@@ -3,9 +3,9 @@
   "profiles": [
     {
       "profile": "portable_socket",
-      "maximum_readiness": "implemented",
-      "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "portable_socket_loopback", "windows_build"],
-      "limitations": ["cross_platform_loopback_requires_ci", "no_authorized_live_provider", "performance_not_certified"]
+      "maximum_readiness": "fixture_validated",
+      "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "portable_socket_loopback", "windows_build", "windows_macos_linux_same_revision_loopback_conformance"],
+      "limitations": ["no_authorized_live_provider", "performance_not_certified"]
     },
     {
       "profile": "tuned_linux_socket",

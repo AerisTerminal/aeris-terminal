@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const EVIDENCE_SCHEMA_VERSION: u32 = 4;
+const EVIDENCE_SCHEMA_VERSION: u32 = 5;
 const EVIDENCE_SCOPE: &str = "stage_1_software_conformance";
 const GENERIC_CORPUS_OUTCOMES: usize = 6;
 const GENERIC_CORPUS_ACCEPTED_EVENTS: usize = 2;
@@ -302,7 +302,7 @@ pub fn verify_set(directory: &Path) -> Result<(), Box<dyn Error>> {
     }
     let source_revision = validate_source_revisions(&reports)?;
     println!(
-        "stage_1_cross_platform_evidence=passed schema_version={EVIDENCE_SCHEMA_VERSION} source_revision={source_revision} targets=windows,macos,linux portable_fixture_evidence=passed readiness_manifest_mutated=false hardware_claims=false provider_claims=false production_claims=false"
+        "stage_1_cross_platform_evidence=passed schema_version={EVIDENCE_SCHEMA_VERSION} source_revision={source_revision} targets=windows,macos,linux portable_fixture_evidence=passed portable_readiness=fixture_validated accelerated_readiness_unchanged=true hardware_claims=false provider_claims=false production_claims=false"
     );
     Ok(())
 }
@@ -374,8 +374,8 @@ fn validate_report(
 fn validate_profiles(profiles: &ProfileEvidence, tuned_linux_native: bool) -> Result<(), String> {
     let portable = &profiles.portable_socket;
     require(
-        portable.readiness == ReadinessEvidence::Implemented,
-        "portable readiness overclaimed or changed",
+        portable.readiness == ReadinessEvidence::FixtureValidated,
+        "portable readiness did not match the cross-platform fixture evidence",
     )?;
     require(
         portable.active_mode == ActiveModeEvidence::PortableSocket,
@@ -597,7 +597,7 @@ fn build_report(
         },
         profiles: ProfileEvidence {
             portable_socket: PortableProfileEvidence {
-                readiness: ReadinessEvidence::Implemented,
+                readiness: ReadinessEvidence::FixtureValidated,
                 active_mode: ActiveModeEvidence::PortableSocket,
                 native_loopback: EvidenceState::Passed,
                 semantic_equivalence: EvidenceState::Passed,

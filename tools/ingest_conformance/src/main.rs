@@ -613,8 +613,18 @@ fn verify_fixture_target_equivalence(
 }
 
 fn verify_readiness_caps() -> Result<(), Box<dyn Error>> {
+    let portable = axiusflow_portable_network_adapter::PortableSocketDriver::try_new(
+        axiusflow_portable_network_adapter::PortableSocketConfig::loopback()?,
+    )?;
+    if portable.permit().readiness() != ReadinessState::FixtureValidated
+        || portable.permit().active_mode() != ActiveIngestMode::PortableSocket
+        || portable.permit().evidence_id()
+            != "windows_macos_linux_same_revision_loopback_conformance"
+    {
+        return Err("portable socket fixture validation was not authorized by reviewed cross-platform evidence".into());
+    }
+
     for profile in [
-        IngestProfile::PortableSocket,
         IngestProfile::TunedLinuxSocket,
         IngestProfile::LinuxAfXdp,
         IngestProfile::LinuxDpdk,
@@ -637,7 +647,10 @@ fn verify_readiness_caps() -> Result<(), Box<dyn Error>> {
         })
         .is_ok()
         {
-            return Err(format!("profile {profile:?} overclaimed fixture validation").into());
+            return Err(format!(
+                "profile {profile:?} overclaimed fixture validation from a software fixture"
+            )
+            .into());
         }
     }
     Ok(())
@@ -690,7 +703,7 @@ fn print_stage_1_status(
         .filter(|outcome| matches!(outcome, ConformanceOutcome::Accepted(_)))
         .count();
     println!(
-        "stage_1_contract_smoke=passed portable_socket_loopback=passed portable_native_equivalence=true portable_market_bar_packet_to_origin=passed portable_packet_partition_fanout_origin=passed tuned_linux_native_loopback={} tuned_linux_market_bar_packet_to_origin={} tuned_linux_packet_partition_fanout_origin={} af_xdp_activation=explicitly_unavailable dpdk_activation=explicitly_unavailable latency_recorder=passed replay_to_gpui_host_benchmark=passed stage_2_binary_stream_fixture=passed stage_2_direct_canonical_market_bar_wire_fixture=passed stage_2_latest_state_snapshot_fixture=passed stage_2_snapshot_chunk_fixture=passed stage_2_client_model_fixture=passed stage_2_websocket_loopback_fixture=passed stage_2_plain_loopback_lifecycle_fixture=passed stage_2_plain_loopback_runtime_chart_fixture=passed stage_2_neutral_stream_chart_coordinator_fixture=passed actual_native_targets={} software_fixture_targets=6 corpus_outcomes={} canonical_events={} portable_readiness=implemented tuned_linux_readiness=fixture_validated af_xdp_readiness=implemented dpdk_readiness=implemented accelerated_native_equivalence=false connected_live=false websocket_loopback=true websocket_connection_owner_loopback=true websocket_background_runtime_loopback=true canonical_direct_fanout_market_bar_wire=true canonical_latest_state_fixture=true market_stream_runtime_port_loopback=true chart_stream_coordinator_loopback=true websocket_transport=false tls_certified=false auth_connected=false entitlement_enforced=false redpanda_deployed=false hardware_claims=false provider_claims=false",
+        "stage_1_contract_smoke=passed portable_socket_loopback=passed portable_native_equivalence=true portable_market_bar_packet_to_origin=passed portable_packet_partition_fanout_origin=passed tuned_linux_native_loopback={} tuned_linux_market_bar_packet_to_origin={} tuned_linux_packet_partition_fanout_origin={} af_xdp_activation=explicitly_unavailable dpdk_activation=explicitly_unavailable latency_recorder=passed replay_to_gpui_host_benchmark=passed stage_2_binary_stream_fixture=passed stage_2_direct_canonical_market_bar_wire_fixture=passed stage_2_latest_state_snapshot_fixture=passed stage_2_snapshot_chunk_fixture=passed stage_2_client_model_fixture=passed stage_2_websocket_loopback_fixture=passed stage_2_plain_loopback_lifecycle_fixture=passed stage_2_plain_loopback_runtime_chart_fixture=passed stage_2_neutral_stream_chart_coordinator_fixture=passed actual_native_targets={} software_fixture_targets=6 corpus_outcomes={} canonical_events={} portable_readiness=fixture_validated tuned_linux_readiness=fixture_validated af_xdp_readiness=implemented dpdk_readiness=implemented accelerated_native_equivalence=false connected_live=false websocket_loopback=true websocket_connection_owner_loopback=true websocket_background_runtime_loopback=true canonical_direct_fanout_market_bar_wire=true canonical_latest_state_fixture=true market_stream_runtime_port_loopback=true chart_stream_coordinator_loopback=true websocket_transport=false tls_certified=false auth_connected=false entitlement_enforced=false redpanda_deployed=false hardware_claims=false provider_claims=false",
         tuned_linux_native,
         tuned_linux_market_bar_origin,
         tuned_linux_market_bar_origin,

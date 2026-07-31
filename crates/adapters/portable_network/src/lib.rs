@@ -110,7 +110,7 @@ impl PortableSocketDriver {
     /// # Errors
     ///
     /// Returns an error if the embedded readiness manifest does not authorize the
-    /// implemented portable mode.
+    /// cross-platform fixture-validated portable mode.
     pub fn try_new(config: PortableSocketConfig) -> Result<Self, PortableSocketError> {
         let capabilities = DriverCapabilities {
             profile: PROFILE,
@@ -122,9 +122,9 @@ impl PortableSocketDriver {
         };
         let permit = ReadinessManifest::authorize_embedded(&ActivationRequest {
             profile: PROFILE,
-            requested: ReadinessState::Implemented,
+            requested: ReadinessState::FixtureValidated,
             active_mode: ActiveIngestMode::PortableSocket,
-            evidence_id: "portable_socket_loopback",
+            evidence_id: "windows_macos_linux_same_revision_loopback_conformance",
             capabilities: &capabilities,
         })?;
         Ok(Self {
