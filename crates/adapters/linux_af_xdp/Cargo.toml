@@ -9,5 +9,13 @@ publish.workspace = true
 [dependencies]
 axiusflow_transport = { path = "../../transport" }
 
-[lints]
-workspace = true
+[target.'cfg(target_os = "linux")'.dependencies]
+libxdp-sys = { version = "=0.2.4", features = ["use_cc_build"] }
+xsk-rs = "=0.8.0"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

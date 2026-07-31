@@ -4,6 +4,8 @@
 //! Linux fixture conformance on Linux. It does not certify accelerated, hardware,
 //! provider, renderer-submission, or presented-pixel readiness.
 
+#[cfg(target_os = "linux")]
+mod af_xdp_copy;
 mod evidence_report;
 
 use axiusflow_observability::{
@@ -394,8 +396,12 @@ fn verify_accelerated_activation_gates() -> Result<(), Box<dyn Error>> {
     )?;
     let mut af_xdp = axiusflow_linux_af_xdp_adapter::AfXdpDriver::unavailable(&af_xdp_config);
     let af_xdp_prerequisites = af_xdp.prerequisites().clone();
-    if af_xdp_prerequisites.native_dependency
-        != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::NotSelected
+    let expected_af_xdp_dependency = if af_xdp_prerequisites.linux_target {
+        axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Present
+    } else {
+        axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::NotSelected
+    };
+    if af_xdp_prerequisites.native_dependency != expected_af_xdp_dependency
         || af_xdp_prerequisites.copy_mode
             != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::NotExercised
         || af_xdp_prerequisites.zero_copy
@@ -455,19 +461,21 @@ fn verify_accelerated_activation_gates() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "acceleration_prerequisites=observed af_xdp_linux_target={} af_xdp_interface={:?} af_xdp_receive_queue={:?} af_xdp_kernel_btf={:?} af_xdp_bpffs={:?} af_xdp_diagnostics={:?} dpdk_linux_target={} dpdk_huge_pages_total={} dpdk_huge_pages_free={} dpdk_vfio_driver={:?} dpdk_vfio_control={:?} dpdk_pkg_config_metadata={:?} native_dependency_selected=false privileged_lifecycle_exercised=false",
+        "acceleration_prerequisites=observed af_xdp_linux_target={} af_xdp_interface={:?} af_xdp_receive_queue={:?} af_xdp_kernel_btf={:?} af_xdp_bpffs={:?} af_xdp_diagnostics={:?} af_xdp_native_dependency={:?} dpdk_linux_target={} dpdk_huge_pages_total={} dpdk_huge_pages_free={} dpdk_vfio_driver={:?} dpdk_vfio_control={:?} dpdk_pkg_config_metadata={:?} dpdk_native_dependency={:?} privileged_lifecycle_exercised=false",
         af_xdp_prerequisites.linux_target,
         af_xdp_prerequisites.interface,
         af_xdp_prerequisites.receive_queue,
         af_xdp_prerequisites.kernel_btf,
         af_xdp_prerequisites.bpf_filesystem,
         af_xdp_prerequisites.xdp_diagnostics,
+        af_xdp_prerequisites.native_dependency,
         dpdk_prerequisites.linux_target,
         dpdk_prerequisites.huge_pages_total,
         dpdk_prerequisites.huge_pages_free,
         dpdk_prerequisites.vfio_driver,
         dpdk_prerequisites.vfio_control,
         dpdk_prerequisites.pkg_config_metadata,
+        dpdk_prerequisites.native_dependency,
     );
     Ok(())
 }
@@ -719,6 +727,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         evidence_report::EvidenceCommand::VerifySet { directory } => {
             evidence_report::verify_set(&directory)?;
             return Ok(());
+        }
+        evidence_report::EvidenceCommand::AfXdpCopy {
+            receive_interface,
+            transmit_interface,
+            report_path,
+        } => {
+            #[cfg(target_os = "linux")]
+            {
+                af_xdp_copy::run(&receive_interface, &transmit_interface, &report_path)?;
+                return Ok(());
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (receive_interface, transmit_interface, report_path);
+                return Err("AF_XDP copy conformance requires Linux".into());
+            }
         }
     };
     let fixture_baseline = run_fixture(axiusflow_portable_network_adapter::fixture_driver(

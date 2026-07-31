@@ -113,7 +113,7 @@ impl ReadinessManifest {
         {
             return Err(ReadinessError::ModeUnavailable(request.active_mode));
         }
-        if request.active_mode != expected_mode(request.profile)
+        if !mode_matches_profile(request.profile, request.active_mode)
             && request.active_mode != ActiveIngestMode::SoftwareFixture
         {
             return Err(ReadinessError::ModeProfileMismatch {
@@ -181,13 +181,20 @@ impl ReadinessManifest {
     }
 }
 
-fn expected_mode(profile: IngestProfile) -> ActiveIngestMode {
-    match profile {
-        IngestProfile::PortableSocket => ActiveIngestMode::PortableSocket,
-        IngestProfile::TunedLinuxSocket => ActiveIngestMode::TunedLinuxSocket,
-        IngestProfile::LinuxAfXdp => ActiveIngestMode::AfXdpZeroCopy,
-        IngestProfile::LinuxDpdk => ActiveIngestMode::DpdkPollMode,
-    }
+fn mode_matches_profile(profile: IngestProfile, mode: ActiveIngestMode) -> bool {
+    matches!(
+        (profile, mode),
+        (
+            IngestProfile::PortableSocket,
+            ActiveIngestMode::PortableSocket
+        ) | (
+            IngestProfile::TunedLinuxSocket,
+            ActiveIngestMode::TunedLinuxSocket
+        ) | (
+            IngestProfile::LinuxAfXdp,
+            ActiveIngestMode::AfXdpCopy | ActiveIngestMode::AfXdpZeroCopy
+        ) | (IngestProfile::LinuxDpdk, ActiveIngestMode::DpdkPollMode)
+    )
 }
 
 /// Immutable adapter evidence presented to the activation guard.

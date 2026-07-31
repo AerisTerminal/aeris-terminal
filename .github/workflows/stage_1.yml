@@ -97,3 +97,83 @@ jobs:
         run: cargo run --quiet --package axiusflow_ingest_conformance
       - name: evidence_scope
         run: echo "This unprivileged lane proves tuned Linux loopback packet-to-fenced-partition, bounded direct/durable-tap queues, and Origin host preparation plus explicit AF_XDP/DPDK unavailability; it does not prove external durability, Redpanda, AF_XDP copy/zero-copy, DPDK PMD, hardware, provider, renderer, presentation, or latency readiness."
+
+  af_xdp_copy_veth:
+    name: linux_af_xdp_generic_copy_veth_conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_af_xdp_build_and_replay_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev libpcap-dev zlib1g-dev iproute2 tcpreplay
+      - name: build_privileged_conformance_as_runner
+        env:
+          CC: clang
+        run: cargo build --package axiusflow_ingest_conformance
+      - name: configure_veth_pair
+        shell: bash
+        run: |
+          suffix="${GITHUB_RUN_ID: -8}"
+          echo "RX_IF=axrx${suffix}" >> "$GITHUB_ENV"
+          echo "TX_IF=axtx${suffix}" >> "$GITHUB_ENV"
+          sudo ip link add "axrx${suffix}" type veth peer name "axtx${suffix}"
+          sudo ip link set "axrx${suffix}" up
+          sudo ip link set "axtx${suffix}" up
+      - name: actual_af_xdp_generic_copy_packet_partition_fanout_origin
+        run: sudo --preserve-env=GITHUB_SHA target/debug/axiusflow_ingest_conformance --af-xdp-copy-conformance "$RX_IF" "$TX_IF" stage_1_af_xdp_copy_evidence_Linux.json
+      - name: verify_af_xdp_copy_evidence_claim_boundary
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("stage_1_af_xdp_copy_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_1_af_xdp_copy_conformance"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["target"]["os"] == "linux"
+          assert evidence["profile"] == "linux_af_xdp"
+          assert evidence["readiness"] == "implemented"
+          assert evidence["mode"] == {
+              "active_mode": "af_xdp_copy",
+              "generic_skb_mode_forced": True,
+              "copy_mode_forced": True,
+              "zero_copy_verified": False,
+          }
+          assert evidence["claims"] == {
+              "zero_copy": "not_claimed",
+              "hardware": "not_claimed",
+              "provider": "not_claimed",
+              "production": "not_claimed",
+          }
+          assert evidence["conformance"]["renderer_submission"] == "not_measured"
+          assert evidence["conformance"]["physical_presentation"] == "not_measured"
+          assert evidence["generic_corpus_outcomes"] > 0
+          assert evidence["generic_corpus_accepted_events"] > 0
+          assert evidence["market_bar_corpus_outcomes"] > 0
+          assert evidence["market_bar_corpus_accepted_events"] > 0
+          PY
+      - name: retain_af_xdp_copy_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_1_af_xdp_copy_evidence_Linux
+          path: stage_1_af_xdp_copy_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: cleanup_veth_pair
+        if: always()
+        shell: bash
+        run: sudo ip link delete "$RX_IF" 2>/dev/null || true
+      - name: evidence_scope
+        run: echo "This privileged software lane proves AF_XDP generic/SKB forced-copy veth packet, lifecycle, fenced-partition, bounded fanout, model, Origin, and GPUI-host preparation only; it does not prove zero-copy, qualified hardware, provider connectivity, renderer submission, presentation, or production readiness."

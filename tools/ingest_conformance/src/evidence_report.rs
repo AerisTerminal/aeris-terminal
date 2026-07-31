@@ -175,8 +175,17 @@ struct Stage1EvidenceReport {
 }
 
 pub enum EvidenceCommand {
-    Run { report_path: Option<PathBuf> },
-    VerifySet { directory: PathBuf },
+    Run {
+        report_path: Option<PathBuf>,
+    },
+    VerifySet {
+        directory: PathBuf,
+    },
+    AfXdpCopy {
+        receive_interface: String,
+        transmit_interface: String,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -213,15 +222,23 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     let Some(argument) = arguments.next() else {
         return Ok(EvidenceCommand::Run { report_path: None });
     };
-    let path = arguments
-        .next()
-        .ok_or_else(|| boxed_error(format!("{} requires a path", argument.to_string_lossy())))?;
-    if path.is_empty() {
-        return Err(boxed_error(format!(
-            "{} path cannot be empty",
-            argument.to_string_lossy()
-        )));
+    if argument == OsStr::new("--af-xdp-copy-conformance") {
+        let receive_interface = required_argument(&mut arguments, "receive interface")?;
+        let transmit_interface = required_argument(&mut arguments, "transmit interface")?;
+        let report_path = required_argument(&mut arguments, "report path")?;
+        if let Some(extra) = arguments.next() {
+            return Err(boxed_error(format!(
+                "unexpected argument: {}",
+                extra.to_string_lossy()
+            )));
+        }
+        return Ok(EvidenceCommand::AfXdpCopy {
+            receive_interface: receive_interface.to_string_lossy().into_owned(),
+            transmit_interface: transmit_interface.to_string_lossy().into_owned(),
+            report_path: PathBuf::from(report_path),
+        });
     }
+    let path = required_argument(&mut arguments, "path")?;
     if let Some(extra) = arguments.next() {
         return Err(boxed_error(format!(
             "unexpected argument: {}",
@@ -242,6 +259,19 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn required_argument(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+    description: &str,
+) -> Result<std::ffi::OsString, Box<dyn Error>> {
+    let value = arguments
+        .next()
+        .ok_or_else(|| boxed_error(format!("missing {description}")))?;
+    if value.is_empty() {
+        return Err(boxed_error(format!("{description} cannot be empty")));
+    }
+    Ok(value)
 }
 
 pub fn write(

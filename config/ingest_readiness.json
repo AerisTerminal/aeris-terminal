@@ -16,8 +16,8 @@
     {
       "profile": "linux_af_xdp",
       "maximum_readiness": "implemented",
-      "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review"],
-      "limitations": ["no_approved_maintained_native_binding", "umem_ownership_audit_and_fuzzing_missing", "privileged_veth_copy_mode_not_exercised", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
+      "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review", "xsk_rs_0_8_0_af_xdp_copy_driver_review"],
+      "limitations": ["independent_unsafe_boundary_audit_and_fuzzing_missing", "privileged_veth_copy_mode_not_exercised", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
     },
     {
       "profile": "linux_dpdk",
