@@ -4713,6 +4713,7 @@ dependencies = [
 [[package]]
 name = "origin_core"
 version = "0.1.0"
+source = "git+https://github.com/TradeAion/Origin_charts.git?rev=8753b071aed2f01ae6c61ad9fbc2a4d4a0506531#8753b071aed2f01ae6c61ad9fbc2a4d4a0506531"
 dependencies = [
  "serde",
  "serde_json",
@@ -4721,6 +4722,7 @@ dependencies = [
 [[package]]
 name = "origin_engine"
 version = "0.1.0"
+source = "git+https://github.com/TradeAion/Origin_charts.git?rev=8753b071aed2f01ae6c61ad9fbc2a4d4a0506531#8753b071aed2f01ae6c61ad9fbc2a4d4a0506531"
 dependencies = [
  "origin_core",
  "origin_indicators",
@@ -4732,10 +4734,12 @@ dependencies = [
 [[package]]
 name = "origin_indicators"
 version = "0.1.0"
+source = "git+https://github.com/TradeAion/Origin_charts.git?rev=8753b071aed2f01ae6c61ad9fbc2a4d4a0506531#8753b071aed2f01ae6c61ad9fbc2a4d4a0506531"
 
 [[package]]
 name = "origin_render"
 version = "0.1.0"
+source = "git+https://github.com/TradeAion/Origin_charts.git?rev=8753b071aed2f01ae6c61ad9fbc2a4d4a0506531#8753b071aed2f01ae6c61ad9fbc2a4d4a0506531"
 dependencies = [
  "origin_core",
 ]
@@ -4743,6 +4747,7 @@ dependencies = [
 [[package]]
 name = "origin_render_gpui"
 version = "0.1.0"
+source = "git+https://github.com/TradeAion/Origin_charts.git?rev=8753b071aed2f01ae6c61ad9fbc2a4d4a0506531#8753b071aed2f01ae6c61ad9fbc2a4d4a0506531"
 dependencies = [
  "gpui",
  "origin_core",
