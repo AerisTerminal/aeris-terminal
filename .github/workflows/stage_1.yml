@@ -29,6 +29,8 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: workspace_clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: workspace_tests
+        run: cargo test --workspace --all-targets
       - name: naming_contract
         run: cargo run --quiet --package axiusflow_naming_check
 
@@ -91,8 +93,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: isolated_profile_builds
+      - name: install_native_profile_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev zlib1g-dev
+      - name: portable_and_contract_profile_builds
         run: cargo check -p axiusflow_linux_socket_network_adapter -p axiusflow_linux_af_xdp_adapter -p axiusflow_linux_dpdk_adapter --all-targets
+      - name: isolated_af_xdp_native_copy_build
+        env:
+          CC: clang
+        run: cargo check -p axiusflow_linux_af_xdp_adapter --all-targets --features native-copy
       - name: tuned_linux_packet_partition_fanout_origin_and_acceleration_gates
         run: cargo run --quiet --package axiusflow_ingest_conformance
       - name: evidence_scope
@@ -117,20 +125,67 @@ jobs:
       - name: build_privileged_conformance_as_runner
         env:
           CC: clang
-        run: cargo build --package axiusflow_ingest_conformance
+        run: cargo build --package axiusflow_ingest_conformance --features af-xdp-copy
       - name: configure_veth_pair
         shell: bash
         run: |
           suffix="${GITHUB_RUN_ID: -8}"
           echo "RX_IF=axrx${suffix}" >> "$GITHUB_ENV"
           echo "TX_IF=axtx${suffix}" >> "$GITHUB_ENV"
-          sudo ip link add "axrx${suffix}" type veth peer name "axtx${suffix}"
+          sudo mountpoint -q /sys/fs/bpf || sudo mount -t bpf bpf /sys/fs/bpf
+          sudo ip link add "axrx${suffix}" numrxqueues 1 numtxqueues 1 type veth peer name "axtx${suffix}" numrxqueues 1 numtxqueues 1
           sudo ip link set "axrx${suffix}" up
           sudo ip link set "axtx${suffix}" up
+          sudo sysctl -w "net.ipv6.conf.axrx${suffix}.disable_ipv6=1"
+          sudo sysctl -w "net.ipv6.conf.axtx${suffix}.disable_ipv6=1"
       - name: actual_af_xdp_generic_copy_packet_partition_fanout_origin
-        run: sudo --preserve-env=GITHUB_SHA target/debug/axiusflow_ingest_conformance --af-xdp-copy-conformance "$RX_IF" "$TX_IF" stage_1_af_xdp_copy_evidence_Linux.json
-      - name: verify_af_xdp_copy_evidence_claim_boundary
         shell: bash
+        run: |
+          set +e
+          output="$(sudo --preserve-env=GITHUB_SHA target/debug/axiusflow_ingest_conformance --af-xdp-copy-conformance "$RX_IF" "$TX_IF" stage_1_af_xdp_copy_evidence_Linux.json 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -eq 0 ]; then
+            echo "AF_XDP_COPY_EXERCISED=true" >> "$GITHUB_ENV"
+          elif grep -Fq 'NativeOpen' <<< "$output"; then
+            echo "AF_XDP_COPY_EXERCISED=false" >> "$GITHUB_ENV"
+            python3 - <<'PY'
+          import json
+          import os
+
+          evidence = {
+              "schema_version": 1,
+              "evidence_scope": "stage_1_af_xdp_copy_unavailable",
+              "source_revision": os.environ["GITHUB_SHA"],
+              "target": {"os": "linux"},
+              "profile": "linux_af_xdp",
+              "readiness": "implemented",
+              "mode": {"active_mode": "unavailable", "zero_copy_verified": False},
+              "activation": "native_socket_open_failed_on_github_hosted_runner",
+              "claims": {
+                  "zero_copy": "not_claimed",
+                  "hardware": "not_claimed",
+                  "provider": "not_claimed",
+                  "production": "not_claimed",
+              },
+              "limitations": [
+                  "privileged_copy_lifecycle_not_exercised",
+                  "qualified_host_required",
+                  "zero_copy_not_verified",
+                  "nic_driver_firmware_unqualified",
+                  "no_authorized_packet_feed",
+              ],
+          }
+          with open("stage_1_af_xdp_copy_evidence_Linux.json", "w", encoding="utf-8") as evidence_file:
+              json.dump(evidence, evidence_file, indent=2)
+              evidence_file.write("\n")
+          PY
+          else
+            exit "$status"
+          fi
+      - name: verify_af_xdp_copy_evidence_claim_boundary
+        if: env.AF_XDP_COPY_EXERCISED == 'true'
         run: |
           python3 - <<'PY'
           import json
@@ -164,6 +219,33 @@ jobs:
           assert evidence["market_bar_corpus_outcomes"] > 0
           assert evidence["market_bar_corpus_accepted_events"] > 0
           PY
+      - name: verify_af_xdp_unavailable_evidence_claim_boundary
+        if: env.AF_XDP_COPY_EXERCISED == 'false'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("stage_1_af_xdp_copy_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_1_af_xdp_copy_unavailable"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["profile"] == "linux_af_xdp"
+          assert evidence["readiness"] == "implemented"
+          assert evidence["mode"] == {
+              "active_mode": "unavailable",
+              "zero_copy_verified": False,
+          }
+          assert evidence["claims"] == {
+              "zero_copy": "not_claimed",
+              "hardware": "not_claimed",
+              "provider": "not_claimed",
+              "production": "not_claimed",
+          }
+          assert "privileged_copy_lifecycle_not_exercised" in evidence["limitations"]
+          PY
       - name: retain_af_xdp_copy_evidence
         uses: actions/upload-artifact@v4
         with:
@@ -175,5 +257,9 @@ jobs:
         if: always()
         shell: bash
         run: sudo ip link delete "$RX_IF" 2>/dev/null || true
-      - name: evidence_scope
+      - name: exercised_evidence_scope
+        if: env.AF_XDP_COPY_EXERCISED == 'true'
         run: echo "This privileged software lane proves AF_XDP generic/SKB forced-copy veth packet, lifecycle, fenced-partition, bounded fanout, model, Origin, and GPUI-host preparation only; it does not prove zero-copy, qualified hardware, provider connectivity, renderer submission, presentation, or production readiness."
+      - name: unavailable_evidence_scope
+        if: env.AF_XDP_COPY_EXERCISED == 'false'
+        run: echo "This hosted runner could not open the AF_XDP native socket. The artifact records explicit unavailability; it proves no copy-mode lifecycle, zero-copy, hardware, provider, renderer, presentation, or production readiness."

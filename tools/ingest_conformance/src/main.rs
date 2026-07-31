@@ -4,7 +4,7 @@
 //! Linux fixture conformance on Linux. It does not certify accelerated, hardware,
 //! provider, renderer-submission, or presented-pixel readiness.
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
 mod af_xdp_copy;
 mod evidence_report;
 
@@ -396,7 +396,7 @@ fn verify_accelerated_activation_gates() -> Result<(), Box<dyn Error>> {
     )?;
     let mut af_xdp = axiusflow_linux_af_xdp_adapter::AfXdpDriver::unavailable(&af_xdp_config);
     let af_xdp_prerequisites = af_xdp.prerequisites().clone();
-    let expected_af_xdp_dependency = if af_xdp_prerequisites.linux_target {
+    let expected_af_xdp_dependency = if axiusflow_linux_af_xdp_adapter::NATIVE_DEPENDENCY_SELECTED {
         axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Present
     } else {
         axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::NotSelected
@@ -711,7 +711,7 @@ fn print_stage_1_status(
         .filter(|outcome| matches!(outcome, ConformanceOutcome::Accepted(_)))
         .count();
     println!(
-        "stage_1_contract_smoke=passed portable_socket_loopback=passed portable_native_equivalence=true portable_market_bar_packet_to_origin=passed portable_packet_partition_fanout_origin=passed tuned_linux_native_loopback={} tuned_linux_market_bar_packet_to_origin={} tuned_linux_packet_partition_fanout_origin={} af_xdp_activation=explicitly_unavailable dpdk_activation=explicitly_unavailable latency_recorder=passed replay_to_gpui_host_benchmark=passed stage_2_binary_stream_fixture=passed stage_2_direct_canonical_market_bar_wire_fixture=passed stage_2_latest_state_snapshot_fixture=passed stage_2_snapshot_chunk_fixture=passed stage_2_client_model_fixture=passed stage_2_websocket_loopback_fixture=passed stage_2_plain_loopback_lifecycle_fixture=passed stage_2_plain_loopback_runtime_chart_fixture=passed stage_2_neutral_stream_chart_coordinator_fixture=passed actual_native_targets={} software_fixture_targets=6 corpus_outcomes={} canonical_events={} portable_readiness=fixture_validated tuned_linux_readiness=fixture_validated af_xdp_readiness=implemented dpdk_readiness=implemented accelerated_native_equivalence=false connected_live=false websocket_loopback=true websocket_connection_owner_loopback=true websocket_background_runtime_loopback=true canonical_direct_fanout_market_bar_wire=true canonical_latest_state_fixture=true market_stream_runtime_port_loopback=true chart_stream_coordinator_loopback=true websocket_transport=false tls_certified=false auth_connected=false entitlement_enforced=false redpanda_deployed=false hardware_claims=false provider_claims=false",
+        "stage_1_contract_smoke=passed portable_socket_loopback=passed portable_native_equivalence=true portable_market_bar_packet_to_origin=passed portable_packet_partition_fanout_origin=passed tuned_linux_native_loopback={} tuned_linux_market_bar_packet_to_origin={} tuned_linux_packet_partition_fanout_origin={} af_xdp_activation=explicitly_unavailable dpdk_activation=explicitly_unavailable latency_recorder=passed replay_to_gpui_host_benchmark=passed stage_2_binary_stream_fixture=passed stage_2_direct_canonical_market_bar_wire_fixture=passed stage_2_latest_state_snapshot_fixture=passed stage_2_snapshot_chunk_fixture=passed stage_2_client_model_fixture=passed stage_2_websocket_loopback_fixture=passed stage_2_plain_loopback_lifecycle_fixture=passed stage_2_plain_loopback_runtime_chart_fixture=passed stage_2_neutral_stream_chart_coordinator_fixture=passed actual_native_targets={} software_fixture_targets=6 corpus_outcomes={} canonical_events={} portable_readiness=fixture_validated tuned_linux_readiness=fixture_validated af_xdp_readiness=implemented dpdk_readiness=contract_only accelerated_native_equivalence=false connected_live=false websocket_loopback=true websocket_connection_owner_loopback=true websocket_background_runtime_loopback=true canonical_direct_fanout_market_bar_wire=true canonical_latest_state_fixture=true market_stream_runtime_port_loopback=true chart_stream_coordinator_loopback=true websocket_transport=false tls_certified=false auth_connected=false entitlement_enforced=false redpanda_deployed=false hardware_claims=false provider_claims=false",
         tuned_linux_native,
         tuned_linux_market_bar_origin,
         tuned_linux_market_bar_origin,
@@ -733,15 +733,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             transmit_interface,
             report_path,
         } => {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
             {
                 af_xdp_copy::run(&receive_interface, &transmit_interface, &report_path)?;
                 return Ok(());
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(all(target_os = "linux", feature = "af-xdp-copy")))]
             {
                 let _ = (receive_interface, transmit_interface, report_path);
-                return Err("AF_XDP copy conformance requires Linux".into());
+                return Err(
+                    "AF_XDP copy conformance requires Linux and the af-xdp-copy feature".into(),
+                );
             }
         }
     };

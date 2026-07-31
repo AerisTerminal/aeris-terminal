@@ -6,12 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+native-copy = ["dep:libxdp-sys", "dep:xsk-rs"]
+
 [dependencies]
 axiusflow_transport = { path = "../../transport" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libxdp-sys = { version = "=0.2.4", features = ["use_cc_build"] }
-xsk-rs = "=0.8.0"
+libxdp-sys = { version = "=0.2.4", features = ["use_cc_build"], optional = true }
+xsk-rs = { version = "=0.8.0", optional = true }
 
 [lints.rust]
 unsafe_code = "deny"

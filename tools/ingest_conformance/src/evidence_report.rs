@@ -38,6 +38,7 @@ enum EvidenceState {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ReadinessEvidence {
+    ContractOnly,
     Implemented,
     FixtureValidated,
 }
@@ -444,17 +445,26 @@ fn validate_profiles(profiles: &ProfileEvidence, tuned_linux_native: bool) -> Re
             && tuned.packet_partition_fanout_origin_equivalence == expected_state,
         "tuned Linux target-specific evidence was inconsistent",
     )?;
-    validate_accelerated_profile("linux_af_xdp", &profiles.linux_af_xdp)?;
-    validate_accelerated_profile("linux_dpdk", &profiles.linux_dpdk)?;
+    validate_accelerated_profile(
+        "linux_af_xdp",
+        &profiles.linux_af_xdp,
+        ReadinessEvidence::Implemented,
+    )?;
+    validate_accelerated_profile(
+        "linux_dpdk",
+        &profiles.linux_dpdk,
+        ReadinessEvidence::ContractOnly,
+    )?;
     Ok(())
 }
 
 fn validate_accelerated_profile(
     name: &str,
     profile: &AcceleratedProfileEvidence,
+    expected_readiness: ReadinessEvidence,
 ) -> Result<(), String> {
     require(
-        profile.readiness == ReadinessEvidence::Implemented
+        profile.readiness == expected_readiness
             && profile.active_mode == ActiveModeEvidence::Unavailable
             && profile.activation == EvidenceState::ExplicitlyUnavailable
             && profile.native_lifecycle == EvidenceState::NotExercised
@@ -644,8 +654,8 @@ fn build_report(
                 packet_to_origin_equivalence: tuned_origin_state,
                 packet_partition_fanout_origin_equivalence: tuned_origin_state,
             },
-            linux_af_xdp: unavailable_accelerated_profile(),
-            linux_dpdk: unavailable_accelerated_profile(),
+            linux_af_xdp: unavailable_accelerated_profile(ReadinessEvidence::Implemented),
+            linux_dpdk: unavailable_accelerated_profile(ReadinessEvidence::ContractOnly),
         },
         boundaries: BoundaryEvidence {
             deterministic_packet_corpus: EvidenceState::Passed,
@@ -696,9 +706,9 @@ fn build_report(
     }
 }
 
-fn unavailable_accelerated_profile() -> AcceleratedProfileEvidence {
+fn unavailable_accelerated_profile(readiness: ReadinessEvidence) -> AcceleratedProfileEvidence {
     AcceleratedProfileEvidence {
-        readiness: ReadinessEvidence::Implemented,
+        readiness,
         active_mode: ActiveModeEvidence::Unavailable,
         activation: EvidenceState::ExplicitlyUnavailable,
         native_lifecycle: EvidenceState::NotExercised,

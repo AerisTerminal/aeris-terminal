@@ -20,6 +20,7 @@ pub enum IngestProfile {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadinessState {
+    ContractOnly,
     Implemented,
     FixtureValidated,
     HardwareValidated,

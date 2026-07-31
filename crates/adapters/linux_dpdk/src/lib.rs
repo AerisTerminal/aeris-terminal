@@ -263,7 +263,7 @@ pub fn fixture_driver(frames: Vec<FixtureFrame>) -> Result<FixtureIngestDriver, 
     let capabilities = software_fixture_capabilities(PROFILE);
     let permit = ReadinessManifest::authorize_embedded(&ActivationRequest {
         profile: PROFILE,
-        requested: ReadinessState::Implemented,
+        requested: ReadinessState::ContractOnly,
         active_mode: ActiveIngestMode::SoftwareFixture,
         evidence_id: "software_fixture_adapter",
         capabilities: &capabilities,

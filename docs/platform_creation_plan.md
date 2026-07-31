@@ -1,27 +1,253 @@
-# Axiusflow Target Architecture
+# Axiusflow Platform Creation Plan
 
-**Status:** Governing target-state architecture, revision 2
+**Status:** Working implementation and stabilization plan, revision 4 (checkbox-tracked)
 **Audience:** Product engineering, platform engineering, security, compliance, data engineering, and technical leadership
 **Primary language:** Rust
 **Supported native operating systems:** Windows, Linux, and macOS
 **Last updated:** 2026-07-31
 
-## 1. Purpose and architectural posture
+## Contents
+
+**Part I — How this plan is executed**
+
+- [1. Purpose and document status](#1-purpose-and-document-status)
+  - [1.1 Current implementation baseline](#11-current-implementation-baseline)
+  - [1.2 Implementation truth rules](#12-implementation-truth-rules)
+  - [1.3 Mandatory repair-before-expansion gate](#13-mandatory-repair-before-expansion-gate)
+  - [1.4 Mandatory cohesive Rust module architecture](#14-mandatory-cohesive-rust-module-architecture)
+  - [1.5 Priority decomposition map](#15-priority-decomposition-map)
+  - [1.6 Decomposition completion criteria](#16-decomposition-completion-criteria)
+  - [1.7 Progress tracking protocol](#17-progress-tracking-protocol)
+  - [1.8 Stage status summary](#18-stage-status-summary)
+
+**Part II — Standing rules and target design**
+
+- [2. Non-negotiable design principles](#2-non-negotiable-design-principles)
+- [3. Language, safety, and authentication policy](#3-language-safety-and-authentication-policy)
+- [4. System topology](#4-system-topology)
+- [5. Logical contexts and deployment model](#5-logical-contexts-and-deployment-model)
+- [6. Cross-platform native client architecture](#6-cross-platform-native-client-architecture)
+- [7. Real-time market-data plane](#7-real-time-market-data-plane)
+- [8. Client and internal transport architecture](#8-client-and-internal-transport-architecture)
+- [9. Execution plane](#9-execution-plane)
+- [10. Control plane, identity, and authorization](#10-control-plane-identity-and-authorization)
+- [11. Durable data plane](#11-durable-data-plane)
+- [12. Analytics, strategies, alerts, and product workflows](#12-analytics-strategies-alerts-and-product-workflows)
+- [13. Provider and licensing architecture](#13-provider-and-licensing-architecture)
+- [14. Infrastructure and acceleration profiles](#14-infrastructure-and-acceleration-profiles)
+- [15. Concurrency, memory, and hot-path mechanics](#15-concurrency-memory-and-hot-path-mechanics)
+- [16. Performance model and release gates](#16-performance-model-and-release-gates)
+- [17. Observability and operations](#17-observability-and-operations)
+- [18. Security, resilience, and supply chain](#18-security-resilience-and-supply-chain)
+- [19. Testing and certification](#19-testing-and-certification)
+
+**Part III — Tracked execution work**
+
+- [20. Delivery sequence from the current foundation](#20-delivery-sequence-from-the-current-foundation)
+  - [Stage 0A: Stabilize and correct the existing foundation](#stage-0a-stabilize-and-correct-the-existing-foundation)
+  - [Stage 0B: Cohesively decompose corrected monolithic crates](#stage-0b-cohesively-decompose-corrected-monolithic-crates)
+  - [Stage 1: Complete the cross-platform and accelerated ingest foundation](#stage-1-complete-the-cross-platform-and-accelerated-ingest-foundation)
+  - [Stage 2: Connected read-only market data](#stage-2-connected-read-only-market-data)
+  - [Stage 3: Durable controlled execution](#stage-3-durable-controlled-execution)
+  - [Stage 4: Professional terminal and transport](#stage-4-professional-terminal-and-transport)
+  - [Stage 5: Venue-adjacent scale and global expansion](#stage-5-venue-adjacent-scale-and-global-expansion)
+
+**Part IV — Constraints, decisions, and definition of success**
+
+- [21. Explicit rejected designs](#21-explicit-rejected-designs)
+- [22. Governing architecture decisions](#22-governing-architecture-decisions)
+- [23. Definition of architectural success](#23-definition-of-architectural-success)
+- [24. Research, source, and licensing note](#24-research-source-and-licensing-note)
+
+Part I governs how work proceeds. Part II describes standing rules and the intended target design and contains no progress claims. Part III holds the tracked checkbox work items. Part IV records hard constraints and completion meaning.
+
+---
+
+## 1. Purpose and document status
 
 Axiusflow is a high-performance trading and financial platform. It combines a professional native terminal, broker-connected execution, portfolio and journal analytics, market-data visualization, alerts, research, and ordinary product functionality such as identity, subscriptions, workspaces, notifications, administration, and support.
+
+This is a **platform creation plan**, not a declaration that the target architecture already exists. It governs the sequence used to turn the current foundation into the intended product. A separate final architecture document is created only after the platform is stable, its principal vertical paths are implemented, and measured evidence confirms the deployed topology.
+
+The immediate order of work is mandatory:
+
+1. establish the real current state and protect concurrent work;
+2. correct incomplete, contradictory, failing, or overstated current implementations;
+3. validate the corrected behavior at its honest readiness level;
+4. decompose stable monolithic crates into cohesive internal modules without changing behavior;
+5. continue product implementation using those module boundaries from the first commit of every new capability;
+6. promote readiness and performance claims only from recorded evidence.
+
+This order does not mean completing the whole product inside monolithic files and splitting it afterward. It means repairing the **existing** foundation first, decomposing that corrected foundation, and then refusing to add further unrelated implementation to oversized `lib.rs` files.
 
 The objective is not an unqualified claim of "absolute" latency. No architecture can remove exchange distance, provider latency, internet routing, operating-system scheduling, or display scanout. The objective is:
 
 > Deliver the lowest practical and repeatable latency within each declared hardware, operating-system, network, durability, and correctness profile, with no hidden loss of financial correctness.
 
-This document separates stable structural decisions from benchmark-driven runtime choices:
+This plan separates stable structural decisions from benchmark-driven runtime choices:
 
 - **Structural decisions** are intended to remain stable: Rust-first domains, provider-neutral contracts, Origin Charts, GPUI boundaries, fixed-point financial values, authoritative PostgreSQL state, Redpanda durability, replay, entitlement enforcement, and reconciliation.
 - **Runtime topology and acceleration profiles** evolve only through measured architecture decisions. A transport, queue, allocator, kernel interface, or deployment boundary is never permanent merely because it appeared in the first implementation.
 
 Axiusflow supports Windows, Linux, and macOS as first-class native desktop targets. The portable path must remain fully functional and correct on all three. Linux-only acceleration can provide lower latency for compatible direct-feed, on-premises, or dedicated-host deployments, but it cannot become a requirement for using the product.
 
-The implementation may be delivered in vertical slices, but every slice must fit these contracts. Delivery sequence is not permission to create fake external services, disposable domain models, unbounded queues, or a second chart state model.
+The implementation may be delivered in vertical slices, but every slice must fit these contracts. Delivery sequence is not permission to create fake external services, disposable domain models, unbounded queues, a second chart state model, or a new monolithic crate.
+
+### 1.1 Current implementation baseline
+
+This baseline records the audited state, not a promise about work that may be changing concurrently. Before modifying a component, the implementing agent must inspect the live Git status and diff, preserve unrelated work, and update this table only from source and validation evidence.
+
+| Area | Current reality | Required next gate |
+|---|---|---|
+| `portable_network` | Real bounded UDP driver using `UdpSocket`, preallocated slots, and explicit release/drop accounting | Preserve as the portable correctness reference and complete platform/provider qualification |
+| `linux_socket_network` | Real `socket2`-based tuned Linux UDP path, but without complete RSS, affinity, busy-poll, kernel/hardware timestamp, or qualified-host evidence | Complete declared tuning features or narrow the declared capability; then benchmark on a named host profile |
+| `linux_af_xdp` | Active copy-mode integration work using `xsk-rs`; zero-copy is not verified and current work may be uncommitted | Stabilize dependency/build state, review ownership and unsafe boundaries, pass fixture/privileged lifecycle evidence, and report copy mode honestly |
+| `linux_dpdk` | Prerequisite probing and explicit unavailable behavior; no verified native poll-mode driver path | Implement and validate native queue/mbuf lifecycle before advancing beyond `implemented`; do not equate a probe with packet processing |
+| Windows/macOS network adapters | Fixture drivers; native mode is explicitly unimplemented | Implement only behind the shared ingest contract and certify independently; never present fixtures as native adapters |
+| `transport`, `realtime`, protocols, recovery, and queues | Substantive bounded contracts and implementations exist, concentrated in large files | Correct current defects, preserve semantics, then split by cohesive responsibility |
+| `persistence` | Transactional inbox/outbox traits only | Add real PostgreSQL transactions, migrations, outbox/inbox behavior, recovery, and integration evidence |
+| `platform_runtime` | Capability ports and a standard clock; major OS implementations are absent | Add credential vault, PKCE callback, update/rollback, power/display, and scheduling adapters per OS |
+| `terminal_ui` and desktop | Bounded UI infrastructure and a fixture/disconnected desktop path | Build a connected production runtime without putting network/decode work on the GPUI thread |
+| Authorization service | Intentionally inactive and starts no listener | Implement the approved authentication/authorization boundary and prove startup, key, session, revocation, and failure behavior |
+| Origin Charts | Existing major external engine integrated through an Axiusflow bridge | Treat it as a separate exact-pinned dependency and compatibility boundary; do not count its engine implementation as newly completed Axiusflow work |
+| Product verticals | No complete live provider, durable data deployment, OMS/risk/ledger, broker connection, reconciliation runtime, or full production terminal | Implement through Stages 2–5 after the corrected foundation and mandatory decomposition gate |
+
+Machine-readable readiness manifests must agree with actual behavior. If code only detects prerequisites or returns `unavailable`, its manifest cannot imply verified native operation. If current source and the manifest disagree, either complete the implementation and evidence or downgrade the readiness claim in the same change.
+
+### 1.2 Implementation truth rules
+
+Progress is recorded by working behavior and evidence, not file count or line count:
+
+- A trait, port, type, constant, or capability enum is a contract, not an implementation.
+- A deterministic fixture proves specified software semantics, not live provider, physical NIC, operating-system, or production behavior.
+- A startup probe is not an active native data path.
+- AF_XDP copy mode is not zero-copy; a virtual device is not qualified hardware.
+- An inactive listener, explicit `unavailable` result, or disconnected desktop is not a running product service.
+- A benchmark harness is not a benchmark result.
+- Existing Origin engine capability is not newly implemented Axiusflow capability.
+- A target described later in this plan remains unimplemented until source, tests, integration evidence, and operational behavior prove it.
+
+Every component change must classify itself as one of `contract_only`, `fixture_validated`, `hardware_validated`, `provider_certified`, or `production_enabled`, using the narrower profile-specific readiness model where applicable. Documentation, runtime reporting, configuration, and evidence must use the same classification.
+
+### 1.3 Mandatory repair-before-expansion gate
+
+Before broad Stage 2 work or another large feature is added, finish the current stabilization pass:
+
+1. inspect and preserve all concurrent and uncommitted work;
+2. resolve failing workflows and dependency/path inconsistencies without hiding failures;
+3. finish or honestly downgrade partial AF_XDP and DPDK claims;
+4. reconcile readiness configuration with runtime behavior;
+5. remove accidental fixture delegation from production paths;
+6. verify bounded ownership, release, overflow, error, shutdown, and recovery behavior;
+7. run targeted tests first, then the affected crate/workspace checks and the applicable CI-equivalent commands;
+8. record what cannot be validated because privileged hardware, provider access, or commercial data is unavailable.
+
+No agent may overwrite another agent's active work, discard a diff, bypass hooks, weaken a test, or silently substitute a fixture merely to make this gate pass.
+
+### 1.4 Mandatory cohesive Rust module architecture
+
+Crate boundaries may remain, but a large `src/lib.rs` is not the final internal architecture. For every nontrivial crate:
+
+- `lib.rs` is the public façade: crate documentation, `mod` declarations, deliberate `pub use` exports, feature gates, and only minimal composition glue.
+- Runtime loops, protocol decoders, state machines, queue algorithms, provider logic, persistence code, large fixtures, and platform-specific implementations belong in named modules.
+- New unrelated behavior must not be appended to an already monolithic `lib.rs`.
+- Split by responsibility and invariant, not by arbitrary line ranges and not into one file per type.
+- Keep implementation details private by default. Preserve the established public API through explicit re-exports unless an approved breaking change is necessary.
+- Avoid generic dumping grounds such as `utils.rs`, `common.rs`, `helpers.rs`, or a new oversized `mod.rs`. Name modules after owned concepts.
+- Keep dependency direction acyclic. Domain modules do not import adapters, GPUI, operating-system APIs, cloud SDKs, or provider SDKs.
+- Place integration tests under `tests/`; keep narrowly scoped unit tests beside their module; put shared fixtures/corpora in clearly owned testing modules or fixture directories.
+- One module owns each state machine or invariant. Parallel modules must communicate through explicit types rather than reaching into each other's mutable internals.
+
+A crate requires decomposition before receiving another major capability when any of these are true:
+
+- `lib.rs` contains multiple independent responsibilities;
+- reviewers cannot locate an invariant or ownership boundary without scanning unrelated code;
+- fixtures and production runtime behavior are interleaved;
+- platform/provider-specific code leaks into shared contracts;
+- merge conflicts repeatedly occur in the same root file;
+- `lib.rs` exceeds roughly 500 lines of implementation rather than façade/API material.
+
+The 500-line value is a review trigger, not a reason to create meaningless fragments. After decomposition, a typical façade should remain well below that size. Cohesion and ownership are the deciding criteria.
+
+### 1.5 Priority decomposition map
+
+After current behavior is corrected and validated, decompose the largest crates in this order while preserving behavior:
+
+| Crate/area | Required cohesive module direction |
+|---|---|
+| `crates/testing` | corpus/fixtures, ingest conformance, protocol assertions, replay/recovery scenarios, readiness/evidence, latency assertions, platform-specific harnesses |
+| `adapters/market_protocol` | framing, decoder, canonical mapping, sequence/gap policy, timestamps/provenance, validation, errors |
+| `adapters/stream_websocket` | configuration, framing, connection/session lifecycle, subscription/snapshot flow, backpressure, reconnect, metrics, errors |
+| `ui/chart_integration` | Origin bridge, model generations, subscriptions, frame scheduling, input translation, metrics/errors |
+| `realtime` | partition identity, fencing/ownership, bounded queues, latest state, fanout, snapshots, recovery |
+| `application` | ports, commands/queries, use-case services, immutable snapshots, error model, feature-owned orchestration |
+| `transport` | ingest driver contract, receive batches, capabilities/readiness, semantic delivery classes, lifecycle, errors |
+| authorization/security | policy model, evidence, decision pipeline, entitlements, revocation/freshness, cryptographic boundary, audit types |
+| each OS/accelerated adapter | configuration, capability probe, native resource ownership, receive/release lifecycle, statistics, shutdown, errors |
+
+These names are architectural directions, not permission for blind file movement. Before moving a symbol, identify its responsibility, callers, invariants, visibility, and tests. Use language-aware moves/renames where possible, keep each change reviewable, and run targeted validation after each crate rather than attempting one repository-wide blind split.
+
+### 1.6 Decomposition completion criteria
+
+A crate's split is complete only when:
+
+1. behavior and public contracts remain unchanged unless the change is explicitly approved;
+2. `lib.rs` acts as a readable façade rather than the implementation body;
+3. production code and fixtures have obvious, separate ownership;
+4. each state machine, queue, decoder, and platform resource has one discoverable home;
+5. module visibility is minimal and no cyclic dependency was introduced;
+6. formatting, lint/type/build checks, targeted tests, and applicable conformance checks pass;
+7. performance-sensitive movement does not add allocation, copying, locking, async hops, or dynamic dispatch without measurement;
+8. the plan's baseline and readiness statements are updated if evidence changed.
+
+No functionality credit is awarded for moving lines alone. Decomposition is a maintainability gate that enables safe continued implementation.
+
+### 1.7 Progress tracking protocol
+
+Section 20 is the single source of truth for tracked work. Every work item there is a checkbox with a stable identifier and an explicit status token. Do not duplicate progress claims elsewhere in this document.
+
+Checkbox meaning:
+
+- `- [x]` — the item is complete at its declared scope and its evidence is named in the status note.
+- `- [ ]` — the item is not complete, regardless of how much code exists.
+
+Status tokens qualify unchecked items and record how a checked item was proven:
+
+| Token | Meaning |
+|---|---|
+| `done` | Implemented and validated at the declared scope; evidence named. |
+| `done_pending_commit` | Implemented and validated locally, but not yet committed or pushed. |
+| `partial` | Code or configuration exists, but the deliverable or its validation is incomplete. |
+| `in_progress` | Actively being implemented right now. |
+| `not_started` | No implementation exists. |
+| `blocked_external` | Cannot progress without privileged hardware, paid provider access, commercial data, or a user decision. Name the blocker. |
+| `superseded` | Replaced by another item; name the replacement identifier. |
+
+Identifier format is `<stage>-<number>`, for example `S0A-03`. Identifiers are stable and never reused. New work appends a new number rather than renumbering existing items.
+
+Rules for updating this file:
+
+1. Change a checkbox only from evidence: source, passing commands, integration behavior, or recorded artifacts. Never from intention or from lines written.
+2. Name the evidence in the status note, such as the command run, the fixture, or the artifact produced.
+3. A contract, trait, fixture, probe, or harness alone never justifies `- [x]` for a behavior item. Apply Section 1.2.
+4. If validation is impossible in the current environment, use `blocked_external` and say what is missing. Do not invent a pass.
+5. If evidence is revoked by a dependency, driver, firmware, provider, or configuration change, uncheck the item and downgrade its status in the same change.
+6. Update Section 1.1 and Section 1.8 whenever a status change alters the real baseline.
+7. Keep status notes short. Detailed results belong in evidence artifacts, not in this plan.
+
+### 1.8 Stage status summary
+
+Each gate is `not_started`, `in_progress`, `blocked_external`, or `complete`. A gate becomes `complete` only when every item in its stage is checked and its exit criteria are satisfied.
+
+| Stage | Gate | Status | Note |
+|---|---|---|---|
+| Stage 0A | Stabilize and correct the existing foundation | `in_progress` | Origin dependency migration validated locally and awaiting commit; AF_XDP, DPDK, readiness reconciliation, and workflow repair outstanding. |
+| Stage 0B | Cohesively decompose corrected monolithic crates | `not_started` | Blocked by Stage 0A. Priority crates still concentrate implementation in `lib.rs`. |
+| Stage 1 | Complete cross-platform and accelerated ingest foundation | `in_progress` | Substantial contracts, fixtures, and portable/tuned implementations exist; accelerated and platform evidence incomplete. |
+| Stage 2 | Connected read-only market data | `not_started` | No live authorized provider path, durable branch deployment, or projections. |
+| Stage 3 | Durable controlled execution | `not_started` | No OMS, risk, ledger, broker, or reconciliation runtime. |
+| Stage 4 | Professional terminal and transport | `not_started` | Desktop remains a fixture/disconnected path. |
+| Stage 5 | Venue-adjacent scale and global expansion | `blocked_external` | Requires qualified hardware, colocation, and authorized direct feeds. |
 
 ---
 
@@ -1043,25 +1269,75 @@ Renderer submission timing is necessary but not sufficient. Tick-to-pixel and in
 
 ## 20. Delivery sequence from the current foundation
 
-The repository currently contains foundational domains, strict security/authorization primitives, Protobuf contracts, bounded replay, one GPUI source, and an Origin GPUI bridge. It does not yet contain a live feed, Redpanda path, production transport, OMS/risk/ledger runtime, provider connection, or infrastructure deployment.
+Section 1.1 is the governing current-state baseline. Later target descriptions do not override it and must not be read as implementation claims. Work proceeds through explicit gates; an agent does not skip repair or decomposition because a later-stage feature appears more visible.
 
-### Stage 1: Cross-platform and accelerated ingest foundation
+This section is the tracked work ledger. Every item is a checkbox governed by Section 1.7: check an item only from named evidence, keep its status token accurate, and update Section 1.8 when a gate's overall status changes. Statuses below were seeded from a read-only audit, so the implementing agent must confirm each one against live source and validation output before relying on it.
 
-Deliver in parallel:
+### Stage 0A: Stabilize and correct the existing foundation
 
-- explicit `platform_runtime`, `transport`, `realtime`, and `ingest_driver` ports;
-- separate `portable_socket`, `tuned_linux_socket`, `linux_af_xdp`, and `linux_dpdk` adapter crates and build targets;
-- a bounded borrowed receive-batch contract with explicit buffer lifetime, release, timestamp-source, overflow, and capability semantics;
-- exact-pinned accelerated dependencies plus Stage 1 safety, license, provenance, fuzzing, and maintenance review;
-- Windows, Linux, and macOS build/smoke matrix for the pinned GPUI source and portable path;
-- Linux compile/conformance lanes using software-accessible AF_XDP modes and DPDK software or virtual devices where runner capabilities permit;
-- a machine-readable, runtime-enforced readiness manifest that prevents activation or claims above each profile's proven readiness state;
-- deterministic Ethernet/IP/UDP/TCP/provider fixtures proving identical canonical events, gaps, errors, and replay across applicable profiles;
-- canonical timestamp vocabulary and latency recorder, including hardware timestamp capability;
-- fenced single-writer partition contract;
-- direct-fanout and durable-tap interfaces using deterministic replay;
-- full replay-to-GPUI frame benchmark, including model and host work;
-- bounded client semantic classes and snapshot recovery.
+Complete this gate before broad new product implementation:
+
+- [ ] `S0A-01` inspect the live worktree and active-agent changes; preserve and integrate rather than overwrite them — status: `in_progress` (must be re-verified at the start of every session)
+- [ ] `S0A-02` restore green targeted and CI-equivalent workflows by fixing root causes, not by suppressing checks — status: `partial` (Stage 1 workflow and Origin browser chart build path still failing)
+- [x] `S0A-03` replace the Origin Charts submodule/path integration with an exact-pinned external Git dependency — status: `done_pending_commit` (gitlink and `.gitmodules` removed, `origin_charts` ignored, three workspace deps pinned to `rev = 8753b071aed2f01ae6c61ad9fbc2a4d4a0506531`; `cargo metadata --locked` and `cargo check --locked -p axiusflow_chart_integration` pass)
+- [ ] `S0A-04` commit and push the Origin migration so the submodule stops appearing in the remote repository — status: `not_started` (requires explicit user approval to commit)
+- [ ] `S0A-05` reconcile readiness manifests, runtime capability reports, and evidence artifacts with actual behavior — status: `partial` (`config/ingest_readiness.json` still asserts `implemented` for profiles lacking verified native paths)
+- [ ] `S0A-06` finish the current AF_XDP copy-mode path to its honest evidence level, including bounded ownership, release, startup/shutdown, error, and fallback behavior — status: `in_progress` (uncommitted `xsk-rs` work; zero-copy not verified)
+- [ ] `S0A-07` either implement the claimed DPDK native behavior or explicitly downgrade it as unavailable without implying poll-mode verification — status: `partial` (prerequisite probe only; no native queue/mbuf lifecycle)
+- [ ] `S0A-08` confirm portable and tuned Linux paths do not delegate production behavior to fixtures — status: `partial` (portable driver verified real; tuned Linux tuning claims still exceed implemented features)
+- [ ] `S0A-09` audit every `implemented`, `fixture_validated`, native-mode, zero-copy, and production-ready claim against actual source and evidence — status: `in_progress` (documentation baseline audited; runtime and config claims outstanding)
+- [ ] `S0A-10` document unavailable hardware/provider validation as an explicit evidence limitation rather than inventing a pass — status: `not_started`
+- [ ] `S0A-11` leave the repository with no unexplained workflow failure or contradictory readiness declaration in the corrected scope — status: `not_started`
+- [ ] `S0A-GATE` exit criteria met: current code, configuration, runtime reporting, workflow behavior, and evidence agree; all corrected behavior passes its targeted checks; unsupported capability fails explicitly; and unresolved external hardware/provider gates are named without overstating readiness — status: `not_started`
+
+### Stage 0B: Cohesively decompose corrected monolithic crates
+
+After Stage 0A stabilizes behavior, apply Sections 1.4–1.6 crate by crate. Each crate is checked only when it satisfies all eight completion criteria in Section 1.6.
+
+Method, applied per crate:
+
+- [ ] `S0B-01` map responsibilities, invariants, public exports, callers, and tests before moving any code — status: `not_started`
+- [ ] `S0B-02` move one cohesive responsibility set at a time and preserve behavior — status: `not_started`
+- [ ] `S0B-03` turn each `lib.rs` into a documented façade with private modules and deliberate re-exports — status: `not_started`
+- [ ] `S0B-04` separate production paths, fixtures, evidence generation, and platform-specific implementations — status: `not_started`
+- [ ] `S0B-05` run formatting and the narrowest meaningful validation after each crate, followed by affected workspace checks — status: `not_started`
+- [ ] `S0B-06` stop and fix any semantic, allocation/copy, queueing, visibility, or dependency regression before continuing — status: `not_started`
+- [ ] `S0B-07` require every subsequent feature to start in the correct cohesive module rather than rebuilding a monolith — status: `not_started`
+
+Crate order, following Section 1.5:
+
+- [ ] `S0B-10` `crates/testing` (~5,688 lines in `lib.rs`) — status: `not_started`
+- [ ] `S0B-11` `crates/adapters/market_protocol` (~2,276) — status: `not_started`
+- [ ] `S0B-12` `crates/adapters/stream_websocket` (~1,796) — status: `not_started`
+- [ ] `S0B-13` `crates/ui/chart_integration` (~1,793) — status: `not_started`
+- [ ] `S0B-14` `crates/realtime` (~1,612) — status: `not_started`
+- [ ] `S0B-15` `crates/application` (~1,370) — status: `not_started`
+- [ ] `S0B-16` `crates/transport` (~808) — status: `not_started`
+- [ ] `S0B-17` authorization and security crates — status: `not_started`
+- [ ] `S0B-18` each operating-system and accelerated network adapter — status: `not_started`
+- [ ] `S0B-GATE` exit criteria met: the priority crates have discoverable ownership boundaries; their `lib.rs` files are façades rather than implementation bodies; existing public behavior remains valid; and no broad new feature continues the one-file-per-crate implementation pattern — status: `not_started`
+
+### Stage 1: Complete the cross-platform and accelerated ingest foundation
+
+Complete, correct, and validate the remaining work in parallel where dependencies permit:
+
+- [x] `S1-01` explicit `platform_runtime`, `transport`, `realtime`, and `ingest_driver` ports — status: `done` (ports present; `platform_runtime` OS adapters are tracked separately as `S1-14`)
+- [x] `S1-02` separate `portable_socket`, `tuned_linux_socket`, `linux_af_xdp`, and `linux_dpdk` adapter crates and build targets — status: `done` (four isolated adapter crates exist; native completeness tracked by `S0A-06`, `S0A-07`, `S0A-08`)
+- [x] `S1-03` a bounded borrowed receive-batch contract with explicit buffer lifetime, release, timestamp-source, overflow, and capability semantics — status: `done` (implemented in `crates/transport` with explicit release and drop accounting)
+- [ ] `S1-04` exact-pinned accelerated dependencies plus safety, license, provenance, fuzzing, and maintenance review — status: `partial` (pins exist; independent unsafe-boundary audit and fuzzing of the AF_XDP boundary outstanding)
+- [ ] `S1-05` Windows, Linux, and macOS build/smoke matrix for the pinned GPUI source and portable path — status: `partial` (workflow defined; currently not green, see `S0A-02`)
+- [ ] `S1-06` Linux compile/conformance lanes using software-accessible AF_XDP modes and DPDK software or virtual devices where runner capabilities permit — status: `partial` (conformance harness exists; privileged veth and virtual-device lifecycle evidence missing)
+- [ ] `S1-07` a machine-readable, runtime-enforced readiness manifest that prevents activation or claims above each profile's proven readiness state — status: `partial` (manifest exists but does not yet agree with actual behavior, see `S0A-05`)
+- [x] `S1-08` deterministic Ethernet/IP/UDP/TCP/provider fixtures proving identical canonical events, gaps, errors, and replay across applicable profiles — status: `done` (fixture corpus and conformance harness in `crates/testing` and `tools/ingest_conformance`)
+- [x] `S1-09` canonical timestamp vocabulary and latency recorder — status: `done` (recorder implemented; hardware timestamp capability tracked by `S1-10`)
+- [ ] `S1-10` hardware timestamp capability reporting and validation — status: `blocked_external` (requires a PTP-capable NIC and qualified host)
+- [x] `S1-11` fenced single-writer partition contract — status: `done` (fenced partitions with ownership epoch and stale-writer rejection)
+- [x] `S1-12` direct-fanout and durable-tap interfaces using deterministic replay — status: `done` (bounded direct and durable queue interfaces with replay)
+- [ ] `S1-13` full replay-to-GPUI frame benchmark, including model and host work — status: `partial` (chart integration and latency recording exist; desktop path is fixture/disconnected, so the end-to-end benchmark is unproven)
+- [ ] `S1-14` `platform_runtime` operating-system adapters: credential vault, PKCE callback, update/rollback, power, display, and scheduling — status: `not_started` (capability ports and standard clock only)
+- [ ] `S1-15` native Windows and macOS ingest adapters behind the shared ingest contract — status: `not_started` (fixture drivers; `NATIVE_MODE_IMPLEMENTED = false`)
+- [x] `S1-16` bounded client semantic classes and snapshot recovery — status: `done` (semantic delivery classes, snapshots, and recovery implemented)
+- [ ] `S1-GATE` exit criteria met — status: `not_started`
 
 Exit criteria: the same applicable packet/replay corpus produces equivalent canonical and Origin state across profiles and operating systems; no domain, decoder, partition, or fanout contract assumes socket-owned memory; every queue and timestamp boundary is visible; AF_XDP and DPDK reach at least `fixture_validated` with unavailable hardware/provider evidence recorded honestly; the portable path is eligible to advance independently toward `production_enabled`; and Redpanda is not required to demonstrate the direct path.
 
@@ -1069,16 +1345,19 @@ Exit criteria: the same applicable packet/replay corpus produces equivalent cano
 
 Deliver:
 
-- first legally authorized live provider adapters using the best currently affordable managed, sandbox, delayed, or real-time source available under its terms;
-- production ingest through `portable_socket` and, on dedicated Linux hosts, `tuned_linux_socket`;
-- AF_XDP and DPDK provider integration when a compatible authorized packet feed is available, without redesigning their Stage 1 contracts;
-- explicit readiness and `unavailable` capability results for incompatible or unqualified profile/feed combinations, never pretend acceleration or silent fallback;
-- direct latest-state fanout;
-- Redpanda durable branch and raw S3 capture;
-- binary WebSocket baseline;
-- QUIC prototype behind negotiation;
-- ClickHouse projections and deterministic bars;
-- entitlement enforcement and resnapshot behavior.
+- [ ] `S2-01` first legally authorized live provider adapters using the best currently affordable managed, sandbox, delayed, or real-time source available under its terms — status: `not_started`
+- [ ] `S2-02` production ingest through `portable_socket` and, on dedicated Linux hosts, `tuned_linux_socket` — status: `not_started`
+- [ ] `S2-03` AF_XDP and DPDK provider integration when a compatible authorized packet feed is available, without redesigning their Stage 1 contracts — status: `blocked_external` (requires a compatible authorized packet feed)
+- [ ] `S2-04` explicit readiness and `unavailable` capability results for incompatible or unqualified profile/feed combinations, with no pretend acceleration or silent fallback — status: `partial` (unavailable paths exist; manifest agreement pending `S0A-05`)
+- [ ] `S2-05` direct latest-state fanout in production — status: `partial` (interfaces exist from `S1-12`; no live feed behind them)
+- [ ] `S2-06` Redpanda durable branch and raw S3 capture — status: `not_started`
+- [ ] `S2-07` binary WebSocket baseline in production — status: `partial` (adapter and runtime implemented; not deployed against a live provider)
+- [ ] `S2-08` QUIC prototype behind negotiation — status: `not_started`
+- [ ] `S2-09` ClickHouse projections and deterministic bars — status: `not_started`
+- [ ] `S2-10` entitlement enforcement and resnapshot behavior on live streams — status: `partial` (authorization domain and snapshot recovery exist; no live stream enforcement)
+- [ ] `S2-11` PostgreSQL persistence implementation behind the existing outbox/inbox traits, with migrations and recovery evidence — status: `not_started`
+- [ ] `S2-12` running authentication and authorization service boundary — status: `not_started` (service intentionally exits without starting a listener)
+- [ ] `S2-GATE` exit criteria met — status: `not_started`
 
 Exit criteria: sustained and burst workloads pass latency, loss, replay, slow-client, and semantic-equivalence gates for every profile declared `production_enabled`; the portable/tuned software and supported product features are production-complete within the current provider's declared rights, coverage, freshness, and availability without requiring a premium direct feed; delayed or sandbox data is never represented as suitable live-trading evidence; accelerated adapters remain implemented and fixture-validated but unclaimed until compatible hardware and provider evidence exists; every displayed event retains provenance.
 
@@ -1086,23 +1365,29 @@ Exit criteria: sustained and burst workloads pass latency, loss, replay, slow-cl
 
 Deliver:
 
-- execution cell;
-- immutable policy/risk snapshots;
-- OMS, risk, broker adapter, durable intent, outbox, ledger input, reconciliation, and kill switches;
-- paper, shadow, restricted canary, then limited live trading.
-
-Exit criteria: every crash, timeout, duplicate callback, and unknown-outcome scenario converges to an explainable reconciled state while meeting the regional execution budget.
+- [ ] `S3-01` execution cell — status: `not_started`
+- [ ] `S3-02` immutable policy and risk snapshots — status: `not_started`
+- [ ] `S3-03` OMS state machine and durable order intent — status: `not_started`
+- [ ] `S3-04` pre-trade risk engine and kill switches — status: `not_started`
+- [ ] `S3-05` broker adapter and provider dispatch — status: `not_started`
+- [ ] `S3-06` transactional outbox publication — status: `not_started`
+- [ ] `S3-07` portfolio ledger input and immutable journal — status: `not_started`
+- [ ] `S3-08` reconciliation runtime — status: `not_started`
+- [ ] `S3-09` paper, shadow, restricted canary, then limited live trading progression — status: `not_started`
+- [ ] `S3-GATE` exit criteria met: every crash, timeout, duplicate callback, and unknown-outcome scenario converges to an explainable reconciled state while meeting the regional execution budget — status: `not_started`
 
 ### Stage 4: Professional terminal and transport
 
 Deliver:
 
-- multi-chart and order-book workspaces;
-- scanners, advanced alerts, drawings, indicators, news, external calendars, and advanced analytics;
-- 120/144 Hz workload certification;
-- certified QUIC reliable-stream profile;
-- optional datagrams for approved semantic classes;
-- professional direct broker/FIX routes.
+- [ ] `S4-01` connected production desktop runtime replacing the fixture/disconnected path — status: `not_started`
+- [ ] `S4-02` multi-chart and order-book workspaces — status: `not_started`
+- [ ] `S4-03` scanners, advanced alerts, drawings, indicators, news, external calendars, and advanced analytics — status: `not_started`
+- [ ] `S4-04` 120/144 Hz workload certification — status: `not_started`
+- [ ] `S4-05` certified QUIC reliable-stream profile — status: `not_started`
+- [ ] `S4-06` optional datagrams for approved semantic classes — status: `not_started`
+- [ ] `S4-07` professional direct broker and FIX routes — status: `not_started`
+- [ ] `S4-GATE` professional terminal and transport gates met — status: `not_started`
 
 ### Stage 5: Venue-adjacent scale and global expansion
 
@@ -1110,12 +1395,13 @@ The acceleration contracts and adapters already exist from Stage 1. This stage e
 
 Deliver:
 
-- qualification evidence that promotes `linux_af_xdp` and `linux_dpdk` from `fixture_validated` through `hardware_validated`, `provider_certified`, and `production_enabled` without changing canonical contracts;
-- additional NIC, driver, firmware, and provider certification matrices for AF_XDP and DPDK;
-- multi-queue and multi-port scaling, hot-spare NICs, and fenced failover;
-- PTP/hardware timestamp deployment and continuous clock-quality alarms;
-- venue-adjacent execution and additional direct feeds;
-- multi-provider arbitration and global home-region expansion.
+- [ ] `S5-01` qualification evidence that promotes `linux_af_xdp` and `linux_dpdk` from `fixture_validated` through `hardware_validated`, `provider_certified`, and `production_enabled` without changing canonical contracts — status: `blocked_external`
+- [ ] `S5-02` additional NIC, driver, firmware, and provider certification matrices for AF_XDP and DPDK — status: `blocked_external`
+- [ ] `S5-03` multi-queue and multi-port scaling, hot-spare NICs, and fenced failover — status: `blocked_external`
+- [ ] `S5-04` PTP/hardware timestamp deployment and continuous clock-quality alarms — status: `blocked_external`
+- [ ] `S5-05` venue-adjacent execution and additional direct feeds — status: `blocked_external`
+- [ ] `S5-06` multi-provider arbitration and global home-region expansion — status: `not_started`
+- [ ] `S5-GATE` expansion promoted only on measured p99/p99.9 improvement without semantic, security, portability, or recovery regression — status: `not_started`
 
 Expansion is promoted only when it materially improves p99/p99.9 without semantic, security, portability, or recovery regression.
 
@@ -1147,6 +1433,8 @@ Expansion is promoted only when it materially improves p99/p99.9 without semanti
 22. Claiming data rights, availability, or low-latency provider behavior absent from contracts and evidence.
 23. Deferring AF_XDP/DPDK buffer ownership, timestamping, and backpressure contracts until after a socket-specific data plane has hardened.
 24. Blocking a production-complete portable/tuned release on unavailable paid direct feeds, colocation, or acceleration hardware—or claiming synthetic evidence as their substitute.
+25. Treating a multi-thousand-line `lib.rs`, `main.rs`, `mod.rs`, `utils.rs`, or fixture file as the permanent home for unrelated runtime, protocol, state-machine, platform, and test responsibilities.
+26. Performing a blind repository-wide file split without first stabilizing behavior, mapping ownership, preserving public APIs, and validating each crate incrementally.
 
 ---
 
@@ -1160,6 +1448,8 @@ Expansion is promoted only when it materially improves p99/p99.9 without semanti
 | Preferred optional client transport | Negotiated QUIC/WebTransport after certification |
 | Linux acceleration | Tuned sockets, AF_XDP, and DPDK are parallel Stage 1 implementations with explicit readiness states; portable product release is independent, and accelerated production activation remains feed- and hardware-qualified |
 | Naming | `snake_case` for Axiusflow-owned identifiers, with documented language/external exceptions |
+| Internal Rust module structure | `lib.rs` is a public façade; implementations are split by cohesive responsibility after current stabilization and before further major expansion |
+| Refactoring sequence | Repair and validate existing behavior first, then decompose one crate at a time with API and performance preservation; all new capabilities start modular |
 | Native UI | One exact-pinned GPUI source plus GPUI Component |
 | Financial charting | Origin Charts only; shared engine and `ChartFrame` |
 | Domain dependency direction | Domain/application remain GPUI-, provider-, transport-, cloud-, and OS-free |
@@ -1200,6 +1490,9 @@ The architecture is functioning as intended when:
 13. A region, process, partition owner, provider, database, or durable consumer failure converges through documented recovery rather than guessing.
 14. Market-data entitlements are enforced at stream, export, replay, API, alert, and algorithmic boundaries.
 15. The initial platform remains operationally understandable; extraction follows evidence instead of fashion.
+16. Current implementation claims, runtime readiness, configuration, and evidence agree; fixtures and probes are never presented as production capability.
+17. Large crates expose readable `lib.rs` façades and cohesive internal modules with one discoverable owner for every decoder, state machine, queue, platform resource, and fixture family.
+18. New features extend the correct module boundary rather than recreating monolithic root files.
 
 ---
 

@@ -12,36 +12,37 @@ use axiusflow_transport::{
     OverflowReport, QueueBinding, ReadinessError, ReadinessManifest, ReadinessState, ReceiveBatch,
     software_fixture_capabilities,
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 use axiusflow_transport::{ReceiveMetadata, TimestampSource};
 use core::fmt;
 use std::{error::Error, num::NonZeroUsize};
 
 pub const PROFILE: IngestProfile = IngestProfile::LinuxAfXdp;
-pub const NATIVE_DEPENDENCY_SELECTED: bool = true;
+pub const NATIVE_DEPENDENCY_SELECTED: bool =
+    cfg!(all(target_os = "linux", feature = "native-copy"));
 pub const ZERO_COPY_VERIFIED: bool = false;
 pub const SAFETY_REVIEW: &str = "xsk-rs 0.8.0 unsafe socket, UMEM-data, RX, and fill-ring calls are isolated in one private Linux module; the safe driver enforces single-UMEM descriptor provenance and retains user ownership until each descriptor is submitted";
 pub const LICENSE_REVIEW: &str = "xsk-rs 0.8.0 is MIT licensed; Cargo.lock pins libxdp-sys 0.2.4+1.6.0, which builds vendored libxdp/libbpf and links system libelf/zlib under their respective terms";
 pub const PROVENANCE_REVIEW: &str = "xsk-rs 0.8.0 registry checksum d1fef46e3505c5055082f52ada0a7f8e5dcaebdbb9eccf8e978c32382c159270; upstream tag v0.8.0 commit c0b110cd3b6763fdcfc41996b3cea8c9f259614f; Cargo.lock pins libxdp-sys 0.2.4+1.6.0 checksum 6098c8281e42ed6f46240af889297dae1e37f70ee505dd26fe5c7199563e4d86";
-pub const MAINTENANCE_REVIEW: &str = "xsk-rs 0.8.0 was published 2025-09-17 and documents testing on Linux 6.5; privileged copy-mode lifecycle, independent unsafe-boundary audit, and fuzz evidence are still missing";
-pub const BUILD_REVIEW: &str = "Linux-only xsk-rs 0.8.0 requires the native libxdp/libbpf build stack and privileges for socket/program activation; non-Linux targets neither compile nor link the dependency";
-pub const MISSING_NATIVE_EVIDENCE: &str = "independent unsafe-boundary audit and fuzzing, privileged veth copy-mode lifecycle, qualified NIC/driver, zero-copy, authorized packet feed";
+pub const MAINTENANCE_REVIEW: &str = "xsk-rs 0.8.0 was published 2025-09-17 and documents testing on Linux 6.5; the native-copy feature is isolated from portable builds; privileged lifecycle, independent unsafe-boundary audit, and fuzz evidence remain incomplete";
+pub const BUILD_REVIEW: &str = "Linux-only xsk-rs 0.8.0 is selected only by the native-copy feature and requires the libxdp/libbpf build stack plus privileges for socket/program activation; portable and non-Linux builds neither compile nor link it";
+pub const MISSING_NATIVE_EVIDENCE: &str = "successful privileged veth copy-mode lifecycle on a capable host, independent unsafe-boundary audit and fuzzing, qualified NIC/driver, zero-copy, authorized packet feed";
 pub const COPY_DRIVER_EVIDENCE_ID: &str = "xsk_rs_0_8_0_af_xdp_copy_driver_review";
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const NATIVE_RING_ENTRIES_MAXIMUM: usize = 4_096;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const NATIVE_UMEM_FRAME_BYTES: usize = 4_096;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const NATIVE_XDP_HEADROOM_BYTES: usize = 256;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const ETHERNET_HEADER_BYTES: usize = 14;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const AXIUSFLOW_EXPERIMENTAL_ETHERTYPE: [u8; 2] = [0x88, 0xb5];
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const NATIVE_PACKET_BYTES_MAXIMUM: usize =
     NATIVE_UMEM_FRAME_BYTES - NATIVE_XDP_HEADROOM_BYTES - ETHERNET_HEADER_BYTES;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 const RECEIVE_POLL_TIMEOUT_MILLIS: i32 = 100;
 
 /// Bounded parameters for one fixed UMEM and queue.
@@ -84,7 +85,7 @@ impl AfXdpConfig {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "native-copy"))]
     fn validate_native_copy(&self) -> Result<(), AfXdpError> {
         if self.queue_id == u16::MAX {
             return Err(AfXdpError::QueueUnavailable(self.queue_id));
@@ -189,7 +190,7 @@ pub fn probe_prerequisites(config: &AfXdpConfig) -> AfXdpPrerequisiteReport {
         kernel_btf: evidence_status(kernel_btf_present),
         bpf_filesystem: evidence_status(bpf_filesystem_mounted),
         xdp_diagnostics: evidence_status(xdp_diagnostics_present),
-        native_dependency: if cfg!(target_os = "linux") {
+        native_dependency: if NATIVE_DEPENDENCY_SELECTED {
             AfXdpEvidenceStatus::Present
         } else {
             AfXdpEvidenceStatus::NotSelected
@@ -299,7 +300,7 @@ pub struct AfXdpCopyDriver {
     released_batches: u64,
     abandoned_batches: u64,
     recycle_failure: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "native-copy"))]
     native: Option<native::CopySocket>,
 }
 
@@ -314,12 +315,12 @@ impl AfXdpCopyDriver {
     /// Returns an error for an unsupported fixed-ring configuration, a readiness-policy
     /// rejection, or a non-Linux target.
     pub fn try_new(config: AfXdpConfig) -> Result<Self, AfXdpError> {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "native-copy")))]
         {
-            let _ = config;
-            return Err(AfXdpError::NativeIntegrationUnavailable);
+            drop(config.interface_name);
+            Err(AfXdpError::NativeIntegrationUnavailable)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
             config.validate_native_copy()?;
             let capabilities = DriverCapabilities {
@@ -359,7 +360,7 @@ impl AfXdpCopyDriver {
     }
 
     fn finish_batch(&mut self, released: bool) {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         if let Some(native) = self.native.as_mut()
             && let Err(error) = native.recycle_batch()
         {
@@ -379,28 +380,28 @@ impl AfXdpCopyDriver {
 pub struct AfXdpCopyReceiveBatch<'driver> {
     driver: &'driver mut AfXdpCopyDriver,
     overflow: OverflowReport,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "native-copy"))]
     timestamp_unix_nanos: i64,
     released: bool,
 }
 
 impl ReceiveBatch for AfXdpCopyReceiveBatch<'_> {
     fn frame_count(&self) -> usize {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
             self.driver
                 .native
                 .as_ref()
                 .map_or(0, native::CopySocket::batch_len)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "native-copy")))]
         {
             0
         }
     }
 
     fn frame(&self, index: usize) -> Option<BorrowedFrame<'_>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
             self.driver
                 .native
@@ -415,7 +416,7 @@ impl ReceiveBatch for AfXdpCopyReceiveBatch<'_> {
                     },
                 })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "native-copy")))]
         {
             let _ = index;
             None
@@ -484,7 +485,7 @@ impl IngestDriver for AfXdpCopyDriver {
             });
         }
         let binding = self.binding.ok_or(AfXdpError::QueueNotBound)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
             let native =
                 native::CopySocket::open(&self.config, binding).map_err(AfXdpError::NativeOpen)?;
@@ -492,7 +493,7 @@ impl IngestDriver for AfXdpCopyDriver {
             self.lifecycle = DriverLifecycle::Running;
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "native-copy")))]
         {
             let _ = binding;
             Err(AfXdpError::NativeIntegrationUnavailable)
@@ -513,7 +514,7 @@ impl IngestDriver for AfXdpCopyDriver {
             return Err(AfXdpError::DescriptorRecycle(error));
         }
         let binding = self.binding.ok_or(AfXdpError::QueueNotBound)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
             let outcome = self
                 .native
@@ -541,7 +542,7 @@ impl IngestDriver for AfXdpCopyDriver {
                 released: false,
             })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "native-copy")))]
         {
             let _ = binding;
             Err(AfXdpError::NativeIntegrationUnavailable)
@@ -561,13 +562,13 @@ impl IngestDriver for AfXdpCopyDriver {
         if let Some(error) = self.recycle_failure.take() {
             return Err(AfXdpError::DescriptorRecycle(error));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         if let Some(native) = self.native.as_mut() {
             native
                 .flush_recycle()
                 .map_err(AfXdpError::DescriptorRecycle)?;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
             self.native = None;
         }
@@ -581,13 +582,13 @@ impl IngestDriver for AfXdpCopyDriver {
             lifecycle: self.lifecycle,
             queue_id: self.config.queue_id,
             queued_frames: {
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", feature = "native-copy"))]
                 {
                     self.native
                         .as_ref()
                         .map_or(0, native::CopySocket::owned_len)
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(all(target_os = "linux", feature = "native-copy")))]
                 {
                     0
                 }
@@ -599,7 +600,7 @@ impl IngestDriver for AfXdpCopyDriver {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 fn unix_timestamp_nanos() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -667,7 +668,7 @@ pub fn fixture_driver(frames: Vec<FixtureFrame>) -> Result<FixtureIngestDriver, 
     FixtureIngestDriver::try_new(permit, capabilities, frames)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
 mod native {
     #![allow(unsafe_code)]
 
@@ -675,7 +676,7 @@ mod native {
         AXIUSFLOW_EXPERIMENTAL_ETHERTYPE, AfXdpConfig, ETHERNET_HEADER_BYTES,
         NATIVE_UMEM_FRAME_BYTES, QueueBinding, RECEIVE_POLL_TIMEOUT_MILLIS,
     };
-    use std::num::NonZeroU32;
+    use std::{error::Error as _, num::NonZeroU32};
     use xsk_rs::{
         CompQueue, FillQueue, FrameDesc, RxQueue, TxQueue, Umem,
         config::{BindFlags, FrameSize, Interface, QueueSize, SocketConfig, UmemConfig, XdpFlags},
@@ -741,7 +742,10 @@ mod native {
             let (tx, rx, queues) = unsafe {
                 Socket::new(socket_config, &umem, &interface, u32::from(config.queue_id))
             }
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error.source() {
+                Some(source) => format!("{error}: {source}"),
+                None => error.to_string(),
+            })?;
             let (mut fill, completion) = queues.ok_or_else(|| {
                 "new non-shared UMEM did not return fill/completion rings".to_string()
             })?;

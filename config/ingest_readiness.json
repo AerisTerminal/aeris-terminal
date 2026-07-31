@@ -17,13 +17,13 @@
       "profile": "linux_af_xdp",
       "maximum_readiness": "implemented",
       "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review", "xsk_rs_0_8_0_af_xdp_copy_driver_review"],
-      "limitations": ["independent_unsafe_boundary_audit_and_fuzzing_missing", "privileged_veth_copy_mode_not_exercised", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
+      "limitations": ["independent_unsafe_boundary_audit_and_fuzzing_missing", "github_hosted_veth_copy_attempt_failed_during_native_socket_open", "wsl2_veth_copy_attempt_opened_socket_but_received_no_fixture_frame", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
     },
     {
       "profile": "linux_dpdk",
-      "maximum_readiness": "implemented",
-      "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review"],
-      "limitations": ["no_approved_maintained_native_binding", "mbuf_ownership_audit_and_fuzzing_missing", "huge_page_eal_virtual_device_lifecycle_not_exercised", "poll_mode_driver_not_verified", "huge_pages_and_nic_unqualified", "no_authorized_packet_feed"]
+      "maximum_readiness": "contract_only",
+      "evidence": ["software_fixture_adapter", "bounded_receive_release_contract", "native_candidate_review"],
+      "limitations": ["native_dependency_not_selected", "no_approved_exact_pinned_binding_or_dpdk_release", "mbuf_ownership_implementation_audit_and_fuzzing_missing", "huge_page_eal_virtual_device_lifecycle_not_exercised", "poll_mode_driver_not_implemented", "huge_pages_and_nic_unqualified", "no_authorized_packet_feed"]
     }
   ]
 }
