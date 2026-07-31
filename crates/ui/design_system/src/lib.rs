@@ -1,0 +1,567 @@
+//! Typed design-system contracts governed by `platform_design_system.md`.
+//!
+//! CSS source expressions are retained as canonical metadata, while rendering
+//! code consumes resolved sRGB values. This keeps browser, GPUI, and Origin
+//! integrations on one token contract without performing string lookup while
+//! painting.
+
+use std::f32::consts::PI;
+
+/// The application-wide color mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThemeMode {
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    /// Returns the opposite application color mode.
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
+        }
+    }
+
+    /// Returns the stable label used by settings and accessibility text.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+/// A resolved sRGB color with an independent alpha channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeColor {
+    red: f32,
+    green: f32,
+    blue: f32,
+    alpha: f32,
+}
+
+impl ThemeColor {
+    /// Resolves an eight-bit sRGB color.
+    #[must_use]
+    pub const fn from_rgb8(red: u8, green: u8, blue: u8) -> Self {
+        Self {
+            red: red as f32 / 255.0,
+            green: green as f32 / 255.0,
+            blue: blue as f32 / 255.0,
+            alpha: 1.0,
+        }
+    }
+
+    /// Resolves a CSS Color 4 OKLCH value into clamped sRGB.
+    #[must_use]
+    pub fn from_oklch(lightness: f32, chroma: f32, hue_degrees: f32) -> Self {
+        let hue_radians = hue_degrees * PI / 180.0;
+        let ok_a = chroma * hue_radians.cos();
+        let ok_b = chroma * hue_radians.sin();
+
+        let light_response = lightness + 0.396_337_78 * ok_a + 0.215_803_76 * ok_b;
+        let medium_response = lightness - 0.105_561_346 * ok_a - 0.063_854_17 * ok_b;
+        let short_response = lightness - 0.089_484_18 * ok_a - 1.291_485_5 * ok_b;
+
+        let light_linear = light_response.powi(3);
+        let medium_linear = medium_response.powi(3);
+        let short_linear = short_response.powi(3);
+
+        let red_linear =
+            4.076_741_7 * light_linear - 3.307_711_6 * medium_linear + 0.230_969_94 * short_linear;
+        let green_linear =
+            -1.268_438 * light_linear + 2.609_757_4 * medium_linear - 0.341_319_4 * short_linear;
+        let blue_linear = -0.004_196_086_3 * light_linear - 0.703_418_6 * medium_linear
+            + 1.707_614_7 * short_linear;
+
+        Self {
+            red: linear_to_srgb(red_linear),
+            green: linear_to_srgb(green_linear),
+            blue: linear_to_srgb(blue_linear),
+            alpha: 1.0,
+        }
+    }
+
+    /// Returns this color with a replaced alpha channel.
+    #[must_use]
+    pub fn with_alpha(self, alpha: f32) -> Self {
+        Self {
+            alpha: alpha.clamp(0.0, 1.0),
+            ..self
+        }
+    }
+
+    /// Returns the red sRGB channel in the inclusive `0.0..=1.0` range.
+    #[must_use]
+    pub const fn red(self) -> f32 {
+        self.red
+    }
+
+    /// Returns the green sRGB channel in the inclusive `0.0..=1.0` range.
+    #[must_use]
+    pub const fn green(self) -> f32 {
+        self.green
+    }
+
+    /// Returns the blue sRGB channel in the inclusive `0.0..=1.0` range.
+    #[must_use]
+    pub const fn blue(self) -> f32 {
+        self.blue
+    }
+
+    /// Returns the alpha channel in the inclusive `0.0..=1.0` range.
+    #[must_use]
+    pub const fn alpha(self) -> f32 {
+        self.alpha
+    }
+
+    /// Returns a packed `0xRRGGBB` value for native UI color constructors.
+    #[must_use]
+    pub fn rgb_u32(self) -> u32 {
+        (u32::from(channel_to_u8(self.red)) << 16)
+            | (u32::from(channel_to_u8(self.green)) << 8)
+            | u32::from(channel_to_u8(self.blue))
+    }
+
+    /// Returns a CSS color accepted by Origin's options and series contracts.
+    #[must_use]
+    pub fn css_value(self) -> String {
+        let red = channel_to_u8(self.red);
+        let green = channel_to_u8(self.green);
+        let blue = channel_to_u8(self.blue);
+        if self.alpha >= 0.999_5 {
+            format!("#{red:02x}{green:02x}{blue:02x}")
+        } else {
+            format!("rgba({red}, {green}, {blue}, {:.3})", self.alpha)
+        }
+    }
+}
+
+fn linear_to_srgb(channel: f32) -> f32 {
+    let encoded = if channel <= 0.003_130_8 {
+        12.92 * channel
+    } else {
+        1.055 * channel.powf(1.0 / 2.4) - 0.055
+    };
+    encoded.clamp(0.0, 1.0)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn channel_to_u8(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// One canonical color token and its resolved theme value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorToken {
+    pub canonical_name: &'static str,
+    pub source_expression: &'static str,
+    pub resolved: ThemeColor,
+}
+
+impl ColorToken {
+    const fn new(
+        canonical_name: &'static str,
+        source_expression: &'static str,
+        resolved: ThemeColor,
+    ) -> Self {
+        Self {
+            canonical_name,
+            source_expression,
+            resolved,
+        }
+    }
+}
+
+/// Core, semantic, and trading colors resolved for one application mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeColors {
+    pub background: ThemeColor,
+    pub foreground: ThemeColor,
+    pub card: ThemeColor,
+    pub card_foreground: ThemeColor,
+    pub popover: ThemeColor,
+    pub popover_foreground: ThemeColor,
+    pub primary: ThemeColor,
+    pub primary_foreground: ThemeColor,
+    pub secondary: ThemeColor,
+    pub secondary_foreground: ThemeColor,
+    pub muted: ThemeColor,
+    pub muted_foreground: ThemeColor,
+    pub accent: ThemeColor,
+    pub accent_foreground: ThemeColor,
+    pub destructive: ThemeColor,
+    pub destructive_foreground: ThemeColor,
+    pub border: ThemeColor,
+    pub input: ThemeColor,
+    pub ring: ThemeColor,
+    pub chart_palette: [ThemeColor; 5],
+    pub profit: ThemeColor,
+    pub loss: ThemeColor,
+    pub warning: ThemeColor,
+    pub info: ThemeColor,
+    pub feature: ThemeColor,
+    pub chart_candle_up: ThemeColor,
+    pub chart_candle_down: ThemeColor,
+    pub chart_volume_up: ThemeColor,
+    pub chart_volume_down: ThemeColor,
+    pub chart_axis_text: ThemeColor,
+}
+
+/// A canonical logical length token.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LengthToken {
+    pub canonical_name: &'static str,
+    pub source_expression: &'static str,
+    pub logical_pixels: f32,
+}
+
+/// Application dimensions that are shared across native and browser shells.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeDimensions {
+    pub dashboard_header_height: LengthToken,
+}
+
+/// A fully resolved Axiusflow theme suitable for a single paint revision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxiusflowTheme {
+    pub mode: ThemeMode,
+    pub colors: ThemeColors,
+    pub dimensions: ThemeDimensions,
+}
+
+impl AxiusflowTheme {
+    /// Resolves all foundational tokens for a mode.
+    #[must_use]
+    pub fn for_mode(mode: ThemeMode) -> Self {
+        Self {
+            mode,
+            colors: match mode {
+                ThemeMode::Light => light_colors(),
+                ThemeMode::Dark => dark_colors(),
+            },
+            dimensions: ThemeDimensions {
+                dashboard_header_height: LengthToken {
+                    canonical_name: "--dashboard_header_height",
+                    source_expression: "2.75rem",
+                    logical_pixels: 44.0,
+                },
+            },
+        }
+    }
+
+    /// Resolves the dark theme used by the desktop terminal initially.
+    #[must_use]
+    pub fn dark() -> Self {
+        Self::for_mode(ThemeMode::Dark)
+    }
+
+    /// Resolves the light theme.
+    #[must_use]
+    pub fn light() -> Self {
+        Self::for_mode(ThemeMode::Light)
+    }
+
+    /// Resolves the opposite mode as one complete theme value.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        Self::for_mode(self.mode.toggled())
+    }
+
+    /// Returns canonical source metadata for every foundational color resolved here.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn color_tokens(self) -> [ColorToken; 34] {
+        let colors = self.colors;
+        let dark = self.mode == ThemeMode::Dark;
+        [
+            ColorToken::new(
+                "--background",
+                mode_source(dark, "oklch(1 0 0)", "oklch(0.145 0 0)"),
+                colors.background,
+            ),
+            ColorToken::new(
+                "--foreground",
+                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
+                colors.foreground,
+            ),
+            ColorToken::new(
+                "--card",
+                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
+                colors.card,
+            ),
+            ColorToken::new(
+                "--card-foreground",
+                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
+                colors.card_foreground,
+            ),
+            ColorToken::new(
+                "--popover",
+                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
+                colors.popover,
+            ),
+            ColorToken::new(
+                "--popover-foreground",
+                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
+                colors.popover_foreground,
+            ),
+            ColorToken::new("--primary", "#3e63dd", colors.primary),
+            ColorToken::new(
+                "--primary-foreground",
+                "oklch(0.97 0.014 254.604)",
+                colors.primary_foreground,
+            ),
+            ColorToken::new(
+                "--secondary",
+                mode_source(
+                    dark,
+                    "oklch(0.967 0.001 286.375)",
+                    "oklch(0.274 0.006 286.033)",
+                ),
+                colors.secondary,
+            ),
+            ColorToken::new(
+                "--secondary-foreground",
+                mode_source(dark, "oklch(0.21 0.006 285.885)", "oklch(0.985 0 0)"),
+                colors.secondary_foreground,
+            ),
+            ColorToken::new(
+                "--muted",
+                mode_source(dark, "oklch(0.97 0 0)", "oklch(0.269 0 0)"),
+                colors.muted,
+            ),
+            ColorToken::new(
+                "--muted-foreground",
+                mode_source(dark, "oklch(0.556 0 0)", "oklch(0.708 0 0)"),
+                colors.muted_foreground,
+            ),
+            ColorToken::new(
+                "--accent",
+                mode_source(dark, "oklch(0.97 0 0)", "oklch(0.269 0 0)"),
+                colors.accent,
+            ),
+            ColorToken::new(
+                "--accent-foreground",
+                mode_source(dark, "oklch(0.205 0 0)", "oklch(0.985 0 0)"),
+                colors.accent_foreground,
+            ),
+            ColorToken::new(
+                "--destructive",
+                mode_source(
+                    dark,
+                    "oklch(0.577 0.245 27.325)",
+                    "oklch(0.704 0.191 22.216)",
+                ),
+                colors.destructive,
+            ),
+            ColorToken::new(
+                "--destructive-foreground",
+                "oklch(0.985 0 0)",
+                colors.destructive_foreground,
+            ),
+            ColorToken::new(
+                "--border",
+                mode_source(dark, "#f5f5f5", "#16191f"),
+                colors.border,
+            ),
+            ColorToken::new(
+                "--input",
+                mode_source(dark, "#f5f5f5", "#16191f"),
+                colors.input,
+            ),
+            ColorToken::new(
+                "--ring",
+                mode_source(dark, "oklch(0.708 0 0)", "oklch(0.556 0 0)"),
+                colors.ring,
+            ),
+            ColorToken::new("--chart-1", "oklch(0.87 0 0)", colors.chart_palette[0]),
+            ColorToken::new("--chart-2", "oklch(0.556 0 0)", colors.chart_palette[1]),
+            ColorToken::new("--chart-3", "oklch(0.439 0 0)", colors.chart_palette[2]),
+            ColorToken::new("--chart-4", "oklch(0.371 0 0)", colors.chart_palette[3]),
+            ColorToken::new("--chart-5", "oklch(0.269 0 0)", colors.chart_palette[4]),
+            ColorToken::new("--profit", "oklch(0.683 0.151 160.997)", colors.profit),
+            ColorToken::new("--loss", "oklch(0.674 0.215 18.124)", colors.loss),
+            ColorToken::new("--warning", "oklch(0.769 0.165 70.08)", colors.warning),
+            ColorToken::new("--info", "oklch(0.555 0.245 266.681)", colors.info),
+            ColorToken::new("--feature", "oklch(0.541 0.247 293.009)", colors.feature),
+            ColorToken::new("--chart-candle-up", "var(--profit)", colors.chart_candle_up),
+            ColorToken::new(
+                "--chart-candle-down",
+                "var(--loss)",
+                colors.chart_candle_down,
+            ),
+            ColorToken::new(
+                "--chart-volume-up",
+                mode_source(
+                    dark,
+                    "oklch(from var(--profit) l c h / 34%)",
+                    "oklch(from var(--profit) l c h / 32%)",
+                ),
+                colors.chart_volume_up,
+            ),
+            ColorToken::new(
+                "--chart-volume-down",
+                mode_source(
+                    dark,
+                    "oklch(from var(--loss) l c h / 30%)",
+                    "oklch(from var(--loss) l c h / 28%)",
+                ),
+                colors.chart_volume_down,
+            ),
+            ColorToken::new(
+                "--chart-axis-text",
+                mode_source(dark, "#0a0a0a", "#ffffff"),
+                colors.chart_axis_text,
+            ),
+        ]
+    }
+}
+
+impl Default for AxiusflowTheme {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+const fn mode_source(
+    dark: bool,
+    light_source: &'static str,
+    dark_source: &'static str,
+) -> &'static str {
+    if dark { dark_source } else { light_source }
+}
+
+fn light_colors() -> ThemeColors {
+    foundational_colors(
+        ThemeMode::Light,
+        ThemeColor::from_oklch(1.0, 0.0, 0.0),
+        ThemeColor::from_oklch(0.145, 0.0, 0.0),
+        ThemeColor::from_oklch(1.0, 0.0, 0.0),
+        ThemeColor::from_oklch(0.967, 0.001, 286.375),
+        ThemeColor::from_oklch(0.21, 0.006, 285.885),
+        ThemeColor::from_oklch(0.97, 0.0, 0.0),
+        ThemeColor::from_oklch(0.556, 0.0, 0.0),
+        ThemeColor::from_oklch(0.205, 0.0, 0.0),
+        ThemeColor::from_oklch(0.577, 0.245, 27.325),
+        ThemeColor::from_rgb8(245, 245, 245),
+        ThemeColor::from_oklch(0.708, 0.0, 0.0),
+    )
+}
+
+fn dark_colors() -> ThemeColors {
+    foundational_colors(
+        ThemeMode::Dark,
+        ThemeColor::from_oklch(0.145, 0.0, 0.0),
+        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_rgb8(7, 10, 15),
+        ThemeColor::from_oklch(0.274, 0.006, 286.033),
+        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_oklch(0.269, 0.0, 0.0),
+        ThemeColor::from_oklch(0.708, 0.0, 0.0),
+        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_oklch(0.704, 0.191, 22.216),
+        ThemeColor::from_rgb8(22, 25, 31),
+        ThemeColor::from_oklch(0.556, 0.0, 0.0),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn foundational_colors(
+    mode: ThemeMode,
+    background: ThemeColor,
+    foreground: ThemeColor,
+    card: ThemeColor,
+    secondary: ThemeColor,
+    secondary_foreground: ThemeColor,
+    muted: ThemeColor,
+    muted_foreground: ThemeColor,
+    accent_foreground: ThemeColor,
+    destructive: ThemeColor,
+    border: ThemeColor,
+    ring: ThemeColor,
+) -> ThemeColors {
+    let primary = ThemeColor::from_rgb8(62, 99, 221);
+    let primary_foreground = ThemeColor::from_oklch(0.97, 0.014, 254.604);
+    let destructive_foreground = ThemeColor::from_oklch(0.985, 0.0, 0.0);
+    let profit = ThemeColor::from_oklch(0.683, 0.151, 160.997);
+    let loss = ThemeColor::from_oklch(0.674, 0.215, 18.124);
+    let volume_alpha = match mode {
+        ThemeMode::Light => (0.34, 0.30),
+        ThemeMode::Dark => (0.32, 0.28),
+    };
+
+    ThemeColors {
+        background,
+        foreground,
+        card,
+        card_foreground: foreground,
+        popover: card,
+        popover_foreground: foreground,
+        primary,
+        primary_foreground,
+        secondary,
+        secondary_foreground,
+        muted,
+        muted_foreground,
+        accent: muted,
+        accent_foreground,
+        destructive,
+        destructive_foreground,
+        border,
+        input: border,
+        ring,
+        chart_palette: [
+            ThemeColor::from_oklch(0.87, 0.0, 0.0),
+            ThemeColor::from_oklch(0.556, 0.0, 0.0),
+            ThemeColor::from_oklch(0.439, 0.0, 0.0),
+            ThemeColor::from_oklch(0.371, 0.0, 0.0),
+            ThemeColor::from_oklch(0.269, 0.0, 0.0),
+        ],
+        profit,
+        loss,
+        warning: ThemeColor::from_oklch(0.769, 0.165, 70.08),
+        info: ThemeColor::from_oklch(0.555, 0.245, 266.681),
+        feature: ThemeColor::from_oklch(0.541, 0.247, 293.009),
+        chart_candle_up: profit,
+        chart_candle_down: loss,
+        chart_volume_up: profit.with_alpha(volume_alpha.0),
+        chart_volume_down: loss.with_alpha(volume_alpha.1),
+        chart_axis_text: match mode {
+            ThemeMode::Light => ThemeColor::from_rgb8(10, 10, 10),
+            ThemeMode::Dark => ThemeColor::from_rgb8(255, 255, 255),
+        },
+    }
+}
+
+/// The complete set of concrete radius tokens. No additional radius is valid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RadiusToken {
+    Sm,
+    Default,
+    Full,
+}
+
+impl RadiusToken {
+    /// Returns the exact compatibility key used by generated CSS and inspectors.
+    #[must_use]
+    pub const fn compatibility_key(self) -> &'static str {
+        match self {
+            Self::Sm => "--radius-sm",
+            Self::Default => "--radius-default",
+            Self::Full => "--radius-full",
+        }
+    }
+
+    /// Returns the governing concrete radius in logical pixels.
+    #[must_use]
+    pub const fn logical_pixels(self) -> u16 {
+        match self {
+            Self::Sm => 6,
+            Self::Default => 8,
+            Self::Full => 999,
+        }
+    }
+}

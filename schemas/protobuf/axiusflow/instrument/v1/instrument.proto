@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package axiusflow.instrument.v1;
+
+// Provider-neutral, versioned instrument reference data.
+message InstrumentRevision {
+  string instrument_id = 1;
+  uint64 revision = 2;
+  AssetClass asset_class = 3;
+  string symbol = 4;
+  string venue_id = 5;
+  string trading_currency = 6;
+  uint32 price_scale = 7;
+  uint32 quantity_scale = 8;
+  InstrumentLifecycle lifecycle = 9;
+}
+
+enum AssetClass {
+  ASSET_CLASS_UNSPECIFIED = 0;
+  ASSET_CLASS_EQUITY = 1;
+  ASSET_CLASS_OPTION = 2;
+  ASSET_CLASS_FUTURE = 3;
+  ASSET_CLASS_FOREIGN_EXCHANGE = 4;
+  ASSET_CLASS_CRYPTO_ASSET = 5;
+  ASSET_CLASS_FIXED_INCOME = 6;
+  ASSET_CLASS_FUND = 7;
+  ASSET_CLASS_INDEX = 8;
+}
+
+enum InstrumentLifecycle {
+  INSTRUMENT_LIFECYCLE_UNSPECIFIED = 0;
+  INSTRUMENT_LIFECYCLE_ACTIVE = 1;
+  INSTRUMENT_LIFECYCLE_HALTED = 2;
+  INSTRUMENT_LIFECYCLE_DELISTED = 3;
+  INSTRUMENT_LIFECYCLE_EXPIRED = 4;
+}

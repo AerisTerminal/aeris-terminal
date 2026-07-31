@@ -1,0 +1,25 @@
+     [package]
+name = "axiusflow_ingest_conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_linux_af_xdp_adapter = { path = "../../crates/adapters/linux_af_xdp" }
+axiusflow_linux_dpdk_adapter = { path = "../../crates/adapters/linux_dpdk" }
+axiusflow_linux_socket_network_adapter = { path = "../../crates/adapters/linux_socket_network" }
+axiusflow_macos_network_adapter = { path = "../../crates/adapters/macos_network" }
+axiusflow_observability = { path = "../../crates/observability" }
+axiusflow_portable_network_adapter = { path = "../../crates/adapters/portable_network" }
+axiusflow_realtime = { path = "../../crates/realtime" }
+axiusflow_testing = { path = "../../crates/testing" }
+axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
+axiusflow_transport = { path = "../../crates/transport" }
+axiusflow_windows_network_adapter = { path = "../../crates/adapters/windows_network" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

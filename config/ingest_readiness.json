@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "profile": "portable_socket",
+      "maximum_readiness": "implemented",
+      "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "portable_socket_loopback", "windows_build"],
+      "limitations": ["cross_platform_loopback_requires_ci", "no_authorized_live_provider", "performance_not_certified"]
+    },
+    {
+      "profile": "tuned_linux_socket",
+      "maximum_readiness": "fixture_validated",
+      "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "tuned_linux_socket_implementation", "tuned_linux_socket_loopback_conformance", "socket2_0_6_5_review"],
+      "limitations": ["wsl2_loopback_only", "busy_poll_not_enabled", "kernel_and_hardware_timestamp_not_verified", "qualified_linux_host_not_tested", "no_authorized_live_provider"]
+    },
+    {
+      "profile": "linux_af_xdp",
+      "maximum_readiness": "implemented",
+      "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review"],
+      "limitations": ["no_approved_maintained_native_binding", "umem_ownership_audit_and_fuzzing_missing", "privileged_veth_copy_mode_not_exercised", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
+    },
+    {
+      "profile": "linux_dpdk",
+      "maximum_readiness": "implemented",
+      "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review"],
+      "limitations": ["no_approved_maintained_native_binding", "mbuf_ownership_audit_and_fuzzing_missing", "huge_page_eal_virtual_device_lifecycle_not_exercised", "poll_mode_driver_not_verified", "huge_pages_and_nic_unqualified", "no_authorized_packet_feed"]
+    }
+  ]
+}

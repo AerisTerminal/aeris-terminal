@@ -1,0 +1,4 @@
+default_compatibility = "backward_transitive"
+field_numbers_reusable = false
+wire_format = "protobuf"
+topic_name_template = "<environment>.<domain>.<entity>.<event_family>.v<major>"

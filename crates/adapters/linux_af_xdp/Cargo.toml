@@ -1,0 +1,13 @@
+[package]
+name = "axiusflow_linux_af_xdp_adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_transport = { path = "../../transport" }
+
+[lints]
+workspace = true

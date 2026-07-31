@@ -1,0 +1,99 @@
+name: stage_1_foundation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workspace_quality:
+    name: workspace_quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: format
+        run: cargo fmt --all -- --check
+      - name: workspace_check
+        run: cargo check --workspace --all-targets
+      - name: workspace_clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: naming_contract
+        run: cargo run --quiet --package axiusflow_naming_check
+
+  portable_matrix:
+    name: portable_${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: portable_contracts_and_real_socket_build
+        run: cargo check -p axiusflow_platform_runtime -p axiusflow_transport -p axiusflow_realtime -p axiusflow_observability -p axiusflow_portable_network_adapter -p axiusflow_protocols -p axiusflow_testing
+      - name: actual_portable_loopback_packet_partition_fanout_origin
+        run: cargo run --quiet --package axiusflow_ingest_conformance -- --evidence-report stage_1_evidence_${{ runner.os }}.json
+      - name: retain_stage_1_software_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_1_software_evidence_${{ runner.os }}
+          path: stage_1_evidence_${{ runner.os }}.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: pinned_gpui_desktop_compile_smoke
+        run: cargo check -p axiusflow_desktop --all-targets
+
+  portable_evidence_gate:
+    name: portable_cross_platform_evidence_gate
+    needs: portable_matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: download_portable_evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stage_1_software_evidence_*
+          path: stage_1_evidence
+          merge-multiple: true
+      - name: verify_cross_platform_evidence
+        run: cargo run --quiet --package axiusflow_ingest_conformance -- --verify-evidence-set stage_1_evidence
+
+  linux_profiles:
+    name: linux_profile_compile_and_unprivileged_conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: isolated_profile_builds
+        run: cargo check -p axiusflow_linux_socket_network_adapter -p axiusflow_linux_af_xdp_adapter -p axiusflow_linux_dpdk_adapter --all-targets
+      - name: tuned_linux_packet_partition_fanout_origin_and_acceleration_gates
+        run: cargo run --quiet --package axiusflow_ingest_conformance
+      - name: evidence_scope
+        run: echo "This unprivileged lane proves tuned Linux loopback packet-to-fenced-partition, bounded direct/durable-tap queues, and Origin host preparation plus explicit AF_XDP/DPDK unavailability; it does not prove external durability, Redpanda, AF_XDP copy/zero-copy, DPDK PMD, hardware, provider, renderer, presentation, or latency readiness."

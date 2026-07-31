@@ -1,0 +1,15 @@
+[package]
+name = "axiusflow_application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_instruments = { path = "../domain/instruments" }
+axiusflow_market_data = { path = "../domain/market_data" }
+axiusflow_protocols = { path = "../protocols" }
+
+[lints]
+workspace = true

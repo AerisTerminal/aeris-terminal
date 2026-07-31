@@ -1,0 +1,3 @@
+[submodule "origin_charts"]
+	path = origin_charts
+	url = https://github.com/TradeAion/Origin_charts.git

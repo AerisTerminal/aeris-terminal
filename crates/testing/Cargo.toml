@@ -1,0 +1,20 @@
+[package]
+name = "axiusflow_testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_application = { path = "../application" }
+axiusflow_chart_integration = { path = "../ui/chart_integration" }
+axiusflow_market_protocol_adapter = { path = "../adapters/market_protocol" }
+axiusflow_protocols = { path = "../protocols" }
+axiusflow_realtime = { path = "../realtime" }
+axiusflow_stream_websocket_adapter = { path = "../adapters/stream_websocket" }
+axiusflow_transport = { path = "../transport" }
+tungstenite.workspace = true
+
+[lints]
+workspace = true
