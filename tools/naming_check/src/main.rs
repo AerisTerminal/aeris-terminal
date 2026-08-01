@@ -5,12 +5,21 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const SKIPPED_DIRECTORIES: &[&str] = &[".git", "node_modules", "origin_charts", "target"];
+const SKIPPED_DIRECTORIES: &[&str] = &[
+    ".git",
+    "__pycache__",
+    "node_modules",
+    "origin_charts",
+    "target",
+    "third_party",
+];
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     ".gitignore",
     ".gitmodules",
+    "AGENTS.md",
     "Cargo.lock",
     "Cargo.toml",
+    "Dockerfile",
     "rust-toolchain.toml",
 ];
 

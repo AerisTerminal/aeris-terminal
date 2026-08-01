@@ -1,0 +1,5 @@
+/artifacts/
+/target/
+/corpus/af_xdp_safe_boundary/*
+!/corpus/af_xdp_safe_boundary/minimum
+!/corpus/af_xdp_safe_boundary/native_limits

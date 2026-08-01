@@ -49,7 +49,7 @@ prost = "=0.14.4"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland", "x11"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704", version = "=0.5.2" }
 origin_engine = { git = "https://github.com/TradeAion/Origin_charts.git", rev = "8753b071aed2f01ae6c61ad9fbc2a4d4a0506531", version = "=0.1.0" }
 origin_render = { git = "https://github.com/TradeAion/Origin_charts.git", rev = "8753b071aed2f01ae6c61ad9fbc2a4d4a0506531", version = "=0.1.0" }
@@ -59,6 +59,10 @@ origin_render_gpui = { git = "https://github.com/TradeAion/Origin_charts.git", r
 # Origin pins the published `gpui = 0.2.2`; replace it with the same Git source
 # used by GPUI Component. Cargo.lock records the immutable Zed commit.
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2" }
+# libxdp 1.6.0 leaks its AF_XDP program refcount-map descriptor during normal
+# socket deletion. Keep the exact crate source local with the upstream cleanup
+# corrected until a released libxdp-sys version contains the fix.
+libxdp-sys = { path = "third_party/libxdp-sys" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

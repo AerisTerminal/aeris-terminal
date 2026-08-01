@@ -1,0 +1,12 @@
+{
+  "crate": "libxdp-sys",
+  "version": "0.2.4+1.6.0",
+  "registry_checksum": "6098c8281e42ed6f46240af889297dae1e37f70ee505dd26fe5c7199563e4d86",
+  "crate_source_revision": "ba1741977157d5bcb52f40d774e5f71e5e8dcba7",
+  "patch_file": "xdp-tools/lib/libxdp/xsk.c",
+  "patch_purpose": "Close the AF_XDP program refcount-map descriptor on every normal release path.",
+  "patched_tree_sha256": "f1c745ab073d6c6bb32d30debc584d0f3dfa438ed760c466456536a7a0ab262c",
+  "reconstructed_upstream_tree_sha256": "6a364971d5144850471396feaf8ee01d101670f19126f5a788cbaf3373faa610",
+  "patched_xsk_sha256": "9959b05596653d19187144c00b828a00fa002246b6cbac11c8cb83a2794098fd",
+  "upstream_xsk_sha256": "df973d13bf2b4ff5f004127661b42eba777e1dead1c814a1b2c844577686a14e"
+}
