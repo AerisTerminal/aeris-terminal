@@ -5,13 +5,18 @@ import sys
 from pathlib import Path
 
 PATCH_PATH = Path("xdp-tools/lib/libxdp/xsk.c")
+SOURCE_EXCLUSIONS = {Path("Cargo.lock")}
 PATCHED_BLOCK = b"""out:\n\tif (ctx->refcnt_map_fd >= 0)\n\t\tclose(ctx->refcnt_map_fd);\n\tctx->refcnt_map_fd = -ENOENT;\n\txdp_program__close(ctx->xdp_prog);\n"""
 UPSTREAM_BLOCK = b"""out:\n\txdp_program__close(ctx->xdp_prog);\n"""
 
 
 def tree_hash(root: Path, replacement: bytes | None = None) -> str:
     digest = hashlib.sha256()
-    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+    for path in sorted(
+        candidate
+        for candidate in root.rglob("*")
+        if candidate.is_file() and candidate.relative_to(root) not in SOURCE_EXCLUSIONS
+    ):
         relative = path.relative_to(root).as_posix().encode()
         data = (
             replacement
