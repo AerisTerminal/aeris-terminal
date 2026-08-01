@@ -30,7 +30,6 @@ pub enum LoopbackCallbackError {
     Bind(std::io::Error),
     Accept(std::io::Error),
     Read(std::io::Error),
-    Write(std::io::Error),
     DeadlineExceeded,
     RequestLineTooLong,
     HeaderTooLong,
@@ -50,7 +49,6 @@ impl fmt::Display for LoopbackCallbackError {
             Self::Bind(error) => write!(formatter, "loopback redirect bind failed: {error}"),
             Self::Accept(error) => write!(formatter, "loopback redirect accept failed: {error}"),
             Self::Read(error) => write!(formatter, "loopback redirect read failed: {error}"),
-            Self::Write(error) => write!(formatter, "loopback redirect write failed: {error}"),
             Self::DeadlineExceeded => {
                 formatter.write_str("loopback redirect deadline elapsed before a request arrived")
             }
@@ -98,9 +96,7 @@ impl LoopbackCallbackError {
 impl Error for LoopbackCallbackError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Bind(error) | Self::Accept(error) | Self::Read(error) | Self::Write(error) => {
-                Some(error)
-            }
+            Self::Bind(error) | Self::Accept(error) | Self::Read(error) => Some(error),
             _ => None,
         }
     }
@@ -204,20 +200,15 @@ impl LoopbackRedirectListener {
             .map_err(LoopbackCallbackError::Accept)?;
 
         loop {
-            let Some(remaining) = expiry
-                .checked_duration_since(Instant::now())
-                .filter(|remaining| !remaining.is_zero())
-            else {
+            let Some(remaining) = remaining_before(expiry) else {
                 return Err(LoopbackCallbackError::DeadlineExceeded);
             };
             match self.listener.accept() {
-                Ok((mut stream, _peer)) => {
-                    match self.serve_redirect(&mut stream, secret, remaining) {
-                        Ok(code) => return Ok(code),
-                        Err(error) if error.proves_state_knowledge() => return Err(error),
-                        Err(_) => {}
-                    }
-                }
+                Ok((mut stream, _peer)) => match self.serve_redirect(&mut stream, secret, expiry) {
+                    Ok(code) => return Ok(code),
+                    Err(error) if error.proves_state_knowledge() => return Err(error),
+                    Err(_) => {}
+                },
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(ACCEPT_POLL_INTERVAL.min(remaining));
                 }
@@ -227,23 +218,21 @@ impl LoopbackRedirectListener {
     }
 
     /// Serves one accepted connection and answers the browser exactly once.
+    ///
+    /// The browser response is best-effort: once a `state`-verified outcome exists it is
+    /// returned even if the browser already closed the connection, so a disconnecting tab
+    /// cannot discard a valid authorization code.
     fn serve_redirect(
         &self,
         stream: &mut TcpStream,
         secret: &PkceSecret,
-        remaining: Duration,
+        expiry: Instant,
     ) -> Result<AuthorizationCode, LoopbackCallbackError> {
         stream
             .set_nonblocking(false)
             .map_err(LoopbackCallbackError::Read)?;
-        stream
-            .set_read_timeout(Some(remaining))
-            .map_err(LoopbackCallbackError::Read)?;
-        stream
-            .set_write_timeout(Some(remaining))
-            .map_err(LoopbackCallbackError::Write)?;
 
-        let outcome = self.read_authorization_code(stream, secret);
+        let outcome = self.read_authorization_code(stream, secret, expiry);
         let (status, body) = if outcome.is_ok() {
             (
                 "200 OK",
@@ -259,10 +248,11 @@ impl LoopbackRedirectListener {
             "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
             body.len()
         );
-        stream
-            .write_all(response.as_bytes())
-            .map_err(LoopbackCallbackError::Write)?;
-        stream.flush().map_err(LoopbackCallbackError::Write)?;
+        if let Some(remaining) = remaining_before(expiry) {
+            let _ = stream.set_write_timeout(Some(remaining));
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
         outcome
     }
 
@@ -270,8 +260,9 @@ impl LoopbackRedirectListener {
         &self,
         stream: &mut TcpStream,
         secret: &PkceSecret,
+        expiry: Instant,
     ) -> Result<AuthorizationCode, LoopbackCallbackError> {
-        let mut reader = BufReader::new(Read::by_ref(stream));
+        let mut reader = BufReader::new(DeadlineStream { stream, expiry });
         let mut request_line = String::new();
         read_bounded_line(
             &mut reader,
@@ -331,16 +322,20 @@ impl LoopbackRedirectListener {
 }
 
 fn read_bounded_line(
-    reader: &mut BufReader<&mut TcpStream>,
+    reader: &mut BufReader<DeadlineStream<'_>>,
     destination: &mut String,
     limit: usize,
     overflow: LoopbackCallbackError,
 ) -> Result<(), LoopbackCallbackError> {
     let mut bounded = reader.take(limit as u64 + 1);
     let mut raw = Vec::new();
-    bounded
-        .read_until(b'\n', &mut raw)
-        .map_err(LoopbackCallbackError::Read)?;
+    bounded.read_until(b'\n', &mut raw).map_err(|error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            LoopbackCallbackError::DeadlineExceeded
+        } else {
+            LoopbackCallbackError::Read(error)
+        }
+    })?;
     if raw.len() > limit {
         return Err(overflow);
     }
@@ -353,7 +348,7 @@ fn read_bounded_line(
 }
 
 fn drain_bounded_headers(
-    reader: &mut BufReader<&mut TcpStream>,
+    reader: &mut BufReader<DeadlineStream<'_>>,
 ) -> Result<(), LoopbackCallbackError> {
     for _ in 0..MAXIMUM_HEADER_LINES {
         let mut header = String::new();
@@ -399,6 +394,36 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Returns the time left before `expiry`, or `None` once it has elapsed.
+fn remaining_before(expiry: Instant) -> Option<Duration> {
+    expiry
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+}
+
+/// Applies one absolute deadline across every read of a redirect request.
+///
+/// A per-operation socket timeout lets a slow-drip peer stay under each individual timeout
+/// while consuming unbounded total time. Recomputing the remaining budget before each read
+/// bounds the whole request instead.
+struct DeadlineStream<'stream> {
+    stream: &'stream mut TcpStream,
+    expiry: Instant,
+}
+
+impl Read for DeadlineStream<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let remaining = remaining_before(self.expiry).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "loopback redirect deadline elapsed",
+            )
+        })?;
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buffer)
+    }
 }
 
 /// Reduces an authorization-server `error` value to a bounded RFC 6749 error code.

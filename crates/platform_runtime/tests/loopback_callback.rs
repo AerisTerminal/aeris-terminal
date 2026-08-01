@@ -297,3 +297,65 @@ fn verified_redirect_without_a_code_is_rejected() {
         "unexpected error: {error:?}"
     );
 }
+
+/// A slow-drip peer must not outlast the absolute deadline via per-read timeouts.
+#[test]
+fn slow_drip_peer_cannot_outlast_the_absolute_deadline() {
+    let (listener, port) = bind();
+    let secret = new_secret();
+
+    let dripper = thread::spawn(move || {
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+            return;
+        };
+        // Each byte alone stays under any per-operation timeout, so only an absolute
+        // deadline can bound the total request.
+        for byte in b"GET /axiusflow/callback?code=a" {
+            if stream.write_all(&[*byte]).is_err() || stream.flush().is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+    });
+
+    let started = Instant::now();
+    let error = listener
+        .accept_authorization_code(&secret, SHORT_DEADLINE)
+        .expect_err("a slow-drip peer must not hold the listener past the deadline");
+    let elapsed = started.elapsed();
+    let _ = dripper.join();
+
+    assert!(
+        matches!(error, LoopbackCallbackError::DeadlineExceeded),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        elapsed < SHORT_DEADLINE * 20,
+        "slow drip outlasted the deadline: {elapsed:?}"
+    );
+}
+
+/// A browser that disconnects after submitting a verified code must not lose the code.
+#[test]
+fn disconnecting_browser_does_not_discard_a_verified_code() {
+    let (listener, port) = bind();
+    let secret = new_secret();
+    let request = verified_request(&secret, "code-survives-disconnect");
+
+    let client = thread::spawn(move || {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", port)).expect("loopback accepts connections");
+        stream
+            .write_all(request.as_bytes())
+            .expect("request is written");
+        stream.flush().expect("request is flushed");
+        // Drop without reading, so the listener's cosmetic response has nowhere to go.
+        drop(stream);
+    });
+
+    let code = listener
+        .accept_authorization_code(&secret, DEADLINE)
+        .expect("a verified code must survive the browser disconnecting");
+    assert_eq!(code.value(), "code-survives-disconnect");
+    let _ = client.join();
+}
