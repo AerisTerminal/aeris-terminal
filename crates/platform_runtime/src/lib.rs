@@ -17,7 +17,7 @@ pub use capability::{
 };
 pub use clock::{RuntimeClock, StandardRuntimeClock};
 pub use composition::PlatformRuntime;
-pub use credential_vault::CredentialVault;
+pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};
 pub use loopback_callback::{AuthorizationCode, LoopbackCallbackError, LoopbackRedirectListener};
 pub use paths::RuntimePaths;
 pub use pkce::{CODE_CHALLENGE_METHOD, PkceError, PkceSecret};
