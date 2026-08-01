@@ -270,9 +270,31 @@ jobs:
         run: |
           # AXIUSFLOW_AF_XDP_REQUIRE_PRIVILEGED=1 makes a missing interface fail instead of
           # skipping, so this lane cannot silently degrade into a passing no-op.
+          # `cargo` is on the runner user's PATH, not root's, so the harness is compiled as the
+          # runner and only the resulting binary is executed with elevated privileges.
+          cargo test --package axiusflow_linux_af_xdp_adapter --features native-copy \
+            --test sequential_rebind --no-run
+          test_binary="$(cargo test --package axiusflow_linux_af_xdp_adapter --features native-copy \
+            --test sequential_rebind --no-run --message-format=json \
+            | python3 -c '
+import json
+import sys
+
+executable = None
+for line in sys.stdin:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if record.get("reason") != "compiler-artifact":
+        continue
+    if record.get("target", {}).get("name") != "sequential_rebind":
+        continue
+    executable = record.get("executable") or executable
+print(executable or "")')"
+          test -n "$test_binary" && test -x "$test_binary"
           sudo --preserve-env=AXIUSFLOW_AF_XDP_TEST_INTERFACE,AXIUSFLOW_AF_XDP_REQUIRE_PRIVILEGED,LIBXDP_BPFFS,LIBXDP_BPFFS_AUTOMOUNT \
-            cargo test --package axiusflow_linux_af_xdp_adapter --features native-copy \
-            --test sequential_rebind -- --test-threads=1 --nocapture
+            "$test_binary" --test-threads=1 --nocapture
       - name: retain_af_xdp_copy_evidence
         uses: actions/upload-artifact@v4
         with:
