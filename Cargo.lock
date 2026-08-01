@@ -719,12 +719,14 @@ name = "axiusflow_platform_runtime"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.0",
+ "core_affinity",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "keyring",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thread-priority",
 ]
 
 [[package]]
@@ -1486,6 +1488,17 @@ dependencies = [
  "io-surface",
  "libc",
  "metal",
+]
+
+[[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi",
 ]
 
 [[package]]
@@ -7171,6 +7184,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "thread-priority"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d2e834949be5111506bb252643498af1514f600d9e1dceedaa42afae155b67f"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows 0.62.2",
 ]
 
 [[package]]

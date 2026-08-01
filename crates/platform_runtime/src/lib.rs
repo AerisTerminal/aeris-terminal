@@ -12,6 +12,7 @@ mod pkce;
 mod signed_update;
 #[cfg(test)]
 mod test_fixture;
+mod thread_scheduling;
 
 pub use capability::{
     CapabilityAvailability, ClientOperatingMode, ClockCapability, RuntimeCapabilities,
@@ -24,4 +25,7 @@ pub use paths::RuntimePaths;
 pub use pkce::{CODE_CHALLENGE_METHOD, PkceError, PkceSecret};
 pub use signed_update::{
     InstalledRelease, SignedUpdateError, SignedUpdateVerifier, UpdateManifest, UpdateRollbackState,
+};
+pub use thread_scheduling::{
+    AffinityTarget, NativeThreadScheduler, ThreadPriorityHint, ThreadSchedulingError,
 };
