@@ -9,6 +9,7 @@ mod credential_vault;
 mod loopback_callback;
 mod paths;
 mod pkce;
+mod signed_update;
 #[cfg(test)]
 mod test_fixture;
 
@@ -21,3 +22,6 @@ pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredent
 pub use loopback_callback::{AuthorizationCode, LoopbackCallbackError, LoopbackRedirectListener};
 pub use paths::RuntimePaths;
 pub use pkce::{CODE_CHALLENGE_METHOD, PkceError, PkceSecret};
+pub use signed_update::{
+    InstalledRelease, SignedUpdateError, SignedUpdateVerifier, UpdateManifest, UpdateRollbackState,
+};
