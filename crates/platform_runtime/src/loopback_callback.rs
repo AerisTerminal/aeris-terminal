@@ -8,8 +8,9 @@
 use crate::pkce::PkceSecret;
 use core::fmt;
 use std::error::Error;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Largest request line accepted from the browser redirect.
@@ -18,6 +19,10 @@ const MAXIMUM_REQUEST_LINE_BYTES: usize = 8_192;
 const MAXIMUM_HEADER_LINES: usize = 64;
 /// Largest single header line accepted from the browser redirect.
 const MAXIMUM_HEADER_LINE_BYTES: usize = 8_192;
+/// Interval between non-blocking accept attempts while awaiting the redirect.
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Largest sanitized authorization-server error code retained for reporting.
+const MAXIMUM_SERVER_ERROR_BYTES: usize = 64;
 
 /// Reason a loopback authorization redirect did not yield a usable code.
 #[derive(Debug)]
@@ -74,6 +79,19 @@ impl fmt::Display for LoopbackCallbackError {
                 write!(formatter, "authorization server reported: {error}")
             }
         }
+    }
+}
+
+impl LoopbackCallbackError {
+    /// Returns whether this failure came from a caller that proved knowledge of `state`.
+    ///
+    /// Only such a failure may abort the pending sign-in. Everything else is a stray or
+    /// hostile request that must not deny the flow.
+    const fn proves_state_knowledge(&self) -> bool {
+        matches!(
+            self,
+            Self::AuthorizationServerError(_) | Self::MissingAuthorizationCode
+        )
     }
 }
 
@@ -158,27 +176,66 @@ impl LoopbackRedirectListener {
         ))
     }
 
-    /// Accepts one redirect and returns its authorization code after verifying `state`.
+    /// Serves redirects until one proves knowledge of `state`, or the deadline elapses.
     ///
     /// The listener is consumed so a single secret can never be reused across redirects.
+    /// A request that fails `state` verification, targets another path, uses another method,
+    /// or exceeds a bound is answered with `400` and does **not** abort the pending sign-in,
+    /// so a stray local connection or a hostile page cannot deny the flow. Only a
+    /// `state`-verified response resolves the wait.
     ///
     /// # Errors
     ///
-    /// Returns an error when the deadline elapses, a bound is exceeded, the request is
-    /// malformed, the authorization server reported a failure, or `state` does not match.
+    /// Returns [`LoopbackCallbackError::DeadlineExceeded`] when no `state`-verified redirect
+    /// arrives in time, [`LoopbackCallbackError::AuthorizationServerError`] when the
+    /// authorization server reported a failure for this exact `state`, or
+    /// [`LoopbackCallbackError::MissingAuthorizationCode`] when a verified redirect carried
+    /// no authorization code.
     pub fn accept_authorization_code(
         self,
         secret: &PkceSecret,
         deadline: Duration,
     ) -> Result<AuthorizationCode, LoopbackCallbackError> {
-        self.listener
-            .set_nonblocking(false)
-            .map_err(LoopbackCallbackError::Accept)?;
-        let started = Instant::now();
-        let remaining = deadline
-            .checked_sub(started.elapsed())
+        let expiry = Instant::now()
+            .checked_add(deadline)
             .ok_or(LoopbackCallbackError::DeadlineExceeded)?;
-        let (mut stream, _peer) = self.accept_within(remaining)?;
+        self.listener
+            .set_nonblocking(true)
+            .map_err(LoopbackCallbackError::Accept)?;
+
+        loop {
+            let Some(remaining) = expiry
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+            else {
+                return Err(LoopbackCallbackError::DeadlineExceeded);
+            };
+            match self.listener.accept() {
+                Ok((mut stream, _peer)) => {
+                    match self.serve_redirect(&mut stream, secret, remaining) {
+                        Ok(code) => return Ok(code),
+                        Err(error) if error.proves_state_knowledge() => return Err(error),
+                        Err(_) => {}
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(ACCEPT_POLL_INTERVAL.min(remaining));
+                }
+                Err(error) => return Err(LoopbackCallbackError::Accept(error)),
+            }
+        }
+    }
+
+    /// Serves one accepted connection and answers the browser exactly once.
+    fn serve_redirect(
+        &self,
+        stream: &mut TcpStream,
+        secret: &PkceSecret,
+        remaining: Duration,
+    ) -> Result<AuthorizationCode, LoopbackCallbackError> {
+        stream
+            .set_nonblocking(false)
+            .map_err(LoopbackCallbackError::Read)?;
         stream
             .set_read_timeout(Some(remaining))
             .map_err(LoopbackCallbackError::Read)?;
@@ -186,15 +243,17 @@ impl LoopbackRedirectListener {
             .set_write_timeout(Some(remaining))
             .map_err(LoopbackCallbackError::Write)?;
 
-        let outcome = self.read_authorization_code(&mut stream, secret);
-        let body = match &outcome {
-            Ok(_) => "Axiusflow sign-in complete. Return to the application.",
-            Err(_) => "Axiusflow sign-in failed. Return to the application.",
-        };
-        let status = if outcome.is_ok() {
-            "200 OK"
+        let outcome = self.read_authorization_code(stream, secret);
+        let (status, body) = if outcome.is_ok() {
+            (
+                "200 OK",
+                "Axiusflow sign-in complete. Return to the application.",
+            )
         } else {
-            "400 Bad Request"
+            (
+                "400 Bad Request",
+                "Axiusflow sign-in failed. Return to the application.",
+            )
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
@@ -205,18 +264,6 @@ impl LoopbackRedirectListener {
             .map_err(LoopbackCallbackError::Write)?;
         stream.flush().map_err(LoopbackCallbackError::Write)?;
         outcome
-    }
-
-    fn accept_within(
-        &self,
-        remaining: Duration,
-    ) -> Result<(TcpStream, SocketAddr), LoopbackCallbackError> {
-        if remaining.is_zero() {
-            return Err(LoopbackCallbackError::DeadlineExceeded);
-        }
-        self.listener
-            .accept()
-            .map_err(LoopbackCallbackError::Accept)
     }
 
     fn read_authorization_code(
@@ -264,12 +311,16 @@ impl LoopbackRedirectListener {
             }
         }
 
-        if let Some(error) = server_error {
-            return Err(LoopbackCallbackError::AuthorizationServerError(error));
-        }
         let state = state.ok_or(LoopbackCallbackError::MissingState)?;
         if !constant_time_equals(state.as_bytes(), secret.state().as_bytes()) {
             return Err(LoopbackCallbackError::StateMismatch);
+        }
+        // RFC 6749 section 4.1.2.1 requires verifying `state` on error responses too, so an
+        // unverified caller can neither abort the flow nor inject text into diagnostics.
+        if let Some(error) = server_error {
+            return Err(LoopbackCallbackError::AuthorizationServerError(
+                sanitize_server_error(&error),
+            ));
         }
         let code = code.ok_or(LoopbackCallbackError::MissingAuthorizationCode)?;
         if code.is_empty() {
@@ -348,6 +399,18 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Reduces an authorization-server `error` value to a bounded RFC 6749 error code.
+///
+/// RFC 6749 section 4.1.2.1 error codes are lowercase ASCII with underscores. Anything
+/// else is dropped so a redirect cannot inject arbitrary text into diagnostics or logs.
+fn sanitize_server_error(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(MAXIMUM_SERVER_ERROR_BYTES)
+        .collect()
 }
 
 /// Compares two byte strings without leaking their contents through timing.
