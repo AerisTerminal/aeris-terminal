@@ -42,7 +42,9 @@ impl Error for PkceError {
 
 /// One single-use PKCE verifier plus its derived challenge and CSRF state.
 ///
-/// `Debug` deliberately redacts the verifier so it cannot reach logs.
+/// `Debug` deliberately redacts both the verifier and the CSRF state so neither can reach
+/// logs. A leaked state lets a local caller forge a state-verified redirect, so it is as
+/// sensitive as the verifier while authorization is pending.
 #[derive(Clone)]
 pub struct PkceSecret {
     verifier: String,
@@ -103,7 +105,7 @@ impl fmt::Debug for PkceSecret {
             .field("verifier", &"<redacted>")
             .field("challenge", &self.challenge)
             .field("challenge_method", &CODE_CHALLENGE_METHOD)
-            .field("state", &self.state)
+            .field("state", &"<redacted>")
             .finish()
     }
 }
@@ -158,13 +160,21 @@ mod tests {
     }
 
     #[test]
-    fn debug_output_never_reveals_the_verifier() {
+    fn debug_output_never_reveals_the_verifier_or_state() {
         let secret = PkceSecret::generate().expect("the operating-system CSPRNG is available");
         let rendered = format!("{secret:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(
             !rendered.contains(secret.verifier()),
             "the verifier must never appear in debug output"
+        );
+        assert!(
+            !rendered.contains(secret.state()),
+            "the CSRF state must never appear in debug output"
+        );
+        assert!(
+            rendered.contains(secret.challenge()),
+            "the public challenge remains observable for diagnostics"
         );
     }
 }

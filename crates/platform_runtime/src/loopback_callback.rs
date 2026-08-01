@@ -21,6 +21,11 @@ const MAXIMUM_HEADER_LINES: usize = 64;
 const MAXIMUM_HEADER_LINE_BYTES: usize = 8_192;
 /// Interval between non-blocking accept attempts while awaiting the redirect.
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Largest share of the deadline any single connection may consume.
+///
+/// Without this bound one stalled or slow-drip peer that connects first would hold the
+/// listener for the entire authorization deadline and starve an already-queued redirect.
+const PER_CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 /// Largest sanitized authorization-server error code retained for reporting.
 const MAXIMUM_SERVER_ERROR_BYTES: usize = 64;
 
@@ -204,11 +209,16 @@ impl LoopbackRedirectListener {
                 return Err(LoopbackCallbackError::DeadlineExceeded);
             };
             match self.listener.accept() {
-                Ok((mut stream, _peer)) => match self.serve_redirect(&mut stream, secret, expiry) {
-                    Ok(code) => return Ok(code),
-                    Err(error) if error.proves_state_knowledge() => return Err(error),
-                    Err(_) => {}
-                },
+                Ok((mut stream, _peer)) => {
+                    let connection_expiry = Instant::now()
+                        .checked_add(PER_CONNECTION_DEADLINE.min(remaining))
+                        .unwrap_or(expiry);
+                    match self.serve_redirect(&mut stream, secret, connection_expiry) {
+                        Ok(code) => return Ok(code),
+                        Err(error) if error.proves_state_knowledge() => return Err(error),
+                        Err(_) => {}
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(ACCEPT_POLL_INTERVAL.min(remaining));
                 }
@@ -350,7 +360,9 @@ fn read_bounded_line(
 fn drain_bounded_headers(
     reader: &mut BufReader<DeadlineStream<'_>>,
 ) -> Result<(), LoopbackCallbackError> {
-    for _ in 0..MAXIMUM_HEADER_LINES {
+    // One extra iteration reads the terminating empty line, so a request carrying exactly
+    // `MAXIMUM_HEADER_LINES` headers is accepted rather than rejected off by one.
+    for _ in 0..=MAXIMUM_HEADER_LINES {
         let mut header = String::new();
         read_bounded_line(
             reader,

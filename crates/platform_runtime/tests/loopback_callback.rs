@@ -359,3 +359,54 @@ fn disconnecting_browser_does_not_discard_a_verified_code() {
     assert_eq!(code.value(), "code-survives-disconnect");
     let _ = client.join();
 }
+
+/// A request carrying exactly the documented header maximum must be accepted.
+#[test]
+fn exactly_the_documented_header_maximum_is_accepted() {
+    let (listener, port) = bind();
+    let secret = new_secret();
+    let state = secret.state().to_string();
+
+    let client = thread::spawn(move || {
+        let mut request =
+            format!("GET {REDIRECT_PATH}?code=header-bound-code&state={state} HTTP/1.1\r\n");
+        for index in 0..64 {
+            let _ = write!(request, "X-Axiusflow-{index}: padding\r\n");
+        }
+        request.push_str("\r\n");
+        send_request(port, &request)
+    });
+
+    let code = listener
+        .accept_authorization_code(&secret, DEADLINE)
+        .expect("exactly 64 headers must be within the documented bound");
+    assert_eq!(code.value(), "header-bound-code");
+    let response = client.join().expect("the client thread completes");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+}
+
+/// A peer that connects first and stalls must not starve a queued legitimate redirect.
+#[test]
+fn stalled_connection_cannot_starve_a_queued_redirect() {
+    let (listener, port) = bind();
+    let secret = new_secret();
+    let request = verified_request(&secret, "not-starved-code");
+
+    // Connect and send nothing, holding the first accept slot.
+    let stalled = TcpStream::connect(("127.0.0.1", port)).expect("loopback accepts connections");
+    let queued = thread::spawn(move || send_request(port, &request));
+
+    let started = Instant::now();
+    let code = listener
+        .accept_authorization_code(&secret, DEADLINE)
+        .expect("a stalled peer must not starve the queued redirect");
+    let elapsed = started.elapsed();
+    drop(stalled);
+    let _ = queued.join();
+
+    assert_eq!(code.value(), "not-starved-code");
+    assert!(
+        elapsed < DEADLINE,
+        "the queued redirect waited for the whole deadline: {elapsed:?}"
+    );
+}
