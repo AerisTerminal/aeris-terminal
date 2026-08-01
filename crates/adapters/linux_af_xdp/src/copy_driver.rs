@@ -12,6 +12,13 @@ use axiusflow_transport::{
 use axiusflow_transport::{ActivationRequest, ReadinessManifest, ReadinessState};
 #[cfg(all(target_os = "linux", feature = "native-copy"))]
 use axiusflow_transport::{ReceiveMetadata, TimestampSource};
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
+use std::time::{Duration, Instant};
+
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
+const NATIVE_REBIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(all(target_os = "linux", feature = "native-copy"))]
+const NATIVE_REBIND_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Real Linux `AF_XDP` copy-mode ingest with one fixed UMEM and fixed rings.
 #[derive(Debug)]
@@ -213,8 +220,16 @@ impl IngestDriver for AfXdpCopyDriver {
         let binding = self.binding.ok_or(AfXdpError::QueueNotBound)?;
         #[cfg(all(target_os = "linux", feature = "native-copy"))]
         {
-            let native = crate::native::CopySocket::open(&self.config, binding)
-                .map_err(AfXdpError::NativeOpen)?;
+            let deadline = Instant::now() + NATIVE_REBIND_TIMEOUT;
+            let native = loop {
+                match crate::native::CopySocket::open(&self.config, binding) {
+                    Ok(native) => break native,
+                    Err(error) if error.queue_busy() && Instant::now() < deadline => {
+                        std::thread::sleep(NATIVE_REBIND_RETRY_INTERVAL);
+                    }
+                    Err(error) => return Err(AfXdpError::NativeOpen(error.to_string())),
+                }
+            };
             self.native = Some(native);
             self.lifecycle = DriverLifecycle::Running;
             Ok(())

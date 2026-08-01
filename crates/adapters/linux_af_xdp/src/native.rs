@@ -24,6 +24,45 @@ pub(super) struct ReceiveOutcome {
 }
 
 #[derive(Debug)]
+pub(super) struct NativeOpenError {
+    message: String,
+    queue_busy: bool,
+}
+
+impl NativeOpenError {
+    pub(super) fn queue_busy(&self) -> bool {
+        self.queue_busy
+    }
+
+    fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            queue_busy: false,
+        }
+    }
+
+    fn socket(error: &xsk_rs::socket::SocketCreateError) -> Self {
+        const LINUX_EBUSY: i32 = 16;
+        Self {
+            queue_busy: error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .is_some_and(|error| error.raw_os_error() == Some(LINUX_EBUSY)),
+            message: match error.source() {
+                Some(source) => format!("{error}: {source}"),
+                None => error.to_string(),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for NativeOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[derive(Debug)]
 /// Field declaration order is drop order, and it is load-bearing here.
 ///
 /// Every queue below holds an `Arc<Mutex<SocketInner>>` reference to the `AF_XDP`
@@ -43,31 +82,36 @@ pub(super) struct CopySocket {
 }
 
 impl CopySocket {
-    pub(super) fn open(config: &AfXdpConfig, binding: QueueBinding) -> Result<Self, String> {
+    pub(super) fn open(
+        config: &AfXdpConfig,
+        binding: QueueBinding,
+    ) -> Result<Self, NativeOpenError> {
         let frame_count = NonZeroU32::new(
             u32::try_from(config.frame_count.get())
-                .map_err(|_| "frame count does not fit the native API".to_string())?,
+                .map_err(|_| NativeOpenError::other("frame count does not fit the native API"))?,
         )
-        .ok_or_else(|| "frame count cannot be zero".to_string())?;
-        let ring_size = QueueSize::new(frame_count.get()).map_err(|error| error.to_string())?;
-        let frame_size = FrameSize::new(
-            u32::try_from(NATIVE_UMEM_FRAME_BYTES)
-                .map_err(|_| "fixed UMEM frame size does not fit the native API".to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
+        .ok_or_else(|| NativeOpenError::other("frame count cannot be zero"))?;
+        let ring_size = QueueSize::new(frame_count.get())
+            .map_err(|error| NativeOpenError::other(error.to_string()))?;
+        let frame_size = FrameSize::new(u32::try_from(NATIVE_UMEM_FRAME_BYTES).map_err(|_| {
+            NativeOpenError::other("fixed UMEM frame size does not fit the native API")
+        })?)
+        .map_err(|error| NativeOpenError::other(error.to_string()))?;
         let umem_config = UmemConfig::builder()
             .frame_size(frame_size)
             .fill_queue_size(ring_size)
             .comp_queue_size(ring_size)
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| NativeOpenError::other(error.to_string()))?;
         if binding.maximum_frame_bytes.get()
             > usize::try_from(umem_config.mtu()).unwrap_or(usize::MAX)
         {
-            return Err("configured packet limit exceeds the fixed UMEM MTU".to_string());
+            return Err(NativeOpenError::other(
+                "configured packet limit exceeds the fixed UMEM MTU",
+            ));
         }
-        let (umem, descriptors) =
-            Umem::new(umem_config, frame_count, false).map_err(|error| error.to_string())?;
+        let (umem, descriptors) = Umem::new(umem_config, frame_count, false)
+            .map_err(|error| NativeOpenError::other(error.to_string()))?;
         let socket_config = SocketConfig::builder()
             .rx_queue_size(ring_size)
             .tx_queue_size(ring_size)
@@ -77,26 +121,23 @@ impl CopySocket {
         let interface: Interface = config
             .interface_name
             .parse()
-            .map_err(|error: std::ffi::NulError| error.to_string())?;
+            .map_err(|error: std::ffi::NulError| NativeOpenError::other(error.to_string()))?;
         // SAFETY: `umem` is newly allocated, is not shared with another socket, and
         // remains owned by this `CopySocket` for longer than every returned queue.
         let (tx, rx, queues) =
             unsafe { Socket::new(socket_config, &umem, &interface, u32::from(config.queue_id)) }
-                .map_err(|error| match error.source() {
-                    Some(source) => format!("{error}: {source}"),
-                    None => error.to_string(),
-                })?;
+                .map_err(|error| NativeOpenError::socket(&error))?;
         let (mut fill, completion) = queues.ok_or_else(|| {
-            "new non-shared UMEM did not return fill/completion rings".to_string()
+            NativeOpenError::other("new non-shared UMEM did not return fill/completion rings")
         })?;
         // SAFETY: every descriptor was created by this exact `umem`, descriptors are
         // unique, and userspace has not submitted or otherwise aliased any of them.
         let submitted = unsafe { fill.produce(&descriptors) };
         if submitted != descriptors.len() {
-            return Err(format!(
+            return Err(NativeOpenError::other(format!(
                 "fill ring accepted {submitted} of {} initial descriptors",
                 descriptors.len()
-            ));
+            )));
         }
         Ok(Self {
             _tx: tx,

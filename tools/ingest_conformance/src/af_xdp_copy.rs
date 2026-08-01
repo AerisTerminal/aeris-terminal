@@ -133,7 +133,6 @@ pub fn run(
 
     verify_abandoned_descriptor_recycle(receive_interface, transmit_interface, &fixture_frames[0])
         .map_err(|error| format!("initial AF_XDP native lifecycle failed: {error}"))?;
-
     let mut native = copy_driver(receive_interface)?;
     require_copy_permit(&native)?;
     let native_outcomes = run_ingest_conformance_after_start(&mut native, |_| {

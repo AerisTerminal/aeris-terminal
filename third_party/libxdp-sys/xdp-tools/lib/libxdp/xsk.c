@@ -69,6 +69,8 @@ struct xsk_umem {
 struct xsk_ctx {
 	struct xsk_ring_prod *fill;
 	struct xsk_ring_cons *comp;
+	void *fill_map;
+	void *comp_map;
 	struct xsk_umem *umem;
 	__u32 queue_id;
 	int refcount;
@@ -84,6 +86,8 @@ struct xsk_ctx {
 struct xsk_socket {
 	struct xsk_ring_cons *rx;
 	struct xsk_ring_prod *tx;
+	void *rx_map;
+	void *tx_map;
 	struct xsk_ctx *ctx;
 	struct xsk_socket_config config;
 	int fd;
@@ -920,19 +924,16 @@ static void xsk_put_ctx(struct xsk_ctx *ctx, bool unmap)
 	if (--ctx->refcount)
 		return;
 
-	if (!unmap)
-		goto out_free;
+	if (unmap) {
+		err = xsk_get_mmap_offsets(umem->fd, &off);
+		if (!err) {
+			munmap(ctx->fill_map, off.fr.desc +
+			       umem->config.fill_size * sizeof(__u64));
+			munmap(ctx->comp_map, off.cr.desc +
+			       umem->config.comp_size * sizeof(__u64));
+		}
+	}
 
-	err = xsk_get_mmap_offsets(umem->fd, &off);
-	if (err)
-		goto out_free;
-
-	munmap(ctx->fill->ring - off.fr.desc, off.fr.desc + umem->config.fill_size *
-	       sizeof(__u64));
-	munmap(ctx->comp->ring - off.cr.desc, off.cr.desc + umem->config.comp_size *
-	       sizeof(__u64));
-
-out_free:
 	list_del(&ctx->list);
 	free(ctx);
 }
@@ -944,6 +945,7 @@ static struct xsk_ctx *xsk_create_ctx(struct xsk_socket *xsk,
 				      struct xsk_ring_cons *comp)
 {
 	struct xsk_ctx *ctx;
+	struct xdp_mmap_offsets off;
 	int err;
 
 	ctx = calloc(1, sizeof(*ctx));
@@ -962,6 +964,12 @@ static struct xsk_ctx *xsk_create_ctx(struct xsk_socket *xsk,
 		memcpy(comp, umem->comp_save, sizeof(*comp));
 	}
 
+	err = xsk_get_mmap_offsets(umem->fd, &off);
+	if (err) {
+		free(ctx);
+		return NULL;
+	}
+
 	ctx->netns_cookie = netns_cookie;
 	ctx->ifindex = ifindex;
 	ctx->refcount = 1;
@@ -972,6 +980,8 @@ static struct xsk_ctx *xsk_create_ctx(struct xsk_socket *xsk,
 
 	ctx->fill = fill;
 	ctx->comp = comp;
+	ctx->fill_map = fill->ring - off.fr.desc;
+	ctx->comp_map = comp->ring - off.cr.desc;
 	list_add(&ctx->list, &umem->ctx_list);
 	return ctx;
 }
@@ -1138,6 +1148,7 @@ int xsk_socket__create_shared(struct xsk_socket **xsk_ptr,
 		rx->cached_cons = *rx->consumer;
 	}
 	xsk->rx = rx;
+	xsk->rx_map = rx_map;
 
 	if (tx) {
 		tx_map = mmap(NULL, off.tx.desc +
@@ -1162,6 +1173,7 @@ int xsk_socket__create_shared(struct xsk_socket **xsk_ptr,
 		tx->cached_cons = *tx->consumer + xsk->config.tx_size;
 	}
 	xsk->tx = tx;
+	xsk->tx_map = tx_map;
 
 	sxdp.sxdp_family = PF_XDP;
 	sxdp.sxdp_ifindex = ctx->ifindex;
@@ -1292,11 +1304,11 @@ void xsk_socket__delete(struct xsk_socket *xsk)
 	err = xsk_get_mmap_offsets(xsk->fd, &off);
 	if (!err) {
 		if (xsk->rx) {
-			munmap(xsk->rx->ring - off.rx.desc,
+			munmap(xsk->rx_map,
 			       off.rx.desc + xsk->config.rx_size * desc_sz);
 		}
 		if (xsk->tx) {
-			munmap(xsk->tx->ring - off.tx.desc,
+			munmap(xsk->tx_map,
 			       off.tx.desc + xsk->config.tx_size * desc_sz);
 		}
 	}
