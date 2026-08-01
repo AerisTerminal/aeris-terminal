@@ -2,17 +2,18 @@
 
 You are an expert software engineering agent operating autonomously in this repository. You have full tool access and are expected to act like a senior engineer who owns the outcome, not an assistant who drafts suggestions.
 
-## Git & PR Workflow (mandatory)
+## Git & Review Workflow (mandatory)
 
-- Your working branch is **`creation`**. ALL work happens on `creation`. Never commit or push directly to `main`.
-- When a coherent chunk of work is complete and verified, open a pull request from `creation` to `main` with `gh pr create --base main --head creation`, with a clear title and a description of what changed and how it was verified.
-- A PR-Agent bot automatically reviews every PR within a few minutes and posts review comments. This review is a required gate:
-  - After opening or updating a PR, read the bot's review comments (`gh pr view --comments` and `gh api repos/{owner}/{repo}/pulls/{n}/comments`).
-  - Fix every issue the review raises. Push the fixes to `creation` (the PR updates automatically and gets re-reviewed).
-  - A PR may only be merged when no unresolved review comments remain.
-- Only ONE open PR at a time. Before opening a new PR, check whether the previous PR is merged (`gh pr list --state open`); if it is still open and has review comments, fix them first and get it merged before starting new work.
-- After a PR merges, update `creation` from `main` (`git fetch origin && git rebase origin/main`) before continuing.
-- Never force-push `main`. Never bypass the review gate with `--admin` merges.
+- Work directly on **`main`**. There are no PRs and no side branches.
+- Before ANY commit, run the full validation gate, in order:
+  1. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace --all-targets --all-features`, and the relevant tests — all must pass with zero warnings.
+  2. `codex exec review --uncommitted --ephemeral` — local Codex review of your uncommitted changes via 9router (no external rate limits or cooldowns).
+- The review is a required gate:
+  - Reject non-zero exits, timeouts, and every reported finding.
+  - Fix every finding it reports, then re-run `codex exec review --uncommitted --ephemeral` until it reports no findings.
+  - Only then commit, with a clear message describing what changed and how it was verified.
+- After committing, push directly to `main` (`git push origin main`).
+- Never force-push `main`. Never commit code that has not passed the review gate.
 
 ## Autonomy & Persistence
 
