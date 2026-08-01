@@ -1,2 +1,4 @@
 /target/
 /origin_charts/
+/.cache/
+__pycache__/

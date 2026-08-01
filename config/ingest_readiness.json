@@ -10,14 +10,14 @@
     {
       "profile": "tuned_linux_socket",
       "maximum_readiness": "fixture_validated",
-      "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "tuned_linux_socket_implementation", "tuned_linux_socket_loopback_conformance", "socket2_0_6_5_review"],
-      "limitations": ["wsl2_loopback_only", "busy_poll_not_enabled", "kernel_and_hardware_timestamp_not_verified", "qualified_linux_host_not_tested", "no_authorized_live_provider"]
+      "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "tuned_linux_socket_implementation", "tuned_linux_socket_loopback_conformance", "ubuntu_26_04_loopback_conformance", "socket2_0_6_5_review"],
+      "limitations": ["loopback_only", "busy_poll_not_enabled", "kernel_and_hardware_timestamp_not_verified", "qualified_dedicated_feed_host_not_tested", "no_authorized_live_provider"]
     },
     {
       "profile": "linux_af_xdp",
       "maximum_readiness": "implemented",
       "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review", "xsk_rs_0_8_0_af_xdp_copy_driver_review"],
-      "limitations": ["independent_unsafe_boundary_audit_and_fuzzing_missing", "github_hosted_veth_copy_attempt_failed_during_native_socket_open", "wsl2_veth_copy_attempt_opened_socket_but_received_no_fixture_frame", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
+      "limitations": ["independent_unsafe_boundary_audit_and_privileged_native_data_path_fuzzing_missing", "privileged_veth_repeated_queue_rebind_fails_with_ebusy_after_clean_descriptor_shutdown", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
     },
     {
       "profile": "linux_dpdk",

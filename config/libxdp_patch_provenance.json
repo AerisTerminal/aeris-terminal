@@ -1,0 +1,12 @@
+{
+  "crate": "libxdp-sys",
+  "version": "0.2.4+1.6.0",
+  "registry_checksum": "6098c8281e42ed6f46240af889297dae1e37f70ee505dd26fe5c7199563e4d86",
+  "crate_source_revision": "ba1741977157d5bcb52f40d774e5f71e5e8dcba7",
+  "patch_file": "xdp-tools/lib/libxdp/xsk.c",
+  "patch_purpose": "Close the AF_XDP program refcount-map descriptor on every normal release path, and retain each ring mmap base so socket deletion unmaps the RX, TX, fill, and completion rings instead of dereferencing ring pointers the caller may have moved.",
+  "patched_tree_sha256": "cfd558fb50ef763faeee1ee116e903c6101f7be23a54bc178e3f689dfec41a64",
+  "reconstructed_upstream_tree_sha256": "b557eb159de9c0adea2af6b80ae93d17b38ae2e3a7beb47b84984a4ff6b92c01",
+  "patched_xsk_sha256": "f7f14dafd1f1378735639c9ee80d2ea7d514b03c1db943cf60a55533a5e31227",
+  "upstream_xsk_sha256": "df973d13bf2b4ff5f004127661b42eba777e1dead1c814a1b2c844577686a14e"
+}

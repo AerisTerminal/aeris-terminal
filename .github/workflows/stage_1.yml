@@ -23,6 +23,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install_linux_desktop_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
       - name: format
         run: cargo fmt --all -- --check
       - name: workspace_check
@@ -49,6 +51,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: install_linux_desktop_build_dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
       - name: portable_contracts_and_real_socket_build
         run: cargo check -p axiusflow_platform_runtime -p axiusflow_transport -p axiusflow_realtime -p axiusflow_observability -p axiusflow_portable_network_adapter -p axiusflow_protocols -p axiusflow_testing
       - name: actual_portable_loopback_packet_partition_fanout_origin
@@ -95,12 +100,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install_native_profile_build_dependencies
         run: sudo apt-get update && sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev zlib1g-dev
+      - name: verify_vendored_libxdp_patch_provenance
+        run: python3 tools/verify_libxdp_patch.py
       - name: portable_and_contract_profile_builds
         run: cargo check -p axiusflow_linux_socket_network_adapter -p axiusflow_linux_af_xdp_adapter -p axiusflow_linux_dpdk_adapter --all-targets
       - name: isolated_af_xdp_native_copy_build
         env:
           CC: clang
         run: cargo check -p axiusflow_linux_af_xdp_adapter --all-targets --features native-copy
+      - name: af_xdp_safe_boundary_fuzz_smoke
+        env:
+          CC: clang
+          AXIUSFLOW_AF_XDP_FUZZ_RUNS: '1024'
+        run: tools/run_af_xdp_safe_boundary_fuzz.sh
       - name: tuned_linux_packet_partition_fanout_origin_and_acceleration_gates
         run: cargo run --quiet --package axiusflow_ingest_conformance
       - name: evidence_scope
@@ -121,7 +133,7 @@ jobs:
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: install_af_xdp_build_and_replay_dependencies
-        run: sudo apt-get update && sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev libpcap-dev zlib1g-dev iproute2 tcpreplay
+        run: sudo apt-get update && sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev zlib1g-dev iproute2 python3
       - name: build_privileged_conformance_as_runner
         env:
           CC: clang
@@ -134,6 +146,8 @@ jobs:
           echo "TX_IF=axtx${suffix}" >> "$GITHUB_ENV"
           sudo mountpoint -q /sys/fs/bpf || sudo mount -t bpf bpf /sys/fs/bpf
           sudo ip link add "axrx${suffix}" numrxqueues 1 numtxqueues 1 type veth peer name "axtx${suffix}" numrxqueues 1 numtxqueues 1
+          sudo ip link set dev "axrx${suffix}" address 02:00:00:00:00:02
+          sudo ip link set dev "axtx${suffix}" address 02:00:00:00:00:01
           sudo ip link set "axrx${suffix}" up
           sudo ip link set "axtx${suffix}" up
           sudo sysctl -w "net.ipv6.conf.axrx${suffix}.disable_ipv6=1"
@@ -148,7 +162,7 @@ jobs:
           printf '%s\n' "$output"
           if [ "$status" -eq 0 ]; then
             echo "AF_XDP_COPY_EXERCISED=true" >> "$GITHUB_ENV"
-          elif grep -Fq 'NativeOpen' <<< "$output"; then
+          elif grep -Fq 'initial AF_XDP native lifecycle failed: AF_XDP ingest error: NativeOpen' <<< "$output"; then
             echo "AF_XDP_COPY_EXERCISED=false" >> "$GITHUB_ENV"
             python3 - <<'PY'
           import json
@@ -246,6 +260,26 @@ jobs:
           }
           assert "privileged_copy_lifecycle_not_exercised" in evidence["limitations"]
           PY
+      - name: af_xdp_sequential_queue_rebind_regression
+        if: env.AF_XDP_COPY_EXERCISED == 'true'
+        shell: bash
+        env:
+          CC: clang
+          AXIUSFLOW_AF_XDP_TEST_INTERFACE: ${{ env.RX_IF }}
+          AXIUSFLOW_AF_XDP_REQUIRE_PRIVILEGED: '1'
+        run: |
+          # AXIUSFLOW_AF_XDP_REQUIRE_PRIVILEGED=1 makes a missing interface fail instead of
+          # skipping, so this lane cannot silently degrade into a passing no-op.
+          # `cargo` is on the runner user's PATH, not root's, so the harness is compiled as the
+          # runner and only the resulting binary is executed with elevated privileges.
+          cargo test --package axiusflow_linux_af_xdp_adapter --features native-copy \
+            --test sequential_rebind --no-run
+          test_binary="$(cargo test --package axiusflow_linux_af_xdp_adapter --features native-copy \
+            --test sequential_rebind --no-run --message-format=json \
+            | python3 -c 'import json, sys; print([record["executable"] for record in map(json.loads, sys.stdin) if record.get("reason") == "compiler-artifact" and record.get("target", {}).get("name") == "sequential_rebind" and record.get("executable")][-1])')"
+          test -n "$test_binary" && test -x "$test_binary"
+          sudo --preserve-env=AXIUSFLOW_AF_XDP_TEST_INTERFACE,AXIUSFLOW_AF_XDP_REQUIRE_PRIVILEGED,LIBXDP_BPFFS,LIBXDP_BPFFS_AUTOMOUNT \
+            "$test_binary" --test-threads=1 --nocapture
       - name: retain_af_xdp_copy_evidence
         uses: actions/upload-artifact@v4
         with:
@@ -262,4 +296,4 @@ jobs:
         run: echo "This privileged software lane proves AF_XDP generic/SKB forced-copy veth packet, lifecycle, fenced-partition, bounded fanout, model, Origin, and GPUI-host preparation only; it does not prove zero-copy, qualified hardware, provider connectivity, renderer submission, presentation, or production readiness."
       - name: unavailable_evidence_scope
         if: env.AF_XDP_COPY_EXERCISED == 'false'
-        run: echo "This hosted runner could not open the AF_XDP native socket. The artifact records explicit unavailability; it proves no copy-mode lifecycle, zero-copy, hardware, provider, renderer, presentation, or production readiness."
+        run: echo "This hosted runner could not open the first AF_XDP native socket. The artifact records explicit unavailability; later lifecycle failures remain hard job failures and cannot be reclassified as host unavailability. It proves no copy-mode lifecycle, zero-copy, hardware, provider, renderer, presentation, or production readiness."

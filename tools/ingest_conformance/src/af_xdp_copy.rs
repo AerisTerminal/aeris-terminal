@@ -33,6 +33,7 @@ const ETHERNET_HEADER_BYTES: usize = 14;
 const AXIUSFLOW_EXPERIMENTAL_ETHERTYPE: [u8; 2] = [0x88, 0xb5];
 const FRAME_COUNT: usize = 64;
 const MAXIMUM_FRAME_BYTES: usize = 2_048;
+const REPLAY_SENDER_SOURCE: &str = include_str!("../send_pcap.py");
 const XSK_RS_VERSION: &str = "0.8.0";
 const XSK_RS_SOURCE_COMMIT: &str = "c0b110cd3b6763fdcfc41996b3cea8c9f259614f";
 const XSK_RS_REGISTRY_CHECKSUM: &str =
@@ -130,13 +131,14 @@ pub fn run(
     let mut fixture = axiusflow_linux_af_xdp_adapter::fixture_driver(fixture_frames.clone())?;
     let fixture_outcomes = run_ingest_conformance(&mut fixture)?;
 
-    verify_abandoned_descriptor_recycle(receive_interface, transmit_interface, &fixture_frames[0])?;
-
+    verify_abandoned_descriptor_recycle(receive_interface, transmit_interface, &fixture_frames[0])
+        .map_err(|error| format!("initial AF_XDP native lifecycle failed: {error}"))?;
     let mut native = copy_driver(receive_interface)?;
     require_copy_permit(&native)?;
     let native_outcomes = run_ingest_conformance_after_start(&mut native, |_| {
         replay_frames(transmit_interface, &fixture_frames)
-    })?;
+    })
+    .map_err(|error| format!("released-batch AF_XDP native lifecycle failed: {error}"))?;
     if !ingest_outcomes_semantically_equivalent(&fixture_outcomes, &native_outcomes) {
         return Err("AF_XDP deterministic packet outcomes diverged from fixture semantics".into());
     }
@@ -162,7 +164,8 @@ pub fn run(
         &mut market_native,
         &market_corpus,
         |_, frames| replay_frames(transmit_interface, frames),
-    )?;
+    )
+    .map_err(|error| format!("market-bar AF_XDP native lifecycle failed: {error}"))?;
     if !fixture_market.semantically_equivalent(&native_market) {
         return Err(
             "AF_XDP market-bar partition/fanout/Origin state diverged from fixture semantics"
@@ -297,8 +300,14 @@ fn verify_abandoned_descriptor_recycle(
     driver.start()?;
     replay_frames(transmit_interface, std::slice::from_ref(frame))?;
     let batch = driver.receive_batch()?;
-    if batch.frame_count() != 1 {
-        return Err("AF_XDP abandonment evidence did not receive exactly one frame".into());
+    let frame_count = batch.frame_count();
+    let overflow = batch.overflow();
+    if frame_count != 1 {
+        return Err(format!(
+            "AF_XDP abandonment evidence received {frame_count} frames; dropped_frames={}, dropped_bytes={}",
+            overflow.dropped_frames, overflow.dropped_bytes,
+        )
+        .into());
     }
     drop(batch);
     driver.shutdown()?;
@@ -318,20 +327,58 @@ fn replay_frames(
     frames: &[FixtureFrame],
 ) -> Result<(), ConformanceHarnessError> {
     let path = temporary_pcap_path();
-    write_pcap(&path, frames).map_err(conformance_error)?;
-    let interface_argument = format!("--intf1={transmit_interface}");
-    let output = Command::new("tcpreplay")
-        .args(["--quiet", "--topspeed", &interface_argument])
+    write_pcap(&path, frames).map_err(|error| {
+        context_error(&format!("write replay capture {}", path.display()), error)
+    })?;
+    let sender = temporary_sender_path();
+    fs::write(&sender, REPLAY_SENDER_SOURCE).map_err(|error| {
+        context_error(&format!("write replay sender {}", sender.display()), error)
+    })?;
+    let interpreter = replay_interpreter();
+    let output = Command::new(&interpreter)
+        .arg(&sender)
+        .arg(transmit_interface)
         .arg(&path)
         .output()
-        .map_err(conformance_error);
+        .map_err(|error| {
+            context_error(
+                &format!(
+                    "spawn {} {} {transmit_interface}",
+                    interpreter.display(),
+                    sender.display()
+                ),
+                error,
+            )
+        });
     let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&sender);
     let output = output?;
     if !output.status.success() {
         return Err(ConformanceHarnessError::Driver(format!(
-            "tcpreplay failed with {}: {}",
+            "AF_PACKET replay failed with {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let successful_packets = stdout
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("successful_packets=")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .ok_or_else(|| {
+            ConformanceHarnessError::Driver(format!(
+                "AF_PACKET replay did not report a successful packet count: {}",
+                stdout.trim()
+            ))
+        })?;
+    if successful_packets != frames.len() {
+        return Err(ConformanceHarnessError::Driver(format!(
+            "AF_PACKET replay sent {successful_packets} of {} fixture packets: {}",
+            frames.len(),
+            stdout.trim()
         )));
     }
     Ok(())
@@ -376,6 +423,14 @@ fn temporary_pcap_path() -> PathBuf {
     ))
 }
 
+fn temporary_sender_path() -> PathBuf {
+    let sequence = PCAP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    env::temp_dir().join(format!(
+        "axiusflow-af-xdp-send-{}-{sequence}.py",
+        std::process::id()
+    ))
+}
+
 fn write_report(path: &Path, report: &AfXdpCopyEvidenceReport) -> Result<(), Box<dyn Error>> {
     let mut encoded = serde_json::to_vec_pretty(report)?;
     encoded.push(b'\n');
@@ -397,6 +452,20 @@ fn require_interface_name(value: &str, role: &str) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-fn conformance_error(error: impl std::fmt::Display) -> ConformanceHarnessError {
-    ConformanceHarnessError::Driver(error.to_string())
+fn context_error(operation: &str, error: impl std::fmt::Display) -> ConformanceHarnessError {
+    ConformanceHarnessError::Driver(format!("failed to {operation}: {error}"))
+}
+
+/// Resolves the replay interpreter without depending on the inherited `PATH`.
+///
+/// The privileged harness runs with a read-only root and a reduced environment, where a
+/// bare `python3` lookup is not guaranteed. Absolute candidates are preferred, and a
+/// `PATH` lookup remains the final fallback.
+fn replay_interpreter() -> PathBuf {
+    const CANDIDATES: [&str; 3] = ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"];
+    CANDIDATES
+        .iter()
+        .map(Path::new)
+        .find(|candidate| candidate.is_file())
+        .map_or_else(|| PathBuf::from("python3"), Path::to_path_buf)
 }
