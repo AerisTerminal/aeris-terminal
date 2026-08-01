@@ -410,3 +410,35 @@ fn stalled_connection_cannot_starve_a_queued_redirect() {
         "the queued redirect waited for the whole deadline: {elapsed:?}"
     );
 }
+
+/// A full set of silent workers must not cause a queued redirect to be accepted and dropped.
+///
+/// This is the case a single-stall test cannot cover: serial handling would spend the whole
+/// budget on the silent peers and report `DeadlineExceeded` even though a valid callback was
+/// already queued.
+#[test]
+fn saturated_workers_preserve_a_queued_redirect() {
+    let (listener, port) = bind();
+    let secret = new_secret();
+    let request = verified_request(&secret, "concurrent-code");
+
+    // Hold several accept slots open without sending a single byte.
+    let stalled: Vec<TcpStream> = (0..8)
+        .filter_map(|_| TcpStream::connect(("127.0.0.1", port)).ok())
+        .collect();
+    assert_eq!(
+        stalled.len(),
+        8,
+        "expected every worker slot to be occupied"
+    );
+
+    let queued = thread::spawn(move || send_request(port, &request));
+
+    let code = listener
+        .accept_authorization_code(&secret, Duration::from_secs(4))
+        .expect("worker saturation must preserve the queued redirect");
+    assert_eq!(code.value(), "concurrent-code");
+
+    drop(stalled);
+    let _ = queued.join();
+}

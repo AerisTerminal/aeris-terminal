@@ -10,6 +10,7 @@ use core::fmt;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,12 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Without this bound one stalled or slow-drip peer that connects first would hold the
 /// listener for the entire authorization deadline and starve an already-queued redirect.
 const PER_CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
+/// Largest number of redirects served at once.
+///
+/// Connections are served concurrently so one silent or slow peer cannot delay accepting
+/// a later legitimate redirect. The count is bounded so a hostile local page cannot spawn
+/// unbounded threads.
+const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 8;
 /// Largest sanitized authorization-server error code retained for reporting.
 const MAXIMUM_SERVER_ERROR_BYTES: usize = 64;
 
@@ -203,132 +210,163 @@ impl LoopbackRedirectListener {
         self.listener
             .set_nonblocking(true)
             .map_err(LoopbackCallbackError::Accept)?;
+        let (sender, receiver) = mpsc::channel();
+        let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();
 
         loop {
-            let Some(remaining) = remaining_before(expiry) else {
+            if remaining_before(expiry).is_none() {
                 return Err(LoopbackCallbackError::DeadlineExceeded);
-            };
-            match self.listener.accept() {
-                Ok((mut stream, _peer)) => {
-                    let connection_expiry = Instant::now()
-                        .checked_add(PER_CONNECTION_DEADLINE.min(remaining))
-                        .unwrap_or(expiry);
-                    match self.serve_redirect(&mut stream, secret, connection_expiry) {
-                        Ok(code) => return Ok(code),
-                        Err(error) if error.proves_state_knowledge() => return Err(error),
-                        Err(_) => {}
+            }
+            workers.retain(|worker| !worker.is_finished());
+
+            if workers.len() < MAXIMUM_CONCURRENT_CONNECTIONS {
+                match self.listener.accept() {
+                    Ok((stream, _peer)) => {
+                        // The per-connection budget never outlives the caller's absolute
+                        // expiry, even if this thread was descheduled around `accept`.
+                        let connection_expiry = Instant::now()
+                            .checked_add(PER_CONNECTION_DEADLINE)
+                            .map_or(expiry, |candidate| candidate.min(expiry));
+                        let redirect_path = self.redirect_path.clone();
+                        let secret = secret.clone();
+                        let sender = sender.clone();
+                        let worker = thread::Builder::new()
+                            .name(String::from("axiusflow_loopback_redirect"))
+                            .spawn(move || {
+                                let mut stream = stream;
+                                let outcome = serve_redirect(
+                                    &redirect_path,
+                                    &mut stream,
+                                    &secret,
+                                    connection_expiry,
+                                );
+                                let _ = sender.send(outcome);
+                            })
+                            .map_err(LoopbackCallbackError::Accept)?;
+                        workers.push(worker);
                     }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(LoopbackCallbackError::Accept(error)),
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(ACCEPT_POLL_INTERVAL.min(remaining));
+            }
+
+            loop {
+                match receiver.try_recv() {
+                    Ok(Ok(code)) => return Ok(code),
+                    Ok(Err(error)) if error.proves_state_knowledge() => return Err(error),
+                    Ok(Err(_)) => {}
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 }
-                Err(error) => return Err(LoopbackCallbackError::Accept(error)),
+            }
+
+            if let Some(remaining) = remaining_before(expiry) {
+                thread::sleep(ACCEPT_POLL_INTERVAL.min(remaining));
             }
         }
     }
+}
 
-    /// Serves one accepted connection and answers the browser exactly once.
-    ///
-    /// The browser response is best-effort: once a `state`-verified outcome exists it is
-    /// returned even if the browser already closed the connection, so a disconnecting tab
-    /// cannot discard a valid authorization code.
-    fn serve_redirect(
-        &self,
-        stream: &mut TcpStream,
-        secret: &PkceSecret,
-        expiry: Instant,
-    ) -> Result<AuthorizationCode, LoopbackCallbackError> {
-        stream
-            .set_nonblocking(false)
-            .map_err(LoopbackCallbackError::Read)?;
+/// Serves one accepted connection and answers the browser exactly once.
+///
+/// The browser response is best-effort: once a `state`-verified outcome exists it is
+/// returned even if the browser already closed the connection, so a disconnecting tab
+/// cannot discard a valid authorization code.
+fn serve_redirect(
+    redirect_path: &str,
+    stream: &mut TcpStream,
+    secret: &PkceSecret,
+    expiry: Instant,
+) -> Result<AuthorizationCode, LoopbackCallbackError> {
+    stream
+        .set_nonblocking(false)
+        .map_err(LoopbackCallbackError::Read)?;
 
-        let outcome = self.read_authorization_code(stream, secret, expiry);
-        let (status, body) = if outcome.is_ok() {
-            (
-                "200 OK",
-                "Axiusflow sign-in complete. Return to the application.",
-            )
-        } else {
-            (
-                "400 Bad Request",
-                "Axiusflow sign-in failed. Return to the application.",
-            )
-        };
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
-            body.len()
-        );
-        if let Some(remaining) = remaining_before(expiry) {
-            let _ = stream.set_write_timeout(Some(remaining));
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        }
-        outcome
+    let outcome = read_authorization_code(redirect_path, stream, secret, expiry);
+    let (status, body) = if outcome.is_ok() {
+        (
+            "200 OK",
+            "Axiusflow sign-in complete. Return to the application.",
+        )
+    } else {
+        (
+            "400 Bad Request",
+            "Axiusflow sign-in failed. Return to the application.",
+        )
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
+        body.len()
+    );
+    if let Some(remaining) = remaining_before(expiry) {
+        let _ = stream.set_write_timeout(Some(remaining));
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+    outcome
+}
+
+fn read_authorization_code(
+    redirect_path: &str,
+    stream: &mut TcpStream,
+    secret: &PkceSecret,
+    expiry: Instant,
+) -> Result<AuthorizationCode, LoopbackCallbackError> {
+    let mut reader = BufReader::new(DeadlineStream { stream, expiry });
+    let mut request_line = String::new();
+    read_bounded_line(
+        &mut reader,
+        &mut request_line,
+        MAXIMUM_REQUEST_LINE_BYTES,
+        LoopbackCallbackError::RequestLineTooLong,
+    )?;
+    drain_bounded_headers(&mut reader)?;
+
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or(LoopbackCallbackError::MalformedRequestLine)?;
+    let target = parts
+        .next()
+        .ok_or(LoopbackCallbackError::MalformedRequestLine)?;
+    if method != "GET" {
+        return Err(LoopbackCallbackError::UnsupportedMethod);
+    }
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target, ""), |(path, query)| (path, query));
+    if path != redirect_path {
+        return Err(LoopbackCallbackError::RedirectPathMismatch);
     }
 
-    fn read_authorization_code(
-        &self,
-        stream: &mut TcpStream,
-        secret: &PkceSecret,
-        expiry: Instant,
-    ) -> Result<AuthorizationCode, LoopbackCallbackError> {
-        let mut reader = BufReader::new(DeadlineStream { stream, expiry });
-        let mut request_line = String::new();
-        read_bounded_line(
-            &mut reader,
-            &mut request_line,
-            MAXIMUM_REQUEST_LINE_BYTES,
-            LoopbackCallbackError::RequestLineTooLong,
-        )?;
-        drain_bounded_headers(&mut reader)?;
-
-        let mut parts = request_line.split_whitespace();
-        let method = parts
-            .next()
-            .ok_or(LoopbackCallbackError::MalformedRequestLine)?;
-        let target = parts
-            .next()
-            .ok_or(LoopbackCallbackError::MalformedRequestLine)?;
-        if method != "GET" {
-            return Err(LoopbackCallbackError::UnsupportedMethod);
+    let mut code = None;
+    let mut state = None;
+    let mut server_error = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match name {
+            "code" => code = Some(percent_decode(value)),
+            "state" => state = Some(percent_decode(value)),
+            "error" => server_error = Some(percent_decode(value)),
+            _ => {}
         }
-        let (path, query) = target
-            .split_once('?')
-            .map_or((target, ""), |(path, query)| (path, query));
-        if path != self.redirect_path {
-            return Err(LoopbackCallbackError::RedirectPathMismatch);
-        }
-
-        let mut code = None;
-        let mut state = None;
-        let mut server_error = None;
-        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            match name {
-                "code" => code = Some(percent_decode(value)),
-                "state" => state = Some(percent_decode(value)),
-                "error" => server_error = Some(percent_decode(value)),
-                _ => {}
-            }
-        }
-
-        let state = state.ok_or(LoopbackCallbackError::MissingState)?;
-        if !constant_time_equals(state.as_bytes(), secret.state().as_bytes()) {
-            return Err(LoopbackCallbackError::StateMismatch);
-        }
-        // RFC 6749 section 4.1.2.1 requires verifying `state` on error responses too, so an
-        // unverified caller can neither abort the flow nor inject text into diagnostics.
-        if let Some(error) = server_error {
-            return Err(LoopbackCallbackError::AuthorizationServerError(
-                sanitize_server_error(&error),
-            ));
-        }
-        let code = code.ok_or(LoopbackCallbackError::MissingAuthorizationCode)?;
-        if code.is_empty() {
-            return Err(LoopbackCallbackError::MissingAuthorizationCode);
-        }
-        Ok(AuthorizationCode(code))
     }
+
+    let state = state.ok_or(LoopbackCallbackError::MissingState)?;
+    if !constant_time_equals(state.as_bytes(), secret.state().as_bytes()) {
+        return Err(LoopbackCallbackError::StateMismatch);
+    }
+    // RFC 6749 section 4.1.2.1 requires verifying `state` on error responses too, so an
+    // unverified caller can neither abort the flow nor inject text into diagnostics.
+    if let Some(error) = server_error {
+        return Err(LoopbackCallbackError::AuthorizationServerError(
+            sanitize_server_error(&error),
+        ));
+    }
+    let code = code.ok_or(LoopbackCallbackError::MissingAuthorizationCode)?;
+    if code.is_empty() {
+        return Err(LoopbackCallbackError::MissingAuthorizationCode);
+    }
+    Ok(AuthorizationCode(code))
 }
 
 fn read_bounded_line(
