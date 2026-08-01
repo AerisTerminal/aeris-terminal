@@ -276,22 +276,7 @@ jobs:
             --test sequential_rebind --no-run
           test_binary="$(cargo test --package axiusflow_linux_af_xdp_adapter --features native-copy \
             --test sequential_rebind --no-run --message-format=json \
-            | python3 -c '
-import json
-import sys
-
-executable = None
-for line in sys.stdin:
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if record.get("reason") != "compiler-artifact":
-        continue
-    if record.get("target", {}).get("name") != "sequential_rebind":
-        continue
-    executable = record.get("executable") or executable
-print(executable or "")')"
+            | python3 -c 'import json, sys; print([record["executable"] for record in map(json.loads, sys.stdin) if record.get("reason") == "compiler-artifact" and record.get("target", {}).get("name") == "sequential_rebind" and record.get("executable")][-1])')"
           test -n "$test_binary" && test -x "$test_binary"
           sudo --preserve-env=AXIUSFLOW_AF_XDP_TEST_INTERFACE,AXIUSFLOW_AF_XDP_REQUIRE_PRIVILEGED,LIBXDP_BPFFS,LIBXDP_BPFFS_AUTOMOUNT \
             "$test_binary" --test-threads=1 --nocapture
