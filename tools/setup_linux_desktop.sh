@@ -2,17 +2,17 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-desktop_packages=(libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0 libxkbcommon-dev libxkbcommon-x11-dev)
+desktop_packages=(libxcb-xkb1 libfontconfig1 libfontconfig-dev libfreetype6 libfreetype-dev libxkbcommon0 libxkbcommon-x11-0 libxkbcommon-dev libxkbcommon-x11-dev)
 acceleration_packages=(clang-21 libclang-common-21-dev libelf1t64 libelf-dev libzstd1 libzstd-dev m4 zlib1g zlib1g-dev)
 
 case "${1:---system}" in
     --system)
         sudo apt-get update
-        sudo apt-get install --yes libxkbcommon-dev libxkbcommon-x11-dev
+        sudo apt-get install --yes libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
         ;;
     --system-acceleration)
         sudo apt-get update
-        sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev zlib1g-dev iproute2 python3 libxkbcommon-dev libxkbcommon-x11-dev
+        sudo apt-get install --yes clang llvm make gcc m4 pkg-config libelf-dev zlib1g-dev iproute2 python3 libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
         ;;
     --user)
         download_dir="$repo_root/.cache/linux-dev-packages"

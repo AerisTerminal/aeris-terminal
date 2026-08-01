@@ -1,7 +1,7 @@
 # Linux development
 
 Axiusflow's native desktop uses GPUI with both Wayland and X11 enabled. Ubuntu development
-hosts need XKBCommon linker files in addition to the Rust toolchain pinned by
+hosts need Fontconfig, FreeType, and XKBCommon development files in addition to the Rust toolchain pinned by
 `rust-toolchain.toml`.
 
 ## Host setup

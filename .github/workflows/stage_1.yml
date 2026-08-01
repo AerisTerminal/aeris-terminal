@@ -24,7 +24,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: install_linux_desktop_build_dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libxkbcommon-dev libxkbcommon-x11-dev
+        run: sudo apt-get update && sudo apt-get install --yes libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
       - name: format
         run: cargo fmt --all -- --check
       - name: workspace_check
@@ -53,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install_linux_desktop_build_dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes libxkbcommon-dev libxkbcommon-x11-dev
+        run: sudo apt-get update && sudo apt-get install --yes libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
       - name: portable_contracts_and_real_socket_build
         run: cargo check -p axiusflow_platform_runtime -p axiusflow_transport -p axiusflow_realtime -p axiusflow_observability -p axiusflow_portable_network_adapter -p axiusflow_protocols -p axiusflow_testing
       - name: actual_portable_loopback_packet_partition_fanout_origin
