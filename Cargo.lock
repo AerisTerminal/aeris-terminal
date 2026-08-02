@@ -638,6 +638,7 @@ dependencies = [
 name = "axiusflow_ingest_conformance"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_application",
  "axiusflow_chart_integration",
  "axiusflow_linux_af_xdp_adapter",
  "axiusflow_linux_dpdk_adapter",
@@ -789,9 +790,12 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_protocols",
  "axiusflow_realtime",
+ "base64 0.23.0",
  "hmac",
  "prost",
  "rdkafka",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
 ]
 

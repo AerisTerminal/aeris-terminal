@@ -125,3 +125,59 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves SigV4-signed immutable object write, byte-exact read-back, and SHA-256 integrity against one digest-pinned plaintext MinIO; it does not prove TLS, IAM policy, or managed object-store behavior."
+
+  clickhouse_projections:
+    name: clickhouse_projections_single_server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_vendored_librdkafka_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc pkg-config libcurl4-openssl-dev
+      - name: build_redpanda_conformance
+        run: cargo build --locked --package axiusflow_ingest_conformance --features redpanda
+      - name: actual_clickhouse_projections
+        run: tools/run_clickhouse_projections.sh
+      - name: verify_clickhouse_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_clickhouse_projections_evidence_Docker.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_clickhouse_projections"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["clickhouse_version"] == "26.7.1.1315"
+          assert evidence["bars_projected"] == 64
+          assert evidence["rows_after_reinsert"] == 64
+          assert evidence["rows_after_rebuild"] == 64
+          assert evidence["behavior"] == {
+              "table_creation": "passed",
+              "batch_insert": "passed",
+              "idempotent_reinsert": "passed",
+              "version_supersession": "passed",
+              "deterministic_rows": "passed",
+              "fixed_point_values": "passed",
+              "tls": "not_exercised",
+              "authentication": "basic_exercised",
+              "cluster_deployment": "not_exercised",
+          }
+          PY
+      - name: retain_clickhouse_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_clickhouse_projections_evidence_Docker
+          path: .cache/evidence/stage_2_clickhouse_projections_evidence_Docker.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves idempotent versioned projection batches, supersession, deterministic fixed-point rows, and basic authentication against one digest-pinned plaintext ClickHouse server; it does not prove TLS or cluster deployment."

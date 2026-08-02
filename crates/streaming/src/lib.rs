@@ -4,6 +4,7 @@
 //! and never touch Kafka or object-storage types directly.
 
 mod capture;
+mod clickhouse;
 mod envelope;
 mod errors;
 mod review;
@@ -12,6 +13,7 @@ mod review;
 mod producer;
 
 pub use capture::{CaptureEndpoint, CapturedObject, MAXIMUM_CAPTURE_BYTES, RawCaptureClient};
+pub use clickhouse::{BarProjectionRow, ClickHouseEndpoint, ClickHouseSink};
 pub use envelope::{
     DURABLE_SCHEMA_VERSION, DurableEventEnvelope, DurableTopic, EventMetadataInput,
     MAXIMUM_ENVELOPE_BYTES, MAXIMUM_PAYLOAD_BYTES,

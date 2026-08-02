@@ -10,6 +10,8 @@ mod af_xdp_copy;
 mod af_xdp_fuzz;
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
 mod af_xdp_replay;
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+mod clickhouse_projection;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
@@ -742,46 +744,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             evidence_report::verify_set(&directory)?;
             return Ok(());
         }
-        evidence_report::EvidenceCommand::AfXdpCopy {
-            receive_interface,
-            transmit_interface,
-            report_path,
-        } => {
-            return run_af_xdp_copy(&receive_interface, &transmit_interface, &report_path);
-        }
-        evidence_report::EvidenceCommand::AfXdpCopyFuzz {
-            receive_interface,
-            transmit_interface,
-            seed,
-            rounds,
-            report_path,
-        } => {
-            return run_af_xdp_copy_fuzz(
-                &receive_interface,
-                &transmit_interface,
-                seed,
-                rounds,
-                &report_path,
-            );
-        }
-        evidence_report::EvidenceCommand::DpdkVdevLifecycle { report_path } => {
-            return run_dpdk_vdev_lifecycle(&report_path);
-        }
-        evidence_report::EvidenceCommand::RedpandaDurableBranch {
-            brokers,
-            report_path,
-        } => {
-            return run_redpanda_durable_branch(&brokers, &report_path);
-        }
-        evidence_report::EvidenceCommand::S3RawCapture {
-            host,
-            port,
-            access_key,
-            secret_key,
-            report_path,
-        } => {
-            return run_s3_raw_capture(&host, port, &access_key, &secret_key, &report_path);
-        }
+        other => return run_lane_command(other),
     };
     let fixture_baseline = run_fixture(axiusflow_portable_network_adapter::fixture_driver(
         deterministic_ingest_corpus(),
@@ -834,6 +797,52 @@ fn main() -> Result<(), Box<dyn Error>> {
         &replay_to_gpui,
     )?;
     Ok(())
+}
+
+fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box<dyn Error>> {
+    match command {
+        evidence_report::EvidenceCommand::AfXdpCopy {
+            receive_interface,
+            transmit_interface,
+            report_path,
+        } => run_af_xdp_copy(&receive_interface, &transmit_interface, &report_path),
+        evidence_report::EvidenceCommand::AfXdpCopyFuzz {
+            receive_interface,
+            transmit_interface,
+            seed,
+            rounds,
+            report_path,
+        } => run_af_xdp_copy_fuzz(
+            &receive_interface,
+            &transmit_interface,
+            seed,
+            rounds,
+            &report_path,
+        ),
+        evidence_report::EvidenceCommand::DpdkVdevLifecycle { report_path } => {
+            run_dpdk_vdev_lifecycle(&report_path)
+        }
+        evidence_report::EvidenceCommand::RedpandaDurableBranch {
+            brokers,
+            report_path,
+        } => run_redpanda_durable_branch(&brokers, &report_path),
+        evidence_report::EvidenceCommand::S3RawCapture {
+            host,
+            port,
+            access_key,
+            secret_key,
+            report_path,
+        } => run_s3_raw_capture(&host, port, &access_key, &secret_key, &report_path),
+        evidence_report::EvidenceCommand::ClickHouseProjections {
+            host,
+            port,
+            report_path,
+        } => run_clickhouse_projections(&host, port, &report_path),
+        evidence_report::EvidenceCommand::Run { .. }
+        | evidence_report::EvidenceCommand::VerifySet { .. } => {
+            Err("lane command dispatch reached a non-lane command".into())
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
@@ -939,4 +948,23 @@ fn run_s3_raw_capture(
 ) -> Result<(), Box<dyn Error>> {
     let _ = (host, port, access_key, secret_key, report_path);
     Err("raw S3 capture conformance requires Linux and the redpanda feature".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+fn run_clickhouse_projections(
+    host: &str,
+    port: u16,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    clickhouse_projection::run(host, port, report_path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "redpanda")))]
+fn run_clickhouse_projections(
+    host: &str,
+    port: u16,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let _ = (host, port, report_path);
+    Err("ClickHouse projection conformance requires Linux and the redpanda feature".into())
 }

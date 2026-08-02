@@ -208,6 +208,11 @@ pub enum EvidenceCommand {
         secret_key: String,
         report_path: PathBuf,
     },
+    ClickHouseProjections {
+        host: String,
+        port: u16,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -276,23 +281,22 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             report_path: PathBuf::from(report_path),
         });
     }
-    if argument == OsStr::new("--s3-raw-capture") {
+    if argument == OsStr::new("--clickhouse-projections") {
         let host = required_argument(&mut arguments, "host")?;
         let port = required_argument(&mut arguments, "port")?
             .to_string_lossy()
             .parse::<u16>()
-            .map_err(|error| boxed_error(format!("invalid S3 capture port: {error}")))?;
-        let access_key = required_argument(&mut arguments, "access key")?;
-        let secret_key = required_argument(&mut arguments, "secret key")?;
+            .map_err(|error| boxed_error(format!("invalid ClickHouse port: {error}")))?;
         let report_path = required_argument(&mut arguments, "report path")?;
         reject_extra(&mut arguments)?;
-        return Ok(EvidenceCommand::S3RawCapture {
+        return Ok(EvidenceCommand::ClickHouseProjections {
             host: host.to_string_lossy().into_owned(),
             port,
-            access_key: access_key.to_string_lossy().into_owned(),
-            secret_key: secret_key.to_string_lossy().into_owned(),
             report_path: PathBuf::from(report_path),
         });
+    }
+    if argument == OsStr::new("--s3-raw-capture") {
+        return s3_raw_capture_command(&mut arguments);
     }
     if argument == OsStr::new("--redpanda-durable-branch") {
         let brokers = required_argument(&mut arguments, "bootstrap servers")?;
@@ -331,6 +335,27 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn s3_raw_capture_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let host = required_argument(arguments, "host")?;
+    let port = required_argument(arguments, "port")?
+        .to_string_lossy()
+        .parse::<u16>()
+        .map_err(|error| boxed_error(format!("invalid S3 capture port: {error}")))?;
+    let access_key = required_argument(arguments, "access key")?;
+    let secret_key = required_argument(arguments, "secret key")?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::S3RawCapture {
+        host: host.to_string_lossy().into_owned(),
+        port,
+        access_key: access_key.to_string_lossy().into_owned(),
+        secret_key: secret_key.to_string_lossy().into_owned(),
+        report_path: PathBuf::from(report_path),
+    })
 }
 
 fn reject_extra(

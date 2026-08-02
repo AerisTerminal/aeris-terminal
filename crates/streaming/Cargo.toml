@@ -13,8 +13,11 @@ redpanda = ["dep:rdkafka"]
 [dependencies]
 axiusflow_protocols = { path = "../protocols" }
 axiusflow_realtime = { path = "../realtime" }
+base64.workspace = true
 hmac.workspace = true
 prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
