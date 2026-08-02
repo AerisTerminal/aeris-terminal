@@ -21,7 +21,6 @@ pub const MAX_UPDATE_SIGNING_KEYS: usize = 16;
 const UPDATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const UPDATE_KEY_ROTATION_SCHEMA_VERSION: u32 = 1;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
-#[cfg(unix)]
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const SHA256_BYTES: usize = 32;
 
@@ -39,6 +38,8 @@ pub struct UpdateManifest {
     signed_json: Vec<u8>,
     #[cfg(unix)]
     signature: [u8; ED25519_SIGNATURE_BYTES],
+    #[cfg(unix)]
+    rotation_proofs: Vec<KeyRotationProof>,
 }
 
 impl UpdateManifest {
@@ -55,6 +56,47 @@ impl UpdateManifest {
     #[must_use]
     pub const fn artifact_bytes(&self) -> u64 {
         self.artifact_bytes
+    }
+}
+
+/// An exact signed statement authorizing one successor update signing key.
+///
+/// Durable adapters persist these proofs so recovery can rebuild the authorized key
+/// chain from the independently managed root key alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyRotationProof {
+    statement: Vec<u8>,
+    signature: [u8; ED25519_SIGNATURE_BYTES],
+}
+
+impl KeyRotationProof {
+    #[must_use]
+    pub fn statement(&self) -> &[u8] {
+        &self.statement
+    }
+
+    #[must_use]
+    pub const fn signature(&self) -> &[u8; ED25519_SIGNATURE_BYTES] {
+        &self.signature
+    }
+
+    /// Reconstructs a proof from persisted bytes without trusting them; the bytes are
+    /// authenticated only when replayed through [`SignedUpdateVerifier::authorize_rotation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the statement is empty or oversized, or the signature is
+    /// not exactly 64 bytes.
+    pub fn try_new(statement: Vec<u8>, signature: &[u8]) -> Result<Self, SignedUpdateError> {
+        if statement.is_empty() || statement.len() > MAX_UPDATE_KEY_ROTATION_BYTES {
+            return Err(SignedUpdateError::InvalidKeyRotationSize);
+        }
+        let signature = <[u8; ED25519_SIGNATURE_BYTES]>::try_from(signature)
+            .map_err(|_| SignedUpdateError::InvalidKeyRotationSignature)?;
+        Ok(Self {
+            statement,
+            signature,
+        })
     }
 }
 
@@ -77,7 +119,8 @@ pub struct SignedUpdateVerifier {
     verifying_key: VerifyingKey,
     minimum_release_sequence: u64,
     trust_domain_identity: [u8; SHA256_BYTES],
-    authorized_key_identities: Vec<[u8; SHA256_BYTES]>,
+    authorized_keys: Vec<VerifyingKey>,
+    rotation_proofs: Vec<KeyRotationProof>,
 }
 
 impl SignedUpdateVerifier {
@@ -100,7 +143,8 @@ impl SignedUpdateVerifier {
             verifying_key,
             minimum_release_sequence,
             trust_domain_identity,
-            authorized_key_identities: vec![trust_domain_identity],
+            authorized_keys: vec![verifying_key],
+            rotation_proofs: Vec::new(),
         })
     }
 
@@ -116,6 +160,34 @@ impl SignedUpdateVerifier {
     #[must_use]
     pub const fn minimum_release_sequence(&self) -> u64 {
         self.minimum_release_sequence
+    }
+
+    /// Returns the authorization proofs that advanced this verifier from its root key,
+    /// in the order they must be replayed.
+    #[must_use]
+    pub fn rotation_proofs(&self) -> &[KeyRotationProof] {
+        &self.rotation_proofs
+    }
+
+    /// Rebuilds an authorized successor verifier by replaying persisted proofs against
+    /// this root verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this verifier already carries proofs, or when any replayed
+    /// proof fails the same authorization rules as [`Self::authorize_rotation`].
+    pub fn replay_rotations(&self, proofs: &[KeyRotationProof]) -> Result<Self, SignedUpdateError> {
+        if !self.rotation_proofs.is_empty() {
+            return Err(SignedUpdateError::KeyRotationReplayRequiresRootKey);
+        }
+        let trusted_floor = self.minimum_release_sequence;
+        let mut verifier = self.clone();
+        verifier.minimum_release_sequence = 0;
+        for proof in proofs {
+            verifier = verifier.authorize_rotation(proof.statement(), proof.signature())?;
+        }
+        verifier.minimum_release_sequence = verifier.minimum_release_sequence.max(trusted_floor);
+        Ok(verifier)
     }
 
     /// Authorizes a successor signing key using an exact bounded statement signed by
@@ -137,6 +209,7 @@ impl SignedUpdateVerifier {
         if rotation_json.is_empty() || rotation_json.len() > MAX_UPDATE_KEY_ROTATION_BYTES {
             return Err(SignedUpdateError::InvalidKeyRotationSize);
         }
+        let signature_bytes = signature;
         let signature = Signature::from_slice(signature)
             .map_err(|_| SignedUpdateError::InvalidKeyRotationSignature)?;
         self.verifying_key
@@ -155,7 +228,7 @@ impl SignedUpdateVerifier {
         if raw.minimum_release_sequence < self.minimum_release_sequence {
             return Err(SignedUpdateError::KeyRotationLowersReleaseFloor);
         }
-        if self.authorized_key_identities.len() >= MAX_UPDATE_SIGNING_KEYS {
+        if self.authorized_keys.len() >= MAX_UPDATE_SIGNING_KEYS {
             return Err(SignedUpdateError::KeyRotationChainFull);
         }
         let next_key_bytes = URL_SAFE_NO_PAD
@@ -169,17 +242,22 @@ impl SignedUpdateVerifier {
         if verifying_key.is_weak() {
             return Err(SignedUpdateError::InvalidVerificationKey);
         }
-        let next_key_identity = signing_key_identity(&verifying_key);
-        if self.authorized_key_identities.contains(&next_key_identity) {
+        if self.authorized_keys.contains(&verifying_key) {
             return Err(SignedUpdateError::KeyRotationReusesSigningKey);
         }
-        let mut authorized_key_identities = self.authorized_key_identities.clone();
-        authorized_key_identities.push(next_key_identity);
+        let mut authorized_keys = self.authorized_keys.clone();
+        authorized_keys.push(verifying_key);
+        let mut rotation_proofs = self.rotation_proofs.clone();
+        rotation_proofs.push(KeyRotationProof::try_new(
+            rotation_json.to_vec(),
+            signature_bytes,
+        )?);
         Ok(Self {
             verifying_key,
             minimum_release_sequence: raw.minimum_release_sequence,
             trust_domain_identity: self.trust_domain_identity,
-            authorized_key_identities,
+            authorized_keys,
+            rotation_proofs,
         })
     }
 
@@ -256,6 +334,8 @@ impl SignedUpdateVerifier {
             signed_json: manifest_json.to_vec(),
             #[cfg(unix)]
             signature: signature.to_bytes(),
+            #[cfg(unix)]
+            rotation_proofs: self.rotation_proofs.clone(),
         })
     }
 
@@ -442,7 +522,7 @@ pub enum SignedUpdateError {
     KeyRotationLowersReleaseFloor,
     KeyRotationReusesSigningKey,
     KeyRotationChainFull,
-    RotationPersistenceUnsupported,
+    KeyRotationReplayRequiresRootKey,
 }
 
 impl fmt::Display for SignedUpdateError {
@@ -508,8 +588,9 @@ impl fmt::Display for SignedUpdateError {
             Self::KeyRotationChainFull => {
                 formatter.write_str("update signing-key rotation chain is full")
             }
-            Self::RotationPersistenceUnsupported => formatter
-                .write_str("durable activation across update signing-key rotation is unsupported"),
+            Self::KeyRotationReplayRequiresRootKey => formatter.write_str(
+                "update signing-key rotation replay requires an unrotated root verifier",
+            ),
         }
     }
 }

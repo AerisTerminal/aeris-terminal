@@ -28,7 +28,8 @@ pub use power_notifications::{NativePowerMonitor, PowerEvent, PowerNotificationE
 #[cfg(unix)]
 pub use signed_update::{DurableUpdateActivator, UpdateActivationError};
 pub use signed_update::{
-    InstalledRelease, SignedUpdateError, SignedUpdateVerifier, UpdateManifest, UpdateRollbackState,
+    InstalledRelease, KeyRotationProof, SignedUpdateError, SignedUpdateVerifier, UpdateManifest,
+    UpdateRollbackState,
 };
 pub use thread_scheduling::{
     AffinityTarget, NativeThreadScheduler, ThreadPriorityHint, ThreadSchedulingError,

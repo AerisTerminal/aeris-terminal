@@ -1,8 +1,8 @@
 //! Crash-recoverable Unix staging of verified update artifacts.
 
 use super::{
-    InstalledRelease, SHA256_BYTES, SignedUpdateError, SignedUpdateVerifier, UpdateRollbackState,
-    read_retry_interrupted,
+    InstalledRelease, KeyRotationProof, SHA256_BYTES, SignedUpdateError, SignedUpdateVerifier,
+    UpdateRollbackState, read_retry_interrupted,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -16,11 +16,18 @@ use std::{
 };
 
 const ACTIVATION_SCHEMA_VERSION: u32 = 1;
+/// Records carrying signing-key authorization proofs use their own schema version.
+///
+/// A predecessor binary without rotation replay cannot verify a rotated manifest at all,
+/// so it must reject such a record. Versioning that record explicitly makes it report an
+/// unsupported schema instead of misreporting a valid journal as corrupt, while stores
+/// that never rotated keep emitting byte-identical schema-1 records.
+const ACTIVATION_SCHEMA_VERSION_ROTATED: u32 = 2;
 const JOURNAL_FILE: &str = "activation.journal";
 const RELEASE_DIRECTORY: &str = "releases";
 const STAGING_DIRECTORY: &str = "staging";
 const MAX_JOURNAL_BYTES: u64 = 8 * 1_024 * 1_024;
-const MAX_JOURNAL_RECORD_BYTES: usize = 16 * 1_024;
+const MAX_JOURNAL_RECORD_BYTES: usize = 64 * 1_024;
 
 /// Owns an exclusively locked, crash-recoverable Unix update staging journal.
 ///
@@ -32,6 +39,10 @@ pub struct DurableUpdateActivator {
     state: UpdateRollbackState,
     generation: u64,
     journal_usable: bool,
+    /// Longest signing-key authorization chain this store has ever committed. Rollback
+    /// restores an older release with a shorter chain but never lowers this mark, so a
+    /// committed rotation can neither be abandoned nor replaced by a sibling branch.
+    committed_rotation_chain: Vec<KeyRotationProof>,
 }
 
 impl DurableUpdateActivator {
@@ -63,6 +74,7 @@ impl DurableUpdateActivator {
         let state = UpdateRollbackState::new(release);
         append_record(&mut journal, 1, &state)?;
         sync_directory(&root)?;
+        let committed_rotation_chain = state.active().manifest.rotation_proofs.clone();
 
         Ok(Self {
             root,
@@ -70,6 +82,7 @@ impl DurableUpdateActivator {
             state,
             generation: 1,
             journal_usable: true,
+            committed_rotation_chain,
         })
     }
 
@@ -92,7 +105,8 @@ impl DurableUpdateActivator {
         validate_existing_store(&root)?;
         let mut journal = open_journal(&root, false)?;
         lock_journal(&journal)?;
-        let (generation, state, valid_bytes) = read_last_record(&mut journal, verifier)?;
+        let (generation, state, valid_bytes, committed_rotation_chain) =
+            read_last_record(&mut journal, verifier)?;
         let journal_bytes = journal.metadata().map_err(UpdateActivationError::Io)?.len();
         if valid_bytes < journal_bytes {
             journal
@@ -110,6 +124,7 @@ impl DurableUpdateActivator {
             state,
             generation,
             journal_usable: true,
+            committed_rotation_chain,
         })
     }
 
@@ -140,10 +155,12 @@ impl DurableUpdateActivator {
         artifact: impl Read,
     ) -> Result<(), UpdateActivationError> {
         self.ensure_usable()?;
-        if candidate.manifest.signing_key_identity
-            != self.state.active().manifest.signing_key_identity
+        if !candidate
+            .manifest
+            .rotation_proofs
+            .starts_with(&self.committed_rotation_chain)
         {
-            return Err(SignedUpdateError::RotationPersistenceUnsupported.into());
+            return Err(UpdateActivationError::DivergentKeyRotationChain);
         }
         let mut next_state = self.state.clone();
         next_state.activate(candidate.clone())?;
@@ -177,6 +194,10 @@ impl DurableUpdateActivator {
         }
         self.state = next_state;
         self.generation = generation;
+        let active_chain = &self.state.active().manifest.rotation_proofs;
+        if active_chain.len() > self.committed_rotation_chain.len() {
+            self.committed_rotation_chain = active_chain.clone();
+        }
         remove_unretained_release_files(&self.root, &self.state)
             .map_err(|error| UpdateActivationError::CommittedCleanup(Box::new(error)))
     }
@@ -218,6 +239,8 @@ pub enum UpdateActivationError {
     RecoveryRequired,
     InvalidStoreRoot,
     InvalidStoreEntry,
+    UnsupportedJournalSchema,
+    DivergentKeyRotationChain,
     CommittedCleanup(Box<UpdateActivationError>),
 }
 
@@ -248,6 +271,12 @@ impl fmt::Display for UpdateActivationError {
             Self::InvalidStoreEntry => {
                 formatter.write_str("update staging store contains an invalid fixed entry")
             }
+            Self::UnsupportedJournalSchema => {
+                formatter.write_str("update activation journal schema is unsupported")
+            }
+            Self::DivergentKeyRotationChain => formatter.write_str(
+                "update release does not extend the durable signing-key authorization chain",
+            ),
             Self::CommittedCleanup(error) => {
                 write!(
                     formatter,
@@ -290,6 +319,15 @@ struct ActivationRecord {
 struct ReleaseRecord {
     signed_manifest: String,
     signature: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rotation_proofs: Vec<RotationProofRecord>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RotationProofRecord {
+    statement: String,
+    signature: String,
 }
 
 impl From<&InstalledRelease> for ReleaseRecord {
@@ -297,14 +335,42 @@ impl From<&InstalledRelease> for ReleaseRecord {
         Self {
             signed_manifest: URL_SAFE_NO_PAD.encode(&release.manifest.signed_json),
             signature: URL_SAFE_NO_PAD.encode(release.manifest.signature),
+            rotation_proofs: release
+                .manifest
+                .rotation_proofs
+                .iter()
+                .map(RotationProofRecord::from)
+                .collect(),
         }
+    }
+}
+
+impl From<&KeyRotationProof> for RotationProofRecord {
+    fn from(proof: &KeyRotationProof) -> Self {
+        Self {
+            statement: URL_SAFE_NO_PAD.encode(proof.statement()),
+            signature: URL_SAFE_NO_PAD.encode(proof.signature()),
+        }
+    }
+}
+
+impl RotationProofRecord {
+    fn decode(self) -> Result<KeyRotationProof, UpdateActivationError> {
+        let statement = URL_SAFE_NO_PAD
+            .decode(self.statement)
+            .map_err(|_| UpdateActivationError::InvalidPersistedRelease)?;
+        let signature = URL_SAFE_NO_PAD
+            .decode(self.signature)
+            .map_err(|_| UpdateActivationError::InvalidPersistedRelease)?;
+        KeyRotationProof::try_new(statement, &signature)
+            .map_err(UpdateActivationError::SignedUpdate)
     }
 }
 
 impl ReleaseRecord {
     fn verify(
         self,
-        verifier: &SignedUpdateVerifier,
+        root_verifier: &SignedUpdateVerifier,
     ) -> Result<InstalledRelease, UpdateActivationError> {
         let signed_manifest = URL_SAFE_NO_PAD
             .decode(self.signed_manifest)
@@ -312,6 +378,14 @@ impl ReleaseRecord {
         let signature = URL_SAFE_NO_PAD
             .decode(self.signature)
             .map_err(|_| UpdateActivationError::InvalidPersistedRelease)?;
+        let rotation_proofs = self
+            .rotation_proofs
+            .into_iter()
+            .map(RotationProofRecord::decode)
+            .collect::<Result<Vec<_>, _>>()?;
+        let verifier = root_verifier
+            .replay_rotations(&rotation_proofs)
+            .map_err(UpdateActivationError::SignedUpdate)?;
         let manifest = verifier
             .verify_persisted_manifest(&signed_manifest, &signature)
             .map_err(UpdateActivationError::SignedUpdate)?;
@@ -436,11 +510,21 @@ fn append_record(
     generation: u64,
     state: &UpdateRollbackState,
 ) -> Result<(), UpdateActivationError> {
+    let active = ReleaseRecord::from(&state.active);
+    let rollback = state.rollback.as_ref().map(ReleaseRecord::from);
+    let carries_rotation_proofs = !active.rotation_proofs.is_empty()
+        || rollback
+            .as_ref()
+            .is_some_and(|release| !release.rotation_proofs.is_empty());
     let record = ActivationRecord {
-        schema_version: ACTIVATION_SCHEMA_VERSION,
+        schema_version: if carries_rotation_proofs {
+            ACTIVATION_SCHEMA_VERSION_ROTATED
+        } else {
+            ACTIVATION_SCHEMA_VERSION
+        },
         generation,
-        active: ReleaseRecord::from(&state.active),
-        rollback: state.rollback.as_ref().map(ReleaseRecord::from),
+        active,
+        rollback,
         minimum_release_sequence: state.minimum_release_sequence,
     };
     let mut encoded =
@@ -470,7 +554,7 @@ fn append_record(
 fn read_last_record(
     journal: &mut File,
     verifier: &SignedUpdateVerifier,
-) -> Result<(u64, UpdateRollbackState, u64), UpdateActivationError> {
+) -> Result<(u64, UpdateRollbackState, u64, Vec<KeyRotationProof>), UpdateActivationError> {
     let bytes = journal.metadata().map_err(UpdateActivationError::Io)?.len();
     if bytes == 0 {
         return Err(UpdateActivationError::StoreNotInitialized);
@@ -486,6 +570,7 @@ fn read_last_record(
     let mut last: Option<(u64, UpdateRollbackState)> = None;
     let mut expected_generation = 1_u64;
     let mut valid_bytes = 0_u64;
+    let mut committed_rotation_chain: Vec<KeyRotationProof> = Vec::new();
 
     loop {
         line.clear();
@@ -504,20 +589,35 @@ fn read_last_record(
         line.pop();
         let record: ActivationRecord =
             serde_json::from_slice(&line).map_err(|_| UpdateActivationError::InvalidJournal)?;
-        if record.schema_version != ACTIVATION_SCHEMA_VERSION
-            || record.generation != expected_generation
-        {
+        if record.generation != expected_generation {
             return Err(UpdateActivationError::InvalidJournal);
+        }
+        let carries_rotation_proofs = !record.active.rotation_proofs.is_empty()
+            || record
+                .rollback
+                .as_ref()
+                .is_some_and(|release| !release.rotation_proofs.is_empty());
+        let expected_schema = if carries_rotation_proofs {
+            ACTIVATION_SCHEMA_VERSION_ROTATED
+        } else {
+            ACTIVATION_SCHEMA_VERSION
+        };
+        if record.schema_version != expected_schema {
+            return Err(UpdateActivationError::UnsupportedJournalSchema);
         }
         let state = restore_state(record, verifier)?;
         if let Some((_, previous)) = &last {
-            if !valid_transition(previous, &state) {
+            if !valid_transition(previous, &state, &committed_rotation_chain) {
                 return Err(UpdateActivationError::InvalidJournal);
             }
         } else if state.rollback.is_some()
             || state.minimum_release_sequence != state.active.manifest.release_sequence
         {
             return Err(UpdateActivationError::InvalidJournal);
+        }
+        let active_chain = &state.active.manifest.rotation_proofs;
+        if active_chain.len() > committed_rotation_chain.len() {
+            committed_rotation_chain.clone_from(active_chain);
         }
         valid_bytes = valid_bytes
             .checked_add(u64::try_from(read).map_err(|_| UpdateActivationError::InvalidJournal)?)
@@ -532,7 +632,7 @@ fn read_last_record(
     if state.minimum_release_sequence != verifier.minimum_release_sequence {
         return Err(UpdateActivationError::InvalidJournal);
     }
-    Ok((generation, state, valid_bytes))
+    Ok((generation, state, valid_bytes, committed_rotation_chain))
 }
 
 fn restore_state(
@@ -548,12 +648,19 @@ fn restore_state(
         .map_err(UpdateActivationError::SignedUpdate)
 }
 
-fn valid_transition(previous: &UpdateRollbackState, current: &UpdateRollbackState) -> bool {
+fn valid_transition(
+    previous: &UpdateRollbackState,
+    current: &UpdateRollbackState,
+    committed_rotation_chain: &[KeyRotationProof],
+) -> bool {
     if current.minimum_release_sequence > previous.minimum_release_sequence {
         current.active.manifest.release_sequence == current.minimum_release_sequence
             && current.rollback.as_ref() == Some(&previous.active)
-            && current.active.manifest.signing_key_identity
-                == previous.active.manifest.signing_key_identity
+            && current
+                .active
+                .manifest
+                .rotation_proofs
+                .starts_with(committed_rotation_chain)
     } else {
         current.minimum_release_sequence == previous.minimum_release_sequence
             && previous.rollback.as_ref() == Some(&current.active)
@@ -963,7 +1070,74 @@ mod tests {
     }
 
     #[test]
-    fn durable_activation_refuses_unpersisted_signing_key_rotation() {
+    fn durable_activation_recovers_authorized_rotation_and_cross_key_rollback() {
+        let directory = TestDirectory::new();
+        let predecessor = installed(1, "1.0.0", b"release-one");
+        let mut activator = DurableUpdateActivator::initialize(
+            directory.path(),
+            predecessor.clone(),
+            Cursor::new(b"release-one"),
+        )
+        .expect("activation store initializes");
+        let rotated = rotated_installed(2, b"rotated-release");
+
+        activator
+            .activate(&rotated, Cursor::new(b"rotated-release"))
+            .expect("authorized rotated release is durably activated");
+        drop(activator);
+
+        let mut recovered = DurableUpdateActivator::open(directory.path(), &verifier(2))
+            .expect("root verifier replays the persisted rotation proof");
+        assert_eq!(
+            recovered.state().active().manifest().release_sequence(),
+            rotated.manifest().release_sequence()
+        );
+        assert_eq!(
+            recovered.state().active().manifest().version(),
+            rotated.manifest().version()
+        );
+        assert_eq!(
+            fs::read(recovered.active_artifact_path()).expect("rotated artifact is retained"),
+            b"rotated-release"
+        );
+        assert_eq!(
+            recovered.state().active().manifest.rotation_proofs,
+            rotated.manifest.rotation_proofs
+        );
+        assert!(recovered.state().rollback_available());
+        recovered
+            .rollback()
+            .expect("cross-key predecessor is durably restored");
+        assert_eq!(
+            recovered.state().active().manifest().release_sequence(),
+            predecessor.manifest().release_sequence()
+        );
+        assert!(
+            recovered
+                .state()
+                .active()
+                .manifest
+                .rotation_proofs
+                .is_empty()
+        );
+        assert_eq!(recovered.state().minimum_release_sequence(), 2);
+        drop(recovered);
+
+        let reopened = DurableUpdateActivator::open(directory.path(), &verifier(2))
+            .expect("cross-key rollback state survives another restart");
+        assert_eq!(
+            reopened.state().active().manifest().release_sequence(),
+            predecessor.manifest().release_sequence()
+        );
+        assert_eq!(
+            fs::read(reopened.active_artifact_path()).expect("predecessor artifact is retained"),
+            b"release-one"
+        );
+        assert!(!reopened.state().rollback_available());
+    }
+
+    #[test]
+    fn durable_activation_rejects_a_divergent_key_chain_before_committing() {
         let directory = TestDirectory::new();
         let mut activator = DurableUpdateActivator::initialize(
             directory.path(),
@@ -972,14 +1146,98 @@ mod tests {
         )
         .expect("activation store initializes");
         let rotated = rotated_installed(2, b"rotated-release");
+        activator
+            .activate(&rotated, Cursor::new(b"rotated-release"))
+            .expect("authorized rotated release is durably activated");
+        let root_signed = installed(3, "3.0.0", b"root-signed-release");
 
         assert!(matches!(
-            activator.activate(&rotated, Cursor::new(b"rotated-release")),
-            Err(UpdateActivationError::SignedUpdate(
-                SignedUpdateError::RotationPersistenceUnsupported
-            ))
+            activator.activate(&root_signed, Cursor::new(b"root-signed-release")),
+            Err(UpdateActivationError::DivergentKeyRotationChain)
+        ));
+        assert_eq!(activator.state().active().manifest().release_sequence(), 2);
+        drop(activator);
+
+        let recovered = DurableUpdateActivator::open(directory.path(), &verifier(2))
+            .expect("committed rotated state remains recoverable");
+        assert_eq!(recovered.state().active().manifest().release_sequence(), 2);
+    }
+
+    #[test]
+    fn rollback_preserves_the_committed_rotation_chain_high_water_mark() {
+        let directory = TestDirectory::new();
+        let mut activator = DurableUpdateActivator::initialize(
+            directory.path(),
+            installed(1, "1.0.0", b"release-one"),
+            Cursor::new(b"release-one"),
+        )
+        .expect("activation store initializes");
+        let rotated = rotated_installed(2, b"rotated-release");
+        activator
+            .activate(&rotated, Cursor::new(b"rotated-release"))
+            .expect("authorized rotated release is durably activated");
+        activator
+            .rollback()
+            .expect("pre-rotation predecessor is durably restored");
+        assert_eq!(activator.state().active().manifest().release_sequence(), 1);
+
+        let root_signed = installed(3, "3.0.0", b"root-signed-release");
+        assert!(matches!(
+            activator.activate(&root_signed, Cursor::new(b"root-signed-release")),
+            Err(UpdateActivationError::DivergentKeyRotationChain)
         ));
         assert_eq!(activator.state().active().manifest().release_sequence(), 1);
+        drop(activator);
+
+        let recovered = DurableUpdateActivator::open(directory.path(), &verifier(2))
+            .expect("rolled-back state remains recoverable");
+        assert_eq!(recovered.state().active().manifest().release_sequence(), 1);
+    }
+
+    #[test]
+    fn same_key_records_stay_schema_one_and_rotated_records_declare_schema_two() {
+        let directory = TestDirectory::new();
+        let mut activator = DurableUpdateActivator::initialize(
+            directory.path(),
+            installed(1, "1.0.0", b"release-one"),
+            Cursor::new(b"release-one"),
+        )
+        .expect("activation store initializes");
+        let journal_path = directory.path().join(JOURNAL_FILE);
+        let first: Value = serde_json::from_str(
+            fs::read_to_string(&journal_path)
+                .expect("journal is UTF-8 JSON")
+                .trim(),
+        )
+        .expect("first record is JSON");
+        assert_eq!(first["schema_version"], 1);
+        assert!(first["active"].get("rotation_proofs").is_none());
+
+        activator
+            .activate(
+                &rotated_installed(2, b"rotated-release"),
+                Cursor::new(b"rotated-release"),
+            )
+            .expect("authorized rotated release is durably activated");
+        drop(activator);
+        let rotated_record: Value = serde_json::from_str(
+            fs::read_to_string(&journal_path)
+                .expect("journal is UTF-8 JSON")
+                .lines()
+                .next_back()
+                .expect("journal has a rotated record"),
+        )
+        .expect("rotated record is JSON");
+        assert_eq!(rotated_record["schema_version"], 2);
+        assert_eq!(
+            rotated_record["active"]["rotation_proofs"]
+                .as_array()
+                .expect("rotated record carries proofs")
+                .len(),
+            1
+        );
+
+        assert!(DurableUpdateActivator::open(directory.path(), &verifier(2)).is_ok());
     }
 
     #[test]
