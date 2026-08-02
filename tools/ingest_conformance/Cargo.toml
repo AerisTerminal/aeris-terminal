@@ -11,6 +11,7 @@ default = []
 af-xdp-copy = ["axiusflow_linux_af_xdp_adapter/native-copy"]
 dpdk-native = ["axiusflow_linux_dpdk_adapter/native"]
 redpanda = ["axiusflow_streaming/redpanda"]
+quic = ["dep:quinn", "dep:rcgen", "dep:tokio"]
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
@@ -28,9 +29,12 @@ axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
 axiusflow_transport = { path = "../../crates/transport" }
 axiusflow_windows_network_adapter = { path = "../../crates/adapters/windows_network" }
 postgres.workspace = true
+quinn = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio = { workspace = true, optional = true }
 
 [lints]
 workspace = true

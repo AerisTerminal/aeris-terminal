@@ -221,6 +221,9 @@ pub enum EvidenceCommand {
         database: String,
         report_path: PathBuf,
     },
+    QuicPrototype {
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +289,13 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             transmit_interface: transmit_interface.to_string_lossy().into_owned(),
             seed,
             rounds,
+            report_path: PathBuf::from(report_path),
+        });
+    }
+    if argument == OsStr::new("--quic-prototype") {
+        let report_path = required_argument(&mut arguments, "report path")?;
+        reject_extra(&mut arguments)?;
+        return Ok(EvidenceCommand::QuicPrototype {
             report_path: PathBuf::from(report_path),
         });
     }

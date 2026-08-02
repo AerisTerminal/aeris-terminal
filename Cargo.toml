@@ -58,6 +58,12 @@ tungstenite = { version = "=0.30.0", default-features = false, features = ["hand
 zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
 postgres = "=0.19.14"
 prost = "=0.14.4"
+quinn = { version = "=0.11.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+] }
+rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "net", "time"] }
 rdkafka = { version = "=0.39.0", default-features = false, features = ["cmake-build"] }
 hmac = "=0.12.1"
 prost-build = "=0.14.4"

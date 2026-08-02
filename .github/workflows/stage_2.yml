@@ -242,3 +242,62 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves checksummed idempotent migrations with drift rejection, transactional outbox staging, inbox deduplication, rollback invisibility, reconnect recovery, and publish marking against one digest-pinned plaintext PostgreSQL; it does not prove TLS, role isolation, or backup drills."
+
+  quic_prototype:
+    name: quic_prototype_behind_negotiation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_quic_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc perl pkg-config
+      - name: build_quic_prototype
+        run: cargo build --locked --package axiusflow_ingest_conformance --features quic
+      - name: actual_quic_prototype
+        run: target/debug/axiusflow_ingest_conformance --quic-prototype stage_2_quic_prototype_evidence_Linux.json
+      - name: verify_quic_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("stage_2_quic_prototype_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_quic_prototype"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["quinn_version"] == "0.11.11"
+          assert evidence["negotiation"] == {
+              "supported_offer_accepted": "passed",
+              "unsupported_offer_rejected": "passed",
+              "no_silent_fallback": "passed",
+              "certificate_pinning_enforced": "passed",
+          }
+          assert evidence["streams"] == {
+              "control_stream": "passed",
+              "reliable_market_stream": "passed",
+              "ordered_byte_exact_delivery": "passed",
+          }
+          assert evidence["datagrams"]["self_identifying_flows"] == "passed"
+          assert evidence["datagrams"]["received_of_sent"] > 0
+          assert evidence["handshake"]["samples"] == 32
+          assert evidence["handshake"]["p50_nanos"] > 0
+          assert evidence["zero_rtt"] == "disabled"
+          assert evidence["certification"] == "prototype_not_certified"
+          PY
+      - name: retain_quic_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_quic_prototype_evidence_Linux
+          path: stage_2_quic_prototype_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves explicit stream_quic negotiation with rejection of unsupported offers and no silent fallback, byte-exact reliable control/market streams, self-identifying datagrams, certificate pinning, and disabled zero-RTT over loopback; it is a prototype and does not prove load, loss, migration, certification, or production readiness."

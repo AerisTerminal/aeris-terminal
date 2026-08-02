@@ -16,6 +16,8 @@ mod clickhouse_projection;
 mod dpdk_lifecycle;
 mod evidence_report;
 mod postgres_persistence;
+#[cfg(all(target_os = "linux", feature = "quic"))]
+mod quic_prototype;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod raw_capture;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
@@ -848,6 +850,9 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             report_path,
         } => postgres_persistence::run(&host, port, &user, &password, &database, &report_path)
             .map_err(|error| error.to_string().into()),
+        evidence_report::EvidenceCommand::QuicPrototype { report_path } => {
+            run_quic_prototype(&report_path)
+        }
         evidence_report::EvidenceCommand::Run { .. }
         | evidence_report::EvidenceCommand::VerifySet { .. } => {
             Err("lane command dispatch reached a non-lane command".into())
@@ -977,4 +982,15 @@ fn run_clickhouse_projections(
 ) -> Result<(), Box<dyn Error>> {
     let _ = (host, port, report_path);
     Err("ClickHouse projection conformance requires Linux and the redpanda feature".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "quic"))]
+fn run_quic_prototype(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    quic_prototype::run(report_path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "quic")))]
+fn run_quic_prototype(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let _ = report_path;
+    Err("QUIC prototype requires Linux and the quic feature".into())
 }
