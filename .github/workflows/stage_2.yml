@@ -357,3 +357,58 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves the running authorization boundary - startup with a pinned JWKS, Ed25519 service-access verification, allow and deny decisions, expired and foreign-key rejection, monotonic policy replacement with revocation, and bounded failure behavior over plaintext loopback; it does not prove TLS, sessions, workload identity, or gRPC transport."
+
+  auth_service:
+    name: auth_service_credential_core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc perl pkg-config
+      - name: build_quic_conformance
+        run: cargo build --locked --package axiusflow_ingest_conformance --features quic
+      - name: actual_auth_service
+        run: tools/run_auth_service.sh
+      - name: verify_auth_service_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_auth_service_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_auth_service"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["behavior"]["startup_and_migrations"] == "passed"
+          assert evidence["behavior"]["signup"] == "passed"
+          assert evidence["behavior"]["duplicate_signup_rejected"] == "passed"
+          assert evidence["behavior"]["sign_in"] == "passed"
+          assert evidence["behavior"]["wrong_password_rejected"] == "passed"
+          assert evidence["behavior"]["unknown_principal_rejected"] == "passed"
+          assert evidence["behavior"]["token_verifies_through_crates_security"] == "passed"
+          assert evidence["behavior"]["jwks_revisioned"] == "passed"
+          assert evidence["behavior"]["malformed_rejected"] == "passed"
+          assert evidence["behavior"]["oversized_rejected"] == "passed"
+          assert evidence["behavior"]["oauth_oidc"] == "not_exercised"
+          assert evidence["behavior"]["pkce_flow"] == "not_exercised"
+          assert evidence["behavior"]["second_factor"] == "not_exercised"
+          assert evidence["behavior"]["tls"] == "not_exercised"
+          PY
+      - name: retain_auth_service_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_auth_service_evidence_Linux
+          path: .cache/evidence/stage_2_auth_service_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves the auth service credential core - argon2 signup and sign-in with uniform failure timing, duplicate and malformed rejection, Ed25519 issuance, revisioned JWKS, and the decisive crates/security verification of an issued token - over plaintext loopback; it does not prove OAuth/OIDC, PKCE, second factors, or TLS."
