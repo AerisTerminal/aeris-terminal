@@ -301,3 +301,59 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves explicit stream_quic negotiation with rejection of unsupported offers and no silent fallback, byte-exact reliable control/market streams, self-identifying datagrams, certificate pinning, and disabled zero-RTT over loopback; it is a prototype and does not prove load, loss, migration, certification, or production readiness."
+
+  authorization_boundary:
+    name: authorization_service_boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_quic_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc perl pkg-config
+      - name: build_quic_conformance
+        run: cargo build --locked --package axiusflow_ingest_conformance --features quic
+      - name: actual_authorization_boundary
+        run: tools/run_authorization_boundary.sh
+      - name: verify_authorization_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_authorization_boundary_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_authorization_boundary"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["behavior"] == {
+              "startup": "passed",
+              "token_verification": "passed",
+              "allow_decision": "passed",
+              "deny_decision": "passed",
+              "expired_token_rejected": "passed",
+              "foreign_key_rejected": "passed",
+              "monotonic_policy_swap": "passed",
+              "revocation": "passed",
+              "malformed_rejected": "passed",
+              "oversized_rejected": "passed",
+              "tls": "not_exercised",
+              "sessions": "not_exercised",
+              "grpc_transport": "not_exercised",
+          }
+          PY
+      - name: retain_authorization_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_authorization_boundary_evidence_Linux
+          path: .cache/evidence/stage_2_authorization_boundary_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves the running authorization boundary - startup with a pinned JWKS, Ed25519 service-access verification, allow and deny decisions, expired and foreign-key rejection, monotonic policy replacement with revocation, and bounded failure behavior over plaintext loopback; it does not prove TLS, sessions, workload identity, or gRPC transport."

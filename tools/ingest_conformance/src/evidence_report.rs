@@ -224,6 +224,10 @@ pub enum EvidenceCommand {
     QuicPrototype {
         report_path: PathBuf,
     },
+    AuthorizationBoundary {
+        service_binary: PathBuf,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -272,25 +276,10 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
         });
     }
     if argument == OsStr::new("--af-xdp-copy-fuzz") {
-        let receive_interface = required_argument(&mut arguments, "receive interface")?;
-        let transmit_interface = required_argument(&mut arguments, "transmit interface")?;
-        let seed = required_argument(&mut arguments, "seed")?
-            .to_string_lossy()
-            .parse::<u64>()
-            .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz seed: {error}")))?;
-        let rounds = required_argument(&mut arguments, "rounds")?
-            .to_string_lossy()
-            .parse::<u32>()
-            .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz rounds: {error}")))?;
-        let report_path = required_argument(&mut arguments, "report path")?;
-        reject_extra(&mut arguments)?;
-        return Ok(EvidenceCommand::AfXdpCopyFuzz {
-            receive_interface: receive_interface.to_string_lossy().into_owned(),
-            transmit_interface: transmit_interface.to_string_lossy().into_owned(),
-            seed,
-            rounds,
-            report_path: PathBuf::from(report_path),
-        });
+        return af_xdp_copy_fuzz_command(&mut arguments);
+    }
+    if argument == OsStr::new("--authorization-boundary") {
+        return authorization_boundary_command(&mut arguments);
     }
     if argument == OsStr::new("--quic-prototype") {
         let report_path = required_argument(&mut arguments, "report path")?;
@@ -356,6 +345,42 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn af_xdp_copy_fuzz_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let receive_interface = required_argument(arguments, "receive interface")?;
+    let transmit_interface = required_argument(arguments, "transmit interface")?;
+    let seed = required_argument(arguments, "seed")?
+        .to_string_lossy()
+        .parse::<u64>()
+        .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz seed: {error}")))?;
+    let rounds = required_argument(arguments, "rounds")?
+        .to_string_lossy()
+        .parse::<u32>()
+        .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz rounds: {error}")))?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::AfXdpCopyFuzz {
+        receive_interface: receive_interface.to_string_lossy().into_owned(),
+        transmit_interface: transmit_interface.to_string_lossy().into_owned(),
+        seed,
+        rounds,
+        report_path: PathBuf::from(report_path),
+    })
+}
+
+fn authorization_boundary_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let service_binary = required_argument(arguments, "service binary")?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::AuthorizationBoundary {
+        service_binary: PathBuf::from(service_binary),
+        report_path: PathBuf::from(report_path),
+    })
 }
 
 fn postgres_persistence_command(

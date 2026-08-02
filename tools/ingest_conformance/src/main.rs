@@ -10,6 +10,7 @@ mod af_xdp_copy;
 mod af_xdp_fuzz;
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
 mod af_xdp_replay;
+mod authorization_boundary;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod clickhouse_projection;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
@@ -853,6 +854,10 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
         evidence_report::EvidenceCommand::QuicPrototype { report_path } => {
             run_quic_prototype(&report_path)
         }
+        evidence_report::EvidenceCommand::AuthorizationBoundary {
+            service_binary,
+            report_path,
+        } => authorization_boundary::run(&service_binary, &report_path),
         evidence_report::EvidenceCommand::Run { .. }
         | evidence_report::EvidenceCommand::VerifySet { .. } => {
             Err("lane command dispatch reached a non-lane command".into())

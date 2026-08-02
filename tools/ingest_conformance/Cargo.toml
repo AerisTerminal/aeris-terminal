@@ -28,6 +28,9 @@ axiusflow_testing = { path = "../../crates/testing" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
 axiusflow_transport = { path = "../../crates/transport" }
 axiusflow_windows_network_adapter = { path = "../../crates/adapters/windows_network" }
+base64.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
 postgres.workspace = true
 quinn = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }

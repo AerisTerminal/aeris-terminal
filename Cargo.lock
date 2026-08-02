@@ -634,6 +634,9 @@ name = "axiusflow_authorization_service"
 version = "0.1.0"
 dependencies = [
  "axiusflow_authorization",
+ "axiusflow_security",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -691,6 +694,9 @@ dependencies = [
  "axiusflow_testing",
  "axiusflow_transport",
  "axiusflow_windows_network_adapter",
+ "base64 0.23.0",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
  "postgres",
  "quinn",
  "rcgen",
