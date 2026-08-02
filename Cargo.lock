@@ -668,6 +668,8 @@ name = "axiusflow_linux_dpdk_adapter"
 version = "0.1.0"
 dependencies = [
  "axiusflow_transport",
+ "bindgen 0.72.1",
+ "cc",
 ]
 
 [[package]]

@@ -17,12 +17,20 @@ fn config() -> DpdkConfig {
 }
 
 #[test]
-fn profile_is_linux_dpdk_and_no_native_dependency_is_selected() {
+fn profile_is_linux_dpdk_and_native_selection_matches_the_feature() {
     assert_eq!(PROFILE, IngestProfile::LinuxDpdk);
+    #[cfg(not(all(target_os = "linux", feature = "native")))]
     const {
         assert!(
             !NATIVE_DEPENDENCY_SELECTED,
-            "no reviewed DPDK binding is selected, so this must stay false"
+            "without the native feature no DPDK binding is selected, so this must stay false"
+        );
+    }
+    #[cfg(all(target_os = "linux", feature = "native"))]
+    const {
+        assert!(
+            NATIVE_DEPENDENCY_SELECTED,
+            "the native feature must report its DPDK binding as selected"
         );
     }
 }
@@ -84,10 +92,12 @@ fn poll_mode_driver_is_never_reported_as_exercised() {
         prerequisites.software_device,
         DpdkEvidenceStatus::NotExercised
     );
-    assert_eq!(
-        prerequisites.native_dependency,
-        DpdkEvidenceStatus::NotSelected
-    );
+    if !NATIVE_DEPENDENCY_SELECTED {
+        assert_eq!(
+            prerequisites.native_dependency,
+            DpdkEvidenceStatus::NotSelected
+        );
+    }
     assert!(
         prerequisites.huge_pages_free <= prerequisites.huge_pages_total,
         "free huge pages must never exceed the reported total"

@@ -161,13 +161,17 @@ jobs:
           assert evidence["expected_dpdk_version"] == "25.11.0"
           assert "25.11.0" in evidence["runtime_version"]
           assert evidence["ports_available"] > 0
+          assert evidence["frames_transmitted"] > 0
+          assert evidence["frames_received"] == evidence["frames_transmitted"]
+          assert evidence["pool_entries_after"] == evidence["pool_entries_before"]
           assert evidence["lifecycle"] == {
               "eal_init": "passed",
               "runtime_version_bound": "passed",
               "virtual_device_enumerated": "passed",
+              "queue_mbuf_lifecycle": "passed",
+              "loopback_payload_verified": "passed",
+              "mbuf_return_accounting": "passed",
               "eal_cleanup": "passed",
-              "queue_mbuf_lifecycle": "not_exercised",
-              "poll_mode_receive": "not_exercised",
           }
           assert evidence["claims"] == {
               "poll_mode_active": "not_claimed",
