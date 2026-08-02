@@ -49,6 +49,7 @@ serde_json = "=1.0.151"
 sha2 = "=0.10.9"
 thread-priority = "=3.1.1"
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
 prost = "=0.14.4"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"

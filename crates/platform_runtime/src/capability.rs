@@ -61,7 +61,7 @@ impl RuntimeCapabilities {
             // `UpdateRollbackState` tracks the verified predecessor in memory only;
             // durable activation and persistence still need per-OS adapters.
             rollback: CapabilityAvailability::Unavailable,
-            power_notifications: CapabilityAvailability::Unavailable,
+            power_notifications: crate::NativePowerMonitor::availability(),
             display_timing: CapabilityAvailability::Unavailable,
             priority_hints: crate::NativeThreadScheduler::priority_availability(),
             affinity_hints: crate::NativeThreadScheduler::affinity_availability(),
@@ -93,7 +93,7 @@ mod tests {
         assert_eq!(detected.rollback, CapabilityAvailability::Unavailable);
         assert_eq!(
             detected.power_notifications,
-            CapabilityAvailability::Unavailable
+            crate::NativePowerMonitor::availability()
         );
         assert_eq!(detected.display_timing, CapabilityAvailability::Unavailable);
         assert_eq!(detected.network_timestamping, ClockCapability::Software);
