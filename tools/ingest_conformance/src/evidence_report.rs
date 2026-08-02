@@ -237,6 +237,11 @@ pub enum EvidenceCommand {
         pg_database: String,
         report_path: PathBuf,
     },
+    CoinbaseLive {
+        products: Vec<String>,
+        window_seconds: u64,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +291,9 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     }
     if argument == OsStr::new("--af-xdp-copy-fuzz") {
         return af_xdp_copy_fuzz_command(&mut arguments);
+    }
+    if argument == OsStr::new("--coinbase-live") {
+        return coinbase_live_command(&mut arguments);
     }
     if argument == OsStr::new("--auth-service") {
         return auth_service_command(&mut arguments);
@@ -379,6 +387,27 @@ fn af_xdp_copy_fuzz_command(
         transmit_interface: transmit_interface.to_string_lossy().into_owned(),
         seed,
         rounds,
+        report_path: PathBuf::from(report_path),
+    })
+}
+
+fn coinbase_live_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let products = required_argument(arguments, "products (comma-separated)")?
+        .to_string_lossy()
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let window_seconds = required_argument(arguments, "window seconds")?
+        .to_string_lossy()
+        .parse::<u64>()
+        .map_err(|error| boxed_error(format!("invalid window seconds: {error}")))?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::CoinbaseLive {
+        products,
+        window_seconds,
         report_path: PathBuf::from(report_path),
     })
 }

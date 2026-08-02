@@ -2,6 +2,7 @@
 members = [
     "apps/desktop",
     "crates/adapters/linux_af_xdp",
+    "crates/adapters/coinbase_market",
     "crates/adapters/linux_dpdk",
     "crates/adapters/linux_socket_network",
     "crates/adapters/macos_network",
@@ -55,7 +56,10 @@ wayland-protocols = { version = "=0.32.13", default-features = false, features =
     "client",
     "unstable",
 ] }
-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+tungstenite = { version = "=0.30.0", default-features = false, features = [
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
 zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
 postgres = "=0.19.14"
 prost = "=0.14.4"

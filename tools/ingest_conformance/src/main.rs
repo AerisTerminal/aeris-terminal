@@ -14,6 +14,7 @@ mod auth_service_boundary;
 mod authorization_boundary;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod clickhouse_projection;
+mod coinbase_live;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
@@ -859,6 +860,11 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             service_binary,
             report_path,
         } => authorization_boundary::run(&service_binary, &report_path),
+        evidence_report::EvidenceCommand::CoinbaseLive {
+            products,
+            window_seconds,
+            report_path,
+        } => coinbase_live::run(&products, window_seconds, &report_path),
         evidence_report::EvidenceCommand::AuthService {
             service_binary,
             pg_host,

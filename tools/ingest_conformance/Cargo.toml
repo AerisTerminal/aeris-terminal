@@ -27,6 +27,7 @@ axiusflow_security = { path = "../../crates/security" }
 axiusflow_streaming = { path = "../../crates/streaming" }
 axiusflow_testing = { path = "../../crates/testing" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
+axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
 axiusflow_transport = { path = "../../crates/transport" }
 axiusflow_windows_network_adapter = { path = "../../crates/adapters/windows_network" }
 base64.workspace = true
