@@ -213,7 +213,7 @@ jobs:
           assert evidence["evidence_scope"] == "stage_2_postgres_persistence"
           assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
           assert evidence["postgres_version"] == "17.10"
-          assert evidence["migrations_applied_first"] == 1
+          assert evidence["migrations_applied_first"] == 2
           assert evidence["migrations_applied_second"] == 0
           assert evidence["pending_after_commit"] == 1
           assert evidence["pending_after_rollback"] == 1

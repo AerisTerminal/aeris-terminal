@@ -10,6 +10,7 @@ mod af_xdp_copy;
 mod af_xdp_fuzz;
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
 mod af_xdp_replay;
+mod auth_service_boundary;
 mod authorization_boundary;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod clickhouse_projection;
@@ -858,6 +859,23 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             service_binary,
             report_path,
         } => authorization_boundary::run(&service_binary, &report_path),
+        evidence_report::EvidenceCommand::AuthService {
+            service_binary,
+            pg_host,
+            pg_port,
+            pg_user,
+            pg_password,
+            pg_database,
+            report_path,
+        } => auth_service_boundary::run(
+            &service_binary,
+            &pg_host,
+            pg_port,
+            &pg_user,
+            &pg_password,
+            &pg_database,
+            &report_path,
+        ),
         evidence_report::EvidenceCommand::Run { .. }
         | evidence_report::EvidenceCommand::VerifySet { .. } => {
             Err("lane command dispatch reached a non-lane command".into())

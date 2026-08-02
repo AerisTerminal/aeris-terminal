@@ -19,6 +19,7 @@ members = [
     "crates/protocols",
     "crates/realtime",
     "crates/security",
+    "services/auth_service",
     "crates/streaming",
     "crates/testing",
     "crates/transport",

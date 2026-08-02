@@ -16,11 +16,18 @@ struct EmbeddedMigration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[EmbeddedMigration] = &[EmbeddedMigration {
-    version: 1,
-    name: "0001_outbox_inbox",
-    sql: include_str!("../migrations/0001_outbox_inbox.sql"),
-}];
+const MIGRATIONS: &[EmbeddedMigration] = &[
+    EmbeddedMigration {
+        version: 1,
+        name: "0001_outbox_inbox",
+        sql: include_str!("../migrations/0001_outbox_inbox.sql"),
+    },
+    EmbeddedMigration {
+        version: 2,
+        name: "0002_auth_credentials",
+        sql: include_str!("../migrations/0002_auth_credentials.sql"),
+    },
+];
 
 /// Applies every pending migration in order and verifies recorded checksums.
 ///

@@ -228,6 +228,15 @@ pub enum EvidenceCommand {
         service_binary: PathBuf,
         report_path: PathBuf,
     },
+    AuthService {
+        service_binary: PathBuf,
+        pg_host: String,
+        pg_port: u16,
+        pg_user: String,
+        pg_password: String,
+        pg_database: String,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -277,6 +286,9 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     }
     if argument == OsStr::new("--af-xdp-copy-fuzz") {
         return af_xdp_copy_fuzz_command(&mut arguments);
+    }
+    if argument == OsStr::new("--auth-service") {
+        return auth_service_command(&mut arguments);
     }
     if argument == OsStr::new("--authorization-boundary") {
         return authorization_boundary_command(&mut arguments);
@@ -367,6 +379,31 @@ fn af_xdp_copy_fuzz_command(
         transmit_interface: transmit_interface.to_string_lossy().into_owned(),
         seed,
         rounds,
+        report_path: PathBuf::from(report_path),
+    })
+}
+
+fn auth_service_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let service_binary = required_argument(arguments, "service binary")?;
+    let pg_host = required_argument(arguments, "postgres host")?;
+    let pg_port = required_argument(arguments, "postgres port")?
+        .to_string_lossy()
+        .parse::<u16>()
+        .map_err(|error| boxed_error(format!("invalid PostgreSQL port: {error}")))?;
+    let pg_user = required_argument(arguments, "postgres user")?;
+    let pg_password = required_argument(arguments, "postgres password")?;
+    let pg_database = required_argument(arguments, "postgres database")?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::AuthService {
+        service_binary: PathBuf::from(service_binary),
+        pg_host: pg_host.to_string_lossy().into_owned(),
+        pg_port,
+        pg_user: pg_user.to_string_lossy().into_owned(),
+        pg_password: pg_password.to_string_lossy().into_owned(),
+        pg_database: pg_database.to_string_lossy().into_owned(),
         report_path: PathBuf::from(report_path),
     })
 }
