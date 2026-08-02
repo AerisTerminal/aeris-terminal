@@ -11,6 +11,9 @@ axiusflow_application = { path = "../../crates/application" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
 axiusflow_design_system = { path = "../../crates/ui/design_system" }
 axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
+axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
+serde.workspace = true
+serde_json.workspace = true
 axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui_platform.workspace = true

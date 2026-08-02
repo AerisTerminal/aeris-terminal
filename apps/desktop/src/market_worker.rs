@@ -114,7 +114,7 @@ impl MarketDataWorker {
     }
 }
 
-struct FixtureMarketWorker {
+pub(crate) struct FixtureMarketWorker {
     source: EmbeddedReplaySource,
     convention: DecimalConvention,
     decoder: BinaryMarketBarStreamDecoder,
@@ -124,7 +124,7 @@ struct FixtureMarketWorker {
 }
 
 impl FixtureMarketWorker {
-    fn try_new() -> Result<Self, String> {
+    pub(crate) fn try_new() -> Result<Self, String> {
         let convention =
             DecimalConvention::try_new("usd_minor", "shares").map_err(|error| error.to_string())?;
         let maximum_frame_bytes =
@@ -150,7 +150,10 @@ impl FixtureMarketWorker {
         })
     }
 
-    fn publish_snapshot(&mut self, bar_count: usize) -> Result<MarketWorkerBootstrap, String> {
+    pub(crate) fn publish_snapshot(
+        &mut self,
+        bar_count: usize,
+    ) -> Result<MarketWorkerBootstrap, String> {
         let snapshot = self
             .source
             .load_snapshot(LoadEmbeddedReplay { bar_count })
@@ -203,7 +206,7 @@ impl FixtureMarketWorker {
         })
     }
 
-    fn publish_delta(
+    pub(crate) fn publish_delta(
         &mut self,
         previous_sequence: u64,
     ) -> Result<Option<MarketWorkerPublication>, String> {

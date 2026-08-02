@@ -1,6 +1,7 @@
 //! Axiusflow's native GPUI terminal entry point.
 
 mod market_worker;
+mod windowed_benchmark;
 
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
@@ -385,6 +386,19 @@ fn gpui_color(color: ThemeColor) -> Hsla {
 }
 
 fn main() {
+    let mut arguments = std::env::args_os().skip(1);
+    if let Some(argument) = arguments.next() {
+        if argument == "--windowed-benchmark" {
+            let report_path = arguments
+                .next()
+                .expect("usage: axiusflow_desktop --windowed-benchmark <report-path>");
+            windowed_benchmark::run(std::path::Path::new(&report_path))
+                .expect("the windowed benchmark completes");
+            return;
+        }
+        eprintln!("unsupported argument: {}", argument.to_string_lossy());
+        std::process::exit(2);
+    }
     let (bootstrap, market_worker) =
         MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps");
     application().run(move |cx: &mut App| {

@@ -625,10 +625,13 @@ dependencies = [
  "axiusflow_chart_integration",
  "axiusflow_design_system",
  "axiusflow_market_protocol_adapter",
+ "axiusflow_platform_runtime",
  "axiusflow_terminal_ui",
  "gpui",
  "gpui-component",
  "gpui_platform",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
