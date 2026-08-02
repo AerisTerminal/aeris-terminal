@@ -15,8 +15,11 @@ use std::{error::Error, fmt, io::Read};
 pub const MAX_UPDATE_MANIFEST_BYTES: usize = 4 * 1_024;
 pub const MAX_UPDATE_VERSION_BYTES: usize = 64;
 pub const MAX_UPDATE_ARTIFACT_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;
+pub const MAX_UPDATE_KEY_ROTATION_BYTES: usize = 1_024;
+pub const MAX_UPDATE_SIGNING_KEYS: usize = 16;
 
 const UPDATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const UPDATE_KEY_ROTATION_SCHEMA_VERSION: u32 = 1;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 #[cfg(unix)]
 const ED25519_SIGNATURE_BYTES: usize = 64;
@@ -30,6 +33,7 @@ pub struct UpdateManifest {
     artifact_bytes: u64,
     artifact_sha256: [u8; SHA256_BYTES],
     signing_key_identity: [u8; SHA256_BYTES],
+    trust_domain_identity: [u8; SHA256_BYTES],
     verifier_binding: [u8; SHA256_BYTES],
     #[cfg(unix)]
     signed_json: Vec<u8>,
@@ -72,6 +76,8 @@ impl InstalledRelease {
 pub struct SignedUpdateVerifier {
     verifying_key: VerifyingKey,
     minimum_release_sequence: u64,
+    trust_domain_identity: [u8; SHA256_BYTES],
+    authorized_key_identities: Vec<[u8; SHA256_BYTES]>,
 }
 
 impl SignedUpdateVerifier {
@@ -89,9 +95,91 @@ impl SignedUpdateVerifier {
         if verifying_key.is_weak() {
             return Err(SignedUpdateError::InvalidVerificationKey);
         }
+        let trust_domain_identity = signing_key_identity(&verifying_key);
         Ok(Self {
             verifying_key,
             minimum_release_sequence,
+            trust_domain_identity,
+            authorized_key_identities: vec![trust_domain_identity],
+        })
+    }
+
+    /// Returns the domain-separated identity callers place in a successor-key
+    /// authorization statement as `current_key_identity`.
+    #[must_use]
+    pub fn current_signing_key_identity(&self) -> [u8; SHA256_BYTES] {
+        self.signing_key_identity()
+    }
+
+    /// Returns the anti-downgrade floor a successor-key authorization may preserve
+    /// or raise, but never lower.
+    #[must_use]
+    pub const fn minimum_release_sequence(&self) -> u64 {
+        self.minimum_release_sequence
+    }
+
+    /// Authorizes a successor signing key using an exact bounded statement signed by
+    /// the current key. The new verifier retains the original trust-domain identity,
+    /// allowing in-memory rollback to the predecessor across the authorized rotation.
+    /// The strict JSON statement contains `schema_version`, base64url-no-pad
+    /// `current_key_identity`, base64url-no-pad `next_verifying_key`, and
+    /// `minimum_release_sequence` fields, with no additional fields accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an oversized, malformed, unsigned, stale, weak, reused,
+    /// or anti-downgrade-floor-lowering rotation statement.
+    pub fn authorize_rotation(
+        &self,
+        rotation_json: &[u8],
+        signature: &[u8],
+    ) -> Result<Self, SignedUpdateError> {
+        if rotation_json.is_empty() || rotation_json.len() > MAX_UPDATE_KEY_ROTATION_BYTES {
+            return Err(SignedUpdateError::InvalidKeyRotationSize);
+        }
+        let signature = Signature::from_slice(signature)
+            .map_err(|_| SignedUpdateError::InvalidKeyRotationSignature)?;
+        self.verifying_key
+            .verify_strict(rotation_json, &signature)
+            .map_err(|_| SignedUpdateError::InvalidKeyRotationSignature)?;
+        let raw: RawUpdateKeyRotation = serde_json::from_slice(rotation_json)
+            .map_err(|_| SignedUpdateError::InvalidKeyRotation)?;
+        if raw.schema_version != UPDATE_KEY_ROTATION_SCHEMA_VERSION {
+            return Err(SignedUpdateError::UnsupportedKeyRotationSchema);
+        }
+        let current_key_identity = decode_sha256(&raw.current_key_identity)
+            .map_err(|()| SignedUpdateError::InvalidKeyRotation)?;
+        if current_key_identity != self.signing_key_identity() {
+            return Err(SignedUpdateError::KeyRotationCurrentKeyMismatch);
+        }
+        if raw.minimum_release_sequence < self.minimum_release_sequence {
+            return Err(SignedUpdateError::KeyRotationLowersReleaseFloor);
+        }
+        if self.authorized_key_identities.len() >= MAX_UPDATE_SIGNING_KEYS {
+            return Err(SignedUpdateError::KeyRotationChainFull);
+        }
+        let next_key_bytes = URL_SAFE_NO_PAD
+            .decode(raw.next_verifying_key)
+            .map_err(|_| SignedUpdateError::InvalidKeyRotation)?;
+        let next_key_bytes = next_key_bytes
+            .try_into()
+            .map_err(|_| SignedUpdateError::InvalidKeyRotation)?;
+        let verifying_key = VerifyingKey::from_bytes(&next_key_bytes)
+            .map_err(|_| SignedUpdateError::InvalidVerificationKey)?;
+        if verifying_key.is_weak() {
+            return Err(SignedUpdateError::InvalidVerificationKey);
+        }
+        let next_key_identity = signing_key_identity(&verifying_key);
+        if self.authorized_key_identities.contains(&next_key_identity) {
+            return Err(SignedUpdateError::KeyRotationReusesSigningKey);
+        }
+        let mut authorized_key_identities = self.authorized_key_identities.clone();
+        authorized_key_identities.push(next_key_identity);
+        Ok(Self {
+            verifying_key,
+            minimum_release_sequence: raw.minimum_release_sequence,
+            trust_domain_identity: self.trust_domain_identity,
+            authorized_key_identities,
         })
     }
 
@@ -162,6 +250,7 @@ impl SignedUpdateVerifier {
             artifact_bytes: raw.artifact_bytes,
             artifact_sha256,
             signing_key_identity: self.signing_key_identity(),
+            trust_domain_identity: self.trust_domain_identity,
             verifier_binding: self.binding(),
             #[cfg(unix)]
             signed_json: manifest_json.to_vec(),
@@ -212,16 +301,14 @@ impl SignedUpdateVerifier {
     fn binding(&self) -> [u8; SHA256_BYTES] {
         let mut digest = Sha256::new();
         digest.update(b"axiusflow-signed-update-verifier-v1\0");
+        digest.update(self.trust_domain_identity);
         digest.update(self.signing_key_identity());
         digest.update(self.minimum_release_sequence.to_be_bytes());
         digest.finalize().into()
     }
 
     fn signing_key_identity(&self) -> [u8; SHA256_BYTES] {
-        let mut digest = Sha256::new();
-        digest.update(b"axiusflow-signed-update-key-v1\0");
-        digest.update(self.verifying_key.as_bytes());
-        digest.finalize().into()
+        signing_key_identity(&self.verifying_key)
     }
 }
 
@@ -268,7 +355,8 @@ impl UpdateRollbackState {
             || (minimum_release_sequence > active.manifest.release_sequence && rollback.is_some())
             || rollback.as_ref().is_some_and(|release| {
                 release.manifest.release_sequence >= active.manifest.release_sequence
-                    || release.manifest.signing_key_identity != active.manifest.signing_key_identity
+                    || release.manifest.trust_domain_identity
+                        != active.manifest.trust_domain_identity
             })
         {
             return Err(SignedUpdateError::InvalidRollbackState);
@@ -301,7 +389,7 @@ impl UpdateRollbackState {
     ///
     /// Returns an error when the candidate does not advance the durable sequence floor.
     pub fn activate(&mut self, candidate: InstalledRelease) -> Result<(), SignedUpdateError> {
-        if candidate.manifest.signing_key_identity != self.active.manifest.signing_key_identity {
+        if candidate.manifest.trust_domain_identity != self.active.manifest.trust_domain_identity {
             return Err(SignedUpdateError::ReleaseTrustDomainMismatch);
         }
         if candidate.manifest.release_sequence <= self.minimum_release_sequence {
@@ -346,6 +434,15 @@ pub enum SignedUpdateError {
     ArtifactDigestMismatch,
     InvalidRollbackState,
     RollbackUnavailable,
+    InvalidKeyRotationSize,
+    InvalidKeyRotationSignature,
+    InvalidKeyRotation,
+    UnsupportedKeyRotationSchema,
+    KeyRotationCurrentKeyMismatch,
+    KeyRotationLowersReleaseFloor,
+    KeyRotationReusesSigningKey,
+    KeyRotationChainFull,
+    RotationPersistenceUnsupported,
 }
 
 impl fmt::Display for SignedUpdateError {
@@ -387,6 +484,32 @@ impl fmt::Display for SignedUpdateError {
             Self::RollbackUnavailable => {
                 formatter.write_str("no verified rollback release is available")
             }
+            Self::InvalidKeyRotationSize => {
+                formatter.write_str("update signing-key rotation size is invalid")
+            }
+            Self::InvalidKeyRotationSignature => {
+                formatter.write_str("update signing-key rotation signature is invalid")
+            }
+            Self::InvalidKeyRotation => {
+                formatter.write_str("update signing-key rotation is invalid")
+            }
+            Self::UnsupportedKeyRotationSchema => {
+                formatter.write_str("update signing-key rotation schema is unsupported")
+            }
+            Self::KeyRotationCurrentKeyMismatch => {
+                formatter.write_str("update signing-key rotation names another current key")
+            }
+            Self::KeyRotationLowersReleaseFloor => {
+                formatter.write_str("update signing-key rotation lowers the anti-downgrade floor")
+            }
+            Self::KeyRotationReusesSigningKey => {
+                formatter.write_str("update signing-key rotation reuses an authorized key")
+            }
+            Self::KeyRotationChainFull => {
+                formatter.write_str("update signing-key rotation chain is full")
+            }
+            Self::RotationPersistenceUnsupported => formatter
+                .write_str("durable activation across update signing-key rotation is unsupported"),
         }
     }
 }
@@ -408,6 +531,30 @@ struct RawUpdateManifest {
     version: String,
     artifact_bytes: u64,
     artifact_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUpdateKeyRotation {
+    schema_version: u32,
+    current_key_identity: String,
+    next_verifying_key: String,
+    minimum_release_sequence: u64,
+}
+
+fn signing_key_identity(verifying_key: &VerifyingKey) -> [u8; SHA256_BYTES] {
+    let mut digest = Sha256::new();
+    digest.update(b"axiusflow-signed-update-key-v1\0");
+    digest.update(verifying_key.as_bytes());
+    digest.finalize().into()
+}
+
+fn decode_sha256(encoded: &str) -> Result<[u8; SHA256_BYTES], ()> {
+    URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(())
 }
 
 fn valid_version(version: &str) -> bool {
@@ -434,7 +581,8 @@ fn read_retry_interrupted(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_UPDATE_MANIFEST_BYTES, SignedUpdateError, SignedUpdateVerifier, UpdateRollbackState,
+        MAX_UPDATE_KEY_ROTATION_BYTES, MAX_UPDATE_MANIFEST_BYTES, SignedUpdateError,
+        SignedUpdateVerifier, UpdateRollbackState, signing_key_identity,
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer, SigningKey};
@@ -489,6 +637,22 @@ mod tests {
         artifact: &[u8],
     ) -> (Vec<u8>, Vec<u8>) {
         signed_manifest_with_key(&signing_key(), release_sequence, version, artifact)
+    }
+
+    fn signed_rotation(
+        current_key: &SigningKey,
+        next_key: &SigningKey,
+        minimum_release_sequence: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let current_key_identity =
+            URL_SAFE_NO_PAD.encode(signing_key_identity(&current_key.verifying_key()));
+        let next_verifying_key = URL_SAFE_NO_PAD.encode(next_key.verifying_key().to_bytes());
+        let json = format!(
+            r#"{{"schema_version":1,"current_key_identity":"{current_key_identity}","next_verifying_key":"{next_verifying_key}","minimum_release_sequence":{minimum_release_sequence}}}"#
+        )
+        .into_bytes();
+        let signature = current_key.sign(&json).to_bytes().to_vec();
+        (json, signature)
     }
 
     fn verifier(floor: u64) -> SignedUpdateVerifier {
@@ -638,6 +802,76 @@ mod tests {
         assert!(matches!(
             verifier(21).verify_artifact(lower_floor_manifest, Cursor::new(artifact)),
             Err(SignedUpdateError::ManifestVerifierMismatch)
+        ));
+    }
+
+    #[test]
+    fn authorized_rotation_preserves_trust_domain_and_cross_key_rollback() {
+        let successor_key = SigningKey::from_bytes(&[59_u8; 32]);
+        let (rotation, rotation_signature) = signed_rotation(&signing_key(), &successor_key, 10);
+        let successor_verifier = verifier(10)
+            .authorize_rotation(&rotation, &rotation_signature)
+            .expect("current signing key authorizes its successor");
+        let artifact = b"successor-release";
+        let (manifest_json, manifest_signature) =
+            signed_manifest_with_key(&successor_key, 11, "2.0.0", artifact);
+        let manifest = successor_verifier
+            .verify_manifest(&manifest_json, &manifest_signature)
+            .expect("successor key authenticates the next release");
+        let successor_release = successor_verifier
+            .verify_artifact(manifest, Cursor::new(artifact))
+            .expect("successor artifact matches its manifest");
+        let predecessor = installed(10, b"predecessor-release");
+        let mut state = UpdateRollbackState::new(predecessor.clone());
+
+        state
+            .activate(successor_release)
+            .expect("authorized successor remains in the root trust domain");
+        state
+            .rollback()
+            .expect("rollback crosses the authorized key boundary");
+        assert_eq!(state.active(), &predecessor);
+        assert_eq!(state.minimum_release_sequence(), 11);
+        assert!(matches!(
+            verifier(10).verify_manifest(&manifest_json, &manifest_signature),
+            Err(SignedUpdateError::InvalidManifestSignature)
+        ));
+    }
+
+    #[test]
+    fn rotation_rejects_tampering_stale_floors_and_key_reuse() {
+        let successor_key = SigningKey::from_bytes(&[61_u8; 32]);
+        let current_verifier = verifier(10);
+        assert_eq!(
+            current_verifier.current_signing_key_identity(),
+            signing_key_identity(&signing_key().verifying_key())
+        );
+        assert_eq!(current_verifier.minimum_release_sequence(), 10);
+        let (rotation, signature) = signed_rotation(&signing_key(), &successor_key, 10);
+        let mut tampered = rotation.clone();
+        tampered[0] ^= 1;
+        assert!(matches!(
+            current_verifier.authorize_rotation(&tampered, &signature),
+            Err(SignedUpdateError::InvalidKeyRotationSignature)
+        ));
+
+        let (stale_rotation, stale_signature) = signed_rotation(&signing_key(), &successor_key, 9);
+        assert!(matches!(
+            current_verifier.authorize_rotation(&stale_rotation, &stale_signature),
+            Err(SignedUpdateError::KeyRotationLowersReleaseFloor)
+        ));
+
+        let (reused_rotation, reused_signature) =
+            signed_rotation(&signing_key(), &signing_key(), 10);
+        assert!(matches!(
+            current_verifier.authorize_rotation(&reused_rotation, &reused_signature),
+            Err(SignedUpdateError::KeyRotationReusesSigningKey)
+        ));
+
+        let oversized = vec![b' '; MAX_UPDATE_KEY_ROTATION_BYTES + 1];
+        assert!(matches!(
+            current_verifier.authorize_rotation(&oversized, &signature),
+            Err(SignedUpdateError::InvalidKeyRotationSize)
         ));
     }
 

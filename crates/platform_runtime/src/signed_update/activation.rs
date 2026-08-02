@@ -140,6 +140,11 @@ impl DurableUpdateActivator {
         artifact: impl Read,
     ) -> Result<(), UpdateActivationError> {
         self.ensure_usable()?;
+        if candidate.manifest.signing_key_identity
+            != self.state.active().manifest.signing_key_identity
+        {
+            return Err(SignedUpdateError::RotationPersistenceUnsupported.into());
+        }
         let mut next_state = self.state.clone();
         next_state.activate(candidate.clone())?;
         remove_unretained_release_files(&self.root, &self.state)?;
@@ -832,6 +837,10 @@ mod tests {
         SigningKey::from_bytes(&[83_u8; 32])
     }
 
+    fn successor_key() -> SigningKey {
+        SigningKey::from_bytes(&[87_u8; 32])
+    }
+
     fn verifier(floor: u64) -> SignedUpdateVerifier {
         SignedUpdateVerifier::try_new(signing_key().verifying_key().to_bytes(), floor)
             .expect("test verification key is valid")
@@ -852,6 +861,35 @@ mod tests {
         verifier
             .verify_artifact(manifest, Cursor::new(artifact))
             .expect("test artifact is valid")
+    }
+
+    fn rotated_installed(sequence: u64, artifact: &[u8]) -> InstalledRelease {
+        let current_key_identity = URL_SAFE_NO_PAD.encode(super::super::signing_key_identity(
+            &signing_key().verifying_key(),
+        ));
+        let next_verifying_key = URL_SAFE_NO_PAD.encode(successor_key().verifying_key().to_bytes());
+        let rotation = format!(
+            r#"{{"schema_version":1,"current_key_identity":"{current_key_identity}","next_verifying_key":"{next_verifying_key}","minimum_release_sequence":{}}}"#,
+            sequence - 1
+        )
+        .into_bytes();
+        let rotation_signature = signing_key().sign(&rotation).to_bytes();
+        let verifier = verifier(sequence - 1)
+            .authorize_rotation(&rotation, &rotation_signature)
+            .expect("successor signing key is authorized");
+        let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(artifact));
+        let manifest = format!(
+            r#"{{"schema_version":1,"release_sequence":{sequence},"version":"2.0.0","artifact_bytes":{},"artifact_sha256":"{digest}"}}"#,
+            artifact.len()
+        )
+        .into_bytes();
+        let signature = successor_key().sign(&manifest).to_bytes();
+        let manifest = verifier
+            .verify_manifest(&manifest, &signature)
+            .expect("successor manifest is valid");
+        verifier
+            .verify_artifact(manifest, Cursor::new(artifact))
+            .expect("successor artifact is valid")
     }
 
     #[test]
@@ -922,6 +960,26 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn durable_activation_refuses_unpersisted_signing_key_rotation() {
+        let directory = TestDirectory::new();
+        let mut activator = DurableUpdateActivator::initialize(
+            directory.path(),
+            installed(1, "1.0.0", b"release-one"),
+            Cursor::new(b"release-one"),
+        )
+        .expect("activation store initializes");
+        let rotated = rotated_installed(2, b"rotated-release");
+
+        assert!(matches!(
+            activator.activate(&rotated, Cursor::new(b"rotated-release")),
+            Err(UpdateActivationError::SignedUpdate(
+                SignedUpdateError::RotationPersistenceUnsupported
+            ))
+        ));
+        assert_eq!(activator.state().active().manifest().release_sequence(), 1);
     }
 
     #[test]
