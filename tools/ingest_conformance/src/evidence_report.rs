@@ -187,6 +187,13 @@ pub enum EvidenceCommand {
         transmit_interface: String,
         report_path: PathBuf,
     },
+    AfXdpCopyFuzz {
+        receive_interface: String,
+        transmit_interface: String,
+        seed: u64,
+        rounds: u32,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -236,6 +243,32 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
         return Ok(EvidenceCommand::AfXdpCopy {
             receive_interface: receive_interface.to_string_lossy().into_owned(),
             transmit_interface: transmit_interface.to_string_lossy().into_owned(),
+            report_path: PathBuf::from(report_path),
+        });
+    }
+    if argument == OsStr::new("--af-xdp-copy-fuzz") {
+        let receive_interface = required_argument(&mut arguments, "receive interface")?;
+        let transmit_interface = required_argument(&mut arguments, "transmit interface")?;
+        let seed = required_argument(&mut arguments, "seed")?
+            .to_string_lossy()
+            .parse::<u64>()
+            .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz seed: {error}")))?;
+        let rounds = required_argument(&mut arguments, "rounds")?
+            .to_string_lossy()
+            .parse::<u32>()
+            .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz rounds: {error}")))?;
+        let report_path = required_argument(&mut arguments, "report path")?;
+        if let Some(extra) = arguments.next() {
+            return Err(boxed_error(format!(
+                "unexpected argument: {}",
+                extra.to_string_lossy()
+            )));
+        }
+        return Ok(EvidenceCommand::AfXdpCopyFuzz {
+            receive_interface: receive_interface.to_string_lossy().into_owned(),
+            transmit_interface: transmit_interface.to_string_lossy().into_owned(),
+            seed,
+            rounds,
             report_path: PathBuf::from(report_path),
         });
     }

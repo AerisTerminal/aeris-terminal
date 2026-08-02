@@ -6,6 +6,10 @@
 
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
 mod af_xdp_copy;
+#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
+mod af_xdp_fuzz;
+#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
+mod af_xdp_replay;
 mod evidence_report;
 
 use axiusflow_observability::{
@@ -733,18 +737,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             transmit_interface,
             report_path,
         } => {
-            #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
-            {
-                af_xdp_copy::run(&receive_interface, &transmit_interface, &report_path)?;
-                return Ok(());
-            }
-            #[cfg(not(all(target_os = "linux", feature = "af-xdp-copy")))]
-            {
-                let _ = (receive_interface, transmit_interface, report_path);
-                return Err(
-                    "AF_XDP copy conformance requires Linux and the af-xdp-copy feature".into(),
-                );
-            }
+            return run_af_xdp_copy(&receive_interface, &transmit_interface, &report_path);
+        }
+        evidence_report::EvidenceCommand::AfXdpCopyFuzz {
+            receive_interface,
+            transmit_interface,
+            seed,
+            rounds,
+            report_path,
+        } => {
+            return run_af_xdp_copy_fuzz(
+                &receive_interface,
+                &transmit_interface,
+                seed,
+                rounds,
+                &report_path,
+            );
         }
     };
     let fixture_baseline = run_fixture(axiusflow_portable_network_adapter::fixture_driver(
@@ -798,4 +806,58 @@ fn main() -> Result<(), Box<dyn Error>> {
         &replay_to_gpui,
     )?;
     Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
+fn run_af_xdp_copy(
+    receive_interface: &str,
+    transmit_interface: &str,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    af_xdp_copy::run(receive_interface, transmit_interface, report_path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "af-xdp-copy")))]
+fn run_af_xdp_copy(
+    receive_interface: &str,
+    transmit_interface: &str,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let _ = (receive_interface, transmit_interface, report_path);
+    Err("AF_XDP copy conformance requires Linux and the af-xdp-copy feature".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
+fn run_af_xdp_copy_fuzz(
+    receive_interface: &str,
+    transmit_interface: &str,
+    seed: u64,
+    rounds: u32,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    af_xdp_fuzz::run(
+        receive_interface,
+        transmit_interface,
+        seed,
+        rounds,
+        report_path,
+    )
+}
+
+#[cfg(not(all(target_os = "linux", feature = "af-xdp-copy")))]
+fn run_af_xdp_copy_fuzz(
+    receive_interface: &str,
+    transmit_interface: &str,
+    seed: u64,
+    rounds: u32,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let _ = (
+        receive_interface,
+        transmit_interface,
+        seed,
+        rounds,
+        report_path,
+    );
+    Err("AF_XDP copy data-path fuzzing requires Linux and the af-xdp-copy feature".into())
 }

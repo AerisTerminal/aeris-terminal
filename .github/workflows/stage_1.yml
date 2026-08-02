@@ -233,6 +233,49 @@ jobs:
           assert evidence["market_bar_corpus_outcomes"] > 0
           assert evidence["market_bar_corpus_accepted_events"] > 0
           PY
+      - name: actual_af_xdp_copy_data_path_fuzz
+        if: env.AF_XDP_COPY_EXERCISED == 'true'
+        shell: bash
+        run: |
+          sudo ip link set dev "$RX_IF" mtu 9216
+          sudo ip link set dev "$TX_IF" mtu 9216
+          sudo --preserve-env=GITHUB_SHA target/debug/axiusflow_ingest_conformance --af-xdp-copy-fuzz "$RX_IF" "$TX_IF" 20260802 64 stage_1_af_xdp_copy_fuzz_evidence_Linux.json
+      - name: verify_af_xdp_copy_fuzz_evidence_claim_boundary
+        if: env.AF_XDP_COPY_EXERCISED == 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("stage_1_af_xdp_copy_fuzz_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_1_af_xdp_copy_data_path_fuzz"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["profile"] == "linux_af_xdp"
+          assert evidence["readiness"] == "implemented"
+          assert evidence["seed"] == 20260802
+          assert evidence["rounds"] == 64
+          assert evidence["frames_sent"] > 0
+          assert evidence["frames_received"] > 0
+          assert evidence["frames_received"] <= evidence["frames_sent"]
+          assert evidence["invariants"] == {
+              "batch_bound_respected": "passed",
+              "frame_size_bound_respected": "passed",
+              "overflow_accounting_monotonic": "passed",
+              "every_batch_released": "passed",
+              "clean_shutdown": "passed",
+              "post_exercise_rebind": "passed",
+          }
+          assert evidence["claims"] == {
+              "coverage_guided": "not_claimed",
+              "zero_copy": "not_claimed",
+              "hardware": "not_claimed",
+              "provider": "not_claimed",
+              "production": "not_claimed",
+          }
+          PY
       - name: verify_af_xdp_unavailable_evidence_claim_boundary
         if: env.AF_XDP_COPY_EXERCISED == 'false'
         run: |
@@ -284,7 +327,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stage_1_af_xdp_copy_evidence_Linux
-          path: stage_1_af_xdp_copy_evidence_Linux.json
+          path: |
+            stage_1_af_xdp_copy_evidence_Linux.json
+            stage_1_af_xdp_copy_fuzz_evidence_Linux.json
           if-no-files-found: error
           retention-days: 30
       - name: cleanup_veth_pair

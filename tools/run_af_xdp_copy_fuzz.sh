@@ -11,6 +11,11 @@ if [[ ! -d "$sdk_lib" ]]; then
     exit 1
 fi
 
+if [[ ! -x "$repo_root/target/debug/axiusflow_ingest_conformance" ]]; then
+    echo "build first: cargo build --package axiusflow_ingest_conformance --features af-xdp-copy" >&2
+    exit 1
+fi
+
 mkdir -p "$evidence_dir"
 
 # Some sandboxes mount the default `~/.docker` read-only, which fails buildx bookkeeping.
@@ -43,9 +48,12 @@ docker run --rm \
     --security-opt no-new-privileges \
     --ulimit memlock=-1:-1 \
     --env "GITHUB_SHA=$(git -C "$repo_root" rev-parse HEAD)" \
+    --env "AXIUSFLOW_AF_XDP_FUZZ_SEED=${AXIUSFLOW_AF_XDP_FUZZ_SEED:-20260802}" \
+    --env "AXIUSFLOW_AF_XDP_FUZZ_ROUNDS=${AXIUSFLOW_AF_XDP_FUZZ_ROUNDS:-64}" \
     --env LIBXDP_BPFFS=/run/xdp-bpffs \
     --env LIBXDP_BPFFS_AUTOMOUNT=1 \
     --env LD_LIBRARY_PATH=/workspace/.cache/linux-dev-root/usr/lib/x86_64-linux-gnu \
     --mount "type=bind,src=$repo_root,dst=/workspace,readonly" \
     --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+    --entrypoint /workspace/tools/af_xdp_conformance_container/run_fuzz.sh \
     "$image"

@@ -4,6 +4,7 @@
 //! copy-mode behavior on a veth pair and never claims zero-copy, hardware, provider, or production
 //! readiness.
 
+use crate::af_xdp_replay::{ethernet_frame, replay_ethernet_frames, require_interface_name};
 use axiusflow_linux_af_xdp_adapter::{AfXdpConfig, AfXdpCopyDriver, COPY_DRIVER_EVIDENCE_ID};
 use axiusflow_testing::{
     ConformanceHarnessError, ConformanceOutcome, deterministic_ingest_corpus,
@@ -16,29 +17,16 @@ use axiusflow_transport::{
     ReceiveBatch,
 };
 use serde::Serialize;
-use std::{
-    env,
-    error::Error,
-    fs::{self, File},
-    io::Write,
-    num::NonZeroUsize,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{env, error::Error, fs, num::NonZeroUsize, path::Path};
 
 const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 const EVIDENCE_SCOPE: &str = "stage_1_af_xdp_copy_conformance";
-const ETHERNET_HEADER_BYTES: usize = 14;
-const AXIUSFLOW_EXPERIMENTAL_ETHERTYPE: [u8; 2] = [0x88, 0xb5];
 const FRAME_COUNT: usize = 64;
 const MAXIMUM_FRAME_BYTES: usize = 2_048;
-const REPLAY_SENDER_SOURCE: &str = include_str!("../send_pcap.py");
 const XSK_RS_VERSION: &str = "0.8.0";
 const XSK_RS_SOURCE_COMMIT: &str = "c0b110cd3b6763fdcfc41996b3cea8c9f259614f";
 const XSK_RS_REGISTRY_CHECKSUM: &str =
     "d1fef46e3505c5055082f52ada0a7f8e5dcaebdbb9eccf8e978c32382c159270";
-static PCAP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize)]
 struct TargetEvidence {
@@ -254,7 +242,7 @@ fn write_success_report(
             production: "not_claimed",
         },
         limitations: [
-            "independent_unsafe_boundary_audit_and_fuzzing_missing",
+            "independent_unsafe_boundary_audit_missing",
             "qualified_host_kernel_matrix_missing",
             "zero_copy_not_verified",
             "nic_driver_firmware_unqualified",
@@ -326,109 +314,11 @@ fn replay_frames(
     transmit_interface: &str,
     frames: &[FixtureFrame],
 ) -> Result<(), ConformanceHarnessError> {
-    let path = temporary_pcap_path();
-    write_pcap(&path, frames).map_err(|error| {
-        context_error(&format!("write replay capture {}", path.display()), error)
-    })?;
-    let sender = temporary_sender_path();
-    fs::write(&sender, REPLAY_SENDER_SOURCE).map_err(|error| {
-        context_error(&format!("write replay sender {}", sender.display()), error)
-    })?;
-    let interpreter = replay_interpreter();
-    let output = Command::new(&interpreter)
-        .arg(&sender)
-        .arg(transmit_interface)
-        .arg(&path)
-        .output()
-        .map_err(|error| {
-            context_error(
-                &format!(
-                    "spawn {} {} {transmit_interface}",
-                    interpreter.display(),
-                    sender.display()
-                ),
-                error,
-            )
-        });
-    let _ = fs::remove_file(&path);
-    let _ = fs::remove_file(&sender);
-    let output = output?;
-    if !output.status.success() {
-        return Err(ConformanceHarnessError::Driver(format!(
-            "AF_PACKET replay failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let successful_packets = stdout
-        .lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("successful_packets=")
-                .and_then(|value| value.trim().parse::<usize>().ok())
-        })
-        .ok_or_else(|| {
-            ConformanceHarnessError::Driver(format!(
-                "AF_PACKET replay did not report a successful packet count: {}",
-                stdout.trim()
-            ))
-        })?;
-    if successful_packets != frames.len() {
-        return Err(ConformanceHarnessError::Driver(format!(
-            "AF_PACKET replay sent {successful_packets} of {} fixture packets: {}",
-            frames.len(),
-            stdout.trim()
-        )));
-    }
-    Ok(())
-}
-
-fn write_pcap(path: &Path, frames: &[FixtureFrame]) -> Result<(), Box<dyn Error>> {
-    let mut file = File::create(path)?;
-    file.write_all(&0xa1b2_c3d4_u32.to_le_bytes())?;
-    file.write_all(&2_u16.to_le_bytes())?;
-    file.write_all(&4_u16.to_le_bytes())?;
-    file.write_all(&0_i32.to_le_bytes())?;
-    file.write_all(&0_u32.to_le_bytes())?;
-    file.write_all(&65_535_u32.to_le_bytes())?;
-    file.write_all(&1_u32.to_le_bytes())?;
-    for (index, frame) in frames.iter().enumerate() {
-        let ethernet = ethernet_frame(&frame.bytes);
-        let length = u32::try_from(ethernet.len())?;
-        file.write_all(&0_u32.to_le_bytes())?;
-        file.write_all(&u32::try_from(index)?.to_le_bytes())?;
-        file.write_all(&length.to_le_bytes())?;
-        file.write_all(&length.to_le_bytes())?;
-        file.write_all(&ethernet)?;
-    }
-    file.flush()?;
-    Ok(())
-}
-
-fn ethernet_frame(payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(ETHERNET_HEADER_BYTES.saturating_add(payload.len()));
-    frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
-    frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    frame.extend_from_slice(&AXIUSFLOW_EXPERIMENTAL_ETHERTYPE);
-    frame.extend_from_slice(payload);
-    frame
-}
-
-fn temporary_pcap_path() -> PathBuf {
-    let sequence = PCAP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    env::temp_dir().join(format!(
-        "axiusflow-af-xdp-{}-{sequence}.pcap",
-        std::process::id()
-    ))
-}
-
-fn temporary_sender_path() -> PathBuf {
-    let sequence = PCAP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    env::temp_dir().join(format!(
-        "axiusflow-af-xdp-send-{}-{sequence}.py",
-        std::process::id()
-    ))
+    let ethernet_frames: Vec<Vec<u8>> = frames
+        .iter()
+        .map(|frame| ethernet_frame(&frame.bytes))
+        .collect();
+    replay_ethernet_frames(transmit_interface, &ethernet_frames)
 }
 
 fn write_report(path: &Path, report: &AfXdpCopyEvidenceReport) -> Result<(), Box<dyn Error>> {
@@ -443,29 +333,4 @@ fn accepted_count(outcomes: &[ConformanceOutcome]) -> usize {
         .iter()
         .filter(|outcome| matches!(outcome, ConformanceOutcome::Accepted(_)))
         .count()
-}
-
-fn require_interface_name(value: &str, role: &str) -> Result<(), Box<dyn Error>> {
-    if value.trim().is_empty() || value.len() > 15 || value.chars().any(char::is_whitespace) {
-        return Err(format!("AF_XDP {role} interface name is invalid").into());
-    }
-    Ok(())
-}
-
-fn context_error(operation: &str, error: impl std::fmt::Display) -> ConformanceHarnessError {
-    ConformanceHarnessError::Driver(format!("failed to {operation}: {error}"))
-}
-
-/// Resolves the replay interpreter without depending on the inherited `PATH`.
-///
-/// The privileged harness runs with a read-only root and a reduced environment, where a
-/// bare `python3` lookup is not guaranteed. Absolute candidates are preferred, and a
-/// `PATH` lookup remains the final fallback.
-fn replay_interpreter() -> PathBuf {
-    const CANDIDATES: [&str; 3] = ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"];
-    CANDIDATES
-        .iter()
-        .map(Path::new)
-        .find(|candidate| candidate.is_file())
-        .map_or_else(|| PathBuf::from("python3"), Path::to_path_buf)
 }
