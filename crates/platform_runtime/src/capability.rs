@@ -54,8 +54,7 @@ impl RuntimeCapabilities {
             credential_vault: native_credential_vault_availability(),
             // `LoopbackRedirectListener` binds an ephemeral loopback port on any std target.
             pkce_loopback_callback: CapabilityAvailability::Available,
-            // No registered-URI-scheme adapter exists yet.
-            registered_uri_callback: CapabilityAvailability::Unavailable,
+            registered_uri_callback: crate::NativeUriSchemeRegistrar::availability(),
             // `SignedUpdateVerifier` verifies manifests and artifacts without OS support.
             signed_updates: CapabilityAvailability::Available,
             // `UpdateRollbackState` tracks the verified predecessor in memory only;
@@ -88,7 +87,7 @@ mod tests {
 
         assert_eq!(
             detected.registered_uri_callback,
-            CapabilityAvailability::Unavailable
+            crate::NativeUriSchemeRegistrar::availability()
         );
         assert_eq!(detected.rollback, CapabilityAvailability::Unavailable);
         assert_eq!(

@@ -14,6 +14,7 @@ mod signed_update;
 #[cfg(test)]
 mod test_fixture;
 mod thread_scheduling;
+mod uri_callback;
 
 pub use capability::{
     CapabilityAvailability, ClientOperatingMode, ClockCapability, RuntimeCapabilities,
@@ -33,4 +34,9 @@ pub use signed_update::{
 };
 pub use thread_scheduling::{
     AffinityTarget, NativeThreadScheduler, ThreadPriorityHint, ThreadSchedulingError,
+};
+pub use uri_callback::{
+    MAXIMUM_APPLICATION_ID_BYTES, MAXIMUM_REDIRECT_BASE_BYTES, MAXIMUM_REDIRECT_RESPONSE_BYTES,
+    MAXIMUM_REDIRECT_URI_BYTES, MAXIMUM_URI_SCHEME_BYTES, NativeUriSchemeRegistrar,
+    RegisteredUriRedirect, UriCallbackError,
 };

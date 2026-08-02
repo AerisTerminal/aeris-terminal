@@ -34,7 +34,7 @@ const PER_CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 /// unbounded threads.
 const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 8;
 /// Largest sanitized authorization-server error code retained for reporting.
-const MAXIMUM_SERVER_ERROR_BYTES: usize = 64;
+pub(crate) const MAXIMUM_SERVER_ERROR_BYTES: usize = 64;
 
 /// Reason a loopback authorization redirect did not yield a usable code.
 #[derive(Debug)]
@@ -121,6 +121,10 @@ impl Error for LoopbackCallbackError {
 pub struct AuthorizationCode(String);
 
 impl AuthorizationCode {
+    pub(crate) fn new(code: String) -> Self {
+        Self(code)
+    }
+
     /// Returns the single-use authorization code.
     #[must_use]
     pub fn value(&self) -> &str {
@@ -416,7 +420,7 @@ fn drain_bounded_headers(
 }
 
 /// Decodes `application/x-www-form-urlencoded` query values.
-fn percent_decode(value: &str) -> String {
+pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -480,7 +484,7 @@ impl Read for DeadlineStream<'_> {
 ///
 /// RFC 6749 section 4.1.2.1 error codes are lowercase ASCII with underscores. Anything
 /// else is dropped so a redirect cannot inject arbitrary text into diagnostics or logs.
-fn sanitize_server_error(value: &str) -> String {
+pub(crate) fn sanitize_server_error(value: &str) -> String {
     value
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
@@ -489,7 +493,7 @@ fn sanitize_server_error(value: &str) -> String {
 }
 
 /// Compares two byte strings without leaking their contents through timing.
-fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
