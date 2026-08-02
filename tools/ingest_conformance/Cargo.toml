@@ -19,6 +19,7 @@ axiusflow_linux_dpdk_adapter = { path = "../../crates/adapters/linux_dpdk" }
 axiusflow_linux_socket_network_adapter = { path = "../../crates/adapters/linux_socket_network" }
 axiusflow_macos_network_adapter = { path = "../../crates/adapters/macos_network" }
 axiusflow_observability = { path = "../../crates/observability" }
+axiusflow_persistence = { path = "../../crates/persistence" }
 axiusflow_portable_network_adapter = { path = "../../crates/adapters/portable_network" }
 axiusflow_realtime = { path = "../../crates/realtime" }
 axiusflow_streaming = { path = "../../crates/streaming" }
@@ -26,6 +27,7 @@ axiusflow_testing = { path = "../../crates/testing" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
 axiusflow_transport = { path = "../../crates/transport" }
 axiusflow_windows_network_adapter = { path = "../../crates/adapters/windows_network" }
+postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

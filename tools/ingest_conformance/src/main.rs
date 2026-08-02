@@ -15,6 +15,7 @@ mod clickhouse_projection;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
+mod postgres_persistence;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod raw_capture;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
@@ -838,6 +839,15 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             port,
             report_path,
         } => run_clickhouse_projections(&host, port, &report_path),
+        evidence_report::EvidenceCommand::PostgresPersistence {
+            host,
+            port,
+            user,
+            password,
+            database,
+            report_path,
+        } => postgres_persistence::run(&host, port, &user, &password, &database, &report_path)
+            .map_err(|error| error.to_string().into()),
         evidence_report::EvidenceCommand::Run { .. }
         | evidence_report::EvidenceCommand::VerifySet { .. } => {
             Err("lane command dispatch reached a non-lane command".into())

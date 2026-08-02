@@ -1,4 +1,21 @@
-//! Persistence contracts for transactional outbox and inbox implementations.
+//! Persistence contracts and `PostgreSQL` implementations for the transactional
+//! outbox and inbox boundaries.
+
+mod errors;
+mod migrations;
+mod postgres_transactions;
+mod review;
+
+pub use errors::PersistenceError;
+pub use migrations::migrate;
+pub use postgres_transactions::{
+    MAXIMUM_OUTBOX_PAYLOAD_BYTES, PendingOutboxRecord, PostgresTransaction, connect_postgres,
+    mark_outbox_published, read_pending_outbox,
+};
+pub use review::{
+    BUILD_REVIEW, CLIENT_DEPENDENCY_SELECTED, LICENSE_REVIEW, MAINTENANCE_REVIEW,
+    MISSING_DURABLE_EVIDENCE, PROVENANCE_REVIEW, SAFETY_REVIEW,
+};
 
 /// A durable event awaiting publication after its owning transaction commits.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -213,6 +213,14 @@ pub enum EvidenceCommand {
         port: u16,
         report_path: PathBuf,
     },
+    PostgresPersistence {
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
+        database: String,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -281,6 +289,9 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             report_path: PathBuf::from(report_path),
         });
     }
+    if argument == OsStr::new("--postgres-persistence") {
+        return postgres_persistence_command(&mut arguments);
+    }
     if argument == OsStr::new("--clickhouse-projections") {
         let host = required_argument(&mut arguments, "host")?;
         let port = required_argument(&mut arguments, "port")?
@@ -335,6 +346,29 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn postgres_persistence_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let host = required_argument(arguments, "host")?;
+    let port = required_argument(arguments, "port")?
+        .to_string_lossy()
+        .parse::<u16>()
+        .map_err(|error| boxed_error(format!("invalid PostgreSQL port: {error}")))?;
+    let user = required_argument(arguments, "user")?;
+    let password = required_argument(arguments, "password")?;
+    let database = required_argument(arguments, "database")?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::PostgresPersistence {
+        host: host.to_string_lossy().into_owned(),
+        port,
+        user: user.to_string_lossy().into_owned(),
+        password: password.to_string_lossy().into_owned(),
+        database: database.to_string_lossy().into_owned(),
+        report_path: PathBuf::from(report_path),
+    })
 }
 
 fn s3_raw_capture_command(
