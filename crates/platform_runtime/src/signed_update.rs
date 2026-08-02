@@ -1,5 +1,11 @@
 //! Signed update verification and anti-downgrade rollback state.
 
+#[cfg(unix)]
+mod activation;
+
+#[cfg(unix)]
+pub use activation::{DurableUpdateActivator, UpdateActivationError};
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
@@ -12,6 +18,8 @@ pub const MAX_UPDATE_ARTIFACT_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;
 
 const UPDATE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
+#[cfg(unix)]
+const ED25519_SIGNATURE_BYTES: usize = 64;
 const SHA256_BYTES: usize = 32;
 
 /// A signature-verified update manifest with bounded artifact metadata.
@@ -23,6 +31,10 @@ pub struct UpdateManifest {
     artifact_sha256: [u8; SHA256_BYTES],
     signing_key_identity: [u8; SHA256_BYTES],
     verifier_binding: [u8; SHA256_BYTES],
+    #[cfg(unix)]
+    signed_json: Vec<u8>,
+    #[cfg(unix)]
+    signature: [u8; ED25519_SIGNATURE_BYTES],
 }
 
 impl UpdateManifest {
@@ -93,6 +105,24 @@ impl SignedUpdateVerifier {
         manifest_json: &[u8],
         signature: &[u8],
     ) -> Result<UpdateManifest, SignedUpdateError> {
+        self.verify_manifest_with_floor(manifest_json, signature, true)
+    }
+
+    #[cfg(unix)]
+    fn verify_persisted_manifest(
+        &self,
+        manifest_json: &[u8],
+        signature: &[u8],
+    ) -> Result<UpdateManifest, SignedUpdateError> {
+        self.verify_manifest_with_floor(manifest_json, signature, false)
+    }
+
+    fn verify_manifest_with_floor(
+        &self,
+        manifest_json: &[u8],
+        signature: &[u8],
+        enforce_floor: bool,
+    ) -> Result<UpdateManifest, SignedUpdateError> {
         if manifest_json.is_empty() || manifest_json.len() > MAX_UPDATE_MANIFEST_BYTES {
             return Err(SignedUpdateError::InvalidManifestSize);
         }
@@ -107,7 +137,10 @@ impl SignedUpdateVerifier {
         if raw.schema_version != UPDATE_MANIFEST_SCHEMA_VERSION {
             return Err(SignedUpdateError::UnsupportedManifestSchema);
         }
-        if raw.release_sequence <= self.minimum_release_sequence {
+        if raw.release_sequence == 0 {
+            return Err(SignedUpdateError::ReleaseSequenceNotIncreasing);
+        }
+        if enforce_floor && raw.release_sequence <= self.minimum_release_sequence {
             return Err(SignedUpdateError::ReleaseSequenceNotIncreasing);
         }
         if !valid_version(&raw.version) {
@@ -130,6 +163,10 @@ impl SignedUpdateVerifier {
             artifact_sha256,
             signing_key_identity: self.signing_key_identity(),
             verifier_binding: self.binding(),
+            #[cfg(unix)]
+            signed_json: manifest_json.to_vec(),
+            #[cfg(unix)]
+            signature: signature.to_bytes(),
         })
     }
 
