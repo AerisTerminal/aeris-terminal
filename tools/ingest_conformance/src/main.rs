@@ -13,6 +13,10 @@ mod af_xdp_replay;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+mod raw_capture;
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+mod redpanda_branch;
 
 use axiusflow_observability::{
     BoundedLatencyRecorder, LatencyBoundary, LatencySample, LatencyTimestampChain,
@@ -763,6 +767,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         evidence_report::EvidenceCommand::DpdkVdevLifecycle { report_path } => {
             return run_dpdk_vdev_lifecycle(&report_path);
         }
+        evidence_report::EvidenceCommand::RedpandaDurableBranch {
+            brokers,
+            report_path,
+        } => {
+            return run_redpanda_durable_branch(&brokers, &report_path);
+        }
+        evidence_report::EvidenceCommand::S3RawCapture {
+            host,
+            port,
+            access_key,
+            secret_key,
+            report_path,
+        } => {
+            return run_s3_raw_capture(&host, port, &access_key, &secret_key, &report_path);
+        }
     };
     let fixture_baseline = run_fixture(axiusflow_portable_network_adapter::fixture_driver(
         deterministic_ingest_corpus(),
@@ -880,4 +899,44 @@ fn run_dpdk_vdev_lifecycle(report_path: &std::path::Path) -> Result<(), Box<dyn 
 fn run_dpdk_vdev_lifecycle(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let _ = report_path;
     Err("DPDK virtual-device lifecycle requires Linux and the dpdk-native feature".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+fn run_redpanda_durable_branch(
+    brokers: &str,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    redpanda_branch::run(brokers, report_path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "redpanda")))]
+fn run_redpanda_durable_branch(
+    brokers: &str,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let _ = (brokers, report_path);
+    Err("Redpanda durable-branch conformance requires Linux and the redpanda feature".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+fn run_s3_raw_capture(
+    host: &str,
+    port: u16,
+    access_key: &str,
+    secret_key: &str,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    raw_capture::run(host, port, access_key, secret_key, report_path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "redpanda")))]
+fn run_s3_raw_capture(
+    host: &str,
+    port: u16,
+    access_key: &str,
+    secret_key: &str,
+    report_path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let _ = (host, port, access_key, secret_key, report_path);
+    Err("raw S3 capture conformance requires Linux and the redpanda feature".into())
 }

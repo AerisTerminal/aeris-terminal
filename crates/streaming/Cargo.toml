@@ -1,0 +1,28 @@
+[package]
+name = "axiusflow_streaming"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+redpanda = ["dep:rdkafka"]
+
+[dependencies]
+axiusflow_protocols = { path = "../protocols" }
+axiusflow_realtime = { path = "../realtime" }
+hmac.workspace = true
+prost.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rdkafka = { workspace = true, optional = true }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

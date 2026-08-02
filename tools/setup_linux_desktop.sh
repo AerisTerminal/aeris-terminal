@@ -48,7 +48,7 @@ EOF
             dpkg-deb --extract "$package" "$sdk_root"
         done
         cat > "$repo_root/.cache/linux-dev-env.sh" <<EOF
-export CFLAGS="\${CFLAGS:-} -I$sdk_root/usr/include"
+export CFLAGS="\${CFLAGS:-} -I$sdk_root/usr/include -I$sdk_root/usr/include/$multiarch"
 export CLANG="$sdk_root/usr/bin/clang-21"
 export PATH="$sdk_root/usr/bin:\$PATH"
 export RUSTFLAGS="\${RUSTFLAGS:-} -L native=$sdk_root/usr/lib/$multiarch"

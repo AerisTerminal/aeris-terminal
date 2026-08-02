@@ -19,6 +19,7 @@ members = [
     "crates/protocols",
     "crates/realtime",
     "crates/security",
+    "crates/streaming",
     "crates/testing",
     "crates/transport",
     "crates/ui/chart_integration",
@@ -56,6 +57,8 @@ wayland-protocols = { version = "=0.32.13", default-features = false, features =
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
 prost = "=0.14.4"
+rdkafka = { version = "=0.39.0", default-features = false, features = ["cmake-build"] }
+hmac = "=0.12.1"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }

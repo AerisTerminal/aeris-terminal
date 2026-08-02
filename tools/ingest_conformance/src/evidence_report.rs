@@ -197,6 +197,17 @@ pub enum EvidenceCommand {
     DpdkVdevLifecycle {
         report_path: PathBuf,
     },
+    RedpandaDurableBranch {
+        brokers: String,
+        report_path: PathBuf,
+    },
+    S3RawCapture {
+        host: String,
+        port: u16,
+        access_key: String,
+        secret_key: String,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -237,12 +248,7 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
         let receive_interface = required_argument(&mut arguments, "receive interface")?;
         let transmit_interface = required_argument(&mut arguments, "transmit interface")?;
         let report_path = required_argument(&mut arguments, "report path")?;
-        if let Some(extra) = arguments.next() {
-            return Err(boxed_error(format!(
-                "unexpected argument: {}",
-                extra.to_string_lossy()
-            )));
-        }
+        reject_extra(&mut arguments)?;
         return Ok(EvidenceCommand::AfXdpCopy {
             receive_interface: receive_interface.to_string_lossy().into_owned(),
             transmit_interface: transmit_interface.to_string_lossy().into_owned(),
@@ -261,12 +267,7 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             .parse::<u32>()
             .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz rounds: {error}")))?;
         let report_path = required_argument(&mut arguments, "report path")?;
-        if let Some(extra) = arguments.next() {
-            return Err(boxed_error(format!(
-                "unexpected argument: {}",
-                extra.to_string_lossy()
-            )));
-        }
+        reject_extra(&mut arguments)?;
         return Ok(EvidenceCommand::AfXdpCopyFuzz {
             receive_interface: receive_interface.to_string_lossy().into_owned(),
             transmit_interface: transmit_interface.to_string_lossy().into_owned(),
@@ -275,14 +276,36 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             report_path: PathBuf::from(report_path),
         });
     }
+    if argument == OsStr::new("--s3-raw-capture") {
+        let host = required_argument(&mut arguments, "host")?;
+        let port = required_argument(&mut arguments, "port")?
+            .to_string_lossy()
+            .parse::<u16>()
+            .map_err(|error| boxed_error(format!("invalid S3 capture port: {error}")))?;
+        let access_key = required_argument(&mut arguments, "access key")?;
+        let secret_key = required_argument(&mut arguments, "secret key")?;
+        let report_path = required_argument(&mut arguments, "report path")?;
+        reject_extra(&mut arguments)?;
+        return Ok(EvidenceCommand::S3RawCapture {
+            host: host.to_string_lossy().into_owned(),
+            port,
+            access_key: access_key.to_string_lossy().into_owned(),
+            secret_key: secret_key.to_string_lossy().into_owned(),
+            report_path: PathBuf::from(report_path),
+        });
+    }
+    if argument == OsStr::new("--redpanda-durable-branch") {
+        let brokers = required_argument(&mut arguments, "bootstrap servers")?;
+        let report_path = required_argument(&mut arguments, "report path")?;
+        reject_extra(&mut arguments)?;
+        return Ok(EvidenceCommand::RedpandaDurableBranch {
+            brokers: brokers.to_string_lossy().into_owned(),
+            report_path: PathBuf::from(report_path),
+        });
+    }
     if argument == OsStr::new("--dpdk-vdev-lifecycle") {
         let report_path = required_argument(&mut arguments, "report path")?;
-        if let Some(extra) = arguments.next() {
-            return Err(boxed_error(format!(
-                "unexpected argument: {}",
-                extra.to_string_lossy()
-            )));
-        }
+        reject_extra(&mut arguments)?;
         return Ok(EvidenceCommand::DpdkVdevLifecycle {
             report_path: PathBuf::from(report_path),
         });
@@ -308,6 +331,18 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn reject_extra(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(extra) = arguments.next() {
+        return Err(boxed_error(format!(
+            "unexpected argument: {}",
+            extra.to_string_lossy()
+        )));
+    }
+    Ok(())
 }
 
 fn required_argument(

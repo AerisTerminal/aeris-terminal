@@ -1,0 +1,127 @@
+name: stage_2_durable_plane
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  redpanda_durable_branch:
+    name: redpanda_durable_branch_single_broker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_vendored_librdkafka_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc pkg-config libcurl4-openssl-dev
+      - name: build_redpanda_conformance
+        run: cargo build --locked --package axiusflow_ingest_conformance --features redpanda
+      - name: actual_redpanda_durable_branch
+        run: tools/run_redpanda_durable_branch.sh
+      - name: verify_redpanda_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_redpanda_durable_branch_evidence_Docker.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_redpanda_durable_branch"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["topic"] == "ci.market.bar.normalized.v1"
+          assert evidence["envelopes_published"] == 64
+          assert evidence["envelopes_delivered"] == 64
+          assert evidence["deliveries_failed"] == 0
+          assert evidence["envelopes_read_back"] == 64
+          assert evidence["client"] == {
+              "crate_name": "rdkafka",
+              "crate_version": "0.39.0",
+              "librdkafka_version": "2.12.1",
+              "idempotent_producer": True,
+              "acks": "all",
+          }
+          assert evidence["behavior"]["publish"] == "passed"
+          assert evidence["behavior"]["delivery_accounting"] == "passed"
+          assert evidence["behavior"]["byte_exact_readback"] == "passed"
+          assert evidence["behavior"]["per_key_ordering"] == "passed"
+          assert evidence["behavior"]["tls"] == "not_exercised"
+          assert evidence["behavior"]["acls"] == "not_exercised"
+          assert evidence["behavior"]["replication"] == "not_exercised"
+          assert evidence["behavior"]["multi_broker_failover"] == "not_exercised"
+          PY
+      - name: retain_redpanda_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_redpanda_durable_branch_evidence_Docker
+          path: .cache/evidence/stage_2_redpanda_durable_branch_evidence_Docker.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves idempotent acks=all envelope publication, delivery accounting, byte-exact read-back, and per-key ordering against one digest-pinned dev Redpanda broker; it does not prove TLS, ACLs, replication, schema governance, or multi-broker failover."
+
+  raw_s3_capture:
+    name: raw_s3_capture_minio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_vendored_librdkafka_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc pkg-config libcurl4-openssl-dev
+      - name: build_redpanda_conformance
+        run: cargo build --locked --package axiusflow_ingest_conformance --features redpanda
+      - name: actual_raw_s3_capture
+        run: tools/run_s3_raw_capture.sh
+      - name: verify_raw_capture_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_raw_s3_capture_evidence_Docker.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_raw_s3_capture"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["bucket"] == "axiusflow-raw-capture"
+          assert evidence["batches_written"] == 4
+          assert evidence["batches_read_back"] == 4
+          assert evidence["behavior"] == {
+              "bucket_ensure": "passed",
+              "object_write": "passed",
+              "byte_exact_readback": "passed",
+              "sha256_integrity": "passed",
+              "sigv4_known_answer": "passed",
+              "tls": "not_exercised",
+              "iam_policy": "not_exercised",
+              "managed_object_store": "not_exercised",
+          }
+          PY
+      - name: retain_raw_capture_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_raw_s3_capture_evidence_Docker
+          path: .cache/evidence/stage_2_raw_s3_capture_evidence_Docker.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves SigV4-signed immutable object write, byte-exact read-back, and SHA-256 integrity against one digest-pinned plaintext MinIO; it does not prove TLS, IAM policy, or managed object-store behavior."
