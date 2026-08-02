@@ -61,7 +61,7 @@ impl RuntimeCapabilities {
             // durable activation and persistence still need per-OS adapters.
             rollback: CapabilityAvailability::Unavailable,
             power_notifications: crate::NativePowerMonitor::availability(),
-            display_timing: CapabilityAvailability::Unavailable,
+            display_timing: crate::NativeDisplayProbe::availability(),
             priority_hints: crate::NativeThreadScheduler::priority_availability(),
             affinity_hints: crate::NativeThreadScheduler::affinity_availability(),
             network_timestamping: ClockCapability::Software,
@@ -94,7 +94,10 @@ mod tests {
             detected.power_notifications,
             crate::NativePowerMonitor::availability()
         );
-        assert_eq!(detected.display_timing, CapabilityAvailability::Unavailable);
+        assert_eq!(
+            detected.display_timing,
+            crate::NativeDisplayProbe::availability()
+        );
         assert_eq!(detected.network_timestamping, ClockCapability::Software);
         assert_eq!(
             detected.priority_hints,

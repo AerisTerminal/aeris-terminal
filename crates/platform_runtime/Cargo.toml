@@ -17,6 +17,8 @@ sha2.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 core_affinity.workspace = true
 thread-priority.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
 zbus.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
