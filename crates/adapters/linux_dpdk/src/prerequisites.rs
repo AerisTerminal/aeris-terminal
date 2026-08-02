@@ -87,7 +87,11 @@ pub fn probe_prerequisites() -> DpdkPrerequisiteReport {
         vfio_driver: evidence_status(vfio_driver_present),
         vfio_control: evidence_status(vfio_control_present),
         pkg_config_metadata: evidence_status(pkg_config_metadata_present),
-        native_dependency: DpdkEvidenceStatus::NotSelected,
+        native_dependency: if crate::NATIVE_DEPENDENCY_SELECTED {
+            DpdkEvidenceStatus::Present
+        } else {
+            DpdkEvidenceStatus::NotSelected
+        },
         software_device: DpdkEvidenceStatus::NotExercised,
         poll_mode_driver: DpdkEvidenceStatus::Unverified,
         missing_evidence: MISSING_NATIVE_EVIDENCE,

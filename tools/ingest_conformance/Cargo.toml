@@ -9,6 +9,7 @@ publish.workspace = true
 [features]
 default = []
 af-xdp-copy = ["axiusflow_linux_af_xdp_adapter/native-copy"]
+dpdk-native = ["axiusflow_linux_dpdk_adapter/native"]
 
 [dependencies]
 axiusflow_linux_af_xdp_adapter = { path = "../../crates/adapters/linux_af_xdp" }

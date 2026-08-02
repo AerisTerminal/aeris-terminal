@@ -6,6 +6,8 @@ pub enum DpdkError {
     FrameLimitUnsupported(usize),
     ReceiveStorageOverflow,
     NativeIntegrationUnavailable,
+    RuntimeVersionMismatch,
+    NativeLifecycleFailed,
 }
 
 impl fmt::Display for DpdkError {

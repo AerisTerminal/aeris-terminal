@@ -118,6 +118,75 @@ jobs:
       - name: evidence_scope
         run: echo "This unprivileged lane proves tuned Linux loopback packet-to-fenced-partition, bounded direct/durable-tap queues, and Origin host preparation plus explicit AF_XDP/DPDK unavailability; it does not prove external durability, Redpanda, AF_XDP copy/zero-copy, DPDK PMD, hardware, provider, renderer, presentation, or latency readiness."
 
+  dpdk_vdev_lifecycle:
+    name: linux_dpdk_virtual_device_eal_lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_exact_pinned_dpdk_packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libdpdk-dev=25.11-2 librte-argparse26=25.11-2 librte-bus-pci26=25.11-2 \
+            librte-bus-platform26=25.11-2 librte-bus-vdev26=25.11-2 librte-eal26=25.11-2 \
+            librte-ethdev26=25.11-2 librte-kvargs26=25.11-2 librte-log26=25.11-2 \
+            librte-mbuf26=25.11-2 librte-mempool-ring26=25.11-2 librte-mempool26=25.11-2 \
+            librte-meter26=25.11-2 librte-net-ring26=25.11-2 librte-net26=25.11-2 \
+            librte-pci26=25.11-2 librte-ring26=25.11-2 librte-telemetry26=25.11-2
+      - name: build_dpdk_native_lifecycle
+        run: cargo build --package axiusflow_ingest_conformance --features dpdk-native
+      - name: actual_dpdk_net_ring_eal_lifecycle
+        run: target/debug/axiusflow_ingest_conformance --dpdk-vdev-lifecycle stage_1_dpdk_vdev_lifecycle_evidence_Linux.json
+      - name: verify_dpdk_vdev_lifecycle_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("stage_1_dpdk_vdev_lifecycle_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_1_dpdk_vdev_lifecycle"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["profile"] == "linux_dpdk"
+          assert evidence["readiness"] == "contract_only"
+          assert evidence["expected_dpdk_version"] == "25.11.0"
+          assert "25.11.0" in evidence["runtime_version"]
+          assert evidence["ports_available"] > 0
+          assert evidence["lifecycle"] == {
+              "eal_init": "passed",
+              "runtime_version_bound": "passed",
+              "virtual_device_enumerated": "passed",
+              "eal_cleanup": "passed",
+              "queue_mbuf_lifecycle": "not_exercised",
+              "poll_mode_receive": "not_exercised",
+          }
+          assert evidence["claims"] == {
+              "poll_mode_active": "not_claimed",
+              "zero_copy": "not_claimed",
+              "hardware": "not_claimed",
+              "provider": "not_claimed",
+              "production": "not_claimed",
+          }
+          PY
+      - name: retain_dpdk_vdev_lifecycle_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_1_dpdk_vdev_lifecycle_evidence_Linux
+          path: stage_1_dpdk_vdev_lifecycle_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves DPDK EAL startup, net_ring virtual-device enumeration, runtime version binding to the exact reviewed 25.11.0 release, and clean teardown without huge pages or PCI; it does not prove queue/mbuf lifecycle, poll-mode receive, hardware, provider, or production readiness."
+
   af_xdp_copy_veth:
     name: linux_af_xdp_generic_copy_veth_conformance
     runs-on: ubuntu-latest

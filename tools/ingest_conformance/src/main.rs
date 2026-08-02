@@ -10,6 +10,8 @@ mod af_xdp_copy;
 mod af_xdp_fuzz;
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
 mod af_xdp_replay;
+#[cfg(all(target_os = "linux", feature = "dpdk-native"))]
+mod dpdk_lifecycle;
 mod evidence_report;
 
 use axiusflow_observability::{
@@ -441,8 +443,12 @@ fn verify_accelerated_activation_gates() -> Result<(), Box<dyn Error>> {
     )?;
     let mut dpdk = axiusflow_linux_dpdk_adapter::DpdkDriver::unavailable(dpdk_config);
     let dpdk_prerequisites = dpdk.prerequisites().clone();
-    if dpdk_prerequisites.native_dependency
-        != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::NotSelected
+    let expected_dpdk_dependency = if axiusflow_linux_dpdk_adapter::NATIVE_DEPENDENCY_SELECTED {
+        axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::Present
+    } else {
+        axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::NotSelected
+    };
+    if dpdk_prerequisites.native_dependency != expected_dpdk_dependency
         || dpdk_prerequisites.software_device
             != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::NotExercised
         || dpdk_prerequisites.poll_mode_driver
@@ -754,6 +760,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &report_path,
             );
         }
+        evidence_report::EvidenceCommand::DpdkVdevLifecycle { report_path } => {
+            return run_dpdk_vdev_lifecycle(&report_path);
+        }
     };
     let fixture_baseline = run_fixture(axiusflow_portable_network_adapter::fixture_driver(
         deterministic_ingest_corpus(),
@@ -860,4 +869,15 @@ fn run_af_xdp_copy_fuzz(
         report_path,
     );
     Err("AF_XDP copy data-path fuzzing requires Linux and the af-xdp-copy feature".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "dpdk-native"))]
+fn run_dpdk_vdev_lifecycle(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    dpdk_lifecycle::run(report_path)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "dpdk-native")))]
+fn run_dpdk_vdev_lifecycle(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let _ = report_path;
+    Err("DPDK virtual-device lifecycle requires Linux and the dpdk-native feature".into())
 }

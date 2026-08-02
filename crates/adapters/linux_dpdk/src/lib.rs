@@ -6,6 +6,10 @@
 mod config;
 mod errors;
 mod fixture;
+#[cfg(all(target_os = "linux", feature = "native"))]
+mod native_lifecycle;
+#[cfg(all(target_os = "linux", feature = "native"))]
+mod native_sys;
 mod prerequisites;
 mod review;
 #[cfg(test)]
@@ -15,6 +19,8 @@ mod unavailable_driver;
 pub use config::DpdkConfig;
 pub use errors::DpdkError;
 pub use fixture::fixture_driver;
+#[cfg(all(target_os = "linux", feature = "native"))]
+pub use native_lifecycle::{EXPECTED_DPDK_VERSION, NativeEalLifecycle, VdevLifecycleReport};
 pub use prerequisites::{DpdkEvidenceStatus, DpdkPrerequisiteReport, probe_prerequisites};
 pub use review::{
     BUILD_REVIEW, CANDIDATE_SURVEY, DEPENDENCY_DECISION, LICENSE_REVIEW, MAINTENANCE_REVIEW,

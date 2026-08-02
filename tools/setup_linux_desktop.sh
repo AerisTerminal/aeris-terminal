@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 desktop_packages=(libxcb-xkb1 libfontconfig1 libfontconfig-dev libfreetype6 libfreetype-dev libxkbcommon0 libxkbcommon-x11-0 libxkbcommon-dev libxkbcommon-x11-dev)
 acceleration_packages=(clang-21 libclang-common-21-dev libelf1t64 libelf-dev libzstd1 libzstd-dev m4 zlib1g zlib1g-dev)
+# Exact-pinned DPDK 25.11 lifecycle libraries; the adapter build rejects any other version.
+dpdk_packages=(libdpdk-dev=25.11-2 librte-argparse26=25.11-2 librte-bus-pci26=25.11-2 librte-bus-platform26=25.11-2 librte-bus-vdev26=25.11-2 librte-eal26=25.11-2 librte-ethdev26=25.11-2 librte-kvargs26=25.11-2 librte-log26=25.11-2 librte-mbuf26=25.11-2 librte-mempool-ring26=25.11-2 librte-mempool26=25.11-2 librte-meter26=25.11-2 librte-net-ring26=25.11-2 librte-net26=25.11-2 librte-pci26=25.11-2 librte-ring26=25.11-2 librte-telemetry26=25.11-2)
 
 case "${1:---system}" in
     --system)
@@ -40,7 +42,7 @@ EOF
         mkdir -p "$download_dir" "$sdk_root"
         (
             cd "$download_dir"
-            apt-get download "${desktop_packages[@]}" "${acceleration_packages[@]}"
+            apt-get download "${desktop_packages[@]}" "${acceleration_packages[@]}" "${dpdk_packages[@]}"
         )
         for package in "$download_dir"/*.deb; do
             dpkg-deb --extract "$package" "$sdk_root"
