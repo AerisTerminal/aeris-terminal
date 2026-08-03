@@ -1,6 +1,6 @@
 # Axiusflow Platform Creation Plan
 
-**Status:** Working implementation and stabilization plan, revision 6 (checkbox-tracked)
+**Status:** Working implementation and stabilization plan, revision 7 (checkbox-tracked)
 **Audience:** Product engineering, platform engineering, security, compliance, data engineering, and technical leadership
 **Primary language:** Rust
 **Supported native operating systems:** Windows, Linux, and macOS
@@ -50,7 +50,8 @@
   - [Stage 2: Connected read-only market data](#stage-2-connected-read-only-market-data)
   - [Stage 3: Durable controlled execution](#stage-3-durable-controlled-execution)
   - [Stage 4: Professional terminal and transport](#stage-4-professional-terminal-and-transport)
-  - [Stage 5: Optional cloud data distribution and venue-adjacent scale](#stage-5-optional-cloud-data-distribution-and-venue-adjacent-scale)
+  - [Stage 5A: Optional cloud data and venue-adjacent scale](#stage-5a-optional-cloud-data-and-venue-adjacent-scale)
+  - [Stage 5B: Optional managed execution](#stage-5b-optional-managed-execution)
 
 **Part IV — Constraints, decisions, and definition of success**
 
@@ -90,6 +91,8 @@ This plan separates stable structural decisions from benchmark-driven runtime ch
 - **Runtime topology and acceleration profiles** evolve only through measured architecture decisions. A transport, queue, allocator, kernel interface, or deployment boundary is never permanent merely because it appeared in the first implementation.
 
 Axiusflow supports Windows, Linux, and macOS as first-class native desktop targets. In the current product phase, each desktop connects directly to the user's entitled Rithmic, CQG, or other approved provider endpoint; Axiusflow does not receive, relay, persist, or redistribute that market data through its cloud. A future Axiusflow cloud market-data service remains a planned option, not a present topology or an implementation assumption. It requires separate provider rights, compliance approval, economics, security design, and measured evidence before activation.
+
+The near-term product is a local-first professional terminal in the same broad category as Sierra Chart, ATAS, and MotiveWave: the user's machine owns provider connectivity, chart state, order-flow processing, and direct broker order routing. That category describes the deployment model, not a claim about another product's internal implementation or relative performance. Axiusflow differentiates through fast measured startup, progressive history hydration, shared local state, smooth frame pacing, correct recovery, and reproducible performance evidence. Funding or infrastructure growth is not a prerequisite for this topology.
 
 The implementation may be delivered in vertical slices, but every slice must fit these contracts. Delivery sequence is not permission to create fake external services, disposable domain models, unbounded queues, a second chart state model, or a new monolithic crate.
 
@@ -249,7 +252,8 @@ Each gate is `not_started`, `in_progress`, `blocked_external`, or `complete`. A 
 | Stage 2 | Connected read-only market data | `in_progress` | The centralized Coinbase/Redpanda/S3/ClickHouse lanes prove reusable reference contracts but are not the chosen production topology. Production now requires direct desktop Rithmic/CQG sessions, provider certification, local rights enforcement, and the Section 16 evidence suite with no Axiusflow cloud market-data hop. |
 | Stage 3 | Durable controlled execution | `not_started` | No OMS, risk, ledger, broker, or reconciliation runtime. |
 | Stage 4 | Professional terminal and transport | `not_started` | Desktop remains a fixture/disconnected path. |
-| Stage 5 | Optional cloud data distribution and venue-adjacent scale | `blocked_external` | Starts only after a commercial/provider-rights decision authorizes Axiusflow to receive and redistribute data; current releases do not depend on it. |
+| Stage 5A | Optional cloud data and venue-adjacent scale | `blocked_external` | Starts only after commercial, provider-data-rights, compliance, funding, security, and measured-benefit decisions authorize the exact data capability; current releases do not depend on it. |
+| Stage 5B | Optional managed execution | `blocked_external` | Starts independently only after broker/provider authorization, regulatory/custody, funding, security, recovery, and measured-benefit decisions authorize the exact execution capability; current releases do not depend on it. |
 
 ---
 
@@ -273,7 +277,7 @@ The platform keeps four logical planes with independent ownership and failure po
 
 1. **Control plane** — Axiusflow identity, application authorization, users, organizations, workspaces, subscriptions, configuration, administration, and support.
 2. **Local real-time data plane** — direct provider connection on the user's device, protocol decoding, sequence validation, normalization, partition-owned latest state, conflation, and local chart/workspace fanout.
-3. **Execution plane** — provider-connected order ingress, authorization evidence, pre-trade risk, durable order intent where required, OMS state transitions, provider dispatch, ledger input, and reconciliation.
+3. **Execution plane** — current desktop-local order ingress, authorization evidence, pre-trade risk, crash-safe local intent, OMS state transitions, direct provider dispatch, ledger input, and reconciliation; any future managed execution is a separately gated topology.
 4. **Optional durable/cloud data plane** — user-owned local replay plus, only in a separately approved future topology, PostgreSQL outbox/inbox, Redpanda, raw capture, S3/Parquet, ClickHouse projections, audit archives, and asynchronous workflows.
 
 In the current phase, raw and normalized market data remain on the user's device unless an explicit provider agreement permits a narrowly defined upload. Control-plane or analytical work must not consume the bounded resources reserved for local real-time data or execution.
@@ -302,6 +306,7 @@ Domain authority and runtime write ownership are distinct:
 - The instrument domain owns internal instrument identity and provider mappings.
 - The workspace domain owns layouts, watchlists, and saved user configuration.
 - The local provider session owns its connection, source sequence, and recoverable market snapshot.
+- The local embedded transactional boundary owns workspace/catalog state and crash-safe desktop OMS/order intent in the current topology.
 - PostgreSQL owns only the authoritative transactional records Axiusflow is approved to host.
 - ClickHouse stores only approved rebuildable projections and owns no financial truth.
 - Redpanda is a future/cloud durability option and is never required for the direct desktop display path.
@@ -446,8 +451,9 @@ References: [RFC 9106 Argon2](https://www.rfc-editor.org/info/rfc9106/), [RFC 76
 ## 4. System topology
 
 ```text
- Rithmic / CQG / approved provider
-      │ user-entitled WSS+Protobuf or certified native SDK
+ Rithmic / CQG / approved provider or broker
+      ▲ user-entitled market data, history, orders, and execution reports
+      │ over certified WSS+Protobuf or native SDK
       ▼
 ┌──────────────── Axiusflow desktop: Windows | Linux | macOS ────────────────┐
 │ OS credential vault → provider session → bounded frame/protobuf decode     │
@@ -455,10 +461,11 @@ References: [RFC 9106 Argon2](https://www.rfc-editor.org/info/rfc9106/), [RFC 76
 │ sequence/gap recovery → canonical local partition → immutable latest state │
 │                                                        ↓                   │
 │ shared model generations → Origin ChartFrame → GPUI → physical display     │
-│                                      │                                    │
-│                    rights-gated bounded local replay                       │
+│        ↕ local workspace/catalog + rights-gated history segment cache      │
+│ input → local risk/OMS → crash-safe intent → direct provider order route   │
 └──────────────────────────────────────┬─────────────────────────────────────┘
-                                       │ app control only; no market-data hop
+                                       │ asynchronous app control/sync only;
+                                       │ no market-data or order-routing hop
                                        ▼
 ┌──────────────────── Current Axiusflow cloud ───────────────────────────────┐
 │ auth, application licensing, signed updates, workspace/configuration       │
@@ -471,7 +478,7 @@ provider redistribution feed → Axiusflow cloud data plane → entitled clients
                              ↘ approved durable/replay/analytics systems
 ```
 
-The current quote-to-pixel path contains no Axiusflow cloud hop. Cloud and clients share versioned contracts and behavior, not market-data buffers, provider credentials, databases, or mutable memory. Existing centralized market-data, Redpanda, S3, ClickHouse, and streaming-gateway work remains reference evidence for the future optional topology; none is a dependency of the direct desktop release.
+The current quote-to-pixel and input-to-provider-dispatch paths contain no Axiusflow cloud hop. Cloud and clients share versioned contracts and behavior, not market-data buffers, provider credentials, order/account payloads, local databases, or mutable memory. Existing centralized market-data, Redpanda, S3, ClickHouse, and streaming-gateway work remains reference evidence for the future optional topology; none is a dependency of the direct desktop release.
 
 ---
 
@@ -497,11 +504,13 @@ A logical context may be a crate, module, database schema owner, or extracted se
 
 The current production topology deliberately minimizes custody of provider data:
 
-1. `desktop` — owns the user's provider session, local normalization, latest state, chart fanout, and any rights-permitted encrypted local replay.
+1. `desktop` — owns the user's provider session, local normalization, latest state, chart fanout, rights-permitted history cache, local risk/OMS and crash-safe order intent, direct provider order routing, and reconciliation.
 2. `auth_service` — first-party Rust authentication for Axiusflow accounts, application sessions, token issuance, and JWKS publication; it never receives provider credentials.
-3. `control_plane` — Axiusflow licensing, users, workspaces, instruments, subscriptions, configuration, signed-update metadata, administration, and support; it never proxies market data.
+3. `control_plane` — Axiusflow licensing, users, asynchronous workspace/configuration sync, instruments, subscriptions, signed-update metadata, administration, and support; it never proxies market data or order traffic and is not on the application startup critical path.
 
 `edge_stream_gateway`, `market_data_plane`, market-data Redpanda/S3/ClickHouse paths, and cloud `data_worker` are future optional deployables. Existing implementations are retained as conformance/reference work, not activated production dependencies. A future cloud data service must pass a new architecture decision covering provider redistribution rights, end-user entitlement enforcement, data residency, retention/deletion, operational cost, and a measured advantage over direct provider delivery.
+
+The desktop opens from a locally durable workspace/configuration snapshot. Cloud sync and licensing refresh run asynchronously under a documented offline grace/expiry policy; a slow or unavailable control plane cannot produce a blank terminal, delay local chart hydration, or interrupt an already authorized direct provider session before that policy expires.
 
 A context is extracted when evidence shows at least one of:
 
@@ -688,6 +697,44 @@ A user selecting `low_latency` receives a warning about power and thermal cost. 
 
 The browser uses Rust/WASM for product logic and Origin WebGPU with Canvas2D fallback. It shares Protobuf contracts, domain value types, formatting, entitlement behavior, chart semantics, indicator formulas, and workspace serialization. It does not need to share every native presentation component.
 
+### 6.7 Local-first startup, history, and cache architecture
+
+Startup is a staged local pipeline, not one blocking initialization transaction:
+
+```text
+process launch
+  ├→ validate local schema/manifest → paint shell and last workspace
+  ├→ open OS vault → connect/authenticate provider → restore subscriptions
+  ├→ hydrate visible chart range from local cache or provider history
+  ├→ prepare visible indicators and render generations
+  └→ refresh license/config and sync workspace asynchronously
+
+cached history → provider snapshot/backfill → contiguous live sequence
+```
+
+The shell, docking layout, watchlists, last symbols, and locally cached visible chart ranges load without waiting for Axiusflow cloud, provider authentication, every indicator, every historical range, or every workspace tab. Provider connection, cache validation, visible-range hydration, and non-visible workspace preparation run concurrently on bounded background workers. The GPUI thread performs no filesystem, network, decompression, decode, database, or indicator computation.
+
+The desktop storage hierarchy is:
+
+1. **Transactional local catalog** — workspace metadata, schema and migration state, cache keys/manifests, provider recovery checkpoints, and local OMS/order-intent state. SQLite WAL is the leading baseline because it provides transactional recovery and cross-platform deployment, but adoption requires an exact-pinned dependency review, a version containing the applicable WAL-reset fix, crash/disk-full tests, and benchmark evidence against at least one pure-Rust embedded alternative.
+2. **Immutable history segments** — checksummed versioned files for bars, ticks, and depth only where provider rights permit retention. A segment key includes provider, account/entitlement class, instrument, data kind, resolution, time range, session calendar, adjustment policy, source/schema revision, and checksum. Atomic catalog publication makes a partially written segment unreachable.
+3. **Bounded memory cache** — current books/bars, visible and adjacent chart ranges, decoded shared model generations, and render-ready level-of-detail data under explicit item and byte budgets. Multiple charts reuse these generations instead of decoding or calculating the same history independently.
+
+Market history does not become transactional metadata rows merely for convenience, and the catalog does not become an unbounded tick store. Hot/visible segments may remain uncompressed when measurement favors page-cache locality; colder eligible segments may use independently decompressible blocks after measuring load time, size, CPU, and memory. The exact segment codec and index are chosen by a recorded spike, not by fashion.
+
+Hydration is useful-work-first:
+
+- paint validated cached pixels or data for the visible time range first, then adjacent ranges, wider history, non-visible tabs, and expensive indicators;
+- request only missing or invalid provider ranges through a bounded, deduplicating scheduler that respects provider pagination, concurrency, and rate limits;
+- build coarse-to-fine or level-of-detail render data so pan, zoom, symbol, and timeframe changes produce a useful frame before full-resolution background work finishes;
+- incrementally update indicators from versioned inputs and cache only rights-permitted derived results keyed by formula/engine version and parameters;
+- atomically hand off cached history to provider snapshot/backfill and then live sequence with no gap, duplicate, flicker, timestamp regression, or partial visible mutation;
+- never restore stale DOM, account, position, or live quote state as current. Cached market data is visibly marked with source and freshness until verified handoff; order entry remains fail-closed until provider account/risk/order reconciliation completes.
+
+Cache invalidation is explicit. Entitlement loss, account change, schema migration, corporate action, session-calendar or adjustment-policy revision, provider correction/source change, checksum failure, or secure-deletion request invalidates the affected scope. Corruption quarantines only affected segments and falls back to provider re-fetch or live-only behavior. If retention is forbidden, the same runtime operates with an ephemeral memory cache and provider history; it never hides persistence or uploads data to compensate.
+
+Redis, PostgreSQL, ClickHouse, S3, Redpanda, and every intermediary Axiusflow-managed or unrelated backend are forbidden in desktop startup, workspace restoration, chart hydration, live display, and the order data path. Direct order routing has two required external data-path dependencies: the certified provider/broker endpoint is the destination, and the independently user-controlled recovery target certified under Section 9.2 supplies the declared durability acknowledgement. Where the provider cannot enforce an exclusive trading session, the opaque Axiusflow lease service defined in Section 9.1 is a permitted conditional authorization dependency: a fresh lease plus provider-enforced account-wide risk may enable trading, but the service never receives or forwards order, account, position, fill, or market-data payloads and is never queried per order. None of these dependencies is an Axiusflow market-data/order gateway, and neither the recovery target nor lease service is a market-data dependency.
+
 ---
 
 ## 7. Real-time market-data plane
@@ -785,6 +832,8 @@ If the local model or UI is slow:
 
 Raw source capture is disabled by default. When the provider agreement and user policy permit it, capture runs on an independently bounded path to encrypted local segments with retention and secure deletion. Failure to capture is observable and creates an explicit local evidence gap. It cannot block the decoder indefinitely or be silently represented as complete history. Cloud upload and S3 capture are future-cloud capabilities and remain disabled.
 
+Each provider profile declares separate cache rights and capabilities for bars, ticks, market depth, derived data, order/account evidence, maximum lookback, pagination, correction behavior, rate limits, retention, export, and secure deletion. Cache eligibility is checked before every persistent dataset class, not inferred from the ability to display it. Account and entitlement scopes cannot share segments unless the provider contract explicitly permits it. Data whose storage right is revoked, forbidden, or retention-expired follows the provider's required secure-deletion policy and is never quarantined. Quarantine is reserved for corrupt data whose retention rights remain valid. The runtime re-fetches permitted provider history or runs live-only rather than silently retaining prohibited data.
+
 Quality checks include sequence gaps, timestamp regression, invalid scales, crossed/locked policy, impossible OHLC relationships, duplicate event IDs, venue/session mismatch, corporate-action discontinuity, and provider divergence.
 
 ### 7.7 Deterministic bars and derived data
@@ -854,28 +903,41 @@ Redpanda is not used for request/reply, pre-trade risk RPC, or client subscripti
 
 ## 9. Execution plane
 
-### 9.1 Execution cell
+### 9.1 Current desktop execution cell
 
-An execution cell owns a stable set of broker accounts in one home region. It colocates hot-path modules while preserving logical contracts:
+In the current product phase, one desktop-local execution cell owns each active provider account session. It colocates hot-path modules while preserving logical contracts and routes directly to the provider or broker API:
 
 ```text
-client command
-  → dedicated regional execution ingress
-  → token and policy evidence validation
+desktop input or strategy command
+  → local session, entitlement, and policy validation
   → idempotency and instrument validation
-  → pre-trade risk using immutable versioned snapshots
-  → OMS durable intent transaction
-  → broker/venue gateway dispatch
+  → local pre-trade risk using reconciled immutable snapshots
+  → crash-safe local OMS intent transaction with stable client order ID
+  → direct Rithmic/CQG/broker session dispatch
   → provider acknowledgement or unknown outcome
-  → normalized execution event
-  → ledger and reconciliation
+  → normalized local OMS/ledger event
+  → provider order, fill, position, balance, and risk reconciliation
 ```
 
-The general control plane is not synchronously queried per order. Authorization policy, account permissions, instrument rules, positions, buying power, limits, and market-health inputs are preloaded as bounded versioned snapshots. Missing, expired, or stale required state fails closed.
+The Axiusflow control plane is not synchronously queried per order and never receives the order, account, position, or fill payload in this topology. Provider credentials stay in the OS vault. Authorization policy, account permissions, instrument rules, positions, buying power, limits, and market-health inputs are preloaded as bounded versioned snapshots and reconciled against the provider before trading is enabled. Missing, expired, stale, or divergent required state fails closed.
+
+One account has one active Axiusflow trading session generation only when an external authority can enforce that claim. The preferred authority is a provider-enforced exclusive trading session. If the provider permits concurrent sessions, an Axiusflow control service may issue a short-lived opaque cross-device lease containing only a pseudonymous account binding, device/session identity, epoch, and expiry—never provider credentials, orders, positions, fills, or market data. That lease coordinates Axiusflow instances only; it does not pretend to fence unrelated provider applications. Live ordering in this concurrent-session profile additionally requires provider/broker-enforced account-wide hard risk limits that cover every writer and remain authoritative when local snapshots race external activity. Without provider exclusivity or that provider-enforced risk boundary, the account remains market-data/read-only even when an Axiusflow lease is fresh. A control outage never blocks shell or chart startup, but may block new orders or lease renewal where the provider supplies no equivalent fence.
+
+Reconnect, restart, suspend/resume, or a second device cannot blindly replay a command: stable client order IDs, provider correlation IDs, authoritative session generations, explicit retry classes, unknown-outcome states, and provider reconciliation determine whether dispatch is safe. Orders entered through other provider applications are external authoritative activity and must be incorporated by reconciliation rather than rejected as impossible. Server-side provider risk and order types remain authoritative where contracted; local controls add protection but never claim to replace them.
 
 ### 9.2 Durable acceptance definition
 
-`accepted` means the normalized intent and provider client order ID are durably committed to the authoritative trading PostgreSQL boundary and can be recovered after process loss. It does not mean the provider or venue accepted the order.
+`accepted_locally` means the normalized intent and provider client order ID are committed to the crash-safe local transactional boundary and can be recovered after process loss. In a live profile it is not reported until the independent recovery commit below is also acknowledged. It does not mean the provider or venue accepted the order. The user-facing state distinguishes local acceptance, dispatch, provider acknowledgement, execution, and reconciliation without collapsing them into one optimistic status.
+
+Live trading also requires a declared device-loss recovery profile. Every journal record has a stable ID and explicit `prepared` and `committed` phases. For a new intent, the runtime commits a local prepared record, appends and syncs the encrypted prepared record to the independent user-controlled target, commits the local `accepted_locally` transition, then appends and syncs the independent commit marker. Only after that final acknowledgement may the UI report local acceptance or the runtime dispatch to the provider. A crash after independent prepare but before local acceptance leaves a remote prepare that restore treats as never accepted and never dispatches. A crash after local acceptance but before the independent commit marker cannot have dispatched; same-device recovery may idempotently finish or abort the marker, while total-device-loss recovery treats the uncommitted remote prepare as not accepted. Every decision is resolved by stable record/client-order IDs plus provider reconciliation, never by guessing from timing.
+
+The encrypted record contains the intent, policy/risk revision, OMS transition, provider correlation, and ledger input. During normal operation and while certified degraded capacity remains, every subsequent authoritative acknowledgement, rejection, fill, cancel/replace transition, provider correction, reconciliation result, and ledger input uses the same ordered prepared/committed journal semantics in both boundaries. Provider-authoritative observations always update the live in-memory OMS, ledger, position, and risk views immediately, including while recovery acknowledgement is pending, so safety decisions never use deliberately stale exposure. Until the independent commit marker is acknowledged, the transition is marked `recovery_pending` and is not represented as independently recoverable or published into downstream stores that claim recovery durability. The UI may show that explicit durability degradation but cannot mislabel the observation as durably recovered state.
+
+The target may be a separately mounted user-owned volume, NAS, or customer-controlled storage integration only after its atomicity, ordering, idempotency, sync, availability, credential, and restore semantics pass certification; a second file on the same failure domain is not sufficient. Encryption uses a user-held recovery secret that survives loss of the device vault. Axiusflow services never receive the plaintext, ciphertext, storage credential, or object location.
+
+The `local_only` recovery profile is limited to paper/shadow operation because total device loss can erase intent and policy evidence that provider history cannot reconstruct. If the independent recovery target becomes unavailable, new live orders and exposure-increasing replaces fail closed. The recovery-degraded safety path permits only provider-enforced atomic reduce-only/close-position actions and cancellation of specifically identified exposure-increasing orders under provider semantics; locally inferred reductions, blanket cancellation that may remove protective orders, and ordinary liquidation orders fail closed. Permitted actions and existing provider activity are recorded in the local journal and bounded ordered recovery backlog while the UI declares recovery degradation. At a certified high-water mark, the runtime invokes only a provider-certified kill/flatten control whose documented semantics cannot increase exposure or silently remove required protection, rejects every other command, and consumes a preallocated emergency journal reserve sized and tested against the maximum outstanding activity allowed by the provider risk boundary. If the provider lacks those atomic safety semantics, the degraded profile disables all local order submission and relies on the provider's independent risk controls and supported external emergency channel. If the reserve nevertheless exhausts or an unbounded provider stream makes such sizing impossible, the runtime continues applying provider truth to live risk, records an explicit evidence-discontinuity marker if durable local space remains, disables local order submission, and requires provider-history reconciliation before trading resumes; it does not claim a complete local transition history. A provider profile that cannot bound outstanding activity or supply authoritative recovery history cannot certify recovery-degraded live trading. Total device loss during any acknowledged recovery outage creates an explicit non-zero-RPO evidence gap and is outside the certified zero-loss profile.
+
+Restore verifies the encrypted journal and rebuilds local OMS/ledger state from committed records only. Orphan prepares are retained as evidence but never become accepted orders or dispatch commands; provider history determines whether a provider-authoritative lifecycle event must be reconstructed. Restore then reconciles every order, fill, position, balance, and provider-side risk control before live trading resumes. Backup/restore rights, retention, secure deletion, key-loss behavior, and jurisdiction are explicit; no zero-RPO claim exists until pre-dispatch intent, continuous lifecycle replication, every prepared/committed crash boundary, recovery-target outage handling, and destructive restore drills prove it.
 
 States distinguish at least:
 
@@ -889,15 +951,15 @@ submitted → replace_pending → acknowledged
 
 A timeout never becomes `rejected` without provider evidence.
 
-### 9.3 Low-latency execution without correctness loss
+### 9.3 Low-latency direct execution without correctness loss
 
-- Hot-path modules run in one execution deployable or on the same dedicated host until evidence requires extraction.
-- Prepared statements, warm connections, bounded pools, and prevalidated immutable snapshots remove avoidable work.
+- Hot-path modules run inside the desktop execution runtime; no Axiusflow network hop is added before provider dispatch.
+- Prepared statements, a warm provider session, preallocated command storage, and prevalidated immutable snapshots remove avoidable work.
 - Provider dispatch begins immediately after the required durable commit.
-- Transactional outbox publication is asynchronous to response and provider dispatch.
-- Venue-adjacent gateways are deployed for professional routes where commercial access permits.
+- Analytics, cloud sync, notification, and optional audit export are asynchronous to provider dispatch.
+- Provider-native server-side brackets, OCOs, trailing stops, and risk controls are preferred when their documented semantics protect the user across desktop disconnects.
 - Retail aggregation adapters are never marketed as institutional low-latency execution.
-- A future alternative durable journal requires a separate decision proving replication, fencing, recovery, PostgreSQL convergence, and audit semantics. Send-before-durable is not an optimization option.
+- The local transactional store and journal mode are selected only after crash, corruption, disk-full, fsync, recovery, and latency evidence. Send-before-durable is not an optimization option.
 
 ### 9.4 OMS, ledger, and reconciliation
 
@@ -907,10 +969,11 @@ Reconciliation independently compares internal orders, fills, positions, cash, f
 
 ### 9.5 Execution tiers
 
-- **Regional durable execution:** cloud-region cell, correctness-first, intended for professional terminal order flow.
-- **Venue-adjacent execution:** dedicated Linux host near provider/venue infrastructure, pinned resources, direct certified adapter, and separately measured latency.
+- **Direct desktop execution:** current product; the user's device routes through the certified provider/broker API with local durable intent and reconciliation.
+- **Provider-hosted controls:** provider-side risk and server-side order features used under their documented contract; no Axiusflow infrastructure required.
+- **Future managed or venue-adjacent execution:** optional dedicated infrastructure considered only after broker/provider authorization, regulatory and custody review, sustainable funding, security design, disaster recovery, and measured user benefit.
 
-Axiusflow does not claim that an internet-connected desktop is an HFT colocation engine. The same order contract can route to a venue-adjacent cell without changing the client domain.
+Axiusflow does not claim that an internet-connected desktop is an HFT colocation engine. The provider and WAN dominate external latency, while Axiusflow owns and measures local input-to-durable-intent, durable-intent-to-provider-write, callback-to-model, and presentation boundaries. A future execution topology may reuse the same OMS contract but cannot become a dependency of the direct desktop product without a separate governing decision.
 
 ---
 
@@ -918,9 +981,9 @@ Axiusflow does not claim that an internet-connected desktop is an HFT colocation
 
 ### 10.1 Edge and control responsibilities
 
-The public edge handles TLS, request limits, JWT verification, session/device context, request IDs, deadlines, protocol negotiation, idempotency headers, rate limits, and coarse routing. Professional streaming and execution may use dedicated regional ingress after the same identity and policy evidence has been established.
+The public edge handles TLS, request limits, JWT verification, session/device context, request IDs, deadlines, protocol negotiation, idempotency headers, rate limits, and coarse routing. The current direct-provider desktop has no Axiusflow streaming or execution ingress. Dedicated regional ingress for professional streaming or managed execution may be introduced only after the applicable future Stage 5 product gate passes and the same identity and policy evidence has been established.
 
-The control plane owns users, organizations, teams, workspaces, watchlists, subscriptions, instrument reference data, feature policy, exports, and administration. Large imports/exports are object-store jobs.
+The control plane owns users, organizations, teams, subscriptions, instrument reference data, feature policy, exports, administration, the synchronized copy of workspaces/watchlists/configuration, and—only where a provider lacks exclusive sessions—opaque short-lived Axiusflow trading-session leases. A lease carries no provider credential or trading payload and is acquired outside the per-order path. The desktop owns the locally durable startup copy and can restore it without a control-plane round trip. Conflict-aware cloud sync is asynchronous and bounded. Large imports/exports are object-store jobs.
 
 ### 10.2 Authorization
 
@@ -942,11 +1005,11 @@ The native terminal uses the system browser with PKCE and a protected loopback o
 
 ## 11. Durable data plane
 
-This section specifies the future optional cloud-data topology and Axiusflow-owned transactional events. It is not part of the current direct desktop market-data path. Market-data topics, capture, and projections remain disabled until provider rights and the cloud-data architecture gate explicitly authorize them.
+This section specifies the future optional cloud-data topology and Axiusflow-owned transactional events for separately approved future capabilities. It is not part of the current direct desktop data or order paths. Market-data topics, capture, and projections remain disabled until Stage 5A explicitly authorizes them; managed order, execution, ledger, and position events remain disabled until Stage 5B explicitly authorizes them. Approval of either event family does not enable the other.
 
 ### 11.1 Redpanda role
 
-When the optional cloud-data topology is approved, Redpanda is its general durable event backbone. It provides partitioned retention, schema-governed events, replay, asynchronous workflows, and projection input. It is not:
+When an optional Stage 5 capability is approved, Redpanda may be its durable event backbone only for the event families authorized by that capability's gate. Stage 5A may enable licensed cloud market-data families; Stage 5B may independently enable managed order, execution, ledger, and position families. Topics, credentials, ACLs, retention, quotas, and preferably clusters are isolated by capability so one approval cannot leak payloads into the other. The backbone provides partitioned retention, schema-governed events, replay, asynchronous workflows, and projection input. It is not:
 
 - the direct tick-to-client barrier;
 - request/reply transport;
@@ -973,7 +1036,9 @@ Topics are not created per symbol or user.
 
 ### 11.3 Partition and delivery semantics
 
-Partition keys reflect correctness:
+These cloud partition contracts apply only to event families whose owning future product gate has passed. Market-source partitions require approval of the optional cloud-data product; order, execution, ledger, and position partitions require approval of future managed execution. The current direct-provider desktop does not publish those payloads to Axiusflow cloud. Workspace and entitlement events remain limited to the asynchronous product/control plane.
+
+When enabled, partition keys reflect correctness:
 
 | Event family | Partition key |
 |---|---|
@@ -988,7 +1053,7 @@ PostgreSQL state changes use a transactional outbox. Consumers with database eff
 
 ### 11.4 PostgreSQL
 
-Separate identity, product, and trading PostgreSQL ownership boundaries provide access and failure isolation. The OMS and ledger may use explicitly owned schemas in the trading cluster and shared transactions only for documented financial invariants.
+Identity and product PostgreSQL ownership boundaries support the current asynchronous control plane. A trading PostgreSQL cluster does not exist in the direct-provider desktop topology and may be introduced only after the future managed-execution gate passes. In that separately approved topology, identity, product, and trading ownership boundaries provide access and failure isolation; the managed OMS and ledger may use explicitly owned schemas in the trading cluster and shared transactions only for documented financial invariants.
 
 Clusters require encryption, private networking, TLS, bounded pooling, query deadlines, backups, point-in-time recovery, tested restore, and cross-region disaster-recovery policy.
 
@@ -1041,9 +1106,10 @@ Broker data is not assumed redistributable, uploadable, or retainable. Direct-to
 ### 14.1 General topology
 
 - The user's desktop and provider endpoint form the current market-data path; no Axiusflow cloud host is in that loop.
+- The user's desktop and provider/broker endpoint form the current order path; no Axiusflow cloud host is in that loop.
 - Axiusflow cloud infrastructure runs only approved control-plane and ordinary product services during this phase.
-- Provider credentials and raw/normalized market data are excluded from cloud logs, traces, crash reports, object storage, queues, and analytics.
-- Future streaming gateways, feed handlers, Redpanda, S3, ClickHouse, and dedicated hosts remain disabled until the cloud-data architecture gate passes.
+- Provider credentials, raw/normalized market data, orders, account state, positions, and fills are excluded from cloud logs, traces, crash reports, object storage, queues, and analytics unless a later separately authorized capability explicitly changes one payload class.
+- Future streaming gateways, feed handlers, market-data Redpanda families, S3, ClickHouse, and associated dedicated hosts remain disabled until the Stage 5A cloud-data gate passes. Managed-execution Redpanda families and execution hosts remain independently disabled until the Stage 5B execution gate passes.
 - A future cloud topology may use managed compute, dedicated hosts, or colocation only after rights and measurement select them; Kubernetes is never placed in an innermost latency loop merely for consistency.
 
 ### 14.2 Consumer performance profiles
@@ -1064,13 +1130,13 @@ Local stage measurements use one process monotonic clock. Provider/exchange time
 
 Cross-host latency is not calculated by subtracting unsynchronized wall clocks. Reports include clock source, synchronization method, maximum observed offset, and uncertainty.
 
-### 14.4 Multi-region ownership
+### 14.4 Future optional multi-region ownership
 
-Each trading account has one home execution region and one active execution owner. Reads and product APIs may be globally active; order and ledger writes are routed to the owner. Disaster recovery promotes ownership through a fenced epoch and requires provider reconnection plus reconciliation before unrestricted trading resumes.
+The current desktop topology has no Axiusflow home execution region. If managed execution is separately authorized later, each trading account has one home execution region and one active execution owner. Reads and product APIs may be globally active; order and ledger writes are routed to the owner. Disaster recovery promotes ownership through a fenced epoch and requires provider reconnection plus reconciliation before unrestricted trading resumes.
 
 ### 14.5 Infrastructure as code
 
-Terraform and reviewed versioned configuration define networking, IAM, KMS, databases, Redpanda, ClickHouse connectivity, host profiles, DNS, and disaster recovery. Production profile changes require a plan, policy checks, benchmark comparison, rollback, and audit evidence.
+Terraform and reviewed versioned configuration define the current control-plane infrastructure. Networking, IAM, KMS, databases, Redpanda, ClickHouse connectivity, host profiles, DNS, and disaster recovery for optional future data or execution services are added only after their governing gate passes. Production profile changes require a plan, policy checks, benchmark comparison, rollback, and audit evidence.
 
 ---
 
@@ -1162,7 +1228,7 @@ present_timestamp_if_measurable
 
 Only timestamps in the same proven clock domain are subtracted. Provider/exchange timestamps are reported separately with their documented meaning, clock source, precision, and uncertainty. Order measurements additionally include input capture, command creation, local authorization/risk, durable boundary if applicable, provider write/callback, provider acknowledgement, normalized execution, and client presentation.
 
-### 16.3 Challenge targets
+### 16.3 Real-time challenge targets
 
 These are local architecture challenges, not production claims. They exclude unknown provider and internet transit and are invalid without the named workload and hardware profile.
 
@@ -1184,17 +1250,36 @@ Desktop presentation gates:
 - A 60 Hz fallback remains supported but is not the flagship performance claim.
 - Multi-chart, order-book, scanner, and active-order workloads are tested together, not only as isolated charts.
 
-Execution challenge targets:
+Direct desktop execution challenge targets:
 
-| Boundary | Regional cell p99 | Dedicated professional cell p99 |
+| Boundary | Balanced p99 | Low-latency p99 |
 |---|---:|---:|
-| execution ingress → completed risk decision | ≤ 1 ms | ≤ 500 µs |
-| execution ingress → durable order acceptance | ≤ 5 ms | ≤ 2 ms |
-| durable acceptance → provider dispatch | ≤ 1 ms | ≤ 500 µs |
+| local command ready → completed local risk decision | ≤ 1 ms | ≤ 500 µs |
+| local command ready → crash-safe local acceptance | ≤ 5 ms | ≤ 2 ms |
+| local acceptance → provider transport write | ≤ 1 ms | ≤ 500 µs |
 
-These order targets exclude client WAN and provider response but include all required internal correctness work. If PostgreSQL durability cannot satisfy a target on the declared topology, the target fails; correctness is not weakened to make the number pass.
+These order targets exclude provider/WAN response but include all required local correctness work, including the independent user-controlled recovery acknowledgement in a live profile. If the selected embedded transactional and recovery boundaries cannot satisfy a target on the declared hardware/profile, the target fails; correctness is not weakened to make the number pass.
 
-### 16.4 WAN, provider, and physical limits
+### 16.4 Startup, hydration, and interaction challenges
+
+Startup performance is a first-class release gate. These are challenge targets, not claims, and must be reported separately for cold OS-cache, warm OS-cache, empty application cache, populated application cache, cache migration, one quarantined/corrupt segment, offline provider, slow provider, and unavailable Axiusflow control plane.
+
+| Boundary | Initial challenge on named reference hardware |
+|---|---:|
+| process launch → first painted shell | warm p95 ≤ 250 ms; cold p95 ≤ 750 ms |
+| process launch → restored workspace interactive | warm p95 ≤ 500 ms; cold p95 ≤ 1.5 s |
+| process launch → cached visible chart useful frame | warm p95 ≤ 750 ms; cold p95 ≤ 2 s |
+| symbol/timeframe switch → useful frame from cache | p95 ≤ 100 ms |
+| pan/zoom input → stable useful frame | p99 within one available refresh interval |
+| provider authentication start → authenticated | measured separately; no universal target without provider evidence |
+| visible-range history request → useful frame | measured by provider/cache profile and requested range |
+| cached/backfill state → verified live handoff | zero gaps, duplicates, regressions, flicker, or partial visible mutation |
+
+The shell challenge excludes operating-system process launch outside Axiusflow control only when that exclusion is stated. A useful frame contains correctly scaled, source/freshness-labelled data for the visible range; an empty canvas, spinner, skeleton, or stale DOM is not a pass. “Faster than” another product is publishable only for the same named device, OS, product version, workspace, dataset/provider state, network condition, boundary, and repeatable procedure.
+
+Startup reports include p50/p95/p99, five-run variance, CPU time, peak RSS, allocations, bytes read and decompressed, disk I/O, provider requests/bytes, cache hit ratios, migration/recovery work, indicator work, frame misses, and time spent on the GPUI thread. The release fails if startup requires the control cloud, blocks the GPUI thread on I/O/decode, scans all history before painting, loads every hidden tab eagerly, uses unbounded memory, displays unlabelled stale data, or enables order entry before provider reconciliation.
+
+### 16.5 WAN, provider, and physical limits
 
 No universal quote-to-pixel or click-to-venue number is published across arbitrary internet paths. End-to-end reports separate:
 
@@ -1204,7 +1289,7 @@ exchange/provider processing + internet transit + local processing + display sch
 
 The first two terms cannot be isolated from an ordinary managed API unless the provider supplies documented synchronized timestamps. Live reports therefore publish provider timestamp age, local processing, presentation, provider round-trip where measurable, endpoint/region, client location, network type, RTT/loss observations, and display refresh as separate values. No subtraction of unsynchronized wall clocks is presented as one-way latency.
 
-### 16.5 Tail and overload gates
+### 16.6 Tail and overload gates
 
 A release gate includes p99.9 and maximum behavior under:
 
@@ -1218,20 +1303,23 @@ A release gate includes p99.9 and maximum behavior under:
 - snapshot storms;
 - provider reconnect and resubscription;
 - permitted local-recorder slowdown and disk-full behavior;
-- telemetry enabled at production settings.
+- telemetry enabled at production settings;
+- cold/warm startup, empty/populated/corrupt caches, schema migration, huge workspaces, rapid symbol/timeframe switching, and aggressive pan/zoom;
+- provider-history throttling, partial ranges, control-cloud outage, and cache-disabled operation where retention rights forbid persistence.
 
 There is no pass if an ordered or authoritative event is silently lost, a queue becomes unbounded, canonical state diverges, memory grows without a declared bound, the GPUI thread performs network/decode work, or recovery requires an unexplained state guess. Replaceable quote conflation is counted and reported rather than described as packet loss.
 
-### 16.6 Benchmark profiles
+### 16.7 Benchmark profiles
 
 Every result records OS/kernel, CPU topology, power and thermal policy, memory, NIC/Wi-Fi and driver, GPU/driver, display resolution/refresh/DPI, provider interface, endpoint/region if known, transport/TLS/compression, RTT/loss observations, build flags, exact commit and lockfile digest, dataset/provenance, burst distribution, instrument/depth distribution, subscriptions, charts, sample count, histogram/percentile method, queue high-water marks, allocations, copied bytes, CPU time, memory high-water mark, gaps, conflation, reconnects, and frame misses.
 
-The evidence suite has four distinct lanes:
+The evidence suite has five distinct lanes:
 
 1. **Deterministic local replay** — repeatable correctness and controlled-load comparison with scheduled-arrival timestamps.
 2. **Authorized live observation** — real provider behavior without pretending the arrival rate or WAN is controlled.
 3. **Windowed presentation** — real GPUI submission and platform presentation timing; flagship claims use external camera/photodiode evidence when platform callbacks are insufficient.
 4. **Endurance and recovery** — at least one full session including reconnect, suspend/resume, network change, thermal equilibrium, and bounded-memory evidence.
+5. **Startup and local hydration** — cold/warm/empty/corrupt/offline matrices, visible-range-first history, live handoff, workspace restoration, symbol/timeframe changes, pan/zoom, and indicator readiness on named low-, mid-, and flagship hardware profiles.
 
 A publishable p99.9 requires at least 100,000 relevant samples; smaller runs label the percentile exploratory. Release comparisons use at least five measured runs after a declared warm-up, retain per-run and aggregate results, and report variance rather than selecting the best run. The benchmark definition and regression threshold are committed before collecting the candidate result. Unless a stricter profile overrides it, a change fails performance review when the confidence-supported regression exceeds 5% at p99 or 10% at p99.9, or when correctness, gaps, memory, CPU/power, thermal stability, reconnect time, or presentation loss worsens materially.
 
@@ -1248,8 +1336,9 @@ Operational telemetry includes:
 - local session generation, reconnect duration, and stale-session rejection;
 - market gaps, quality flags, conflation, resnapshot, downgrade, and disconnect rates;
 - local rights-gated capture continuity, retention state, and evidence gaps;
-- outbox age, retry count, and oldest unpublished record;
-- database pool saturation, commit latency, and slow queries;
+- local catalog/cache hit ratio, segment quarantine, migration, bytes read/decompressed, and visible-range hydration timing;
+- local order-intent commit latency, recovery, unknown-outcome, and reconciliation state;
+- future-cloud outbox age, database saturation, and slow-query metrics only when those approved deployables are active;
 - provider round-trip, unknown outcomes, invalid OMS transitions, and reconciliation breaks;
 - entitlement denials and revocation propagation;
 - client decode, model, Origin build, GPUI submission, and presentation timing;
@@ -1267,11 +1356,11 @@ Raw quotes, DOM, account values, orders, credentials, provider tokens, instrumen
 - Desktop installers and updates are signed; macOS is notarized where required; update manifests are independently signed and anti-downgrade protected.
 - Dependencies are exact-pinned with reviewed lockfiles, SBOMs, provenance, vulnerability review, and license policy.
 - Protocol decoders, state transitions, native-SDK boundaries, and untrusted payloads are fuzzed.
-- Identity, provider, local partition, credential-vault, reconnect, network-change, and desktop resource-exhaustion exercises are required now; Redpanda, ClickHouse, S3, and cloud partition/region exercises become required only for the future cloud-data topology.
+- Identity, provider, local partition, credential-vault, reconnect, network-change, and desktop resource-exhaustion exercises are required now. Stage 5A activates Redpanda, ClickHouse, S3, and cloud partition/region exercises for its data infrastructure; Stage 5B independently activates Redpanda, transactional-database, outbox/inbox, execution-owner fencing, region-failover, and reconciliation exercises for its managed-execution infrastructure.
 - Analytics, reports, or notifications cannot block execution.
 - Missing risk or authoritative persistence fails live trading safely.
 
-Disaster recovery restores authoritative state and explains every in-flight order. It does not claim zero RPO/RTO without measured proof.
+Disaster recovery restores authoritative state and explains every in-flight order within its declared profile. Live desktop trading requires the independently controlled encrypted recovery journal from Section 9.2; a same-device `local_only` store is paper/shadow only. No zero RPO/RTO claim exists without measured pre-dispatch durability and destructive restore proof.
 
 ---
 
@@ -1314,6 +1403,7 @@ Windows, Linux, and macOS run the same:
 - duplicate intent and callback handling;
 - timeout/unknown-outcome recovery;
 - crash between durable commit and provider dispatch;
+- process or total-device loss at every local/independent prepared/committed boundary and after acknowledgement/fill/cancel/replace/correction transitions, continuous independent-journal ordering, recovery-target outage, bounded backlog, and destructive restore;
 - kill-switch and stale-risk-snapshot drills;
 - daily reconciliation before broader live access.
 
@@ -1403,7 +1493,7 @@ Exit criteria: the same applicable provider-message/replay corpus produces equiv
 
 Deliver:
 
-Revision 6 changes the target production topology. Completed centralized items below remain valid implementation evidence, but labels such as “in production,” “client,” “durable branch,” or “gateway” describe the exercised reference vertical, not an authorization to route production user market data through Axiusflow cloud services.
+Revision 7 defines the target production topology. Completed centralized items below remain valid implementation evidence, but labels such as “in production,” “client,” “durable branch,” or “gateway” describe the exercised reference vertical, not an authorization to route production user market data through Axiusflow cloud services.
 
 - [x] `S2-01` first legally authorized live provider adapters using the best currently affordable managed, sandbox, delayed, or real-time source available under its terms — status: `done` (the first authorized provider is Coinbase Advanced Trade public market data — free, keyless for public channels, US-safe — recorded as entitlement class `crypto_public_realtime` with venue provenance on every event. `crates/adapters/coinbase_market` subscribes to `heartbeats` and `market_trades` over TLS with bounded configuration, validates `sequence_num` continuity with an explicit gap outcome instead of silent continuation, deduplicates the snapshot/update trade overlap in a bounded window, and decodes prices and sizes to exact mantissa+scale fixed point with no float round-trip, covered by ten first-party tests including the documented protocol messages and timestamp parsing. The live lane `--coinbase-live` connected to the real endpoint on 2026-08-03 and collected 247 BTC-USD/ETH-USD trades in 20 s with 20 heartbeats, zero sequence gaps, zero malformed messages, and a byte-exact sample trade, writing schema-v1 evidence at honest scope (single venue, public rate limits, no Level 2, no backfill). The vertical is now proven end to end: `services/market_data_plane` backfills 300 one-minute candles per product over HTTPS (chunked-transfer aware), aggregates live trades into deterministic minute bars — merging the still-open backfilled minute instead of duplicating it — and serves clients a bounded snapshot plus live delta bars in the exact binary market-bar protocol over one-product-per-connection WebSockets with overload disconnects instead of unbounded buffering. `tools/run_live_data_plane.sh` proves the full path: 298–299 snapshot bars at sequences 1–N followed by a live aggregated delta bar at N+1 with valid OHLC, increasing timestamps, and `coinbase` provenance on every event. The desktop's `AXIUSFLOW_LIVE_ENDPOINT` mode connects the terminal to the plane and renders live bars for a sustained 20-second window; the fixture worker's transport-neutral decoder and bounded client model are reused unchanged with the plane's `usd`/`base` convention and subscription identity. Two real defects were found and fixed in the vertical: a seconds-vs-minutes unit mismatch that silently classified every trade as late, and a duplicate current-minute bar that broke timestamp monotonicity. Entitlement class `crypto_public_realtime` and single-venue, public-rate-limit, plaintext-client-edge limitations are recorded in schema-v1 evidence; production deployment remains under `S2-02`)
 - [ ] `S2-02` production direct-desktop provider runtime using WSS/TLS or a certified native SDK, with credentials confined to the OS vault and no Axiusflow cloud market-data hop — status: `not_started`
@@ -1423,27 +1513,34 @@ Revision 6 changes the target production topology. Completed centralized items b
 - [ ] `S2-16` direct Rithmic Protocol API adapter: WSS/TLS plus generated Protobuf, bounded heartbeat/session lifecycle, snapshots/deltas, sequence and gap recovery, provider timestamps with documented clock meaning, order/execution message separation, and Rithmic conformance evidence — status: `blocked_external` (requires the dev kit, protocol files, test credentials, certification cases, and a usable market-data test environment)
 - [ ] `S2-17` direct CQG Web API adapter: WSS/TLS plus generated Protobuf, bounded logon/ping/subscription lifecycle, snapshot/delta/DOM recovery, collapsing detection, provider timestamps, and CQG conformance evidence — status: `blocked_external` (requires commercial access, protocol package, test credentials, certification cases, and confirmed rights)
 - [ ] `S2-18` optional Rithmic R|API+ feasibility lane behind an isolated C ABI shim or process boundary, including supported compiler/runtime packaging, callback lifetime safety, reconnect semantics, canonical equivalence with Protocol API, and measured end-to-end comparison before selection — status: `blocked_external` (requires the C++ dev kit and redistribution/runtime terms)
-- [ ] `S2-19` desktop-local provider runtime: OS-vault credentials, provider session generation/fencing, bounded semantic queues, shared immutable model state, rights-gated encrypted local replay, redacted diagnostics, suspend/resume and network-change recovery, and no provider payload or credential upload — status: `not_started`
-- [ ] `S2-20` verifiable performance evidence suite from Section 16: deterministic scheduled-arrival replay, authorized live observation, windowed presentation, endurance/recovery, raw-result checksums, five-run variance, 100,000-sample publishable p99.9, and cross-platform regression gates — status: `not_started`
+- [ ] `S2-19` desktop-local provider runtime: OS-vault credentials, provider session generation/fencing, bounded semantic queues, shared immutable model state, rights-gated encrypted local history/replay, visible-range-first hydration, deterministic cache/backfill/live handoff, redacted diagnostics, suspend/resume and network-change recovery, and no provider payload or credential upload — status: `not_started`
+- [ ] `S2-20` verifiable performance evidence suite from Section 16: deterministic scheduled-arrival replay, authorized live observation, windowed presentation, startup/local hydration, endurance/recovery, raw-result checksums, five-run variance, 100,000-sample publishable p99.9, and cross-platform regression gates — status: `not_started`
 - [ ] `S2-21` prove cloud-data absence in the shipping topology: network integration tests and release inspection show that market data and provider credentials flow only between the user device and provider endpoints; cloud telemetry and services receive neither payload class — status: `not_started`
+- [ ] `S2-22` embedded desktop storage spike and architecture decision: compare exact-pinned SQLite WAL with at least one pure-Rust transactional candidate; test workspace/catalog and local OMS workloads, crash recovery, corruption, disk full, migration, fsync latency, packaging, security, and maintenance; select the transactional catalog separately from the immutable history-segment codec — status: `not_started`
+- [ ] `S2-23` rights-aware local history store: atomic checksummed segment publication, provider/account/entitlement isolation, bounded catalog, encryption/retention/secure deletion, targeted quarantine, schema/calendar/adjustment/correction invalidation, and provider re-fetch or live-only fallback — status: `not_started`
+- [ ] `S2-24` provider history capability adapters and bounded request scheduler: bars/ticks/depth matrix, lookback, pagination, rate limits, request deduplication/cancellation, visible-range priority, adjacent prefetch, and deterministic snapshot/backfill/live sequence handoff — status: `not_started`
+- [ ] `S2-25` startup and history correctness suite: cold/warm/empty/populated/corrupt/migrated/offline/control-cloud-down matrices, shared multi-chart cache, zero gap/duplicate/flicker handoff, bounded memory/I/O, and no GPUI-thread storage/network/decode work — status: `not_started`
 - [ ] `S2-GATE` exit criteria met — status: `not_started`
 
-Exit criteria: direct Rithmic and/or CQG user-device sessions pass provider certification plus sustained, burst, gap, reconnect, slow-model, presentation, endurance, and semantic-equivalence gates on every supported operating system; credentials stay in the OS vault; raw and normalized provider data do not traverse Axiusflow cloud; local recording is rights-gated; delayed or sandbox data is never represented as live-trading evidence; every displayed event retains provenance; and every public performance statement is reproducible from a checksummed Section 16 artifact.
+Exit criteria: direct Rithmic and/or CQG user-device sessions pass provider certification plus sustained, burst, gap, reconnect, slow-model, presentation, startup/hydration, endurance, and semantic-equivalence gates on every supported operating system; credentials stay in the OS vault; raw and normalized provider data do not traverse Axiusflow cloud; local caching/recording is rights-gated; cold/warm/corrupt/offline histories recover without stale-truth ambiguity; cached/backfill/live handoff has no gap, duplicate, or flicker; delayed or sandbox data is never represented as live-trading evidence; every displayed event retains provenance; and every public performance statement is reproducible from a checksummed Section 16 artifact.
 
 ### Stage 3: Durable controlled execution
 
 Deliver:
 
-- [ ] `S3-01` execution cell — status: `not_started`
+- [ ] `S3-01` desktop-local execution cell with one authoritatively fenced Axiusflow provider account session and no Axiusflow order-routing hop; require provider exclusivity, or both a short-lived opaque cross-device lease and provider-enforced account-wide hard risk across every writer, otherwise remain read-only — status: `not_started`
 - [ ] `S3-02` immutable policy and risk snapshots — status: `not_started`
-- [ ] `S3-03` OMS state machine and durable order intent — status: `not_started`
+- [ ] `S3-03` local OMS state machine, stable client order IDs, and crash-safe transactional order intent — status: `not_started`
 - [ ] `S3-04` pre-trade risk engine and kill switches — status: `not_started`
-- [ ] `S3-05` broker adapter and provider dispatch — status: `not_started`
-- [ ] `S3-06` transactional outbox publication — status: `not_started`
-- [ ] `S3-07` portfolio ledger input and immutable journal — status: `not_started`
-- [ ] `S3-08` reconciliation runtime — status: `not_started`
+- [ ] `S3-05` direct Rithmic/CQG/broker order adapter and provider dispatch — status: `not_started`
+- [ ] `S3-07` rights-permitted local portfolio ledger input and immutable journal — status: `not_started`
+- [ ] `S3-08` restart/reconnect provider reconciliation for orders, fills, positions, balances, and risk state — status: `not_started`
 - [ ] `S3-09` paper, shadow, restricted canary, then limited live trading progression — status: `not_started`
-- [ ] `S3-GATE` exit criteria met: every crash, timeout, duplicate callback, and unknown-outcome scenario converges to an explainable reconciled state while meeting the regional execution budget — status: `not_started`
+- [ ] `S3-10` encrypted device-loss recovery profile: independently controlled durability target, user-held recovery key, two-boundary prepared/committed protocol with pre-dispatch intent acknowledgement, ordered acknowledged replication of every authoritative execution/reconciliation/ledger transition, orphan-prepare rules, bounded outage backlog with a calculated emergency reserve and explicit evidence-discontinuity behavior, corruption/key-loss/retention/secure-deletion rules, and destructive restore plus provider-reconciliation drills; `local_only` remains paper/shadow — status: `not_started`
+- [ ] `S3-11` explicit retry classes, unknown-outcome recovery, and server-side order-feature integration — status: `not_started`
+- [ ] `S3-GATE` exit criteria met: provider-exclusive and provider-risk-bounded Axiusflow-leased multi-device cases, external provider-application activity, process and total-device loss, recovery-target outage through emergency-reserve exhaustion, destructive restore, every timeout, duplicate callback, stale session, lease expiry, and unknown outcome converge to an explainable provider-reconciled state while meeting the direct desktop execution budget and sending no order/account payload through Axiusflow cloud — status: `not_started`
+
+Retired identifier, preserved for history and excluded from Stage 3 deliverables and gate completion: `S3-06` transactional outbox publication — status: `superseded` by `S5-08` because the current direct desktop execution path publishes no order/account payload to Axiusflow cloud.
 
 ### Stage 4: Professional terminal and transport
 
@@ -1456,11 +1553,14 @@ Deliver:
 - [ ] `S4-05` certified direct-provider WSS/native profile across the release OS matrix — status: `not_started`
 - [ ] `S4-06` balanced and low-latency local modes with measured power, thermal, memory, frame-pacing, and recovery behavior — status: `not_started`
 - [ ] `S4-07` professional direct broker and FIX routes — status: `not_started`
-- [ ] `S4-GATE` professional terminal and transport gates met — status: `not_started`
+- [ ] `S4-08` instant local shell/workspace restoration with asynchronous control sync and documented offline grace/expiry behavior — status: `not_started`
+- [ ] `S4-09` progressive visible-range-first chart/indicator hydration, shared history generations, render level-of-detail, adjacent prefetch, and responsive symbol/timeframe/pan/zoom behavior — status: `not_started`
+- [ ] `S4-10` Section 16.4 startup and interaction certification on named low-, mid-, and flagship hardware across Windows, Linux, and macOS — status: `not_started`
+- [ ] `S4-GATE` professional terminal and transport gates met, including useful local UI before external readiness, certified startup/hydration/interaction targets, smooth flagship workloads, bounded resource use, and fail-closed trading state — status: `not_started`
 
-### Stage 5: Optional cloud data distribution and venue-adjacent scale
+### Stage 5A: Optional cloud data and venue-adjacent scale
 
-This stage is intentionally unavailable to the initial product. It begins only after Axiusflow has a signed provider agreement permitting server-side receipt and redistribution, a compliance and data-residency decision, viable economics, and an approved architecture record. Direct desktop delivery remains supported even if the cloud option later ships.
+This stage is intentionally unavailable to the initial product. A cloud-data capability begins only after Axiusflow has a signed provider agreement permitting server-side receipt and redistribution, a compliance and data-residency decision, viable economics, and an approved architecture record. Direct desktop data delivery remains supported even if this option later ships.
 
 Deliver:
 
@@ -1470,9 +1570,19 @@ Deliver:
 - [ ] `S5-04` benchmark cloud delivery against direct provider delivery on named user locations and workloads; publish provider/WAN, server processing, client processing, presentation, gaps, and availability separately — status: `blocked_external`
 - [ ] `S5-05` decide from profiles whether any raw/multicast feed is bottlenecked by tuned kernel sockets; only then create a new decision for AF_XDP, DPDK, Onload, or provider-native acceleration — status: `blocked_external`
 - [ ] `S5-06` optional certified QUIC/WebTransport client delivery, multi-provider arbitration, and regional expansion without removing the direct-provider fallback — status: `blocked_external`
-- [ ] `S5-GATE` cloud data ships only when rights, compliance, security, cost, correctness, availability, and measured user benefit all pass without weakening the direct desktop path — status: `blocked_external`
+- [ ] `S5-GATE` optional cloud data ships only when its rights, compliance, security, funding/cost, correctness, availability, recovery, and measured user benefit all pass without weakening the direct desktop data path — status: `blocked_external`
 
-No date or product dependency is attached to this stage. “Planned” means the contracts avoid preventing it; it does not mean Axiusflow currently receives or may legally redistribute provider data.
+### Stage 5B: Optional managed execution
+
+This independent stage is intentionally unavailable to the initial product. It begins only after broker/provider authorization, a regulatory and custody decision, viable funding, approved security and recovery designs, and measured evidence that an Axiusflow order hop benefits the user. Direct desktop order routing remains supported even if this option later ships.
+
+Deliver:
+
+- [ ] `S5-07` separate managed-execution decision for any Axiusflow order/account hop: broker/provider authorization, regulatory/custody analysis, threat model, durable authority, tenant isolation, disaster recovery, reconciliation, cost/funding, and measured benefit over direct desktop routing — status: `blocked_external`
+- [ ] `S5-08` transactional outbox publication for managed order/account events, implemented only after `S5-07` authorizes the exact payload classes and topology — status: `blocked_external`
+- [ ] `S5-EXEC-GATE` optional managed execution ships only when its authorization, compliance/custody, security, funding/cost, correctness, availability, recovery, and measured user benefit all pass without weakening direct desktop order routing — status: `blocked_external`
+
+No date or current-product dependency is attached to either Stage 5 capability. “Planned” means the contracts avoid preventing it; it does not mean Axiusflow currently receives or may legally redistribute provider data or route user orders.
 
 ---
 
@@ -1505,6 +1615,13 @@ No date or product dependency is attached to this stage. “Planned” means the
 25. Treating a multi-thousand-line `lib.rs`, `main.rs`, `mod.rs`, `utils.rs`, or fixture file as the permanent home for unrelated runtime, protocol, state-machine, platform, and test responsibilities.
 26. Performing a blind repository-wide file split without first stabilizing behavior, mapping ownership, preserving public APIs, and validating each crate incrementally.
 27. Introducing any first-party JavaScript or TypeScript runtime—Node.js, Bun, or Deno—into a deployable, especially at the authentication boundary. A runtime's implementation language does not exempt it: what matters is the TypeScript source and npm dependency graph it brings inside the security perimeter.
+28. Waiting for control-cloud availability, provider login, complete history, every indicator, or every hidden workspace tab before painting an interactive local shell.
+29. Treating cached quotes, DOM, account state, or positions as live truth after restart, or enabling order entry before provider reconciliation.
+30. Scanning or rebuilding an entire local history store for every launch, chart, symbol change, timeframe change, pan, or zoom.
+31. Putting Redis, PostgreSQL, ClickHouse, S3, Redpanda, or another network dependency in desktop startup, chart hydration, live display, or direct order routing.
+32. Routing, storing, logging, or retransmitting user orders, account state, positions, or fills through Axiusflow cloud before a separate execution/custody/compliance architecture gate permits the exact payload class.
+33. Claiming safe live trading across devices or applications without provider-enforced exclusivity, or without both a fresh opaque Axiusflow cross-device lease and provider-enforced account-wide hard risk covering every writer; local process generations alone do not provide distributed fencing.
+34. Enabling live order dispatch with the only intent/OMS/ledger evidence on one device; same-device durability is not total-device-loss recovery.
 
 ---
 
@@ -1516,6 +1633,7 @@ No date or product dependency is attached to this stage. “Planned” means the
 | Authentication authority | First-party Rust `auth_service`; Node.js, Bun, and Deno are all excluded |
 | Native desktop operating systems | Windows, Linux, and macOS |
 | Current market-data topology | User device connects directly to the user's entitled provider; Axiusflow cloud is not in the market-data path |
+| Current order topology | User device commits crash-safe local intent and routes directly through the certified provider/broker session; Axiusflow cloud is not in the order path |
 | Portable client baseline | Provider-certified WSS/TLS plus Protobuf over evented OS networking |
 | Preferred optional provider transport | Certified native SDK only after canonical equivalence and end-to-end measurement |
 | Consumer acceleration | Bounded queues, off-UI decode/model workers, storage reuse, shared immutable generations, frame-aligned conflation, and measured OS/runtime tuning; no AF_XDP or DPDK |
@@ -1528,15 +1646,19 @@ No date or product dependency is attached to this stage. “Planned” means the
 | Domain dependency direction | Domain/application remain GPUI-, provider-, transport-, cloud-, and OS-free |
 | Operational planes | Control, real-time data, execution, and durable data |
 | Market display path | Direct provider session → desktop-local canonical state → bounded local fanout; optional licensed local recording is never inline |
-| Runtime ordering | Fenced single writer per ordered partition |
-| Initial deployment model | Desktop plus minimal auth/control services; no cloud market-data gateway |
+| Startup path | Local validated shell/workspace first; provider connection, visible history, indicators, hidden tabs, licensing refresh, and cloud sync proceed concurrently behind bounded workers |
+| Desktop transactional store | Exact-pinned embedded database selected by crash/corruption/disk-full/migration and latency evidence; SQLite WAL is the leading baseline, not an unreviewed commitment |
+| Live order recovery | Pre-dispatch intent requires independent acknowledgement before dispatch; during normal/zero-loss operation every later authoritative lifecycle/ledger transition is encrypted, ordered, synced, and independently acknowledged, while a declared target outage uses the bounded local backlog, emergency reserve, and explicit evidence-gap behavior in Section 9.2 without blocking safety actions; no order/account plaintext, ciphertext, credential, or location enters Axiusflow services; `local_only` is paper/shadow only |
+| Desktop market cache | Rights-aware immutable checksummed history segments plus a bounded in-memory visible-range/shared-generation cache; stale live state never becomes truth |
+| Runtime ordering | Fenced single writer per ordered partition within an enforceable authority scope; live cross-device/concurrent-session trading requires provider exclusivity, or both an opaque Axiusflow lease and provider-enforced account-wide hard risk covering every writer |
+| Initial deployment model | Local-first desktop plus minimal asynchronous auth/control services; no cloud market-data or order gateway |
 | Durable event backbone | Redpanda only for approved future cloud/Axiusflow-owned events, never RPC or an inline display barrier |
-| Authoritative transactions | PostgreSQL with outbox/inbox |
-| Analytics | ClickHouse rebuildable projections |
-| Historical/raw data | S3 and Parquet |
-| Ephemeral cache | Redis, never authoritative |
-| Client delivery semantics | Reliable snapshots/events plus optional loss-tolerant datagrams by semantic class |
-| Execution | Durable intent before provider dispatch; home-region execution cell |
+| Cloud authoritative transactions | PostgreSQL with outbox/inbox for approved cloud-owned state only |
+| Future cloud analytics | ClickHouse rebuildable projections only after the cloud-data gate |
+| Future cloud historical/raw data | S3 and Parquet only after the cloud-data gate |
+| Future cloud ephemeral cache | Redis, never authoritative and never a desktop dependency |
+| Future cloud client delivery | Reliable snapshots/events plus optional loss-tolerant datagrams by semantic class; disabled for the direct-provider product |
+| Execution | Crash-safe local intent before direct provider dispatch; future managed/venue-adjacent execution requires a separate gate |
 | Financial numerics | Checked fixed-point/integer domain types |
 | Strategy isolation | Capability-restricted WebAssembly |
 | Performance evidence | Boundary- and clock-qualified, checksummed, five-run hardware/profile evidence with publishable p99.9 only at ≥100,000 samples plus overload and recovery gates |
@@ -1553,7 +1675,7 @@ The architecture is functioning as intended when:
 3. A normalized event reaches desktop-local latest state and chart fanout without any Axiusflow cloud or disk acknowledgement; optional licensed local recording remains observable and independently bounded.
 4. Every local ordered partition has one writer and stale session generations/epochs are rejected.
 5. Slow UI consumers, local-recorder failure, and control-cloud outages cannot create unbounded memory or corrupt local market state.
-6. Every accepted order has durable intent, deterministic state history, raw provider evidence, and reconciliation result.
+6. Every accepted live order has crash-safe local intent, pre-dispatch independently recoverable encrypted evidence, provider-exclusive or provider-risk-bounded leased session evidence, provider correlation, explicit recovery-durability/gap status for every observed transition, and a reconciliation result without an Axiusflow cloud routing or storage hop.
 7. Every portfolio metric traces to immutable ledger inputs and a versioned policy.
 8. Every displayed market value retains source, sequence, quality, entitlement, and correction provenance.
 9. Origin owns chart state once and the same frame contract renders through supported backends.
@@ -1564,15 +1686,17 @@ The architecture is functioning as intended when:
 14. Provider and Axiusflow entitlements/rights are enforced at connection, local storage, export, replay, alert, and algorithmic boundaries; cloud receipt remains impossible until separately approved.
 15. The initial platform remains operationally understandable; extraction follows evidence instead of fashion.
 16. Every performance statement identifies its exact boundaries and clock domains, retains a reproducible checksummed artifact, reports tails and variance, and never converts provider timestamp age or component timing into a false end-to-end claim.
-16. Current implementation claims, runtime readiness, configuration, and evidence agree; fixtures and probes are never presented as production capability.
-17. Large crates expose readable `lib.rs` façades and cohesive internal modules with one discoverable owner for every decoder, state machine, queue, platform resource, and fixture family.
-18. New features extend the correct module boundary rather than recreating monolithic root files.
+17. Current implementation claims, runtime readiness, configuration, and evidence agree; fixtures and probes are never presented as production capability.
+18. Large crates expose readable `lib.rs` façades and cohesive internal modules with one discoverable owner for every decoder, state machine, queue, platform resource, and fixture family.
+19. New features extend the correct module boundary rather than recreating monolithic root files.
+20. The terminal paints a validated local shell and workspace without waiting for control cloud, provider login, complete history, indicators, or hidden tabs; visible data hydrates first and hands off to live state without gaps, duplicates, flicker, or stale-truth ambiguity.
+21. Cold/warm startup, workspace restoration, visible-chart readiness, symbol/timeframe changes, pan/zoom, cache recovery, and offline/control-outage behavior pass named cross-platform evidence gates with bounded CPU, memory, I/O, and provider requests.
 
 ---
 
 ## 24. Research, source, and licensing note
 
-This revision was checked against official or primary material for [Rithmic API interfaces](https://www.rithmic.com/apis), [CQG Web API](https://partners.cqg.com/api-resources/web-api), [Linux AF_XDP](https://docs.kernel.org/next/networking/af_xdp.html), [Linux PTP clocks](https://docs.kernel.org/driver-api/ptp.html), historical [DPDK Linux deployment](https://doc.dpdk.org/guides/linux_gsg/index.html), [Windows IOCP](https://learn.microsoft.com/en-us/windows/win32/fileio/i-o-completion-ports), [Windows RIO](https://learn.microsoft.com/en-us/windows/win32/winsock/riorqueue), [Apple Network.framework](https://developer.apple.com/videos/play/wwdc2018/715/), [QUIC](https://www.rfc-editor.org/info/rfc9000/), [QUIC DATAGRAM](https://www.rfc-editor.org/info/rfc9221/), and [GPUI cross-platform product availability](https://zed.dev/blog/gpui-2-on-preview).
+This revision was checked against official or primary material for [Rithmic API interfaces](https://www.rithmic.com/apis), [CQG Web API](https://partners.cqg.com/api-resources/web-api), [SQLite WAL](https://www.sqlite.org/wal.html), [Linux AF_XDP](https://docs.kernel.org/next/networking/af_xdp.html), [Linux PTP clocks](https://docs.kernel.org/driver-api/ptp.html), historical [DPDK Linux deployment](https://doc.dpdk.org/guides/linux_gsg/index.html), [Windows IOCP](https://learn.microsoft.com/en-us/windows/win32/fileio/i-o-completion-ports), [Windows RIO](https://learn.microsoft.com/en-us/windows/win32/winsock/riorqueue), [Apple Network.framework](https://developer.apple.com/videos/play/wwdc2018/715/), [QUIC](https://www.rfc-editor.org/info/rfc9000/), [QUIC DATAGRAM](https://www.rfc-editor.org/info/rfc9221/), and [GPUI cross-platform product availability](https://zed.dev/blog/gpui-2-on-preview).
 
 External capabilities are architecture inputs, not evidence that Axiusflow has implemented or benchmarked them. Exact dependency/library selection requires compatibility, security, license, maintenance, and performance evaluation at implementation time. Commercial availability, market-data rights, broker behavior, and regulatory responsibility require direct agreements and legal review.
 
