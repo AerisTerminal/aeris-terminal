@@ -145,6 +145,14 @@ fn exercise(
                 continue;
             }
             Ok(_) => continue,
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
             Err(error) => return Err(error.to_string().into()),
         };
         for projected in decoder.push(&frame)? {

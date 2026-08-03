@@ -2,26 +2,35 @@
 //!
 //! One supervised Coinbase session per product feeds the aggregator; a
 //! sequence gap reconnects and resnapshots against the provider while the
-//! plane's own downstream sequence never regresses. Clients receive a bounded
-//! snapshot followed by live delta bars in the same binary market-bar protocol
-//! the desktop already decodes. Overloaded clients are disconnected, never
-//! buffered without bound.
+//! plane's own downstream sequence never regresses. Every completed bar is
+//! accepted by its product's fenced partition and published through the
+//! realtime direct/durable fanout: the direct branch drives the client
+//! broadcast, the durable branch feeds the Redpanda tap when one is
+//! configured. Clients receive a bounded snapshot followed by live delta bars
+//! in the same binary market-bar protocol the desktop already decodes.
+//! Overloaded clients are disconnected, never buffered without bound.
 
 use crate::aggregation::BarAggregator;
 use crate::backfill::backfill_bars;
 use crate::entitlement::{EntitlementError, EntitlementGuard};
+use crate::fanout::ProductFanout;
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+use crate::fanout::{durable_envelope, durable_partition_key};
 use crate::instruments::{ProductMapping, map_product};
-use crate::provenance::coinbase_bar_provenance;
-use axiusflow_application::{ReplayProvenance, ReplaySnapshot, validate_provenanced_market_bar};
+use axiusflow_application::ReplayProvenance;
 use axiusflow_coinbase_market_adapter::{CoinbaseConfig, CoinbaseSession};
-use axiusflow_market_data::MarketBar;
 use axiusflow_market_protocol_adapter::{
-    DecimalConvention, encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
-    try_encode_replay_snapshot_chunk_envelopes,
+    DecimalConvention, encode_market_bar_stream_frame,
+    try_encode_canonical_market_bar_delta_envelope, try_encode_replay_snapshot_chunk_envelopes,
+    try_project_canonical_market_bar_snapshot,
 };
-use axiusflow_protocols::{Provenanced, StreamDelta};
+use axiusflow_realtime::CanonicalMarketEvent;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,7 +39,7 @@ const SUBSCRIPTION_ID: &str = "coinbase_spot_one_minute";
 const SNAPSHOT_CHUNK_ITEMS: usize = 64;
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 const MAXIMUM_FRAME_BYTES: usize = 65_536;
-const OWNERSHIP_EPOCH: u64 = 1;
+const MAXIMUM_LATEST_STATE_ITEMS: usize = 1_024;
 
 /// One connected client with its authorized principal when enforced.
 struct ClientHandle {
@@ -38,11 +47,148 @@ struct ClientHandle {
     sender: SyncSender<Vec<u8>>,
 }
 
-/// One product lane: mapping, aggregator, and its client broadcast.
+/// One product lane: mapping, aggregator, fenced fanout, and client broadcast.
 struct ProductLane {
     mapping: ProductMapping,
     aggregator: BarAggregator,
+    fanout: ProductFanout,
     clients: Vec<ClientHandle>,
+}
+
+/// The durable tap consuming the fanout's durable branch.
+pub enum DurableTap {
+    /// One Redpanda producer bound to the plane's durable bar topic.
+    #[cfg(all(target_os = "linux", feature = "redpanda"))]
+    Redpanda(RedpandaTap),
+    /// No tap configured; durable events are counted and dropped, never
+    /// silently presented as published.
+    Inactive,
+}
+
+impl DurableTap {
+    /// Whether a live durable tap is consuming the durable branch.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "redpanda"))]
+            Self::Redpanda(_) => true,
+            Self::Inactive => false,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "redpanda"))]
+    pub fn redpanda(producer: axiusflow_streaming::RedpandaProducer) -> Result<Self, String> {
+        RedpandaTap::spawn(producer).map(Self::Redpanda)
+    }
+
+    fn worker_health(&self) -> (u64, u64, bool) {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "redpanda"))]
+            Self::Redpanda(tap) => tap.health(),
+            Self::Inactive => (0, 0, false),
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+struct DurablePublication {
+    key: Vec<u8>,
+    envelope: axiusflow_streaming::DurableEventEnvelope,
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+pub struct RedpandaTap {
+    sender: SyncSender<DurablePublication>,
+    enqueue_lock: Mutex<()>,
+    delivered: Arc<AtomicU64>,
+    delivery_failures: Arc<AtomicU64>,
+    recovery_required: Arc<AtomicBool>,
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+impl RedpandaTap {
+    fn spawn(mut producer: axiusflow_streaming::RedpandaProducer) -> Result<Self, String> {
+        let (sender, receiver) = sync_channel::<DurablePublication>(1_024);
+        let delivered = Arc::new(AtomicU64::new(0));
+        let delivery_failures = Arc::new(AtomicU64::new(0));
+        let recovery_required = Arc::new(AtomicBool::new(false));
+        let worker_delivered = Arc::clone(&delivered);
+        let worker_failures = Arc::clone(&delivery_failures);
+        let worker_recovery = Arc::clone(&recovery_required);
+        std::thread::Builder::new()
+            .name("axiusflow-redpanda-durable-tap".to_string())
+            .spawn(move || {
+                while let Ok(publication) = receiver.recv() {
+                    let before = producer.health();
+                    loop {
+                        if producer
+                            .publish(&publication.key, &publication.envelope)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                        worker_failures.fetch_add(1, Ordering::Relaxed);
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    loop {
+                        let flush = producer.flush();
+                        let after = producer.health();
+                        let delivered_once = after.delivered == before.delivered.saturating_add(1)
+                            && after.failed == before.failed;
+                        if delivered_once {
+                            worker_delivered.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        worker_failures.fetch_add(1, Ordering::Relaxed);
+                        if after.failed > before.failed {
+                            worker_recovery.store(true, Ordering::Release);
+                            return;
+                        }
+                        let _ = flush;
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                }
+            })
+            .map_err(|error| format!("cannot start durable tap worker: {error}"))?;
+        Ok(Self {
+            sender,
+            enqueue_lock: Mutex::new(()),
+            delivered,
+            delivery_failures,
+            recovery_required,
+        })
+    }
+
+    fn enqueue(&self, event: &CanonicalMarketEvent) -> Result<(), String> {
+        let _guard = self
+            .enqueue_lock
+            .lock()
+            .map_err(|_| "durable tap enqueue lock poisoned".to_string())?;
+        if self.recovery_required.load(Ordering::Acquire) {
+            return Err(
+                "durable tap recovery is required before later sequences can publish".to_string(),
+            );
+        }
+        let publication = DurablePublication {
+            key: durable_partition_key(event),
+            envelope: durable_envelope(event)?,
+        };
+        self.sender.try_send(publication).map_err(|error| {
+            self.recovery_required.store(true, Ordering::Release);
+            match error {
+                TrySendError::Full(_) => "durable tap queue is full".to_string(),
+                TrySendError::Disconnected(_) => "durable tap worker stopped".to_string(),
+            }
+        })
+    }
+
+    fn health(&self) -> (u64, u64, bool) {
+        (
+            self.delivered.load(Ordering::Relaxed),
+            self.delivery_failures.load(Ordering::Relaxed),
+            self.recovery_required.load(Ordering::Acquire),
+        )
+    }
 }
 
 /// Health counters for evidence.
@@ -54,6 +200,12 @@ pub struct PlaneHealth {
     pub clients_disconnected_overload: u64,
     pub backfill_bars: u64,
     pub apply_failures: u64,
+    pub fanout_rejected: u64,
+    pub durable_queued: u64,
+    pub durable_delivered: u64,
+    pub durable_failed: u64,
+    pub durable_dropped_without_tap: u64,
+    pub durable_recovery_required: bool,
 }
 
 /// The supervised market data plane for the configured products.
@@ -62,6 +214,7 @@ pub struct MarketDataPlane {
     convention: DecimalConvention,
     health: Arc<Mutex<PlaneHealth>>,
     entitlement: Option<std::sync::Arc<std::sync::RwLock<EntitlementGuard>>>,
+    durable_tap: Arc<DurableTap>,
 }
 
 impl MarketDataPlane {
@@ -72,25 +225,40 @@ impl MarketDataPlane {
     /// Returns an error for invalid products or convention failures.
     #[allow(dead_code)]
     pub fn try_new(products: &[String]) -> Result<Self, String> {
-        Self::try_new_with_entitlement(products, None)
+        Self::try_new_with_entitlement(products, None, "dev", 1, DurableTap::Inactive)
     }
 
-    /// Builds the plane with an optional entitlement guard.
+    /// Builds the plane with an optional entitlement guard and durable tap.
+    ///
+    /// Each product lane owns one fenced partition whose identifier is the
+    /// product's one-based configuration index.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid products or convention failures.
+    /// Returns an error for invalid products, partitions, topics, or
+    /// convention failures.
     pub fn try_new_with_entitlement(
         products: &[String],
         entitlement: Option<EntitlementGuard>,
+        environment: &str,
+        ownership_epoch: u64,
+        durable_tap: DurableTap,
     ) -> Result<Self, String> {
         let mut lanes = HashMap::new();
-        for product in products {
+        for (index, product) in products.iter().enumerate() {
+            let partition_id = u32::try_from(index + 1)
+                .map_err(|_| "too many products for partition identity".to_string())?;
             lanes.insert(
                 product.clone(),
                 ProductLane {
                     mapping: map_product(product)?,
                     aggregator: BarAggregator::new(),
+                    fanout: ProductFanout::try_new(
+                        partition_id,
+                        "market_data_plane",
+                        environment,
+                        ownership_epoch,
+                    )?,
                     clients: Vec::new(),
                 },
             );
@@ -102,6 +270,7 @@ impl MarketDataPlane {
             health: Arc::new(Mutex::new(PlaneHealth::default())),
             entitlement: entitlement
                 .map(|guard| std::sync::Arc::new(std::sync::RwLock::new(guard))),
+            durable_tap: Arc::new(durable_tap),
         })
     }
 
@@ -205,7 +374,15 @@ impl MarketDataPlane {
         })
     }
 
+    /// Whether the durable tap is actively publishing the durable branch.
+    #[must_use]
+    pub fn durable_tap_active(&self) -> bool {
+        self.durable_tap.is_active()
+    }
+
     pub fn health(&self) -> PlaneHealth {
+        let (durable_delivered, worker_failures, durable_recovery_required) =
+            self.durable_tap.worker_health();
         self.health
             .lock()
             .map(|health| PlaneHealth {
@@ -215,6 +392,12 @@ impl MarketDataPlane {
                 clients_disconnected_overload: health.clients_disconnected_overload,
                 backfill_bars: health.backfill_bars,
                 apply_failures: health.apply_failures,
+                fanout_rejected: health.fanout_rejected,
+                durable_queued: health.durable_queued,
+                durable_delivered,
+                durable_failed: health.durable_failed.saturating_add(worker_failures),
+                durable_dropped_without_tap: health.durable_dropped_without_tap,
+                durable_recovery_required,
             })
             .unwrap_or_default()
     }
@@ -242,6 +425,9 @@ impl MarketDataPlane {
                 .get_mut(product)
                 .ok_or_else(|| "lane disappeared".to_string())?;
             let seeded = lane.aggregator.seed_backfill(bars)?;
+            let history = lane.aggregator.history();
+            lane.fanout
+                .install_backfill(&lane.mapping, &history, unix_nanos_now())?;
             drop(lanes);
             self.health
                 .lock()
@@ -251,10 +437,11 @@ impl MarketDataPlane {
         for product in products {
             let lanes = Arc::clone(&self.lanes);
             let health = Arc::clone(&self.health);
+            let durable_tap = Arc::clone(&self.durable_tap);
             let product_name = product.clone();
             std::thread::Builder::new()
                 .name(format!("axiusflow-coinbase-feed-{product}"))
-                .spawn(move || supervise_feed(&product_name, &lanes, &health))
+                .spawn(move || supervise_feed(&product_name, &lanes, &health, &durable_tap))
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -299,8 +486,17 @@ impl MarketDataPlane {
         let lane = lanes
             .get_mut(product)
             .ok_or_else(|| format!("unknown product: {product}"))?;
-        let history = lane.aggregator.history();
-        let snapshot = build_snapshot(&lane.mapping, &history)?;
+        let canonical_snapshot = lane.fanout.latest_snapshot(
+            NonZeroUsize::new(MAXIMUM_LATEST_STATE_ITEMS)
+                .ok_or("latest-state item limit cannot be zero")?,
+        )?;
+        let snapshot = try_project_canonical_market_bar_snapshot(
+            &canonical_snapshot,
+            &lane.mapping.instrument,
+            ReplayProvenance::LiveProvider,
+            &lane.mapping.bar_definition,
+        )
+        .map_err(|error| format!("canonical snapshot projection failed: {error}"))?;
         let snapshot_id = format!(
             "coinbase_{}_bars_{}",
             product.to_ascii_lowercase(),
@@ -331,6 +527,7 @@ fn supervise_feed(
     product: &str,
     lanes: &Arc<Mutex<HashMap<String, ProductLane>>>,
     health: &Arc<Mutex<PlaneHealth>>,
+    durable_tap: &Arc<DurableTap>,
 ) {
     loop {
         let Ok(config) = CoinbaseConfig::try_new(vec![product.to_string()]) else {
@@ -338,8 +535,11 @@ fn supervise_feed(
         };
         let session = CoinbaseSession::new(config);
         let result = session.collect(Duration::from_hours(24), &mut |trade| {
-            let mut lanes = lanes.lock().expect("lane lock poisoned");
-            if let Some(lane) = lanes.get_mut(product) {
+            let durable = {
+                let mut lanes = lanes.lock().expect("lane lock poisoned");
+                let Some(lane) = lanes.get_mut(product) else {
+                    return;
+                };
                 health.lock().expect("health lock poisoned").trades_applied += 1;
                 let applied = lane.aggregator.apply_trade(trade);
                 if applied.is_err() {
@@ -347,19 +547,39 @@ fn supervise_feed(
                 }
                 if let Ok(Some(bar)) = applied {
                     health.lock().expect("health lock poisoned").bars_completed += 1;
-                    if let Ok(frame) = encode_delta(&lane.mapping, &bar) {
-                        let before = lane.clients.len();
-                        lane.clients
-                            .retain(|client| client.sender.try_send(frame.clone()).is_ok());
-                        let dropped = before - lane.clients.len();
-                        if dropped > 0 {
-                            health
-                                .lock()
-                                .expect("health lock poisoned")
-                                .clients_disconnected_overload += dropped as u64;
+                    if let Ok(fanned) =
+                        lane.fanout
+                            .publish_bar(&lane.mapping, &bar, unix_nanos_now())
+                    {
+                        if fanned.direct.header().source_sequence == bar.source_sequence {
+                            if let Ok(frame) = encode_delta(&lane.mapping, &fanned.direct) {
+                                let before = lane.clients.len();
+                                lane.clients
+                                    .retain(|client| client.sender.try_send(frame.clone()).is_ok());
+                                let dropped = before - lane.clients.len();
+                                if dropped > 0 {
+                                    health
+                                        .lock()
+                                        .expect("health lock poisoned")
+                                        .clients_disconnected_overload += dropped as u64;
+                                }
+                            }
+                            Some(fanned.durable)
+                        } else {
+                            health.lock().expect("health lock poisoned").fanout_rejected += 1;
+                            None
                         }
+                    } else {
+                        eprintln!("fanout rejected {product} sequence {}", bar.source_sequence);
+                        health.lock().expect("health lock poisoned").fanout_rejected += 1;
+                        None
                     }
+                } else {
+                    None
                 }
+            };
+            if let Some(event) = durable {
+                publish_durable(durable_tap, &event, health);
             }
         });
         health.lock().expect("health lock poisoned").reconnects += 1;
@@ -369,87 +589,51 @@ fn supervise_feed(
     }
 }
 
-fn encode_delta(mapping: &ProductMapping, bar: &MarketBar) -> Result<Vec<u8>, String> {
-    let item = Provenanced::new(
-        *bar,
-        coinbase_bar_provenance(bar, unix_nanos_now(), OWNERSHIP_EPOCH),
-    );
-    validate_provenanced_market_bar(&item).map_err(|error| format!("{error:?}"))?;
-    let delta = StreamDelta::try_new(
-        bar.source_sequence.saturating_sub(1).max(1),
-        bar.source_sequence,
-        item,
-    )
-    .map_err(|error| format!("{error:?}"))?;
-    let envelope = try_encode_replay_delta_envelope(
+fn publish_durable(
+    durable_tap: &DurableTap,
+    event: &CanonicalMarketEvent,
+    health: &Arc<Mutex<PlaneHealth>>,
+) {
+    #[cfg(not(all(target_os = "linux", feature = "redpanda")))]
+    let _ = event;
+    match durable_tap {
+        #[cfg(all(target_os = "linux", feature = "redpanda"))]
+        DurableTap::Redpanda(producer) => {
+            let result = producer.enqueue(event);
+            let mut health = health.lock().expect("health lock poisoned");
+            if result.is_ok() {
+                health.durable_queued += 1;
+            } else {
+                eprintln!(
+                    "durable tap rejected partition={} sequence={}; later durable publication remains latched until stream repair and restart",
+                    event.header().partition_id,
+                    event.header().source_sequence
+                );
+                health.durable_failed += 1;
+            }
+        }
+        DurableTap::Inactive => {
+            health
+                .lock()
+                .expect("health lock poisoned")
+                .durable_dropped_without_tap += 1;
+        }
+    }
+}
+
+fn encode_delta(mapping: &ProductMapping, event: &CanonicalMarketEvent) -> Result<Vec<u8>, String> {
+    let envelope = try_encode_canonical_market_bar_delta_envelope(
         SUBSCRIPTION_ID,
         &mapping.instrument,
         &mapping.bar_definition,
-        &delta,
+        event.header().source_sequence.saturating_sub(1).max(1),
+        event,
         &DecimalConvention::try_new("usd", "base").map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("delta encode failed: {error}"))?;
     let maximum = NonZeroUsize::new(MAXIMUM_FRAME_BYTES).ok_or("frame limit cannot be zero")?;
     encode_market_bar_stream_frame(&envelope, maximum)
         .map_err(|error| format!("frame encode failed: {error}"))
-}
-
-fn build_snapshot(
-    mapping: &ProductMapping,
-    history: &[MarketBar],
-) -> Result<ReplaySnapshot, String> {
-    let mut bars = Vec::with_capacity(history.len());
-    for bar in history {
-        let item = Provenanced::new(
-            *bar,
-            coinbase_bar_provenance(bar, unix_nanos_now(), OWNERSHIP_EPOCH),
-        );
-        validate_provenanced_market_bar(&item).map_err(|error| format!("{error:?}"))?;
-        bars.push(item);
-    }
-    let (Some(first), Some(last)) = (bars.first(), bars.last()) else {
-        return Err("cannot snapshot an empty bar history".to_string());
-    };
-    let mut evidence = axiusflow_protocols::SnapshotEvidence {
-        partition_id: 0,
-        ownership_epoch: OWNERSHIP_EPOCH,
-        generation: 1,
-        first_sequence: first.value().source_sequence,
-        last_sequence: last.value().source_sequence,
-        schema_version: 1,
-        checksum: [0; 32],
-    };
-    evidence.checksum = axiusflow_protocols::compute_market_snapshot_checksum(
-        &evidence,
-        axiusflow_protocols::MarketSnapshotIdentityRef {
-            instrument_id: mapping.instrument.instrument_id.as_str(),
-            instrument_revision: mapping.instrument.revision,
-            bar_definition_id: &mapping.bar_definition.definition_id,
-            bar_definition_version: mapping.bar_definition.version,
-            bar_interval_seconds: mapping.bar_definition.interval_seconds,
-        },
-        bars.iter().map(|item| {
-            let bar = item.value();
-            axiusflow_protocols::MarketValueChecksumRef {
-                source_sequence: bar.source_sequence,
-                exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
-                open: bar.open,
-                high: bar.high,
-                low: bar.low,
-                close: bar.close,
-                volume: bar.volume,
-                provenance: item.provenance(),
-            }
-        }),
-    );
-    ReplaySnapshot::try_new_provenanced(
-        mapping.instrument.clone(),
-        ReplayProvenance::LiveProvider,
-        mapping.bar_definition.clone(),
-        evidence,
-        bars,
-    )
-    .map_err(|error| format!("{error:?}"))
 }
 
 fn unix_nanos_now() -> i64 {

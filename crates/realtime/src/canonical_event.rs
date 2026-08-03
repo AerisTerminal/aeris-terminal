@@ -1,11 +1,13 @@
 //! Provider-neutral canonical market events and their timestamp vocabulary.
 
 use crate::errors::RealtimeError;
+use serde::Serialize;
 
 pub const MAX_CANONICAL_PAYLOAD_BYTES: usize = 4_096;
 
 /// Delivery and recovery semantics for one event stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SemanticClass {
     StateReplace,
     OrderedDelta,
@@ -15,7 +17,8 @@ pub enum SemanticClass {
 }
 
 /// Clock source retained for an optional NIC timestamp.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NicTimestampSource {
     SocketSoftware,
     KernelSoftware,
@@ -23,7 +26,7 @@ pub enum NicTimestampSource {
 }
 
 /// Complete Stage 1 canonical market timestamp vocabulary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct CanonicalTimestamps {
     pub exchange_unix_nanos: i64,
     pub provider_receive_unix_nanos: i64,
@@ -61,7 +64,7 @@ impl CanonicalTimestamps {
 }
 
 /// Versioned identity required when canonical payload semantics depend on a series definition.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CanonicalSeriesIdentity {
     pub instrument_revision: u64,
     pub definition_id: String,
@@ -70,7 +73,7 @@ pub struct CanonicalSeriesIdentity {
 }
 
 /// Provider-neutral canonical market event header.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CanonicalEventHeader {
     pub event_id: String,
     pub event_time_unix_nanos: i64,
@@ -95,7 +98,7 @@ pub struct CanonicalEventHeader {
 }
 
 /// Materialized canonical event. No driver-owned pointer crosses this boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CanonicalMarketEvent {
     header: CanonicalEventHeader,
     payload: Vec<u8>,

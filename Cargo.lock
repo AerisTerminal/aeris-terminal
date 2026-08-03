@@ -825,7 +825,9 @@ dependencies = [
  "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
  "axiusflow_protocols",
+ "axiusflow_realtime",
  "axiusflow_security",
+ "axiusflow_streaming",
  "rustls",
  "serde",
  "serde_json",
@@ -901,6 +903,7 @@ dependencies = [
 name = "axiusflow_realtime"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sha2 0.10.9",
 ]
 

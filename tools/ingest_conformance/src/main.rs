@@ -1056,14 +1056,18 @@ fn run_af_xdp_copy_command(
     }
 }
 
-fn run_entitlement_command(command: evidence_report::EvidenceCommand) -> Result<(), Box<dyn Error>> {
+fn run_entitlement_command(
+    command: evidence_report::EvidenceCommand,
+) -> Result<(), Box<dyn Error>> {
     match command {
         evidence_report::EvidenceCommand::EntitlementEnforcement {
             plane_address,
             workdir,
             resnapshot_seconds,
             report_path,
-        } => entitlement_enforcement::run(&plane_address, &workdir, resnapshot_seconds, &report_path),
+        } => {
+            entitlement_enforcement::run(&plane_address, &workdir, resnapshot_seconds, &report_path)
+        }
         _ => Err("entitlement command dispatch mismatch".into()),
     }
 }

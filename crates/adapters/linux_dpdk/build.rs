@@ -105,6 +105,7 @@ fn generate_bindings() {
         .allowlist_var("RTE_MBUF_DEFAULT_BUF_SIZE")
         .allowlist_var("RTE_PKTMBUF_HEADROOM")
         .allowlist_var("SOCKET_ID_ANY")
+        .generate_comments(false)
         .layout_tests(false)
         .generate()
         .expect("DPDK bindgen generation must succeed against the exact reviewed headers");

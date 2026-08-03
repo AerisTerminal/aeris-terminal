@@ -3,8 +3,9 @@
 mod aggregation;
 mod backfill;
 mod entitlement;
+mod fanout;
 mod instruments;
-mod provenance;
+mod ownership_epoch;
 mod server;
 
 use std::{env, process::ExitCode};
@@ -25,6 +26,9 @@ struct PlaneArguments {
     jwks_path: Option<String>,
     policy_path: Option<String>,
     resnapshot_seconds: u64,
+    environment: String,
+    redpanda_brokers: Option<String>,
+    ownership_state: Option<String>,
 }
 
 fn parse_arguments() -> Result<PlaneArguments, String> {
@@ -33,6 +37,9 @@ fn parse_arguments() -> Result<PlaneArguments, String> {
     let mut jwks_path = None;
     let mut policy_path = None;
     let mut resnapshot_seconds = 30_u64;
+    let mut environment = "dev".to_string();
+    let mut redpanda_brokers = None;
+    let mut ownership_state = None;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -59,6 +66,23 @@ fn parse_arguments() -> Result<PlaneArguments, String> {
                     .parse()
                     .map_err(|_| "invalid --resnapshot-seconds")?;
             }
+            "--environment" => {
+                environment = arguments.next().ok_or("--environment requires a value")?;
+            }
+            "--redpanda-brokers" => {
+                redpanda_brokers = Some(
+                    arguments
+                        .next()
+                        .ok_or("--redpanda-brokers requires a value")?,
+                );
+            }
+            "--ownership-state" => {
+                ownership_state = Some(
+                    arguments
+                        .next()
+                        .ok_or("--ownership-state requires a path")?,
+                );
+            }
             other => return Err(format!("unsupported argument: {other}")),
         }
     }
@@ -72,6 +96,9 @@ fn parse_arguments() -> Result<PlaneArguments, String> {
         jwks_path,
         policy_path,
         resnapshot_seconds,
+        environment,
+        redpanda_brokers,
+        ownership_state,
     })
 }
 
@@ -86,6 +113,9 @@ fn bootstrap() -> Result<ExitCode, String> {
         jwks_path,
         policy_path,
         resnapshot_seconds,
+        environment,
+        redpanda_brokers,
+        ownership_state,
     } = arguments;
 
     let entitlement = match (&jwks_path, &policy_path) {
@@ -93,9 +123,18 @@ fn bootstrap() -> Result<ExitCode, String> {
         (None, None) => None,
         _ => return Err("--jwks and --policy must be given together".to_string()),
     };
+    let ownership_lease =
+        reserve_ownership_epoch(redpanda_brokers.as_deref(), ownership_state.as_deref())?;
+    let ownership_epoch = ownership_lease
+        .as_ref()
+        .map_or(1, ownership_epoch::OwnershipLease::epoch);
+    let durable_tap = build_durable_tap(&environment, redpanda_brokers.as_deref())?;
     let plane = std::sync::Arc::new(server::MarketDataPlane::try_new_with_entitlement(
         &products,
         entitlement,
+        &environment,
+        ownership_epoch,
+        durable_tap,
     )?);
     plane.start()?;
     start_resnapshot_supervisor(
@@ -104,11 +143,7 @@ fn bootstrap() -> Result<ExitCode, String> {
         policy_path.clone(),
         resnapshot_seconds,
     );
-    println!(
-        "axiusflow_market_data_plane listener_started=true products={} backfill_bars={}",
-        products.join(","),
-        plane.health().backfill_bars
-    );
+    log_startup(&plane, &products);
 
     let listener = std::net::TcpListener::bind(&listen).map_err(|error| error.to_string())?;
     let shared = plane;
@@ -168,6 +203,64 @@ fn bootstrap() -> Result<ExitCode, String> {
         });
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn log_startup(plane: &server::MarketDataPlane, products: &[String]) {
+    let health = plane.health();
+    println!(
+        "axiusflow_market_data_plane listener_started=true products={} backfill_bars={} durable_tap_active={} durable_delivered={} durable_recovery_required={}",
+        products.join(","),
+        health.backfill_bars,
+        plane.durable_tap_active(),
+        health.durable_delivered,
+        health.durable_recovery_required
+    );
+}
+
+fn reserve_ownership_epoch(
+    redpanda_brokers: Option<&str>,
+    ownership_state: Option<&str>,
+) -> Result<Option<ownership_epoch::OwnershipLease>, String> {
+    if redpanda_brokers.is_some() && ownership_state.is_none() {
+        return Err("--redpanda-brokers requires --ownership-state".to_string());
+    }
+    ownership_state
+        .map(|path| ownership_epoch::reserve_next(std::path::Path::new(path)))
+        .transpose()
+}
+
+#[cfg(all(target_os = "linux", feature = "redpanda"))]
+fn build_durable_tap(
+    environment: &str,
+    redpanda_brokers: Option<&str>,
+) -> Result<server::DurableTap, String> {
+    use std::time::Duration;
+
+    let Some(bootstrap_servers) = redpanda_brokers else {
+        return Ok(server::DurableTap::Inactive);
+    };
+    let config = axiusflow_streaming::RedpandaProducerConfig {
+        bootstrap_servers: bootstrap_servers.to_string(),
+        client_id: "axiusflow_market_data_plane".to_string(),
+        topic: fanout::durable_bar_topic(environment)?,
+        maximum_in_flight: 1_024,
+        delivery_capacity: 2_048,
+        request_timeout: Duration::from_secs(5),
+    };
+    let producer = axiusflow_streaming::RedpandaProducer::connect(&config)
+        .map_err(|error| error.to_string())?;
+    server::DurableTap::redpanda(producer)
+}
+
+#[cfg(not(all(target_os = "linux", feature = "redpanda")))]
+fn build_durable_tap(
+    _environment: &str,
+    redpanda_brokers: Option<&str>,
+) -> Result<server::DurableTap, String> {
+    if redpanda_brokers.is_some() {
+        return Err("--redpanda-brokers requires the Linux redpanda feature build".to_string());
+    }
+    Ok(server::DurableTap::Inactive)
 }
 
 fn load_entitlement(

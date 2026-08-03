@@ -146,7 +146,6 @@ impl RedpandaProducer {
         if self.in_flight() >= self.maximum_in_flight {
             return Err(StreamingError::QueueFull);
         }
-        self.published += 1;
         let encoded = envelope.encode();
         let record = BaseRecord::with_opaque_to(&self.topic, SequenceOpaque)
             .key(partition_key)
@@ -154,6 +153,7 @@ impl RedpandaProducer {
         self.producer
             .send(record)
             .map_err(|(error, _)| StreamingError::Client(error.to_string()))?;
+        self.published += 1;
         self.producer.poll(Duration::ZERO);
         Ok(())
     }
