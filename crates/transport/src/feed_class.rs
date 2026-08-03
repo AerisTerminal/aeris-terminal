@@ -75,7 +75,10 @@ mod tests {
             );
         }
         assert_eq!(
-            evaluate_profile_feed(IngestProfile::PortableSocket, FeedTransportClass::TlsTcpStream),
+            evaluate_profile_feed(
+                IngestProfile::PortableSocket,
+                FeedTransportClass::TlsTcpStream
+            ),
             FeedProfileCompatibility::Applicable
         );
         assert_eq!(
@@ -90,7 +93,10 @@ mod tests {
 
     #[test]
     fn packet_udp_feed_remains_applicable_on_socket_profiles() {
-        for profile in [IngestProfile::PortableSocket, IngestProfile::TunedLinuxSocket] {
+        for profile in [
+            IngestProfile::PortableSocket,
+            IngestProfile::TunedLinuxSocket,
+        ] {
             assert_eq!(
                 evaluate_profile_feed(profile, FeedTransportClass::PacketUdp),
                 FeedProfileCompatibility::Applicable

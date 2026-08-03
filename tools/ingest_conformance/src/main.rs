@@ -15,10 +15,10 @@ mod authorization_boundary;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod clickhouse_projection;
 mod coinbase_live;
-mod feed_profile_matrix;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
+mod feed_profile_matrix;
 mod live_data_plane;
 mod postgres_persistence;
 #[cfg(all(target_os = "linux", feature = "quic"))]
