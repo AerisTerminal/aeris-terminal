@@ -15,6 +15,7 @@ mod authorization_boundary;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod clickhouse_projection;
 mod coinbase_live;
+mod feed_profile_matrix;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
@@ -861,6 +862,14 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             service_binary,
             report_path,
         } => authorization_boundary::run(&service_binary, &report_path),
+        evidence_report::EvidenceCommand::FeedProfileMatrix {
+            live_provider,
+            report_path,
+        } => feed_profile_matrix::run(
+            &live_provider,
+            axiusflow_transport::FeedTransportClass::TlsTcpStream,
+            &report_path,
+        ),
         evidence_report::EvidenceCommand::LiveDataPlane {
             plane_address,
             product,

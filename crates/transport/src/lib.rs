@@ -3,6 +3,7 @@
 mod binary_frame;
 mod driver;
 mod errors;
+mod feed_class;
 mod fixture_driver;
 mod profile;
 mod readiness;
@@ -16,6 +17,9 @@ pub use driver::{
     software_fixture_capabilities,
 };
 pub use errors::ReadinessError;
+pub use feed_class::{
+    FeedProfileCompatibility, FeedTransportClass, compatibility_reason, evaluate_profile_feed,
+};
 pub use fixture_driver::{
     FixtureDriverError, FixtureFrame, FixtureIngestDriver, FixtureReceiveBatch,
 };

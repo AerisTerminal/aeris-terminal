@@ -248,6 +248,10 @@ pub enum EvidenceCommand {
         window_seconds: u64,
         report_path: PathBuf,
     },
+    FeedProfileMatrix {
+        live_provider: String,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -285,18 +289,19 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
         return Ok(EvidenceCommand::Run { report_path: None });
     };
     if argument == OsStr::new("--af-xdp-copy-conformance") {
-        let receive_interface = required_argument(&mut arguments, "receive interface")?;
-        let transmit_interface = required_argument(&mut arguments, "transmit interface")?;
-        let report_path = required_argument(&mut arguments, "report path")?;
-        reject_extra(&mut arguments)?;
-        return Ok(EvidenceCommand::AfXdpCopy {
-            receive_interface: receive_interface.to_string_lossy().into_owned(),
-            transmit_interface: transmit_interface.to_string_lossy().into_owned(),
-            report_path: PathBuf::from(report_path),
-        });
+        return af_xdp_copy_conformance_command(&mut arguments);
     }
     if argument == OsStr::new("--af-xdp-copy-fuzz") {
         return af_xdp_copy_fuzz_command(&mut arguments);
+    }
+    if argument == OsStr::new("--feed-profile-matrix") {
+        let live_provider = required_argument(&mut arguments, "live provider")?;
+        let report_path = required_argument(&mut arguments, "report path")?;
+        reject_extra(&mut arguments)?;
+        return Ok(EvidenceCommand::FeedProfileMatrix {
+            live_provider: live_provider.to_string_lossy().into_owned(),
+            report_path: PathBuf::from(report_path),
+        });
     }
     if argument == OsStr::new("--live-data-plane") {
         return live_data_plane_command(&mut arguments);
@@ -374,6 +379,20 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn af_xdp_copy_conformance_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let receive_interface = required_argument(arguments, "receive interface")?;
+    let transmit_interface = required_argument(arguments, "transmit interface")?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::AfXdpCopy {
+        receive_interface: receive_interface.to_string_lossy().into_owned(),
+        transmit_interface: transmit_interface.to_string_lossy().into_owned(),
+        report_path: PathBuf::from(report_path),
+    })
 }
 
 fn af_xdp_copy_fuzz_command(
