@@ -419,6 +419,10 @@ fn main() {
     }
     let (bootstrap, market_worker) = match std::env::var("AXIUSFLOW_LIVE_ENDPOINT") {
         Ok(endpoint) if !endpoint.trim().is_empty() => {
+            let endpoint = match std::env::var("AXIUSFLOW_AUTH_TOKEN") {
+                Ok(token) if !token.trim().is_empty() => format!("{endpoint}?token={token}"),
+                _ => endpoint,
+            };
             MarketDataWorker::start_live(&endpoint, "live coinbase · authorized public feed")
                 .expect("the live market worker connects")
         }

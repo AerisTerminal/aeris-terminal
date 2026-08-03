@@ -819,11 +819,13 @@ name = "axiusflow_market_data_plane"
 version = "0.1.0"
 dependencies = [
  "axiusflow_application",
+ "axiusflow_authorization",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_instruments",
  "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
  "axiusflow_protocols",
+ "axiusflow_security",
  "rustls",
  "serde",
  "serde_json",

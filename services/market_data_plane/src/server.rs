@@ -9,6 +9,7 @@
 
 use crate::aggregation::BarAggregator;
 use crate::backfill::backfill_bars;
+use crate::entitlement::{EntitlementError, EntitlementGuard};
 use crate::instruments::{ProductMapping, map_product};
 use crate::provenance::coinbase_bar_provenance;
 use axiusflow_application::{ReplayProvenance, ReplaySnapshot, validate_provenanced_market_bar};
@@ -31,11 +32,17 @@ const CLIENT_QUEUE_CAPACITY: usize = 64;
 const MAXIMUM_FRAME_BYTES: usize = 65_536;
 const OWNERSHIP_EPOCH: u64 = 1;
 
+/// One connected client with its authorized principal when enforced.
+struct ClientHandle {
+    principal: Option<String>,
+    sender: SyncSender<Vec<u8>>,
+}
+
 /// One product lane: mapping, aggregator, and its client broadcast.
 struct ProductLane {
     mapping: ProductMapping,
     aggregator: BarAggregator,
-    clients: Vec<SyncSender<Vec<u8>>>,
+    clients: Vec<ClientHandle>,
 }
 
 /// Health counters for evidence.
@@ -54,6 +61,7 @@ pub struct MarketDataPlane {
     lanes: Arc<Mutex<HashMap<String, ProductLane>>>,
     convention: DecimalConvention,
     health: Arc<Mutex<PlaneHealth>>,
+    entitlement: Option<std::sync::Arc<std::sync::RwLock<EntitlementGuard>>>,
 }
 
 impl MarketDataPlane {
@@ -62,7 +70,20 @@ impl MarketDataPlane {
     /// # Errors
     ///
     /// Returns an error for invalid products or convention failures.
+    #[allow(dead_code)]
     pub fn try_new(products: &[String]) -> Result<Self, String> {
+        Self::try_new_with_entitlement(products, None)
+    }
+
+    /// Builds the plane with an optional entitlement guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid products or convention failures.
+    pub fn try_new_with_entitlement(
+        products: &[String],
+        entitlement: Option<EntitlementGuard>,
+    ) -> Result<Self, String> {
         let mut lanes = HashMap::new();
         for product in products {
             lanes.insert(
@@ -79,11 +100,111 @@ impl MarketDataPlane {
             convention: DecimalConvention::try_new("usd", "base")
                 .map_err(|error| error.to_string())?,
             health: Arc::new(Mutex::new(PlaneHealth::default())),
+            entitlement: entitlement
+                .map(|guard| std::sync::Arc::new(std::sync::RwLock::new(guard))),
         })
     }
 
     /// Current aggregate health.
+    /// Authorizes one client token for one product's stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns the denial reason when enforcement is active and the check
+    /// fails; without enforcement every connection is authorized.
+    pub fn authorize_client(
+        &self,
+        product: &str,
+        token: Option<&str>,
+    ) -> Result<Option<String>, EntitlementError> {
+        let Some(entitlement) = &self.entitlement else {
+            return Ok(None);
+        };
+        let guard = entitlement
+            .read()
+            .map_err(|_| EntitlementError::PolicyUnavailable)?;
+        let token = token.ok_or(EntitlementError::TokenInvalid)?;
+        guard.authorize(token, product).map(Some)
+    }
+
+    /// Swaps the entitlement guard and disconnects clients whose principal no
+    /// longer holds a matching grant. Returns the number disconnected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the guard lock is poisoned.
+    pub fn resnapshot_entitlement(&self, next: EntitlementGuard) -> Result<u64, String> {
+        let Some(entitlement) = &self.entitlement else {
+            return Ok(0);
+        };
+        let current_version = entitlement
+            .read()
+            .map_err(|_| "entitlement lock poisoned".to_string())?
+            .policy_version();
+        if next.policy_version() <= current_version {
+            return Ok(0);
+        }
+        *entitlement
+            .write()
+            .map_err(|_| "entitlement lock poisoned".to_string())? = next;
+        let mut disconnected = 0_u64;
+        let mut lanes = self
+            .lanes
+            .lock()
+            .map_err(|_| "lane lock poisoned".to_string())?;
+        let guard = entitlement
+            .read()
+            .map_err(|_| "entitlement lock poisoned".to_string())?;
+        for (product, lane) in lanes.iter_mut() {
+            let resource = format!("stream:{}", product.to_ascii_lowercase());
+            lane.clients.retain(|client| {
+                let Some(principal) = &client.principal else {
+                    return true;
+                };
+                let Ok(principal) =
+                    axiusflow_authorization::PrincipalId::try_new(principal.clone())
+                else {
+                    disconnected += 1;
+                    return false;
+                };
+                let Ok(resource_id) =
+                    axiusflow_authorization::ResourceId::try_new(resource.clone())
+                else {
+                    return true;
+                };
+                let Ok(request) = axiusflow_authorization::AuthorizationRequest::try_new(
+                    principal,
+                    resource_id,
+                    axiusflow_authorization::AuthorizationAction::Stream,
+                    format!("resnapshot:{product}"),
+                ) else {
+                    return true;
+                };
+                let allowed = matches!(
+                    guard.evaluator_outcome(&request),
+                    axiusflow_authorization::AuthorizationOutcome::Allowed
+                );
+                if !allowed {
+                    disconnected += 1;
+                }
+                allowed
+            });
+        }
+        Ok(disconnected)
+    }
+
+    /// Health snapshot for evidence.
+    #[allow(dead_code)]
     #[must_use]
+    pub fn entitlement_revision(&self) -> Option<(u64, u64)> {
+        self.entitlement.as_ref().and_then(|entitlement| {
+            entitlement
+                .read()
+                .ok()
+                .map(|guard| (guard.policy_version(), guard.key_revision()))
+        })
+    }
+
     pub fn health(&self) -> PlaneHealth {
         self.health
             .lock()
@@ -147,10 +268,11 @@ impl MarketDataPlane {
     pub fn serve_client(
         &self,
         product: &str,
+        principal: Option<String>,
         stream: &mut tungstenite::WebSocket<std::net::TcpStream>,
     ) -> Result<(), String> {
         let (sender, receiver) = sync_channel(CLIENT_QUEUE_CAPACITY);
-        let snapshot_frames = self.register_client(product, sender)?;
+        let snapshot_frames = self.register_client(product, principal, sender)?;
         for frame in &snapshot_frames {
             stream
                 .send(tungstenite::Message::Binary(frame.clone().into()))
@@ -167,6 +289,7 @@ impl MarketDataPlane {
     fn register_client(
         &self,
         product: &str,
+        principal: Option<String>,
         sender: SyncSender<Vec<u8>>,
     ) -> Result<Vec<Vec<u8>>, String> {
         let mut lanes = self
@@ -199,7 +322,7 @@ impl MarketDataPlane {
                     .map_err(|error| format!("frame encode failed: {error}"))?,
             );
         }
-        lane.clients.push(sender);
+        lane.clients.push(ClientHandle { principal, sender });
         Ok(frames)
     }
 }
@@ -227,7 +350,7 @@ fn supervise_feed(
                     if let Ok(frame) = encode_delta(&lane.mapping, &bar) {
                         let before = lane.clients.len();
                         lane.clients
-                            .retain(|client| client.try_send(frame.clone()).is_ok());
+                            .retain(|client| client.sender.try_send(frame.clone()).is_ok());
                         let dropped = before - lane.clients.len();
                         if dropped > 0 {
                             health

@@ -2,6 +2,7 @@
 
 mod aggregation;
 mod backfill;
+mod entitlement;
 mod instruments;
 mod provenance;
 mod server;
@@ -18,12 +19,20 @@ fn main() -> ExitCode {
     }
 }
 
-/// The tungstenite handshake callback trait fixes one `Err` shape the
-/// `result_large_err` lint cannot satisfy without reimplementing the handshake.
-#[expect(clippy::result_large_err)]
-fn bootstrap() -> Result<ExitCode, String> {
+struct PlaneArguments {
+    listen: String,
+    products: Vec<String>,
+    jwks_path: Option<String>,
+    policy_path: Option<String>,
+    resnapshot_seconds: u64,
+}
+
+fn parse_arguments() -> Result<PlaneArguments, String> {
     let mut listen = None;
     let mut products = None;
+    let mut jwks_path = None;
+    let mut policy_path = None;
+    let mut resnapshot_seconds = 30_u64;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -37,18 +46,64 @@ fn bootstrap() -> Result<ExitCode, String> {
                         .ok_or("--products requires a comma-separated list")?,
                 );
             }
+            "--jwks" => {
+                jwks_path = Some(arguments.next().ok_or("--jwks requires a path")?);
+            }
+            "--policy" => {
+                policy_path = Some(arguments.next().ok_or("--policy requires a path")?);
+            }
+            "--resnapshot-seconds" => {
+                resnapshot_seconds = arguments
+                    .next()
+                    .ok_or("--resnapshot-seconds requires a value")?
+                    .parse()
+                    .map_err(|_| "invalid --resnapshot-seconds")?;
+            }
             other => return Err(format!("unsupported argument: {other}")),
         }
     }
-    let listen = listen.ok_or("--listen is required")?;
-    let products: Vec<String> = products
-        .ok_or("--products is required")?
-        .split(',')
-        .map(str::to_string)
-        .collect();
+    Ok(PlaneArguments {
+        listen: listen.ok_or("--listen is required")?,
+        products: products
+            .ok_or("--products is required")?
+            .split(',')
+            .map(str::to_string)
+            .collect(),
+        jwks_path,
+        policy_path,
+        resnapshot_seconds,
+    })
+}
 
-    let plane = server::MarketDataPlane::try_new(&products)?;
+/// The tungstenite handshake callback trait fixes one `Err` shape the
+/// `result_large_err` lint cannot satisfy without reimplementing the handshake.
+#[expect(clippy::result_large_err)]
+fn bootstrap() -> Result<ExitCode, String> {
+    let arguments = parse_arguments()?;
+    let PlaneArguments {
+        listen,
+        products,
+        jwks_path,
+        policy_path,
+        resnapshot_seconds,
+    } = arguments;
+
+    let entitlement = match (&jwks_path, &policy_path) {
+        (Some(jwks), Some(policy)) => Some(load_entitlement(jwks, policy)?),
+        (None, None) => None,
+        _ => return Err("--jwks and --policy must be given together".to_string()),
+    };
+    let plane = std::sync::Arc::new(server::MarketDataPlane::try_new_with_entitlement(
+        &products,
+        entitlement,
+    )?);
     plane.start()?;
+    start_resnapshot_supervisor(
+        std::sync::Arc::clone(&plane),
+        jwks_path.clone(),
+        policy_path.clone(),
+        resnapshot_seconds,
+    );
     println!(
         "axiusflow_market_data_plane listener_started=true products={} backfill_bars={}",
         products.join(","),
@@ -56,29 +111,156 @@ fn bootstrap() -> Result<ExitCode, String> {
     );
 
     let listener = std::net::TcpListener::bind(&listen).map_err(|error| error.to_string())?;
-    let shared = std::sync::Arc::new(plane);
+    let shared = plane;
     for connection in listener.incoming() {
         let connection = connection.map_err(|error| error.to_string())?;
         let shared = std::sync::Arc::clone(&shared);
         std::thread::spawn(move || {
-            let mut requested = String::new();
+            let mut requested_path = String::new();
+            let mut requested_token: Option<String> = None;
+            let denied = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+            let denied_for_callback = std::sync::Arc::clone(&denied);
             let mut callback =
                 |request: &tungstenite::handshake::server::Request,
                  response: tungstenite::handshake::server::Response| {
-                    requested = request.uri().path().to_string();
+                    let uri = request.uri().to_string();
+                    let (path, query) = uri.split_once('?').unwrap_or((uri.as_str(), ""));
+                    requested_path = path.to_string();
+                    requested_token = query
+                        .split('&')
+                        .find_map(|part| part.strip_prefix("token="))
+                        .map(str::to_string);
+                    let product = path.trim_start_matches('/').to_string();
+                    if let Err(error) =
+                        shared.authorize_client(&product, requested_token.as_deref())
+                    {
+                        *denied_for_callback.lock().expect("denied lock poisoned") =
+                            Some(format!("{error:?}"));
+                        let rejection = tungstenite::http::Response::builder()
+                            .status(403)
+                            .body(Some(format!("entitlement denied: {error:?}")))
+                            .expect("a static 403 response builds");
+                        return Err(rejection);
+                    }
                     Ok::<_, tungstenite::handshake::server::ErrorResponse>(response)
                 };
             let callback = &mut callback;
             match tungstenite::accept_hdr(connection, callback) {
                 Ok(mut websocket) => {
-                    let product = requested.trim_start_matches('/').to_string();
-                    if let Err(error) = shared.serve_client(&product, &mut websocket) {
+                    let product = requested_path.trim_start_matches('/').to_string();
+                    let principal = shared
+                        .authorize_client(&product, requested_token.as_deref())
+                        .ok()
+                        .flatten();
+                    if let Err(error) = shared.serve_client(&product, principal, &mut websocket) {
                         eprintln!("client session for {product} failed: {error}");
                     }
                 }
-                Err(error) => eprintln!("websocket handshake failed: {error}"),
+                Err(error) => {
+                    let reason = denied.lock().expect("denied lock poisoned").take();
+                    if let Some(reason) = reason {
+                        eprintln!("entitlement denied during handshake: {reason}");
+                    } else {
+                        eprintln!("websocket handshake failed: {error}");
+                    }
+                }
             }
         });
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn load_entitlement(
+    jwks_path: &str,
+    policy_path: &str,
+) -> Result<entitlement::EntitlementGuard, String> {
+    let jwks_json = std::fs::read_to_string(jwks_path)
+        .map_err(|error| format!("cannot read JWKS {jwks_path}: {error}"))?;
+    let key_set = axiusflow_security::Ed25519KeySetSnapshot::try_from_jwks_json(1, &jwks_json)
+        .map_err(|error| format!("invalid JWKS snapshot: {error}"))?;
+    let verifier = axiusflow_security::Ed25519JwtVerifier::try_new(
+        key_set,
+        axiusflow_security::SystemVerificationClock,
+        60,
+    )
+    .map_err(|error| format!("verifier configuration failed: {error}"))?;
+    let evaluator = load_policy_evaluator(policy_path)?;
+    Ok(entitlement::EntitlementGuard::new(verifier, evaluator))
+}
+
+fn load_policy_evaluator(
+    policy_path: &str,
+) -> Result<axiusflow_authorization::AuthorizationEvaluator, String> {
+    let content = std::fs::read_to_string(policy_path)
+        .map_err(|error| format!("cannot read policy {policy_path}: {error}"))?;
+    let document: serde_json::Value =
+        serde_json::from_str(&content).map_err(|error| format!("malformed policy: {error}"))?;
+    let version = document["version"]
+        .as_u64()
+        .ok_or("policy document lacks a version")?;
+    let grants_json = document["grants"]
+        .as_array()
+        .ok_or("policy document lacks grants")?;
+    let mut grants = Vec::with_capacity(grants_json.len());
+    for grant in grants_json {
+        let action = match grant["action"].as_str().ok_or("grant lacks action")? {
+            "read" => axiusflow_authorization::AuthorizationAction::Read,
+            "stream" => axiusflow_authorization::AuthorizationAction::Stream,
+            "trade" => axiusflow_authorization::AuthorizationAction::Trade,
+            "administer" => axiusflow_authorization::AuthorizationAction::Administer,
+            other => return Err(format!("unknown grant action: {other}")),
+        };
+        grants.push(axiusflow_authorization::AuthorizationGrant::new(
+            axiusflow_authorization::AuthorizationGrantId::try_new(
+                grant["grant_id"].as_str().ok_or("grant lacks id")?,
+            )
+            .map_err(|error| format!("invalid grant id: {error}"))?,
+            axiusflow_authorization::PrincipalId::try_new(
+                grant["principal_id"]
+                    .as_str()
+                    .ok_or("grant lacks principal")?,
+            )
+            .map_err(|error| format!("invalid principal id: {error}"))?,
+            axiusflow_authorization::ResourceId::try_new(
+                grant["resource_id"]
+                    .as_str()
+                    .ok_or("grant lacks resource")?,
+            )
+            .map_err(|error| format!("invalid resource id: {error}"))?,
+            action,
+        ));
+    }
+    let version = axiusflow_authorization::PolicyVersion::try_new(version)
+        .map_err(|error| format!("invalid policy version: {error}"))?;
+    let snapshot = axiusflow_authorization::AuthorizationPolicySnapshot::try_new(version, grants)
+        .map_err(|error| format!("invalid policy snapshot: {error}"))?;
+    Ok(axiusflow_authorization::AuthorizationEvaluator::with_snapshot(snapshot))
+}
+
+fn start_resnapshot_supervisor(
+    plane: std::sync::Arc<server::MarketDataPlane>,
+    jwks_path: Option<String>,
+    policy_path: Option<String>,
+    interval_seconds: u64,
+) {
+    let (Some(jwks_path), Some(policy_path)) = (jwks_path, policy_path) else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("axiusflow-entitlement-resnapshot".to_string())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(interval_seconds.max(1)));
+                match load_entitlement(&jwks_path, &policy_path) {
+                    Ok(guard) => match plane.resnapshot_entitlement(guard) {
+                        Ok(disconnected) if disconnected > 0 => {
+                            eprintln!("entitlement resnapshot disconnected {disconnected} clients");
+                        }
+                        Ok(_) => {}
+                        Err(error) => eprintln!("entitlement resnapshot failed: {error}"),
+                    },
+                    Err(error) => eprintln!("entitlement reload failed: {error}"),
+                }
+            }
+        });
 }

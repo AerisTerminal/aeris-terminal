@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
+axiusflow_authorization = { path = "../../crates/domain/authorization" }
+axiusflow_security = { path = "../../crates/security" }
 axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }

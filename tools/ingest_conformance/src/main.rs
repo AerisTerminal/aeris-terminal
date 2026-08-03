@@ -17,6 +17,7 @@ mod clickhouse_projection;
 mod coinbase_live;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
+mod entitlement_enforcement;
 mod evidence_report;
 mod feed_profile_matrix;
 mod live_data_plane;
@@ -809,11 +810,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box<dyn Error>> {
     match command {
-        evidence_report::EvidenceCommand::AfXdpCopy {
-            receive_interface,
-            transmit_interface,
-            report_path,
-        } => run_af_xdp_copy(&receive_interface, &transmit_interface, &report_path),
+        evidence_report::EvidenceCommand::AfXdpCopy { .. } => run_af_xdp_copy_command(command),
         evidence_report::EvidenceCommand::AfXdpCopyFuzz {
             receive_interface,
             transmit_interface,
@@ -862,6 +859,12 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             service_binary,
             report_path,
         } => authorization_boundary::run(&service_binary, &report_path),
+        evidence_report::EvidenceCommand::MintJwks { workdir } => {
+            entitlement_enforcement::mint_jwks(&workdir)
+        }
+        evidence_report::EvidenceCommand::EntitlementEnforcement { .. } => {
+            run_entitlement_command(command)
+        }
         evidence_report::EvidenceCommand::FeedProfileMatrix {
             live_provider,
             report_path,
@@ -1038,4 +1041,29 @@ fn run_quic_prototype(report_path: &std::path::Path) -> Result<(), Box<dyn Error
 fn run_quic_prototype(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let _ = report_path;
     Err("QUIC prototype requires Linux and the quic feature".into())
+}
+
+fn run_af_xdp_copy_command(
+    command: evidence_report::EvidenceCommand,
+) -> Result<(), Box<dyn Error>> {
+    match command {
+        evidence_report::EvidenceCommand::AfXdpCopy {
+            receive_interface,
+            transmit_interface,
+            report_path,
+        } => run_af_xdp_copy(&receive_interface, &transmit_interface, &report_path),
+        _ => Err("AF_XDP copy command dispatch mismatch".into()),
+    }
+}
+
+fn run_entitlement_command(command: evidence_report::EvidenceCommand) -> Result<(), Box<dyn Error>> {
+    match command {
+        evidence_report::EvidenceCommand::EntitlementEnforcement {
+            plane_address,
+            workdir,
+            resnapshot_seconds,
+            report_path,
+        } => entitlement_enforcement::run(&plane_address, &workdir, resnapshot_seconds, &report_path),
+        _ => Err("entitlement command dispatch mismatch".into()),
+    }
 }

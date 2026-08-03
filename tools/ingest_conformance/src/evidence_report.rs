@@ -252,6 +252,15 @@ pub enum EvidenceCommand {
         live_provider: String,
         report_path: PathBuf,
     },
+    EntitlementEnforcement {
+        plane_address: String,
+        workdir: PathBuf,
+        resnapshot_seconds: u64,
+        report_path: PathBuf,
+    },
+    MintJwks {
+        workdir: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -294,6 +303,12 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     if argument == OsStr::new("--af-xdp-copy-fuzz") {
         return af_xdp_copy_fuzz_command(&mut arguments);
     }
+    if argument == OsStr::new("--mint-jwks") {
+        return mint_jwks_command(&mut arguments);
+    }
+    if argument == OsStr::new("--entitlement-enforcement") {
+        return entitlement_enforcement_command(&mut arguments);
+    }
     if argument == OsStr::new("--feed-profile-matrix") {
         let live_provider = required_argument(&mut arguments, "live provider")?;
         let report_path = required_argument(&mut arguments, "report path")?;
@@ -316,11 +331,7 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
         return authorization_boundary_command(&mut arguments);
     }
     if argument == OsStr::new("--quic-prototype") {
-        let report_path = required_argument(&mut arguments, "report path")?;
-        reject_extra(&mut arguments)?;
-        return Ok(EvidenceCommand::QuicPrototype {
-            report_path: PathBuf::from(report_path),
-        });
+        return single_path_command(&mut arguments, SinglePathCommandKind::QuicPrototype);
     }
     if argument == OsStr::new("--postgres-persistence") {
         return postgres_persistence_command(&mut arguments);
@@ -352,11 +363,7 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
         });
     }
     if argument == OsStr::new("--dpdk-vdev-lifecycle") {
-        let report_path = required_argument(&mut arguments, "report path")?;
-        reject_extra(&mut arguments)?;
-        return Ok(EvidenceCommand::DpdkVdevLifecycle {
-            report_path: PathBuf::from(report_path),
-        });
+        return single_path_command(&mut arguments, SinglePathCommandKind::DpdkVdevLifecycle);
     }
     let path = required_argument(&mut arguments, "path")?;
     if let Some(extra) = arguments.next() {
@@ -379,6 +386,56 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+#[derive(Clone, Copy)]
+enum SinglePathCommandKind {
+    QuicPrototype,
+    DpdkVdevLifecycle,
+}
+
+fn single_path_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+    kind: SinglePathCommandKind,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    let report_path = PathBuf::from(report_path);
+    Ok(match kind {
+        SinglePathCommandKind::QuicPrototype => EvidenceCommand::QuicPrototype { report_path },
+        SinglePathCommandKind::DpdkVdevLifecycle => {
+            EvidenceCommand::DpdkVdevLifecycle { report_path }
+        }
+    })
+}
+
+fn mint_jwks_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let workdir = required_argument(arguments, "workdir")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::MintJwks {
+        workdir: PathBuf::from(workdir),
+    })
+}
+
+fn entitlement_enforcement_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let plane_address = required_argument(arguments, "plane address")?;
+    let workdir = required_argument(arguments, "workdir")?;
+    let resnapshot_seconds = required_argument(arguments, "resnapshot seconds")?
+        .to_string_lossy()
+        .parse::<u64>()
+        .map_err(|error| boxed_error(format!("invalid resnapshot seconds: {error}")))?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::EntitlementEnforcement {
+        plane_address: plane_address.to_string_lossy().into_owned(),
+        workdir: PathBuf::from(workdir),
+        resnapshot_seconds,
+        report_path: PathBuf::from(report_path),
+    })
 }
 
 fn af_xdp_copy_conformance_command(

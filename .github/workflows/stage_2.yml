@@ -524,3 +524,52 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves the live vertical - Coinbase backfill into a snapshot in the exact binary wire protocol, then a live aggregated delta bar with contiguous sequence, valid OHLC, increasing timestamps, and Coinbase provenance - over plaintext loopback to the client; it does not prove TLS at the client edge, multi-product connections, or production deployment."
+
+  entitlement_enforcement:
+    name: entitlement_enforcement_live_streams
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc perl pkg-config
+      - name: actual_entitlement_enforcement
+        run: tools/run_entitlement_enforcement.sh
+      - name: verify_entitlement_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_entitlement_enforcement_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_entitlement_enforcement"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["behavior"] == {
+              "valid_token_accepted": "passed",
+              "missing_token_refused": "passed",
+              "foreign_key_refused": "passed",
+              "ungranted_principal_refused": "passed",
+              "resnapshot_revocation_disconnects": "passed",
+              "policy_version_monotonic": "passed",
+              "tls": "not_exercised",
+              "production_distribution": "not_exercised",
+          }
+          PY
+      - name: retain_entitlement_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_entitlement_enforcement_evidence_Linux
+          path: .cache/evidence/stage_2_entitlement_enforcement_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves stream entitlement enforcement - valid service-access tokens open the live stream, missing, foreign, and ungranted tokens are refused with HTTP 403 at the handshake, and a monotonic policy resnapshot disconnects a live revoked stream - over plaintext loopback; it does not prove TLS or production policy distribution."
