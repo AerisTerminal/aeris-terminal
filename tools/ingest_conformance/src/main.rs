@@ -17,6 +17,7 @@ mod clickhouse_projection;
 mod coinbase_live;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
+mod embedded_store_spike;
 mod entitlement_enforcement;
 mod evidence_report;
 mod feed_profile_matrix;
@@ -843,15 +844,13 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             port,
             report_path,
         } => run_clickhouse_projections(&host, port, &report_path),
-        evidence_report::EvidenceCommand::PostgresPersistence {
-            host,
-            port,
-            user,
-            password,
-            database,
-            report_path,
-        } => postgres_persistence::run(&host, port, &user, &password, &database, &report_path)
-            .map_err(|error| error.to_string().into()),
+        command @ evidence_report::EvidenceCommand::PostgresPersistence { .. } => {
+            run_postgres_command(command)
+        }
+        command @ (evidence_report::EvidenceCommand::EmbeddedStoreSpike { .. }
+        | evidence_report::EvidenceCommand::EmbeddedStoreCrashChild { .. }) => {
+            run_embedded_store_command(command)
+        }
         evidence_report::EvidenceCommand::QuicPrototype { report_path } => {
             run_quic_prototype(&report_path)
         }
@@ -906,6 +905,36 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             Err("lane command dispatch reached a non-lane command".into())
         }
     }
+}
+
+fn run_embedded_store_command(
+    command: evidence_report::EvidenceCommand,
+) -> Result<(), Box<dyn Error>> {
+    match command {
+        evidence_report::EvidenceCommand::EmbeddedStoreSpike { report_path } => {
+            embedded_store_spike::run(&report_path)
+        }
+        evidence_report::EvidenceCommand::EmbeddedStoreCrashChild { backend, path } => {
+            embedded_store_spike::run_crash_child(&backend, &path)
+        }
+        _ => Err("non-embedded command reached embedded-store dispatcher".into()),
+    }
+}
+
+fn run_postgres_command(command: evidence_report::EvidenceCommand) -> Result<(), Box<dyn Error>> {
+    let evidence_report::EvidenceCommand::PostgresPersistence {
+        host,
+        port,
+        user,
+        password,
+        database,
+        report_path,
+    } = command
+    else {
+        return Err("non-PostgreSQL command reached PostgreSQL dispatcher".into());
+    };
+    postgres_persistence::run(&host, port, &user, &password, &database, &report_path)
+        .map_err(|error| error.to_string().into())
 }
 
 #[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]

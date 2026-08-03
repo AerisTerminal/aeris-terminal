@@ -221,6 +221,13 @@ pub enum EvidenceCommand {
         database: String,
         report_path: PathBuf,
     },
+    EmbeddedStoreSpike {
+        report_path: PathBuf,
+    },
+    EmbeddedStoreCrashChild {
+        backend: String,
+        path: PathBuf,
+    },
     QuicPrototype {
         report_path: PathBuf,
     },
@@ -336,6 +343,11 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     if argument == OsStr::new("--postgres-persistence") {
         return postgres_persistence_command(&mut arguments);
     }
+    if argument == OsStr::new("--embedded-store-spike")
+        || argument == OsStr::new("--embedded-store-crash-child")
+    {
+        return embedded_store_command(&argument, &mut arguments);
+    }
     if argument == OsStr::new("--clickhouse-projections") {
         let host = required_argument(&mut arguments, "host")?;
         let port = required_argument(&mut arguments, "port")?
@@ -386,6 +398,26 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             argument.to_string_lossy()
         )))
     }
+}
+
+fn embedded_store_command(
+    command: &OsStr,
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    if command == OsStr::new("--embedded-store-spike") {
+        let report_path = required_argument(arguments, "report path")?;
+        reject_extra(arguments)?;
+        return Ok(EvidenceCommand::EmbeddedStoreSpike {
+            report_path: PathBuf::from(report_path),
+        });
+    }
+    let backend = required_argument(arguments, "backend")?;
+    let path = required_argument(arguments, "database path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::EmbeddedStoreCrashChild {
+        backend: backend.to_string_lossy().into_owned(),
+        path: PathBuf::from(path),
+    })
 }
 
 #[derive(Clone, Copy)]
