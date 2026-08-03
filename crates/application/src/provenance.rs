@@ -21,6 +21,8 @@ pub struct RequestContext {
 pub enum ReplayProvenance {
     /// Deterministic local data used before a real stream transport is connected.
     EmbeddedFixture,
+    /// A live authorized provider stream; the venue is recorded per event.
+    LiveProvider,
 }
 
 impl ReplayProvenance {
@@ -29,6 +31,7 @@ impl ReplayProvenance {
     pub const fn label(self) -> &'static str {
         match self {
             Self::EmbeddedFixture => "embedded replay fixture",
+            Self::LiveProvider => "live authorized provider",
         }
     }
 }

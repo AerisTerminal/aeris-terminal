@@ -242,6 +242,12 @@ pub enum EvidenceCommand {
         window_seconds: u64,
         report_path: PathBuf,
     },
+    LiveDataPlane {
+        plane_address: String,
+        product: String,
+        window_seconds: u64,
+        report_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -291,6 +297,9 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     }
     if argument == OsStr::new("--af-xdp-copy-fuzz") {
         return af_xdp_copy_fuzz_command(&mut arguments);
+    }
+    if argument == OsStr::new("--live-data-plane") {
+        return live_data_plane_command(&mut arguments);
     }
     if argument == OsStr::new("--coinbase-live") {
         return coinbase_live_command(&mut arguments);
@@ -387,6 +396,25 @@ fn af_xdp_copy_fuzz_command(
         transmit_interface: transmit_interface.to_string_lossy().into_owned(),
         seed,
         rounds,
+        report_path: PathBuf::from(report_path),
+    })
+}
+
+fn live_data_plane_command(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<EvidenceCommand, Box<dyn Error>> {
+    let plane_address = required_argument(arguments, "plane address")?;
+    let product = required_argument(arguments, "product")?;
+    let window_seconds = required_argument(arguments, "window seconds")?
+        .to_string_lossy()
+        .parse::<u64>()
+        .map_err(|error| boxed_error(format!("invalid window seconds: {error}")))?;
+    let report_path = required_argument(arguments, "report path")?;
+    reject_extra(arguments)?;
+    Ok(EvidenceCommand::LiveDataPlane {
+        plane_address: plane_address.to_string_lossy().into_owned(),
+        product: product.to_string_lossy().into_owned(),
+        window_seconds,
         report_path: PathBuf::from(report_path),
     })
 }

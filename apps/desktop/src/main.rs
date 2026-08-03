@@ -23,10 +23,14 @@ use std::{sync::mpsc::TrySendError, time::Duration};
 
 const MARKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-fn generation_status(subscription_id: &str, generation: &DesktopMarketGeneration) -> String {
+fn generation_status(
+    worker_label: &str,
+    subscription_id: &str,
+    generation: &DesktopMarketGeneration,
+) -> String {
     let (first_sequence, last_sequence) = generation.sequence_range();
     format!(
-        "binary fixture worker · disconnected · {subscription_id} · model g{} · {} retained · seq {first_sequence}–{last_sequence}",
+        "{worker_label} · {subscription_id} · model g{} · {} retained · seq {first_sequence}–{last_sequence}",
         generation.generation(),
         generation.items().len(),
     )
@@ -53,6 +57,8 @@ struct TerminalApp {
     theme_revision: u64,
     instrument_label: String,
     replay_label: String,
+    worker_label: String,
+    subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
 }
@@ -64,7 +70,11 @@ impl TerminalApp {
         market_worker: MarketDataWorker,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
-        let replay_label = generation_status(&bootstrap.subscription_id, &bootstrap.generation);
+        let replay_label = generation_status(
+            &bootstrap.worker_label,
+            &bootstrap.subscription_id,
+            &bootstrap.generation,
+        );
         let instrument = bootstrap.snapshot.instrument();
         let instrument_label = format!(
             "{} · {} · instrument r{}",
@@ -89,14 +99,19 @@ impl TerminalApp {
             theme_revision: 0,
             instrument_label,
             replay_label,
+            worker_label: bootstrap.worker_label,
+            subscription_id: bootstrap.subscription_id,
             bridge_label,
             market_worker,
         }
     }
 
     fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
-        self.replay_label =
-            generation_status("desktop_fixture_market_bars", &publication.generation);
+        self.replay_label = generation_status(
+            &self.worker_label,
+            &self.subscription_id,
+            &publication.generation,
+        );
         self.chart.update(cx, |chart, chart_cx| {
             if chart.try_queue_replay_update(publication.update).is_err() {
                 eprintln!("bounded chart queue overflowed; fixture resnapshot required");
@@ -130,8 +145,11 @@ impl TerminalApp {
         });
         match install {
             Ok(true) => {
-                self.replay_label =
-                    generation_status(&bootstrap.subscription_id, &bootstrap.generation);
+                self.replay_label = generation_status(
+                    &self.worker_label,
+                    &bootstrap.subscription_id,
+                    &bootstrap.generation,
+                );
                 cx.notify();
             }
             Ok(false) => eprintln!("ignored stale fixture recovery response {request_id}"),
@@ -399,8 +417,13 @@ fn main() {
         eprintln!("unsupported argument: {}", argument.to_string_lossy());
         std::process::exit(2);
     }
-    let (bootstrap, market_worker) =
-        MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps");
+    let (bootstrap, market_worker) = match std::env::var("AXIUSFLOW_LIVE_ENDPOINT") {
+        Ok(endpoint) if !endpoint.trim().is_empty() => {
+            MarketDataWorker::start_live(&endpoint, "live coinbase · authorized public feed")
+                .expect("the live market worker connects")
+        }
+        _ => MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps"),
+    };
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         sync_component_theme(&AxiusflowTheme::dark(), None, cx);

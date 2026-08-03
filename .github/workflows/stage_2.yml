@@ -467,3 +467,60 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves the authorized Coinbase public feed over TLS - subscription, live trades with sequence continuity, heartbeats, and exact fixed-point decoding - for BTC-USD and ETH-USD; it does not prove Level 2, historical backfill, partitions, fanout, or production deployment."
+
+  live_data_plane:
+    name: live_data_plane_vertical
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake make gcc perl pkg-config
+      - name: build_quic_conformance
+        run: cargo build --locked --package axiusflow_ingest_conformance --features quic
+      - name: actual_live_data_plane
+        run: tools/run_live_data_plane.sh
+      - name: verify_live_data_plane_evidence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_live_data_plane_evidence_Linux.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_live_data_plane"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["product"] == "BTC-USD"
+          assert evidence["snapshot_bars"] > 0
+          assert evidence["snapshot_first_sequence"] == 1
+          assert evidence["live_delta_sequence"] == evidence["snapshot_last_sequence"] + 1
+          assert evidence["behavior"] == {
+              "backfill": "passed",
+              "snapshot_served": "passed",
+              "binary_wire_protocol": "passed",
+              "live_delta_bar": "passed",
+              "sequence_continuity": "passed",
+              "ohlc_invariants": "passed",
+              "coinbase_provenance": "passed",
+              "tls_at_client_edge": "not_exercised",
+              "multi_product_connection": "not_exercised",
+              "production_deployment": "not_exercised",
+          }
+          PY
+      - name: retain_live_data_plane_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_live_data_plane_evidence_Linux
+          path: .cache/evidence/stage_2_live_data_plane_evidence_Linux.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: evidence_scope
+        run: echo "This lane proves the live vertical - Coinbase backfill into a snapshot in the exact binary wire protocol, then a live aggregated delta bar with contiguous sequence, valid OHLC, increasing timestamps, and Coinbase provenance - over plaintext loopback to the client; it does not prove TLS at the client edge, multi-product connections, or production deployment."

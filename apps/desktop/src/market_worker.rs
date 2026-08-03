@@ -39,6 +39,7 @@ pub(crate) struct MarketWorkerBootstrap {
     pub snapshot: ReplaySnapshot,
     pub subscription_id: String,
     pub generation: DesktopMarketGeneration,
+    pub worker_label: String,
 }
 
 pub(crate) struct MarketWorkerPublication {
@@ -83,6 +84,39 @@ impl MarketDataWorker {
         ))
     }
 
+    /// Starts a live worker against the market data plane's binary WebSocket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection or bootstrap fails.
+    pub fn start_live(
+        endpoint: &str,
+        source_label: &str,
+    ) -> Result<(MarketWorkerBootstrap, Self), String> {
+        let (bootstrap_tx, bootstrap_rx) = mpsc::sync_channel(1);
+        let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
+        let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let endpoint = endpoint.to_string();
+        let label = source_label.to_string();
+        thread::Builder::new()
+            .name("axiusflow-market-live-worker".to_string())
+            .spawn(move || {
+                run_live_worker(&endpoint, &label, &bootstrap_tx, &message_tx, &command_rx);
+            })
+            .map_err(|error| error.to_string())?;
+        let bootstrap = bootstrap_rx
+            .recv()
+            .map_err(|_| "live worker stopped before bootstrap".to_string())??;
+        Ok((
+            bootstrap,
+            Self {
+                commands: command_tx,
+                messages: message_rx,
+                connected: true,
+            },
+        ))
+    }
+
     pub fn try_send_recovery(
         &self,
         command: ReplayRecoveryCommand,
@@ -115,6 +149,7 @@ impl MarketDataWorker {
 }
 
 pub(crate) struct FixtureMarketWorker {
+    expected_subscription_id: String,
     source: EmbeddedReplaySource,
     convention: DecimalConvention,
     decoder: BinaryMarketBarStreamDecoder,
@@ -125,8 +160,15 @@ pub(crate) struct FixtureMarketWorker {
 
 impl FixtureMarketWorker {
     pub(crate) fn try_new() -> Result<Self, String> {
-        let convention =
-            DecimalConvention::try_new("usd_minor", "shares").map_err(|error| error.to_string())?;
+        Self::try_new_with_convention("usd_minor", "shares")
+    }
+
+    pub(crate) fn try_new_with_convention(
+        price_unit: &str,
+        quantity_unit: &str,
+    ) -> Result<Self, String> {
+        let convention = DecimalConvention::try_new(price_unit, quantity_unit)
+            .map_err(|error| error.to_string())?;
         let maximum_frame_bytes =
             NonZeroUsize::new(MAXIMUM_FRAME_BYTES).unwrap_or(NonZeroUsize::MIN);
         let maximum_buffered_bytes =
@@ -139,6 +181,7 @@ impl FixtureMarketWorker {
         )
         .map_err(|error| error.to_string())?;
         Ok(Self {
+            expected_subscription_id: SUBSCRIPTION_ID.to_string(),
             source: EmbeddedReplaySource,
             convention,
             decoder,
@@ -203,6 +246,7 @@ impl FixtureMarketWorker {
             snapshot: decoded_snapshot,
             subscription_id: SUBSCRIPTION_ID.to_string(),
             generation: publication.generation,
+            worker_label: "binary fixture worker · disconnected".to_string(),
         })
     }
 
@@ -260,7 +304,7 @@ impl FixtureMarketWorker {
         let projected = projected
             .pop()
             .ok_or_else(|| "binary fixture frame projected no update".to_string())?;
-        if projected.subscription_id != SUBSCRIPTION_ID {
+        if projected.subscription_id != self.expected_subscription_id {
             return Err("binary fixture subscription identity changed".to_string());
         }
         let outcome = self
@@ -332,6 +376,79 @@ fn run_worker(
             .is_err()
         {
             return;
+        }
+    }
+}
+
+fn run_live_worker(
+    endpoint: &str,
+    source_label: &str,
+    bootstrap_tx: &SyncSender<Result<MarketWorkerBootstrap, String>>,
+    message_tx: &SyncSender<MarketWorkerMessage>,
+    _command_rx: &Receiver<ReplayRecoveryCommand>,
+) {
+    let result = run_live_worker_inner(endpoint, source_label, bootstrap_tx, message_tx);
+    if let Err(error) = result {
+        let _ = bootstrap_tx.send(Err(error));
+    }
+}
+
+fn run_live_worker_inner(
+    endpoint: &str,
+    source_label: &str,
+    bootstrap_tx: &SyncSender<Result<MarketWorkerBootstrap, String>>,
+    message_tx: &SyncSender<MarketWorkerMessage>,
+) -> Result<(), String> {
+    // The fixture worker's decoder and bounded client model are transport-neutral;
+    // the live worker reuses exactly that machinery over the data-plane socket.
+    // The live worker uses the plane's coinbase spot convention and identity.
+    let mut worker = FixtureMarketWorker::try_new_with_convention("usd", "base")?;
+    worker.expected_subscription_id = "coinbase_spot_one_minute".to_string();
+    let (mut socket, _) = tungstenite::connect(endpoint).map_err(|error| error.to_string())?;
+    let mut bootstrapped = false;
+    loop {
+        let frame = match socket.read() {
+            Ok(tungstenite::Message::Binary(bytes)) => bytes,
+            Ok(tungstenite::Message::Ping(payload)) => {
+                socket
+                    .send(tungstenite::Message::Pong(payload))
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+            Ok(tungstenite::Message::Close(_)) => {
+                return Err("live data plane closed the stream".to_string());
+            }
+            Ok(_) => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let projected = worker.decode_frame(&frame)?;
+        if projected.is_empty() {
+            continue;
+        }
+        let publication = worker.finish_publication(projected)?;
+        if !bootstrapped {
+            let ReplayStreamUpdate::Snapshot(snapshot) = publication.update else {
+                return Err("live data plane sent a delta before any snapshot".to_string());
+            };
+            bootstrapped = true;
+            if bootstrap_tx
+                .send(Ok(MarketWorkerBootstrap {
+                    snapshot,
+                    subscription_id: SUBSCRIPTION_ID.to_string(),
+                    generation: publication.generation,
+                    worker_label: source_label.to_string(),
+                }))
+                .is_err()
+            {
+                return Ok(());
+            }
+            continue;
+        }
+        if message_tx
+            .send(MarketWorkerMessage::Update(publication))
+            .is_err()
+        {
+            return Ok(());
         }
     }
 }

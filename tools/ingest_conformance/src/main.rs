@@ -18,6 +18,7 @@ mod coinbase_live;
 #[cfg(all(target_os = "linux", feature = "dpdk-native"))]
 mod dpdk_lifecycle;
 mod evidence_report;
+mod live_data_plane;
 mod postgres_persistence;
 #[cfg(all(target_os = "linux", feature = "quic"))]
 mod quic_prototype;
@@ -860,6 +861,12 @@ fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box
             service_binary,
             report_path,
         } => authorization_boundary::run(&service_binary, &report_path),
+        evidence_report::EvidenceCommand::LiveDataPlane {
+            plane_address,
+            product,
+            window_seconds,
+            report_path,
+        } => live_data_plane::run(&plane_address, &product, window_seconds, &report_path),
         evidence_report::EvidenceCommand::CoinbaseLive {
             products,
             window_seconds,

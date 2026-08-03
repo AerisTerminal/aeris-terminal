@@ -21,6 +21,7 @@ members = [
     "crates/realtime",
     "crates/security",
     "services/auth_service",
+    "services/market_data_plane",
     "crates/streaming",
     "crates/testing",
     "crates/transport",
@@ -48,7 +49,9 @@ getrandom = "=0.4.3"
 jsonwebtoken = { version = "=11.0.0", default-features = false }
 keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
 serde = { version = "=1.0.229", features = ["derive"] }
+rustls = "=0.23.43"
 serde_json = "=1.0.151"
+webpki-roots = "=1.0.5"
 sha2 = "=0.10.9"
 thread-priority = "=3.1.1"
 wayland-client = { version = "=0.31.15", default-features = false, features = ["dlopen"] }

@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_desktop"
+name = "axiusflow_market_data_plane"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,17 +8,16 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
-axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
-axiusflow_design_system = { path = "../../crates/ui/design_system" }
+axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
+axiusflow_instruments = { path = "../../crates/domain/instruments" }
+axiusflow_market_data = { path = "../../crates/domain/market_data" }
 axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
-axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
+axiusflow_protocols = { path = "../../crates/protocols" }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
-gpui.workspace = true
-gpui_platform.workspace = true
-gpui-component.workspace = true
 tungstenite.workspace = true
+webpki-roots.workspace = true
 
 [lints]
 workspace = true
