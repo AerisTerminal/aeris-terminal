@@ -100,6 +100,23 @@ impl<T> SharedHistoryCache<T> {
         self.prepare_publish(identity, decoded_bytes, reserved_decoded_bytes)
     }
 
+    pub(crate) fn check_publish_capacity(
+        &self,
+        identity: &SegmentIdentity,
+        decoded_bytes: usize,
+        reserved_decoded_bytes: usize,
+    ) -> Result<(), DesktopHistoryError> {
+        let requested = decoded_bytes.saturating_add(reserved_decoded_bytes);
+        if requested > self.maximum_decoded_bytes.get() {
+            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+                requested,
+                maximum: self.maximum_decoded_bytes.get(),
+            });
+        }
+        self.planned_evictions(identity, decoded_bytes, reserved_decoded_bytes)
+            .map(|_| ())
+    }
+
     /// Replaces one immutable generation after proving all cache bounds.
     ///
     /// # Errors
@@ -178,6 +195,19 @@ impl<T> SharedHistoryCache<T> {
         reserved_decoded_bytes: usize,
     ) -> Result<(), DesktopHistoryError> {
         self.prune_retired();
+        let evictions = self.planned_evictions(identity, decoded_bytes, reserved_decoded_bytes)?;
+        for candidate in evictions {
+            self.remove_entry(&candidate);
+        }
+        Ok(())
+    }
+
+    fn planned_evictions(
+        &self,
+        identity: &SegmentIdentity,
+        decoded_bytes: usize,
+        reserved_decoded_bytes: usize,
+    ) -> Result<Vec<SegmentIdentity>, DesktopHistoryError> {
         let replacement = self.entries.get(identity);
         let replacement_is_retained =
             replacement.is_some_and(|entry| Arc::strong_count(&entry.publication) > 1);
@@ -192,13 +222,26 @@ impl<T> SharedHistoryCache<T> {
             .entries
             .len()
             .saturating_add(usize::from(!self.entries.contains_key(identity)));
+        let released_retired_bytes = self
+            .retired
+            .iter()
+            .filter(|generation| generation.publication.strong_count() == 0)
+            .fold(0_usize, |total, generation| {
+                total.saturating_add(generation.decoded_bytes)
+            });
+        let retained_generations = self
+            .retired
+            .iter()
+            .filter(|generation| generation.publication.strong_count() != 0)
+            .count();
         let mut projected_bytes = self
             .decoded_bytes
+            .saturating_sub(released_retired_bytes)
             .saturating_sub(reclaimed_replacement_bytes)
             .saturating_add(decoded_bytes)
             .saturating_add(reserved_decoded_bytes);
         let mut projected_generations = projected_entries
-            .saturating_add(self.retired.len())
+            .saturating_add(retained_generations)
             .saturating_add(usize::from(replacement_is_retained));
         let mut candidates = self
             .entries
@@ -244,10 +287,7 @@ impl<T> SharedHistoryCache<T> {
                 maximum_entries: self.maximum_entries.get(),
             });
         }
-        for candidate in evictions {
-            self.remove_entry(&candidate);
-        }
-        Ok(())
+        Ok(evictions)
     }
 
     fn remove_entry(&mut self, identity: &SegmentIdentity) {

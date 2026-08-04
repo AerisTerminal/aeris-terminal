@@ -1003,6 +1003,9 @@ fn maximum_watermark_overlap_is_not_charged() {
         worker
             .push_live(&identity, item(u64::MAX), 8)
             .expect("maximum sequence buffers");
+        worker
+            .check_snapshot_capacity(&identity, u64::MAX, 64)
+            .expect("overlapping live bytes are excluded from the capacity check");
         let publication = worker
             .install_snapshot(
                 &identity,

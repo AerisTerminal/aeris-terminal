@@ -94,6 +94,15 @@ The deterministic suite proves:
   coarse diagnostic classes;
 - authenticated local hydration succeeds while both provider and Axiusflow
   control-plane connectivity are unavailable;
+- a real Coinbase history adapter page passes through the bounded scheduler and
+  into the composed worker only after exact provider/account/entitlement,
+  instrument, dataset, resolution, and range matching plus worker-owned
+  non-reusable scheduler binding to the complete immutable segment revision and
+  consumes only the scheduler's read-only validated completion; stale
+  generations, unfinished pagination, missing empty-page cutover evidence,
+  decoded-memory overflow, and gapped snapshots fail before publication, and
+  the capacity preflight does not evict cache entries. A live gap can bind new
+  recovery work without restarting or discarding the active handoff floor;
 - the Linux native listener constructs the exact state and owner-change match
   rules, applies fail-closed state mapping and duplicate coalescing, and shares
   the lifecycle event type; a live host probe opened the listener and read
@@ -104,8 +113,9 @@ The deterministic suite proves:
 
 This slice does not implement Rithmic, CQG, FYERS, or another direct streaming
 provider adapter. Coinbase now supplies a bounded direct public one-minute
-history fetch adapter, but it is not yet composed with this lifecycle/history
-owner. The lifecycle owner and native monitor remain disconnected from
+history fetch adapter, and the deterministic suite now composes its validated
+scheduler completion with this lifecycle/history owner. No application event
+loop drives that boundary. The lifecycle owner and native monitor remain disconnected from
 `apps/desktop`; Windows and macOS network-change backends are unimplemented.
 The composed worker proves provider-generation ownership of history callbacks,
 but no native provider SDK or application event loop drives that boundary yet.

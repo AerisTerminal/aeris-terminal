@@ -22,7 +22,10 @@ use zeroize::Zeroize;
 
 mod market_worker;
 
-pub use market_worker::{DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError};
+pub use market_worker::{
+    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
+    HistoryCompletionBinding, HistoryCompletionInstall,
+};
 
 struct CredentialBytes(Vec<u8>);
 

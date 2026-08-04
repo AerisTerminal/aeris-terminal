@@ -591,7 +591,7 @@ fn validated_pages_schedule_progressing_continuations_without_losing_retry_state
             NOW + 10_000,
         )
         .expect("valid page completes");
-    assert!(completion.continuation_scheduled);
+    assert!(completion.continuation_scheduled());
     let next = scheduler
         .dispatch_next(NOW, MONOTONIC_NOW)
         .expect("continuation dispatch succeeds")

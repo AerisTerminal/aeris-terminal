@@ -91,9 +91,26 @@ pub enum FetchFailureOutcome {
 /// Validated provider page plus its interested consumers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Completion {
-    pub page: HistoryPage,
-    pub interests: Vec<RequestInterest>,
-    pub continuation_scheduled: bool,
+    pub(crate) page: HistoryPage,
+    pub(crate) interests: Vec<RequestInterest>,
+    pub(crate) continuation_scheduled: bool,
+}
+
+impl Completion {
+    #[must_use]
+    pub const fn page(&self) -> &HistoryPage {
+        &self.page
+    }
+
+    #[must_use]
+    pub fn interests(&self) -> &[RequestInterest] {
+        &self.interests
+    }
+
+    #[must_use]
+    pub const fn continuation_scheduled(&self) -> bool {
+        self.continuation_scheduled
+    }
 }
 
 #[derive(Clone)]

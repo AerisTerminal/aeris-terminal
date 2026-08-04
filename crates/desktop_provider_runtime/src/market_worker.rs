@@ -10,9 +10,16 @@ use axiusflow_desktop_history::{
 };
 use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
-use axiusflow_provider_history::{SequencedHistory, VerifiedHistorySnapshot};
+use axiusflow_provider_history::{
+    Completion, DataClass, HistoryItem, RequestInterest, SequencedHistory, VerifiedHistorySnapshot,
+};
 use std::{
-    collections::BTreeMap, error::Error, fmt, num::NonZeroUsize, path::Path, sync::Arc,
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    num::{NonZeroU64, NonZeroUsize},
+    path::Path,
+    sync::Arc,
     thread::ThreadId,
 };
 
@@ -27,6 +34,9 @@ pub enum DesktopMarketWorkerError {
     HistoryHandoffState,
     HistoryStorage,
     HistoryContinuity,
+    HistoryCompletionMismatch,
+    HistoryCompletionIncomplete,
+    HistoryEmptyCutoverMissing,
     HandoffLimitReached { maximum: usize },
     HandoffNotTracked,
     HandoffGenerationMismatch,
@@ -54,6 +64,15 @@ impl fmt::Display for DesktopMarketWorkerError {
             Self::HistoryContinuity => {
                 formatter.write_str("desktop market history continuity failed")
             }
+            Self::HistoryCompletionMismatch => {
+                formatter.write_str("desktop market history completion identity mismatched")
+            }
+            Self::HistoryCompletionIncomplete => {
+                formatter.write_str("desktop market history completion is not a complete page")
+            }
+            Self::HistoryEmptyCutoverMissing => {
+                formatter.write_str("desktop market empty history has no cutover watermark")
+            }
             Self::HandoffLimitReached { maximum } => write!(
                 formatter,
                 "desktop market worker reached its {maximum}-handoff bound"
@@ -78,6 +97,9 @@ impl Error for DesktopMarketWorkerError {
             | Self::HistoryHandoffState
             | Self::HistoryStorage
             | Self::HistoryContinuity
+            | Self::HistoryCompletionMismatch
+            | Self::HistoryCompletionIncomplete
+            | Self::HistoryEmptyCutoverMissing
             | Self::HandoffLimitReached { .. }
             | Self::HandoffNotTracked
             | Self::HandoffGenerationMismatch
@@ -120,11 +142,27 @@ pub struct DesktopMarketWorkerConfig {
     pub maximum_catalog_entries: usize,
 }
 
+/// Snapshot metadata required when installing one completed provider page.
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryCompletionInstall {
+    pub binding: HistoryCompletionBinding,
+    pub snapshot_generation: NonZeroU64,
+    pub empty_cutover_watermark: Option<u64>,
+    pub startup_cache_state: StartupCacheState,
+}
+
+/// Worker-issued, non-reusable binding between one scheduler request and handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryCompletionBinding(NonZeroU64);
+
 /// Worker-local composition of direct-provider lifecycle and desktop history.
 pub struct DesktopMarketWorker<T, V, D: ProviderSessionDriver> {
     provider: DesktopProviderRuntime<V, D>,
     history: HistoryWorker<T>,
     handoff_generations: BTreeMap<SegmentIdentity, SessionGeneration>,
+    history_completion_bindings:
+        BTreeMap<SegmentIdentity, (RequestInterest, HistoryCompletionBinding)>,
+    next_history_completion_binding: NonZeroU64,
     maximum_handoffs: NonZeroUsize,
 }
 
@@ -161,6 +199,8 @@ where
             provider,
             history,
             handoff_generations: BTreeMap::new(),
+            history_completion_bindings: BTreeMap::new(),
+            next_history_completion_binding: NonZeroU64::MIN,
             maximum_handoffs,
         })
     }
@@ -368,6 +408,48 @@ where
         Ok(())
     }
 
+    /// Starts a history handoff or binds recovery work to an active handoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale lifecycle, bounds, storage, or handoff state.
+    pub fn begin_scheduled_history_handoff(
+        &mut self,
+        generation: SessionGeneration,
+        identity: SegmentIdentity,
+        interest: RequestInterest,
+        encryption_key: &SegmentEncryptionKey,
+        now_unix_seconds: i64,
+    ) -> Result<HistoryCompletionBinding, DesktopMarketWorkerError> {
+        self.ensure_streaming_generation(generation)?;
+        match self.handoff_generations.get(&identity) {
+            Some(tracked) if *tracked != generation => {
+                return Err(DesktopMarketWorkerError::HandoffGenerationMismatch);
+            }
+            Some(_) if self.history_completion_bindings.contains_key(&identity) => {
+                return Err(DesktopMarketWorkerError::HistoryHandoffState);
+            }
+            Some(_) => {}
+            None => self.begin_history_handoff(
+                generation,
+                identity.clone(),
+                encryption_key,
+                now_unix_seconds,
+            )?,
+        }
+        let binding = HistoryCompletionBinding(self.next_history_completion_binding);
+        let next_binding = self
+            .next_history_completion_binding
+            .get()
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(DesktopMarketWorkerError::HistoryResourceLimit)?;
+        self.next_history_completion_binding = next_binding;
+        self.history_completion_bindings
+            .insert(identity, (interest, binding));
+        Ok(binding)
+    }
+
     /// Retires one tracked history handoff.
     ///
     /// # Errors
@@ -381,6 +463,7 @@ where
         self.ensure_history_callback(generation, identity)?;
         self.history.end_handoff(identity)?;
         self.handoff_generations.remove(identity);
+        self.history_completion_bindings.remove(identity);
         Ok(())
     }
 
@@ -419,6 +502,118 @@ where
         self.history
             .install_snapshot(identity, snapshot, decoded_bytes, startup_cache_state)
             .map_err(Into::into)
+    }
+
+    /// Decodes and installs one scheduler-validated, non-paginated provider completion.
+    ///
+    /// The completion must describe the tracked segment exactly. Stale provider
+    /// generations and identity mismatches are rejected before payload decoding.
+    /// Empty pages require an explicit provider cutover watermark.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale lifecycle, mismatched or paginated work,
+    /// decode/size failure, missing empty cutover evidence, or snapshot continuity.
+    pub fn install_history_completion<E, F>(
+        &mut self,
+        generation: SessionGeneration,
+        identity: &SegmentIdentity,
+        completion: &Completion,
+        install: HistoryCompletionInstall,
+        mut retained_decoded_bytes: E,
+        mut decode: F,
+    ) -> Result<Arc<HistoryPublication<T>>, DesktopMarketWorkerError>
+    where
+        E: FnMut(&HistoryItem) -> Result<usize, String>,
+        F: FnMut(&HistoryItem, usize) -> Result<(T, usize), String>,
+    {
+        self.ensure_history_callback(generation, identity)?;
+        let Some((interest, tracked_binding)) = self.history_completion_bindings.get(identity)
+        else {
+            return Err(DesktopMarketWorkerError::HistoryCompletionMismatch);
+        };
+        if *tracked_binding != install.binding || !completion.interests().contains(interest) {
+            return Err(DesktopMarketWorkerError::HistoryCompletionMismatch);
+        }
+        if !completion_matches_identity(completion, identity) {
+            return Err(DesktopMarketWorkerError::HistoryCompletionMismatch);
+        }
+        if completion.continuation_scheduled()
+            || completion.page().next.is_some()
+            || completion.page().request.continuation.is_some()
+            || completion.interests().is_empty()
+            || completion.page().items.len() > completion.page().request.maximum_items.get()
+        {
+            return Err(DesktopMarketWorkerError::HistoryCompletionIncomplete);
+        }
+        let mut previous_sequence: Option<u64> = None;
+        for item in &completion.page().items {
+            if item.event_time_unix_nanos < identity.range_start_unix_nanos
+                || item.event_time_unix_nanos >= identity.range_end_unix_nanos
+                || previous_sequence
+                    .is_some_and(|previous| previous.checked_add(1) != Some(item.sequence))
+            {
+                return Err(DesktopMarketWorkerError::HistoryContinuity);
+            }
+            let sequence = NonZeroU64::new(item.sequence)
+                .ok_or(DesktopMarketWorkerError::HistoryContinuity)?;
+            previous_sequence = Some(sequence.get());
+        }
+        let snapshot_watermark = match completion.page().items.last() {
+            Some(item) => {
+                if install.empty_cutover_watermark.is_some() {
+                    return Err(DesktopMarketWorkerError::HistoryCompletionMismatch);
+                }
+                item.sequence
+            }
+            None => install
+                .empty_cutover_watermark
+                .ok_or(DesktopMarketWorkerError::HistoryEmptyCutoverMissing)?,
+        };
+        let mut estimated_item_bytes = Vec::with_capacity(completion.page().items.len());
+        let mut decoded_bytes = 0_usize;
+        for item in &completion.page().items {
+            let item_bytes = retained_decoded_bytes(item)
+                .map_err(|_| DesktopMarketWorkerError::HistoryDecode)?
+                .max(size_of::<SequencedHistory<T>>());
+            decoded_bytes = decoded_bytes
+                .checked_add(item_bytes)
+                .ok_or(DesktopMarketWorkerError::HistoryResourceLimit)?;
+            estimated_item_bytes.push(item_bytes);
+        }
+        self.history
+            .check_snapshot_capacity(identity, snapshot_watermark, decoded_bytes)?;
+        let mut values = Vec::with_capacity(completion.page().items.len());
+        for (item, maximum_item_bytes) in completion.page().items.iter().zip(estimated_item_bytes) {
+            let sequence = NonZeroU64::new(item.sequence)
+                .ok_or(DesktopMarketWorkerError::HistoryContinuity)?;
+            let (value, item_bytes) = decode(item, maximum_item_bytes)
+                .map_err(|_| DesktopMarketWorkerError::HistoryDecode)?;
+            if item_bytes.max(size_of::<SequencedHistory<T>>()) > maximum_item_bytes {
+                return Err(DesktopMarketWorkerError::HistoryResourceLimit);
+            }
+            values.push(SequencedHistory { sequence, value });
+        }
+        let snapshot = if values.is_empty() {
+            VerifiedHistorySnapshot::empty_with_watermark(
+                install.snapshot_generation,
+                install
+                    .empty_cutover_watermark
+                    .ok_or(DesktopMarketWorkerError::HistoryEmptyCutoverMissing)?,
+            )
+        } else {
+            VerifiedHistorySnapshot::try_new(install.snapshot_generation, values)
+                .map_err(|_| DesktopMarketWorkerError::HistoryContinuity)?
+        };
+        let publication = self.install_history_snapshot(
+            generation,
+            identity,
+            snapshot,
+            decoded_bytes,
+            install.startup_cache_state,
+        )?;
+        self.history_completion_bindings.remove(identity);
+        Ok(publication)
     }
 
     /// Hydrates visible history independently of provider lifecycle.
@@ -522,6 +717,7 @@ where
             match self.history.end_handoff(&identity) {
                 Ok(()) => {
                     self.handoff_generations.remove(&identity);
+                    self.history_completion_bindings.remove(&identity);
                 }
                 Err(error) if first_error.is_none() => first_error = Some(error),
                 Err(_) => {}
@@ -540,4 +736,21 @@ where
             (Ok(value), Ok(())) => Ok(value),
         }
     }
+}
+
+fn completion_matches_identity(completion: &Completion, identity: &SegmentIdentity) -> bool {
+    let request = &completion.page().request;
+    request.provider_id == identity.scope.provider_id
+        && request.account_id == identity.scope.account_id
+        && request.entitlement_revision == identity.scope.entitlement_revision
+        && request.instrument_id == identity.instrument_id
+        && request.resolution == identity.resolution
+        && request.range.start_unix_nanos == identity.range_start_unix_nanos
+        && request.range.end_unix_nanos == identity.range_end_unix_nanos
+        && matches!(
+            (request.data_class, identity.data_kind),
+            (DataClass::Bars, axiusflow_desktop_storage::DataKind::Bars)
+                | (DataClass::Ticks, axiusflow_desktop_storage::DataKind::Ticks)
+                | (DataClass::Depth, axiusflow_desktop_storage::DataKind::Depth)
+        )
 }

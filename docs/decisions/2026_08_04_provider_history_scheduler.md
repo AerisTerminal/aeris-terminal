@@ -76,7 +76,9 @@ crypto data.
   continuation history.
 - Mismatched, oversized, out-of-range, unordered, or invalidly paginated pages
   are rejected while the original in-flight request remains available for
-  retry or explicit cancellation.
+  retry or explicit cancellation. Successful completions expose the validated
+  page and scheduler outcome read-only so downstream code cannot enlarge page
+  or payload bounds after validation.
 - Provider fetch failures finalize their dispatch immediately. They requeue
   only within the configured attempt and queue bounds; terminal failures release
   scheduler capacity and report every affected consumer.
@@ -108,8 +110,12 @@ The deterministic suite does not prove provider quota behavior. The live lane
 proves only the authorized public Coinbase endpoint and one bounded page per
 BTC-USD and ETH-USD product; it does not prove another Coinbase precision
 profile, rights for another provider, Rithmic/CQG
-compatibility, desktop startup, storage integration, cache retention, UI
+compatibility, shipping desktop startup, cache retention, UI
 smoothness, cross-platform behavior, latency, throughput, or production
-performance. `S2-19` owns desktop provider-runtime composition, `S2-25` owns
+performance. A separate deterministic desktop-runtime case passes a Coinbase
+page through this scheduler and installs it through generation- and
+full-segment-identity-fenced desktop history, but no shipping event loop drives
+that path.
+`S2-19` owns shipping desktop provider-runtime composition, `S2-25` owns
 startup/history correctness, and `S2-20` owns reproducible performance
 evidence.

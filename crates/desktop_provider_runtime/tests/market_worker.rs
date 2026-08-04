@@ -2,24 +2,36 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketBarReplayPort, MarketStreamPublication, ReplayStreamUpdate,
 };
+use axiusflow_coinbase_market_adapter::{
+    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
+    ENTITLEMENT_CLASS, decode_history_bar,
+};
 use axiusflow_desktop_history::{
     ControlPlaneState, HistoryDecoder, HistoryWorkerConfig, HydrationOutcome, HydrationRequest,
     ProviderConnectionState, StartupCacheState,
 };
 use axiusflow_desktop_provider_runtime::{
     ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
-    DesktopProviderConfig, NetworkEvent, ProviderSessionDriver, SessionGeneration,
+    DesktopProviderConfig, HistoryCompletionInstall, NetworkEvent, ProviderSessionDriver,
+    SessionGeneration,
 };
 use axiusflow_desktop_storage::{
     CatalogKey, DataKind, HistoryScope, HistoryStore, PublicationOutcome, PublicationRequest,
     RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
 };
+use axiusflow_market_data::MarketBar;
 use axiusflow_platform_runtime::CredentialVault;
-use axiusflow_provider_history::{SequencedHistory, VerifiedHistorySnapshot};
+use axiusflow_provider_history::{
+    Completion, DataClass, HistoryPage, HistoryPageRequest, HistoryRange, HistoryScheduler,
+    ProviderHistoryAdapter, RequestInterest, RequestPriority, SchedulerConfig, SequencedHistory,
+    VerifiedHistorySnapshot,
+};
 use std::{
+    cell::RefCell,
     fs,
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    rc::Rc,
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -141,6 +153,410 @@ impl HistoryDecoder<u64> for SecretFailingDecoder {
     ) -> Result<(Vec<SequencedHistory<u64>>, usize), String> {
         Err("provider-secret-decoder-detail".to_string())
     }
+}
+
+#[derive(Clone)]
+struct CoinbaseFixtureTransport {
+    response: Vec<u8>,
+    paths: Rc<RefCell<Vec<String>>>,
+}
+
+impl CoinbaseHistoryTransport for CoinbaseFixtureTransport {
+    fn get(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        self.paths.borrow_mut().push(path.to_string());
+        Ok(self.response.clone())
+    }
+}
+
+fn scheduled_coinbase_completion(
+    identity: &SegmentIdentity,
+) -> (Completion, Rc<RefCell<Vec<String>>>) {
+    scheduled_coinbase_completion_from_fixture(
+        identity,
+        br#"{"candles":[
+            {"start":"1700000160","low":"37000.00","high":"37100.00","open":"37010.00","close":"37090.00","volume":"1.25000000"},
+            {"start":"1700000100","low":"37020.00","high":"37080.00","open":"37020.00","close":"37070.00","volume":"0.75000000"},
+            {"start":"1700000040","low":"36950.00","high":"37050.00","open":"37000.00","close":"37020.00","volume":"0.50000000"}
+        ]}"#
+        .to_vec(),
+        RequestInterest::new(nonzero_u64(1)),
+        |_| {},
+    )
+}
+
+fn scheduled_coinbase_completion_from_fixture(
+    identity: &SegmentIdentity,
+    response: Vec<u8>,
+    interest: RequestInterest,
+    mutate_page: impl FnOnce(&mut HistoryPage),
+) -> (Completion, Rc<RefCell<Vec<String>>>) {
+    const NOW_UNIX_NANOS: i64 = 1_800_000_000_000_000_000;
+
+    let paths = Rc::new(RefCell::new(Vec::new()));
+    let mut adapter =
+        CoinbaseHistoryCapabilityAdapter::try_with_transport(CoinbaseFixtureTransport {
+            response,
+            paths: paths.clone(),
+        })
+        .expect("Coinbase adapter configures");
+    let mut scheduler = HistoryScheduler::try_new(
+        adapter.capabilities().clone(),
+        SchedulerConfig {
+            maximum_queued_requests: nonzero(1),
+            maximum_total_inflight: nonzero(1),
+            maximum_interests_per_request: nonzero(1),
+            maximum_continuations_per_request: nonzero(1),
+            maximum_fetch_attempts: nonzero(1),
+            adjacent_prefetch_windows: 0,
+        },
+    )
+    .expect("history scheduler configures");
+    scheduler
+        .submit(
+            HistoryPageRequest {
+                provider_id: "coinbase".to_string(),
+                account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+                entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+                instrument_id: identity.instrument_id.clone(),
+                data_class: DataClass::Bars,
+                resolution: identity.resolution.clone(),
+                range: HistoryRange {
+                    start_unix_nanos: identity.range_start_unix_nanos,
+                    end_unix_nanos: identity.range_end_unix_nanos,
+                },
+                maximum_items: nonzero(3),
+                continuation: None,
+            },
+            interest,
+            RequestPriority::Visible,
+            NOW_UNIX_NANOS,
+        )
+        .expect("visible request schedules");
+    let dispatch = scheduler
+        .dispatch_next(NOW_UNIX_NANOS, 0)
+        .expect("dispatch succeeds")
+        .dispatch
+        .expect("request is immediately eligible");
+    let mut page = adapter
+        .fetch_page(&dispatch.request)
+        .expect("Coinbase page fetches");
+    mutate_page(&mut page);
+    let completion = scheduler
+        .complete(dispatch.dispatch_id, page, NOW_UNIX_NANOS)
+        .expect("Coinbase page validates through the scheduler");
+    (completion, paths)
+}
+
+fn coinbase_completion_install(
+    binding: axiusflow_desktop_provider_runtime::HistoryCompletionBinding,
+) -> HistoryCompletionInstall {
+    HistoryCompletionInstall {
+        binding,
+        snapshot_generation: nonzero_u64(1),
+        empty_cutover_watermark: None,
+        startup_cache_state: StartupCacheState::Cold,
+    }
+}
+
+#[test]
+fn coinbase_scheduler_completion_installs_generation_fenced_history() {
+    let root = TestRoot::create("coinbase-completion");
+    let key = segment_key();
+    let identity = coinbase_identity();
+    let mut worker = market_bar_worker(root.path(), 1);
+    let provider_generation = worker
+        .connect(ConnectTrigger::Initial)
+        .expect("provider session starts");
+    worker
+        .session_established(provider_generation)
+        .expect("provider session streams");
+    let binding = worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            identity.clone(),
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("history handoff starts");
+    let (initial, _) = scheduled_coinbase_completion_from_fixture(
+        &identity,
+        br#"{"candles":[
+            {"start":"1700000040","low":"36950.00","high":"37050.00","open":"37000.00","close":"37020.00","volume":"0.50000000"}
+        ]}"#
+        .to_vec(),
+        RequestInterest::new(nonzero_u64(1)),
+        |_| {},
+    );
+    let initial_publication = worker
+        .install_history_completion(
+            provider_generation,
+            &identity,
+            &initial,
+            coinbase_completion_install(binding),
+            |_| Ok(size_of::<MarketBar>()),
+            |item, maximum_item_bytes| {
+                assert_eq!(maximum_item_bytes, size_of::<SequencedHistory<MarketBar>>());
+                decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>()))
+            },
+        )
+        .expect("scheduler completion installs atomically");
+    let (completion, paths) = scheduled_coinbase_completion(&identity);
+    let gap = completion
+        .page()
+        .items
+        .last()
+        .expect("fixture has a gap item");
+    worker
+        .push_history_live(
+            provider_generation,
+            &identity,
+            SequencedHistory {
+                sequence: nonzero_u64(gap.sequence),
+                value: decode_history_bar(gap).expect("gap item decodes"),
+            },
+            size_of::<MarketBar>(),
+        )
+        .expect_err("sequence gap requires a recovery snapshot");
+    let recovery_binding = worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            identity.clone(),
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("active handoff accepts recovery work");
+    assert_ne!(binding, recovery_binding);
+    let publication = worker
+        .install_history_completion(
+            provider_generation,
+            &identity,
+            &completion,
+            HistoryCompletionInstall {
+                binding: recovery_binding,
+                snapshot_generation: nonzero_u64(2),
+                empty_cutover_watermark: None,
+                startup_cache_state: StartupCacheState::Cold,
+            },
+            |_| Ok(size_of::<MarketBar>()),
+            |item, maximum_item_bytes| {
+                assert_eq!(maximum_item_bytes, size_of::<SequencedHistory<MarketBar>>());
+                decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>()))
+            },
+        )
+        .expect("recovery completion installs without restarting the handoff");
+
+    assert_eq!(initial_publication.values.len(), 1);
+    assert_eq!(publication.values.len(), 3);
+    assert_eq!(publication.values[0].value.open, 3_700_000);
+    assert_eq!(publication.watermark, publication.values[2].sequence.get());
+    assert_eq!(
+        paths.borrow().as_slice(),
+        [
+            "/api/v3/brokerage/market/products/BTC-USD/candles?start=1700000040&end=1700000160&granularity=ONE_MINUTE&limit=3"
+        ]
+    );
+}
+
+#[test]
+fn history_completion_is_bound_to_the_scheduled_segment_revision() {
+    let root = TestRoot::create("coinbase-completion-revision");
+    let key = segment_key();
+    let identity = coinbase_identity();
+    let mut revised_identity = identity.clone();
+    revised_identity.source_revision = 2;
+    let mut worker = market_bar_worker(root.path(), 2);
+    let provider_generation = worker
+        .connect(ConnectTrigger::Initial)
+        .expect("provider session starts");
+    worker
+        .session_established(provider_generation)
+        .expect("provider session streams");
+    let old_binding = worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            identity.clone(),
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("history handoff starts");
+    let (completion, _) = scheduled_coinbase_completion(&identity);
+    worker
+        .end_history_handoff(provider_generation, &identity)
+        .expect("old revision handoff ends");
+    let new_binding = worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            revised_identity.clone(),
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("new revision handoff starts");
+    assert_ne!(old_binding, new_binding);
+    let mut adjacent_identity = revised_identity.clone();
+    adjacent_identity.range_start_unix_nanos = revised_identity.range_end_unix_nanos;
+    adjacent_identity.range_end_unix_nanos = 1_700_000_400_000_000_000;
+    worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            adjacent_identity,
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("shared-interest adjacent handoff starts");
+    let estimated = std::cell::Cell::new(false);
+    assert!(matches!(
+        worker.install_history_completion(
+            provider_generation,
+            &revised_identity,
+            &completion,
+            coinbase_completion_install(old_binding),
+            |_| {
+                estimated.set(true);
+                Ok(size_of::<MarketBar>())
+            },
+            |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
+        ),
+        Err(DesktopMarketWorkerError::HistoryCompletionMismatch)
+    ));
+    assert!(!estimated.get());
+}
+
+#[test]
+fn history_completion_rejects_mismatch_empty_and_gapped_pages() {
+    let root = TestRoot::create("coinbase-completion-rejection");
+    let key = segment_key();
+    let identity = coinbase_identity();
+    let mut worker = market_bar_worker(root.path(), 1);
+    let provider_generation = worker
+        .connect(ConnectTrigger::Initial)
+        .expect("provider session starts");
+    worker
+        .session_established(provider_generation)
+        .expect("provider session streams");
+    let binding = worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            identity.clone(),
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("history handoff starts");
+    let (uninterested, _) = scheduled_coinbase_completion_from_fixture(
+        &identity,
+        br#"{"candles":[]}"#.to_vec(),
+        RequestInterest::new(nonzero_u64(2)),
+        |_| {},
+    );
+    let decoded = std::cell::Cell::new(false);
+    assert!(matches!(
+        worker.install_history_completion(
+            provider_generation,
+            &identity,
+            &uninterested,
+            coinbase_completion_install(binding),
+            |_| Ok(size_of::<MarketBar>()),
+            |_, _| {
+                decoded.set(true);
+                Err("must not decode mismatched work".to_string())
+            },
+        ),
+        Err(DesktopMarketWorkerError::HistoryCompletionMismatch)
+    ));
+    assert!(!decoded.get());
+
+    let (empty, _) = scheduled_coinbase_completion_from_fixture(
+        &identity,
+        br#"{"candles":[]}"#.to_vec(),
+        RequestInterest::new(nonzero_u64(1)),
+        |_| {},
+    );
+    assert!(matches!(
+        worker.install_history_completion(
+            provider_generation,
+            &identity,
+            &empty,
+            coinbase_completion_install(binding),
+            |_| Ok(size_of::<MarketBar>()),
+            |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
+        ),
+        Err(DesktopMarketWorkerError::HistoryEmptyCutoverMissing)
+    ));
+
+    let (gapped, _) = scheduled_coinbase_completion_from_fixture(
+        &identity,
+        br#"{"candles":[
+            {"start":"1700000160","low":"37000.00","high":"37100.00","open":"37010.00","close":"37090.00","volume":"1.25000000"},
+            {"start":"1700000100","low":"37020.00","high":"37080.00","open":"37020.00","close":"37070.00","volume":"0.75000000"},
+            {"start":"1700000040","low":"36950.00","high":"37050.00","open":"37000.00","close":"37020.00","volume":"0.50000000"}
+        ]}"#
+        .to_vec(),
+        RequestInterest::new(nonzero_u64(1)),
+        |page| {
+            page.items.remove(1);
+        },
+    );
+    let estimated = std::cell::Cell::new(false);
+    assert!(matches!(
+        worker.install_history_completion(
+            provider_generation,
+            &identity,
+            &gapped,
+            coinbase_completion_install(binding),
+            |_| {
+                estimated.set(true);
+                Ok(size_of::<MarketBar>())
+            },
+            |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
+        ),
+        Err(DesktopMarketWorkerError::HistoryContinuity)
+    ));
+    assert!(!estimated.get());
+}
+
+#[test]
+fn history_completion_checks_capacity_before_decoding() {
+    let root = TestRoot::create("coinbase-completion-capacity");
+    let key = segment_key();
+    let identity = coinbase_identity();
+    let mut worker = market_bar_worker(root.path(), 1);
+    let provider_generation = worker
+        .connect(ConnectTrigger::Initial)
+        .expect("provider session starts");
+    worker
+        .session_established(provider_generation)
+        .expect("provider session streams");
+    let binding = worker
+        .begin_scheduled_history_handoff(
+            provider_generation,
+            identity.clone(),
+            RequestInterest::new(nonzero_u64(1)),
+            &key,
+            1_800_000_000,
+        )
+        .expect("history handoff starts");
+    let (completion, _) = scheduled_coinbase_completion(&identity);
+    let decoded = std::cell::Cell::new(false);
+    assert!(matches!(
+        worker.install_history_completion(
+            provider_generation,
+            &identity,
+            &completion,
+            coinbase_completion_install(binding),
+            |_| Ok(4097),
+            |_, _| {
+                decoded.set(true);
+                Err("must check capacity before decoding".to_string())
+            },
+        ),
+        Err(DesktopMarketWorkerError::HistoryResourceLimit)
+    ));
+    assert!(!decoded.get());
 }
 
 #[test]
@@ -395,6 +811,36 @@ fn market_worker_with_event_capacity(
     .expect("market worker opens")
 }
 
+fn market_bar_worker(
+    root: &Path,
+    maximum_handoffs: usize,
+) -> DesktopMarketWorker<MarketBar, MemoryVault, RecordingDriver> {
+    let ui_thread = thread::spawn(|| thread::current().id())
+        .join()
+        .expect("ui thread identity is captured");
+    DesktopMarketWorker::try_open(
+        MemoryVault,
+        RecordingDriver::default(),
+        "coinbase-public-session",
+        root,
+        catalog_key(),
+        ui_thread,
+        DesktopMarketWorkerConfig {
+            provider: DesktopProviderConfig::new(nonzero(32), nonzero(64)),
+            history: HistoryWorkerConfig {
+                maximum_cache_entries: nonzero(4),
+                maximum_decoded_bytes: nonzero(4096),
+                maximum_charts: nonzero(4),
+                maximum_segment_read_bytes: nonzero(4096),
+                maximum_buffered_live: nonzero(4),
+                maximum_handoffs: nonzero(maximum_handoffs),
+            },
+            maximum_catalog_entries: 4,
+        },
+    )
+    .expect("market-bar worker opens")
+}
+
 fn publication() -> MarketStreamPublication {
     let source = EmbeddedReplaySource;
     let snapshot = source
@@ -433,6 +879,26 @@ fn identity(instrument: &str) -> SegmentIdentity {
         resolution: "1m".to_string(),
         range_start_unix_nanos: 1,
         range_end_unix_nanos: 61,
+        source_revision: 1,
+        schema_revision: 1,
+        calendar_revision: 1,
+        adjustment_revision: 1,
+        correction_revision: 1,
+    }
+}
+
+fn coinbase_identity() -> SegmentIdentity {
+    SegmentIdentity {
+        scope: HistoryScope {
+            provider_id: "coinbase".to_string(),
+            account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+        },
+        instrument_id: "instrument:coinbase:btc:usd".to_string(),
+        data_kind: DataKind::Bars,
+        resolution: "1m".to_string(),
+        range_start_unix_nanos: 1_700_000_040_000_000_000,
+        range_end_unix_nanos: 1_700_000_220_000_000_000,
         source_revision: 1,
         schema_revision: 1,
         calendar_revision: 1,

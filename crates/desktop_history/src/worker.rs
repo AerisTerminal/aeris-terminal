@@ -564,6 +564,41 @@ impl<T: Clone> HistoryWorker<T> {
         Ok(publication)
     }
 
+    /// Proves cache capacity for a provider snapshot before decoding it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or when the decoded snapshot
+    /// and buffered live data cannot fit within the configured cache bounds.
+    pub fn check_snapshot_capacity(
+        &self,
+        identity: &SegmentIdentity,
+        snapshot_watermark: u64,
+        decoded_bytes: usize,
+    ) -> Result<(), DesktopHistoryError> {
+        self.ensure_owner()?;
+        let candidate = self
+            .handoffs
+            .get(identity)
+            .ok_or(DesktopHistoryError::MissingHandoff)?;
+        let retained_live_bytes = candidate
+            .buffered_item_bytes
+            .range((Excluded(snapshot_watermark), Unbounded))
+            .fold(0_usize, |total, (_, bytes)| total.saturating_add(*bytes));
+        let candidate_buffered_bytes = candidate
+            .buffered_item_bytes
+            .values()
+            .fold(0_usize, |total, bytes| total.saturating_add(*bytes));
+        let other_buffered_bytes = self
+            .buffered_live_bytes
+            .saturating_sub(candidate_buffered_bytes);
+        self.cache.check_publish_capacity(
+            identity,
+            decoded_bytes.saturating_add(retained_live_bytes),
+            other_buffered_bytes,
+        )
+    }
+
     fn ensure_owner(&self) -> Result<(), DesktopHistoryError> {
         if thread::current().id() != self.owner_thread {
             return Err(DesktopHistoryError::WorkerThreadMismatch);
