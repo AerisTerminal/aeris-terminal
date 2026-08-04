@@ -19,6 +19,10 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod market_worker;
+
+pub use market_worker::{DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError};
+
 struct CredentialBytes(Vec<u8>);
 
 impl CredentialBytes {

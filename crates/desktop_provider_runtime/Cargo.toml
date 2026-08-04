@@ -8,7 +8,10 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../application" }
+axiusflow_desktop_history = { path = "../desktop_history" }
+axiusflow_desktop_storage = { path = "../desktop_storage" }
 axiusflow_platform_runtime = { path = "../platform_runtime" }
+axiusflow_provider_history = { path = "../provider_history" }
 zeroize.workspace = true
 
 [lints]

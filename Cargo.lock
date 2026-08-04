@@ -762,7 +762,10 @@ name = "axiusflow_desktop_provider_runtime"
 version = "0.1.0"
 dependencies = [
  "axiusflow_application",
+ "axiusflow_desktop_history",
+ "axiusflow_desktop_storage",
  "axiusflow_platform_runtime",
+ "axiusflow_provider_history",
  "zeroize",
 ]
 

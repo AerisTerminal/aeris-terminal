@@ -1,6 +1,6 @@
 # S2-19 decision: bounded desktop provider lifecycle owner
 
-**Status:** accepted as a partial runtime foundation; connected provider and desktop integration remain open
+**Status:** accepted as a partial runtime foundation; direct provider and desktop integration remain open
 
 **Evidence command:** `tools/run_desktop_provider_runtime_conformance.sh`
 
@@ -33,6 +33,17 @@ and errors expose only lifecycle state, capacities, counters, and coarse failure
 classes; they omit the credential key, credential bytes, provider error text,
 queued publication contents, and subscription identifiers.
 
+`DesktopMarketWorker` composes this lifecycle owner with the existing
+`HistoryWorker` on the same non-`Send` worker boundary. Each active history
+handoff is registered against the streaming provider session generation before
+provider callbacks can mutate handoff or cache state. Suspend, network loss,
+transport invalidation, and permanent stop retire every bounded handoff after
+fencing provider callbacks. A fresh provider generation can then start a new
+handoff for the same identity, while delayed live and snapshot callbacks from
+the retired generation fail before reaching the history worker. Local
+visible-range hydration and chart publication remain available without an
+active provider session or Axiusflow control-plane availability.
+
 ## Conformance
 
 The deterministic suite proves:
@@ -58,14 +69,25 @@ The deterministic suite proves:
 - the runtime is statically non-`Send`, so its declared worker ownership and
   teardown cannot migrate to another thread;
 - event `Debug` output redacts the complete market publication and subscription.
+- lifecycle fencing retires real history handoffs, permits the replacement
+  generation to reuse their identities, and rejects delayed live and snapshot
+  callbacks before history mutation;
+- the composed handoff registry enforces the configured bound before starting
+  additional history state;
+- semantic-queue overflow retires the active generation's history handoffs
+  before retry, so their identities and pins cannot strand recovery;
+- composed history errors reduce decoder, storage, and continuity details to
+  coarse diagnostic classes;
+- authenticated local hydration succeeds while both provider and Axiusflow
+  control-plane connectivity are unavailable.
 
 ## Claim boundary
 
 This slice does not implement Rithmic, CQG, FYERS, or another direct provider
 adapter. It does not add a native OS network-change monitor, connect the
-lifecycle owner to `apps/desktop`, or compose `crates/desktop_history` into the
-same worker. The encrypted rights-aware store, visible-range hydration, and
-cache/backfill/live handoff remain independently proven but not runtime-wired.
+lifecycle owner to `apps/desktop`, or connect a provider history fetch adapter.
+The composed worker proves provider-generation ownership of history callbacks,
+but no native provider SDK or application event loop drives that boundary yet.
 It also does not prove shipping-topology cloud absence, provider certification,
 cross-platform recovery, GPUI responsiveness, or performance. `S2-19` therefore
 remains partial; `S2-20` and `S2-21` remain not started.
