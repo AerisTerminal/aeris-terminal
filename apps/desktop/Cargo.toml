@@ -18,7 +18,6 @@ axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
-tungstenite.workspace = true
 
 [lints]
 workspace = true

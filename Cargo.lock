@@ -746,7 +746,6 @@ dependencies = [
  "gpui_platform",
  "serde",
  "serde_json",
- "tungstenite",
 ]
 
 [[package]]

@@ -573,3 +573,49 @@ jobs:
           retention-days: 30
       - name: evidence_scope
         run: echo "This lane proves stream entitlement enforcement - valid service-access tokens open the live stream, missing, foreign, and ungranted tokens are refused with HTTP 403 at the handshake, and a monotonic policy resnapshot disconnects a live revoked stream - over plaintext loopback; it does not prove TLS or production policy distribution."
+
+  desktop_cloud_absence:
+    name: desktop_cloud_data_absence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: verify_exact_source_revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: install_linux_desktop_build_dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - name: inspect_shipping_desktop
+        run: tools/run_desktop_cloud_absence.sh
+      - name: verify_desktop_cloud_absence_claim_boundary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(".cache/evidence/stage_2_desktop_cloud_absence_evidence.json", encoding="utf-8") as evidence_file:
+              evidence = json.load(evidence_file)
+
+          assert evidence["schema_version"] == 1
+          assert evidence["evidence_scope"] == "stage_2_desktop_cloud_absence"
+          assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
+          assert evidence["source_tree_clean"] is True
+          assert evidence["shipping_topology"] == "disconnected_fixture"
+          assert evidence["forbidden_cloud_packages_present"] == []
+          assert evidence["forbidden_shipping_source_literals_present"] == []
+          assert evidence["forbidden_release_binary_literals_present"] == []
+          assert evidence["market_data_cloud_route"] == "absent"
+          assert evidence["provider_credential_cloud_route"] == "absent"
+          assert evidence["direct_provider_network_integration"] == "not_exercised"
+          assert evidence["claim_readiness"] == "fixture_validated"
+          PY
+      - name: retain_desktop_cloud_absence_evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage_2_desktop_cloud_absence_evidence_Linux
+          path: .cache/evidence/stage_2_desktop_cloud_absence_evidence.json
+          if-no-files-found: error
+          retention-days: 30

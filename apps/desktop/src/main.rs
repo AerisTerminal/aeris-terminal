@@ -417,17 +417,8 @@ fn main() {
         eprintln!("unsupported argument: {}", argument.to_string_lossy());
         std::process::exit(2);
     }
-    let (bootstrap, market_worker) = match std::env::var("AXIUSFLOW_LIVE_ENDPOINT") {
-        Ok(endpoint) if !endpoint.trim().is_empty() => {
-            let endpoint = match std::env::var("AXIUSFLOW_AUTH_TOKEN") {
-                Ok(token) if !token.trim().is_empty() => format!("{endpoint}?token={token}"),
-                _ => endpoint,
-            };
-            MarketDataWorker::start_live(&endpoint, "live coinbase · authorized public feed")
-                .expect("the live market worker connects")
-        }
-        _ => MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps"),
-    };
+    let (bootstrap, market_worker) =
+        MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps");
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         sync_component_theme(&AxiusflowTheme::dark(), None, cx);
