@@ -1,18 +1,20 @@
 # S2-19 decision: bounded desktop provider lifecycle owner
 
-**Status:** accepted as a partial runtime foundation; direct provider and desktop integration remain open
+**Status:** accepted as a partial runtime and Coinbase lifecycle composition; shipping desktop integration remains open
 
-**Evidence commands:** `tools/run_desktop_provider_runtime_conformance.sh` and
+**Evidence commands:** `tools/run_desktop_provider_runtime_conformance.sh`,
+`cargo test --locked --package axiusflow_coinbase_market_adapter`, and
 `tools/run_native_network_monitor_conformance.sh`
 
 ## Decision
 
 Use `crates/desktop_provider_runtime` as the provider-neutral, single-writer
-lifecycle owner around a future direct desktop provider adapter. The owner runs
-on one declared worker thread, loads opaque credentials from the existing
-`CredentialVault` for every connection attempt, bounds their size, lends them
-only to the provider start call, and zeroizes the returned vault buffer before
-the attempt returns.
+lifecycle owner around direct desktop provider adapters. The owner runs on one
+declared worker thread. Credentialed adapters load opaque credentials from the
+existing `CredentialVault` for every connection attempt, bound their size, lend
+them only to the provider start call, and zeroize the returned vault buffer
+before the attempt returns. Explicitly keyless public adapters receive an empty
+borrowed credential slice and never perform a synthetic vault lookup.
 
 Every connection attempt receives a monotonically increasing nonzero local
 generation. Provider establishment, invalidation, and immutable
@@ -45,6 +47,20 @@ the retired generation fail before reaching the history worker. Local
 visible-range hydration and chart publication remain available without an
 active provider session or Axiusflow control-plane availability.
 
+The first direct session driver uses the authorized keyless Coinbase public
+WebSocket. It opens TLS and subscribes off the owning worker, reports actual
+post-handshake establishment, delivers trades through a fixed-capacity channel,
+and observes cooperative stop requests through DNS, TCP, TLS, subscription, and
+stream reads in 100 ms I/O slices. One connection-wide continuity cursor
+includes subscription acknowledgements, heartbeats, and market-trade messages,
+and five seconds without a subscribed-channel message invalidates a silently dead connection. Queue
+overflow, sequence gaps, peer closure, and transport failure terminate the
+session and expose only a coarse invalidation reason. The driver owns at most
+one generation thread, rejects stale stops, joins confirmed shutdown, and the
+next generation atomically clears prior queued callbacks only after that join.
+The composed market worker advances lifecycle state before returning a trade
+from the matching streaming generation.
+
 `NativeNetworkMonitor` supplies the same `NetworkEvent` type consumed by the
 lifecycle owner. Its Linux backend installs fixed-capacity, sender/path/
 interface/member-specific system-bus matches for `NetworkManager.StateChanged`
@@ -64,6 +80,16 @@ The deterministic suite proves:
 
 - missing, unavailable, and oversized vault credentials fail before a provider
   session can become active;
+- the explicit keyless Coinbase driver starts while an unavailable vault stays
+  untouched, whereas credentialed drivers retain mandatory vault loading;
+- subscription acknowledgements, heartbeats, and market-trade messages advance
+  one connection-wide sequence without hiding a gap;
+- its bounded callback queue latches overflow after queued work drains, trade
+  diagnostics redact payloads, stale stops cannot cancel an active generation,
+  a confirmed stop permits the next generation, and undrained callbacks from
+  the stopped generation cannot precede its replacement;
+- the composed market worker accepts establishment before returning a Coinbase
+  trade and fences both by the same provider generation;
 - provider start failures expose only a coarse recovery class;
 - network loss and suspend stop the active generation, while restoration and
   resume create strictly newer generations;
@@ -111,14 +137,13 @@ The deterministic suite proves:
 
 ## Claim boundary
 
-This slice does not implement Rithmic, CQG, FYERS, or another direct streaming
-provider adapter. Coinbase now supplies a bounded direct public one-minute
-history fetch adapter, and the deterministic suite now composes its validated
-scheduler completion with this lifecycle/history owner. No application event
-loop drives that boundary. The lifecycle owner and native monitor remain disconnected from
-`apps/desktop`; Windows and macOS network-change backends are unimplemented.
-The composed worker proves provider-generation ownership of history callbacks,
-but no native provider SDK or application event loop drives that boundary yet.
+This slice does not implement Rithmic, CQG, FYERS, or a credentialed streaming
+provider adapter. Coinbase now supplies bounded direct public WebSocket and
+one-minute history connections; deterministic suites compose its streaming
+lifecycle and validated scheduler completion with the worker. No trade-to-bar,
+history-seeding, or application event loop drives those boundaries. The
+lifecycle owner and native monitor remain disconnected from `apps/desktop`;
+Windows and macOS network-change backends are unimplemented.
 It also does not prove shipping-topology cloud absence, provider certification,
 cross-platform recovery, GPUI responsiveness, or performance. `S2-19` therefore
-remains partial; `S2-20` and `S2-21` remain not started.
+remains partial; `S2-20` is not started and `S2-21` remains partial.

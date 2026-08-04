@@ -20,8 +20,13 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod coinbase_driver;
 mod market_worker;
 
+pub use coinbase_driver::{
+    CoinbaseProviderDriver, CoinbaseProviderDriverError, CoinbaseProviderEvent,
+    CoinbaseProviderEvents, CoinbaseProviderInvalidReason,
+};
 pub use market_worker::{
     DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
     HistoryCompletionBinding, HistoryCompletionInstall,
@@ -194,6 +199,12 @@ impl DesktopProviderConfig {
 pub trait ProviderSessionDriver {
     type Error;
 
+    /// Declares whether this provider session consumes secret credentials.
+    #[must_use]
+    fn credential_requirement(&self) -> ProviderCredentialRequirement {
+        ProviderCredentialRequirement::Required
+    }
+
     /// Starts one fresh provider session using borrowed, opaque vault bytes.
     ///
     /// # Errors
@@ -211,6 +222,13 @@ pub trait ProviderSessionDriver {
     ///
     /// Returns a provider-specific error when shutdown cannot be confirmed.
     fn stop_session(&mut self, generation: SessionGeneration) -> Result<(), Self::Error>;
+}
+
+/// Provider credential policy used before starting a session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderCredentialRequirement {
+    Required,
+    Public,
 }
 
 /// Redacted failure classes returned by the desktop runtime.
@@ -383,19 +401,22 @@ where
         let generation = SessionGeneration(
             NonZeroU64::new(generation_value).ok_or(DesktopProviderError::GenerationExhausted)?,
         );
-        let credentials = match self.load_credentials() {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                self.state = DesktopProviderState::RecoveryRequired {
-                    generation: None,
-                    reason: RecoveryReason::CredentialUnavailable,
-                };
-                self.record_event(DesktopProviderEvent::RecoveryRequired {
-                    generation: None,
-                    reason: RecoveryReason::CredentialUnavailable,
-                })?;
-                return Err(error);
-            }
+        let credentials = match self.driver.credential_requirement() {
+            ProviderCredentialRequirement::Required => match self.load_credentials() {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    self.state = DesktopProviderState::RecoveryRequired {
+                        generation: None,
+                        reason: RecoveryReason::CredentialUnavailable,
+                    };
+                    self.record_event(DesktopProviderEvent::RecoveryRequired {
+                        generation: None,
+                        reason: RecoveryReason::CredentialUnavailable,
+                    })?;
+                    return Err(error);
+                }
+            },
+            ProviderCredentialRequirement::Public => CredentialBytes(Vec::new()),
         };
         self.last_generation = generation_value;
         self.metrics.connection_attempts = self.metrics.connection_attempts.saturating_add(1);
@@ -502,13 +523,34 @@ where
         &mut self,
         generation: SessionGeneration,
     ) -> Result<(), DesktopProviderError> {
+        self.session_invalid_with_reason(generation, RecoveryReason::TransportInvalid)
+    }
+
+    /// Invalidates a generation whose bounded provider callback queue overflowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale callback, invalid lifecycle state, wrong
+    /// thread, provider stop failure, or a full semantic queue.
+    pub fn session_callback_queue_overflow(
+        &mut self,
+        generation: SessionGeneration,
+    ) -> Result<(), DesktopProviderError> {
+        self.session_invalid_with_reason(generation, RecoveryReason::SemanticQueueOverflow)
+    }
+
+    fn session_invalid_with_reason(
+        &mut self,
+        generation: SessionGeneration,
+        reason: RecoveryReason,
+    ) -> Result<(), DesktopProviderError> {
         self.ensure_owner()?;
         if self.active_generation() != Some(generation) {
             return self.reject_stale();
         }
         self.state = DesktopProviderState::RecoveryRequired {
             generation: Some(generation),
-            reason: RecoveryReason::TransportInvalid,
+            reason,
         };
         let stop_failed = self.driver.stop_session(generation).is_err();
         if stop_failed {
@@ -516,7 +558,7 @@ where
                 self.metrics.provider_stop_failures.saturating_add(1);
             self.state = DesktopProviderState::StopUnconfirmed {
                 generation,
-                recovery: Some(RecoveryReason::TransportInvalid),
+                recovery: Some(reason),
             };
         }
         if stop_failed {
@@ -525,7 +567,7 @@ where
         }
         self.record_event(DesktopProviderEvent::RecoveryRequired {
             generation: Some(generation),
-            reason: RecoveryReason::TransportInvalid,
+            reason,
         })?;
         Ok(())
     }

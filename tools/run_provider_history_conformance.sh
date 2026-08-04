@@ -21,4 +21,4 @@ cargo test \
     --package axiusflow_coinbase_market_adapter \
     history::tests
 
-echo "provider_history=passed scheduler_cases=8 handoff_cases=3 coinbase_direct_bar_history_cases=6 bounded=true deduplication=true cancellation=true bounded_fetch_failure=true visible_priority=true adjacent_prefetch=true pagination=true monotonic_rate_limits=true empty_snapshot_watermark=true contiguous_handoff=true"
+echo "provider_history=passed scheduler_cases=8 handoff_cases=3 coinbase_adapter_cases=8 bounded=true connection_cancellation=true definitive_connection_failure_fallback=true deduplication=true cancellation=true bounded_fetch_failure=true visible_priority=true adjacent_prefetch=true pagination=true monotonic_rate_limits=true empty_snapshot_watermark=true contiguous_handoff=true"

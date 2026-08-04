@@ -24,4 +24,4 @@ pub use history::{
     CoinbaseHttpsHistoryTransport, decode_history_bar,
 };
 pub use review::{ENTITLEMENT_CLASS, PROVIDER, PROVIDER_REVIEW, TERMS_REVIEW, WEBSOCKET_ENDPOINT};
-pub use session::{CoinbaseSession, SessionHealth, SessionOutcome};
+pub use session::{CoinbaseConnection, CoinbaseSession, SessionHealth, SessionOutcome};

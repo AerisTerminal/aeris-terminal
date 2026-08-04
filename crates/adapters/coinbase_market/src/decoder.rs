@@ -67,6 +67,13 @@ impl CoinbaseDecoder {
     ///
     /// Returns an error for malformed messages or a sequence gap.
     pub fn decode(&mut self, bytes: &[u8]) -> Result<Vec<CanonicalTrade>, CoinbaseError> {
+        self.decode_with_liveness(bytes).map(|(trades, _)| trades)
+    }
+
+    pub(crate) fn decode_with_liveness(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(Vec<CanonicalTrade>, bool), CoinbaseError> {
         let message: ChannelMessage =
             serde_json::from_slice(bytes).map_err(|_| CoinbaseError::InvalidMessage)?;
         self.metrics.messages += 1;
@@ -83,12 +90,11 @@ impl CoinbaseDecoder {
 
         if message.channel == "heartbeats" {
             self.metrics.heartbeats += 1;
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
         if message.channel != "market_trades" {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
-
         let provider_timestamp = parse_rfc3339_nanos(&message.timestamp)?;
         let mut trades = Vec::new();
         for event in &message.events {
@@ -117,7 +123,7 @@ impl CoinbaseDecoder {
                 self.metrics.trades += 1;
             }
         }
-        Ok(trades)
+        Ok((trades, true))
     }
 
     /// Resets sequence and dedup state for a reconnect.
@@ -243,6 +249,18 @@ mod tests {
         )
     }
 
+    fn heartbeat_message(sequence: u64) -> String {
+        format!(
+            r#"{{"channel":"heartbeats","timestamp":"2023-02-09T20:19:35.39625135Z","sequence_num":{sequence},"events":[{{"heartbeat_counter":{sequence}}}]}}"#
+        )
+    }
+
+    fn subscriptions_message(sequence: u64) -> String {
+        format!(
+            r#"{{"channel":"subscriptions","timestamp":"2023-02-09T20:19:35.39625135Z","sequence_num":{sequence},"events":[]}}"#
+        )
+    }
+
     #[test]
     fn decodes_exact_fixed_point_trades() {
         let mut decoder = CoinbaseDecoder::new();
@@ -265,6 +283,29 @@ mod tests {
             .expect("baseline accepted");
         assert!(decoder.decode(trade_message(2, "t-2").as_bytes()).is_err());
         assert_eq!(decoder.metrics().sequence_gaps, 1);
+    }
+
+    #[test]
+    fn every_provider_channel_advances_the_connection_sequence() {
+        let mut decoder = CoinbaseDecoder::new();
+        decoder
+            .decode(subscriptions_message(0).as_bytes())
+            .expect("first acknowledgement accepted");
+        decoder
+            .decode(trade_message(1, "t-1").as_bytes())
+            .expect("trade baseline accepted");
+        decoder
+            .decode(subscriptions_message(2).as_bytes())
+            .expect("second acknowledgement accepted");
+        decoder
+            .decode(heartbeat_message(3).as_bytes())
+            .expect("heartbeat accepted");
+        decoder
+            .decode(trade_message(4, "t-2").as_bytes())
+            .expect("next trade accepted");
+        assert_eq!(decoder.metrics().sequence_gaps, 0);
+        assert_eq!(decoder.metrics().heartbeats, 1);
+        assert_eq!(decoder.metrics().trades, 2);
     }
 
     #[test]

@@ -6,11 +6,16 @@ use axiusflow_provider_history::{
 };
 use rustls::{ClientConfig, ClientConnection, RootCertStore, Stream};
 use serde::Deserialize;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::{Arc, OnceLock, mpsc},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -19,6 +24,7 @@ const REST_HOST: &str = "api.coinbase.com";
 const REST_PORT: u16 = 443;
 const RESPONSE_BYTE_LIMIT: usize = 1_048_576;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ONE_SECOND_NANOS: i64 = 1_000_000_000;
 const ONE_MINUTE_SECONDS: i64 = 60;
 const ONE_MINUTE_NANOS_I64: i64 = 60_000_000_000;
@@ -398,6 +404,7 @@ pub(crate) fn coinbase_tls_config() -> Result<ClientConfig, String> {
 pub(crate) struct DeadlineTcpStream {
     stream: TcpStream,
     deadline: Instant,
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl DeadlineTcpStream {
@@ -407,31 +414,72 @@ impl DeadlineTcpStream {
 
     fn prepare_read(&self) -> io::Result<()> {
         self.stream
-            .set_read_timeout(Some(remaining_until(self.deadline)?))
+            .set_read_timeout(Some(self.operation_timeout()?))
     }
 
     fn prepare_write(&self) -> io::Result<()> {
         self.stream
-            .set_write_timeout(Some(remaining_until(self.deadline)?))
+            .set_write_timeout(Some(self.operation_timeout()?))
+    }
+
+    fn operation_timeout(&self) -> io::Result<Duration> {
+        if self
+            .stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Coinbase connection cancelled",
+            ));
+        }
+        remaining_until(self.deadline).map(|remaining| remaining.min(NETWORK_POLL_INTERVAL))
     }
 }
 
 impl Read for DeadlineTcpStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.prepare_read()?;
-        self.stream.read(buffer)
+        loop {
+            self.prepare_read()?;
+            match self.stream.read(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) => {}
+                result => return result,
+            }
+        }
     }
 }
 
 impl Write for DeadlineTcpStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.prepare_write()?;
-        self.stream.write(buffer)
+        loop {
+            self.prepare_write()?;
+            match self.stream.write(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) => {}
+                result => return result,
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.prepare_write()?;
-        self.stream.flush()
+        loop {
+            self.prepare_write()?;
+            match self.stream.flush() {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) => {}
+                result => return result,
+            }
+        }
     }
 }
 
@@ -440,28 +488,142 @@ pub(crate) fn connect_coinbase_endpoint(
     port: u16,
     deadline: Instant,
 ) -> Result<DeadlineTcpStream, String> {
+    connect_coinbase_endpoint_cancellable(host, port, deadline, None)
+}
+
+pub(crate) fn connect_coinbase_endpoint_cancellable(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    stop: Option<Arc<AtomicBool>>,
+) -> Result<DeadlineTcpStream, String> {
     const MAXIMUM_RESOLVED_ADDRESSES: usize = 16;
 
-    let addresses = resolve_addresses(host, port, deadline, MAXIMUM_RESOLVED_ADDRESSES)?;
+    let addresses = resolve_addresses(
+        host,
+        port,
+        deadline,
+        MAXIMUM_RESOLVED_ADDRESSES,
+        stop.as_deref(),
+    )?;
     if addresses.is_empty() {
         return Err("Coinbase endpoint address resolution returned no address".to_string());
     }
     for (index, address) in addresses.iter().enumerate() {
+        if stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+        {
+            return Err("Coinbase endpoint connection cancelled".to_string());
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         let attempts_left = u32::try_from(addresses.len() - index)
             .map_err(|_| "Coinbase endpoint address count overflow".to_string())?;
-        let attempt_timeout = (remaining / attempts_left).max(Duration::from_millis(1));
-        if let Ok(stream) = TcpStream::connect_timeout(address, attempt_timeout) {
-            stream
-                .set_nodelay(true)
-                .map_err(|_| "Coinbase endpoint socket setup failed".to_string())?;
-            return Ok(DeadlineTcpStream { stream, deadline });
+        let attempt_deadline = Instant::now() + remaining / attempts_left;
+        match connect_address_cancellable(*address, attempt_deadline, stop.as_deref()) {
+            Ok(stream) => {
+                stream
+                    .set_nodelay(true)
+                    .map_err(|_| "Coinbase endpoint socket setup failed".to_string())?;
+                return Ok(DeadlineTcpStream {
+                    stream,
+                    deadline,
+                    stop,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                return Err("Coinbase endpoint connection cancelled".to_string());
+            }
+            Err(_) => {}
         }
     }
     Err("Coinbase endpoint connection failed".to_string())
+}
+
+fn connect_address_cancellable(
+    address: SocketAddr,
+    deadline: Instant,
+    stop: Option<&AtomicBool>,
+) -> io::Result<TcpStream> {
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    socket.set_nonblocking(true)?;
+    match socket.connect(&address.into()) {
+        Ok(()) => return finish_connected_socket(socket),
+        Err(error) if connection_is_pending(&error) => {}
+        Err(error) => return Err(error),
+    }
+    loop {
+        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Coinbase endpoint connection cancelled",
+            ));
+        }
+        if let Some(error) = socket.take_error()? {
+            return Err(error);
+        }
+        match socket.peer_addr() {
+            Ok(_) => return finish_connected_socket(socket),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotConnected || connection_is_pending(&error) => {
+            }
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Coinbase endpoint connection deadline exceeded",
+            ));
+        }
+        thread::sleep(remaining.min(NETWORK_POLL_INTERVAL));
+    }
+}
+
+fn connection_is_pending(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    let raw = error.raw_os_error();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if matches!(raw, Some(114 | 115)) {
+        return true;
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    if matches!(raw, Some(36 | 37)) {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    if matches!(raw, Some(10_035..=10_037)) {
+        return true;
+    }
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    if matches!(raw, Some(149 | 150)) {
+        return true;
+    }
+    false
+}
+
+fn finish_connected_socket(socket: Socket) -> io::Result<TcpStream> {
+    socket.set_nonblocking(false)?;
+    Ok(socket.into())
 }
 
 fn resolve_addresses(
@@ -469,34 +631,55 @@ fn resolve_addresses(
     port: u16,
     deadline: Instant,
     maximum_addresses: usize,
+    stop: Option<&AtomicBool>,
 ) -> Result<Vec<SocketAddr>, String> {
     let resolver = RESOLVER.get_or_init(start_resolver);
     let resolver = resolver.as_ref().map_err(|error| (*error).to_string())?;
     let (sender, receiver) = mpsc::sync_channel(1);
-    resolver
-        .try_send(ResolutionRequest {
-            host: host.to_string(),
-            port,
-            maximum_addresses,
-            response: sender,
-        })
-        .map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => "Coinbase endpoint resolver is busy".to_string(),
-            mpsc::TrySendError::Disconnected(_) => "Coinbase endpoint resolver failed".to_string(),
-        })?;
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err("Coinbase endpoint resolution deadline exceeded".to_string());
-    }
-    receiver
-        .recv_timeout(remaining)
-        .map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => {
-                "Coinbase endpoint resolution deadline exceeded".to_string()
+    let mut request = ResolutionRequest {
+        host: host.to_string(),
+        port,
+        maximum_addresses,
+        response: sender,
+    };
+    loop {
+        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            return Err("Coinbase endpoint resolution cancelled".to_string());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Coinbase endpoint resolution deadline exceeded".to_string());
+        }
+        match resolver.try_send(request) {
+            Ok(()) => break,
+            Err(mpsc::TrySendError::Full(returned)) => {
+                request = returned;
+                thread::sleep(remaining.min(NETWORK_POLL_INTERVAL));
             }
-            mpsc::RecvTimeoutError::Disconnected => "Coinbase endpoint resolver failed".to_string(),
-        })?
-        .map_err(|_| "Coinbase endpoint address resolution failed".to_string())
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err("Coinbase endpoint resolver failed".to_string());
+            }
+        }
+    }
+    loop {
+        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            return Err("Coinbase endpoint resolution cancelled".to_string());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Coinbase endpoint resolution deadline exceeded".to_string());
+        }
+        match receiver.recv_timeout(remaining.min(NETWORK_POLL_INTERVAL)) {
+            Ok(result) => {
+                return result
+                    .map_err(|_| "Coinbase endpoint address resolution failed".to_string());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Coinbase endpoint resolver failed".to_string());
+            }
+        }
+    }
 }
 
 fn start_resolver() -> Result<mpsc::SyncSender<ResolutionRequest>, &'static str> {
@@ -628,7 +811,7 @@ fn decode_chunked(raw: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::{
         COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-        decode_history_bar,
+        connect_coinbase_endpoint_cancellable, decode_history_bar,
     };
     use crate::ENTITLEMENT_CLASS;
     use axiusflow_provider_history::{
@@ -640,6 +823,10 @@ mod tests {
         net::{TcpListener, TcpStream},
         num::NonZeroUsize,
         rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -677,6 +864,7 @@ mod tests {
         let mut stream = DeadlineTcpStream {
             stream,
             deadline: started + Duration::from_millis(60),
+            stop: None,
         };
         let mut byte = [0_u8; 1];
         let error = loop {
@@ -692,6 +880,52 @@ mod tests {
         ));
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().expect("join loopback fixture");
+    }
+
+    #[test]
+    fn cancellable_socket_read_observes_the_poll_bound() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
+        let address = listener.local_addr().expect("read loopback address");
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept loopback fixture");
+            thread::sleep(Duration::from_millis(200));
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let request_stop = Arc::clone(&stop);
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            request_stop.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let stream = TcpStream::connect(address).expect("connect loopback fixture");
+        let mut stream = DeadlineTcpStream {
+            stream,
+            deadline: started + Duration::from_secs(1),
+            stop: Some(stop),
+        };
+        let error = stream
+            .read(&mut [0_u8; 1])
+            .expect_err("cancelled read fails");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        canceller.join().expect("join cancellation fixture");
+        server.join().expect("join loopback fixture");
+    }
+
+    #[test]
+    fn definitive_connection_failure_does_not_retry_until_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
+        let port = listener.local_addr().expect("read loopback address").port();
+        drop(listener);
+        let started = Instant::now();
+        let result = connect_coinbase_endpoint_cancellable(
+            "127.0.0.1",
+            port,
+            started + Duration::from_secs(1),
+            None,
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     fn request(maximum_items: usize) -> HistoryPageRequest {

@@ -91,7 +91,7 @@ crypto data.
 ## Evidence and limitations
 
 The evidence command runs eight scheduler contract tests, three handoff tests,
-and six Coinbase adapter tests. They cover unsupported
+and eight Coinbase adapter tests. They cover unsupported
 capabilities and invalid bounds, expired-request eviction/reporting, priority,
 exact deduplication before and during dispatch, atomic adjacent prefetch, queue
 and interest bounds, rate and concurrency gates, shared and final-owner
@@ -101,7 +101,9 @@ empty-snapshot watermarks for global sequences, contiguous cutover, gaps, and
 buffer overflow. The Coinbase cases additionally prove public-only scope,
 minute/range/page bounds before transport, exact provider path construction,
 out-of-order response normalization, exact fixed-point conversion, duplicate
-and over-precision rejection, and payload/metadata identity binding. The Stage
+and over-precision rejection, payload/metadata identity binding, bounded
+cancellation polling for shared Coinbase socket I/O, and immediate fallback
+from definitive connection failures without retrying until deadline. The Stage
 2 live Coinbase lane fetches and decodes a non-empty bounded HTTPS page for each
 configured product before its WebSocket observation, while retaining
 `production_deployment=not_exercised`.

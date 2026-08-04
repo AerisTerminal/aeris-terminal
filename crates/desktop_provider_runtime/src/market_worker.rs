@@ -1,9 +1,11 @@
 use crate::{
-    ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderEvent,
-    DesktopProviderMetrics, DesktopProviderRuntime, DesktopProviderState, NetworkEvent,
-    ProviderSessionDriver, SessionGeneration,
+    CoinbaseProviderDriver, CoinbaseProviderEvent, CoinbaseProviderEvents,
+    CoinbaseProviderInvalidReason, ConnectTrigger, DesktopProviderConfig, DesktopProviderError,
+    DesktopProviderEvent, DesktopProviderMetrics, DesktopProviderRuntime, DesktopProviderState,
+    NetworkEvent, ProviderSessionDriver, SessionGeneration,
 };
 use axiusflow_application::MarketStreamPublication;
+use axiusflow_coinbase_market_adapter::CanonicalTrade;
 use axiusflow_desktop_history::{
     ChartId, DesktopHistoryError, HistoryDecoder, HistoryPublication, HistoryWorker,
     HistoryWorkerConfig, HydrationOutcome, HydrationRequest, StartupCacheState, WorkerMetrics,
@@ -41,6 +43,7 @@ pub enum DesktopMarketWorkerError {
     HandoffNotTracked,
     HandoffGenerationMismatch,
     ProviderNotStreaming,
+    CallbackSourceMismatch,
 }
 
 impl fmt::Display for DesktopMarketWorkerError {
@@ -82,6 +85,9 @@ impl fmt::Display for DesktopMarketWorkerError {
                 formatter.write_str("history callback belongs to a stale provider generation")
             }
             Self::ProviderNotStreaming => formatter.write_str("provider session is not streaming"),
+            Self::CallbackSourceMismatch => {
+                formatter.write_str("provider callback source mismatched")
+            }
         }
     }
 }
@@ -103,7 +109,8 @@ impl Error for DesktopMarketWorkerError {
             | Self::HandoffLimitReached { .. }
             | Self::HandoffNotTracked
             | Self::HandoffGenerationMismatch
-            | Self::ProviderNotStreaming => None,
+            | Self::ProviderNotStreaming
+            | Self::CallbackSourceMismatch => None,
         }
     }
 }
@@ -318,6 +325,25 @@ where
                 if active == generation
         );
         let provider_result = self.provider.session_invalid(generation);
+        let history_result = if active {
+            self.retire_handoffs()
+        } else {
+            Ok(())
+        };
+        Self::finish_fence(provider_result, history_result)
+    }
+
+    fn session_callback_queue_overflow(
+        &mut self,
+        generation: SessionGeneration,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        let active = matches!(
+            self.provider.state()?,
+            DesktopProviderState::Connecting { generation: active, .. }
+                | DesktopProviderState::Streaming { generation: active }
+                if active == generation
+        );
+        let provider_result = self.provider.session_callback_queue_overflow(generation);
         let history_result = if active {
             self.retire_handoffs()
         } else {
@@ -734,6 +760,49 @@ where
             (Err(error), _) => Err(error.into()),
             (Ok(_), Err(error)) => Err(error.into()),
             (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+}
+
+impl<T: Clone, V> DesktopMarketWorker<T, V, CoinbaseProviderDriver>
+where
+    V: CredentialVault,
+{
+    /// Applies at most one ready direct Coinbase callback on the owning worker.
+    ///
+    /// Established and invalid callbacks advance the provider lifecycle here;
+    /// trades are returned only for the currently streaming generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted lifecycle error for stale, invalid, or failed callbacks.
+    pub fn try_recv_coinbase_trade(
+        &mut self,
+        events: &CoinbaseProviderEvents,
+    ) -> Result<Option<(SessionGeneration, CanonicalTrade)>, DesktopMarketWorkerError> {
+        if !self.provider.owns_coinbase_events(events) {
+            return Err(DesktopMarketWorkerError::CallbackSourceMismatch);
+        }
+        let Some(event) = events.try_recv() else {
+            return Ok(None);
+        };
+        match event {
+            CoinbaseProviderEvent::Established { generation } => {
+                self.session_established(generation)?;
+                Ok(None)
+            }
+            CoinbaseProviderEvent::Trade { generation, trade } => {
+                self.ensure_streaming_generation(generation)?;
+                Ok(Some((generation, trade)))
+            }
+            CoinbaseProviderEvent::Invalid { generation, reason } => {
+                if reason == CoinbaseProviderInvalidReason::EventQueueOverflow {
+                    self.session_callback_queue_overflow(generation)?;
+                } else {
+                    self.session_invalid(generation)?;
+                }
+                Ok(None)
+            }
         }
     }
 }
