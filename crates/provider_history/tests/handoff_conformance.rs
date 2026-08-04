@@ -128,6 +128,18 @@ fn live_buffer_overflow_and_snapshot_gaps_fail_closed() {
             actual: 3,
         })
     );
+    assert_eq!(
+        VerifiedHistorySnapshot::try_new(
+            nonzero_u64(1),
+            vec![
+                sequenced(u64::MAX, "maximum"),
+                sequenced(u64::MAX, "duplicate"),
+            ],
+        ),
+        Err(ProviderHistoryError::InvalidPage(
+            "snapshot sequence cannot advance beyond the maximum"
+        ))
+    );
 
     let mut retry = HandoffCoordinator::new(nonzero_usize(2));
     retry

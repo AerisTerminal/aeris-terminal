@@ -5,7 +5,7 @@ use zeroize::Zeroize;
 pub(crate) const MAXIMUM_IDENTITY_BYTES: usize = 192;
 
 /// Provider/account/entitlement boundary that owns one retained segment.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct HistoryScope {
     pub provider_id: String,
     pub account_id: String,
@@ -21,7 +21,7 @@ impl HistoryScope {
 }
 
 /// Immutable history payload class.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DataKind {
     Bars,
     Ticks,
@@ -41,7 +41,7 @@ impl DataKind {
 }
 
 /// Complete immutable identity and invalidation dimensions for one segment.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SegmentIdentity {
     pub scope: HistoryScope,
     pub instrument_id: String,
@@ -57,7 +57,12 @@ pub struct SegmentIdentity {
 }
 
 impl SegmentIdentity {
-    pub(crate) fn validate(&self) -> Result<(), DesktopStorageError> {
+    /// Validates all bounded identity fields and monotonic range/revision values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the invalid identity field.
+    pub fn validate(&self) -> Result<(), DesktopStorageError> {
         self.scope.validate()?;
         validate_identifier("instrument_id", &self.instrument_id)?;
         validate_identifier("resolution", &self.resolution)?;
@@ -201,6 +206,80 @@ pub enum AvailabilityReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HistoryRead {
     Hit(Vec<u8>),
+    Unavailable {
+        reason: AvailabilityReason,
+        recovery: RecoveryAction,
+    },
+}
+
+/// Cached authorization and retention facts for one successfully read segment.
+#[derive(Clone)]
+pub struct SegmentAccessPolicy {
+    key_id: String,
+    key_verifier: [u8; 32],
+    retention_until: Option<i64>,
+    recovery: RecoveryAction,
+}
+
+impl SegmentAccessPolicy {
+    pub(crate) fn new(
+        key_id: String,
+        key_verifier: [u8; 32],
+        retention_until: Option<i64>,
+        recovery: RecoveryAction,
+    ) -> Self {
+        Self {
+            key_id,
+            key_verifier,
+            retention_until,
+            recovery,
+        }
+    }
+
+    /// Revalidates the caller's key and current retention deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied key differs from the retained segment key.
+    pub fn validate(
+        &self,
+        encryption_key: &SegmentEncryptionKey,
+        now_unix_seconds: i64,
+    ) -> Result<Option<(AvailabilityReason, RecoveryAction)>, DesktopStorageError> {
+        if self
+            .retention_until
+            .is_some_and(|expiry| expiry <= now_unix_seconds)
+        {
+            return Ok(Some((AvailabilityReason::Expired, self.recovery)));
+        }
+        if self.key_id != encryption_key.key_id()
+            || self.key_verifier != crate::crypto::segment_key_verifier(encryption_key)?
+        {
+            return Err(DesktopStorageError::SegmentKeyMismatch);
+        }
+        Ok(None)
+    }
+}
+
+impl fmt::Debug for SegmentAccessPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SegmentAccessPolicy")
+            .field("key_id", &self.key_id)
+            .field("key_verifier", &"[REDACTED]")
+            .field("retention_until", &self.retention_until)
+            .field("recovery", &self.recovery)
+            .finish()
+    }
+}
+
+/// Bounded read result carrying the policy needed for safe memory-cache reuse.
+#[derive(Debug)]
+pub enum AuthorizedHistoryRead {
+    Hit {
+        payload: Vec<u8>,
+        access_policy: SegmentAccessPolicy,
+    },
     Unavailable {
         reason: AvailabilityReason,
         recovery: RecoveryAction,

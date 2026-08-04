@@ -16,6 +16,7 @@ const SEGMENT_FORMAT_VERSION: u8 = 1;
 const NONCE_BYTES: usize = 24;
 const TAG_BYTES: usize = 16;
 const HEADER_BYTES: usize = SEGMENT_MAGIC.len() + 1 + NONCE_BYTES;
+pub(crate) const SEGMENT_FILE_OVERHEAD_BYTES: usize = HEADER_BYTES + TAG_BYTES;
 
 /// Stable catalog-index key loaded from the OS vault.
 pub struct CatalogKey {

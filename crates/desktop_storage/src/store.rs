@@ -2,8 +2,9 @@ use crate::{
     DesktopStorageError,
     catalog::{Catalog, CatalogFilter, CatalogRecord, NewCatalogRecord},
     crypto::{
-        catalog_key_verifier, checksum, decrypt_segment, encode_identity, encrypt_segment, hex,
-        identity_token, instrument_token, resolution_token, scope_tokens, segment_key_verifier,
+        SEGMENT_FILE_OVERHEAD_BYTES, catalog_key_verifier, checksum, decrypt_segment,
+        encode_identity, encrypt_segment, hex, identity_token, instrument_token, resolution_token,
+        scope_tokens, segment_key_verifier,
     },
     model::{
         AvailabilityReason, CatalogStatistics, DeletionReport, HistoryRead, HistoryScope,
@@ -138,10 +139,73 @@ impl HistoryStore {
         now_unix_seconds: i64,
         missing_recovery: RecoveryAction,
     ) -> Result<HistoryRead, DesktopStorageError> {
+        self.read_bounded(
+            identity,
+            encryption_key,
+            now_unix_seconds,
+            missing_recovery,
+            MAXIMUM_SEGMENT_BYTES,
+        )
+    }
+
+    /// Reads one exact segment only when its cataloged payload fits the caller's bound.
+    ///
+    /// The bound is checked from cataloged payload metadata before opening,
+    /// reading, allocating, or decrypting the segment file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid bound, invalid identity, wrong key,
+    /// catalog/I/O failure, or a cataloged payload above the requested bound.
+    pub fn read_bounded(
+        &mut self,
+        identity: &crate::SegmentIdentity,
+        encryption_key: &SegmentEncryptionKey,
+        now_unix_seconds: i64,
+        missing_recovery: RecoveryAction,
+        maximum_payload_bytes: usize,
+    ) -> Result<HistoryRead, DesktopStorageError> {
+        Ok(
+            match self.read_bounded_authorized(
+                identity,
+                encryption_key,
+                now_unix_seconds,
+                missing_recovery,
+                maximum_payload_bytes,
+            )? {
+                crate::AuthorizedHistoryRead::Hit { payload, .. } => HistoryRead::Hit(payload),
+                crate::AuthorizedHistoryRead::Unavailable { reason, recovery } => {
+                    HistoryRead::Unavailable { reason, recovery }
+                }
+            },
+        )
+    }
+
+    /// Reads one bounded segment and returns the policy required for safe cache reuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::read_bounded`].
+    pub fn read_bounded_authorized(
+        &mut self,
+        identity: &crate::SegmentIdentity,
+        encryption_key: &SegmentEncryptionKey,
+        now_unix_seconds: i64,
+        missing_recovery: RecoveryAction,
+        maximum_payload_bytes: usize,
+    ) -> Result<crate::AuthorizedHistoryRead, DesktopStorageError> {
+        if maximum_payload_bytes == 0 || maximum_payload_bytes > MAXIMUM_SEGMENT_BYTES {
+            return Err(DesktopStorageError::InvalidConfiguration(
+                "segment read bound must be within 1..=67108864",
+            ));
+        }
         identity.validate()?;
         let segment_id = identity_token(&self.catalog_key, identity)?;
         let Some(record) = self.catalog.find(&segment_id)? else {
-            return Ok(unavailable(AvailabilityReason::NotCached, missing_recovery));
+            return Ok(crate::AuthorizedHistoryRead::Unavailable {
+                reason: AvailabilityReason::NotCached,
+                recovery: missing_recovery,
+            });
         };
         if record
             .retention_until
@@ -149,20 +213,68 @@ impl HistoryStore {
         {
             let recovery = record.recovery;
             self.remove_records(&[record])?;
-            return Ok(unavailable(AvailabilityReason::Expired, recovery));
+            return Ok(crate::AuthorizedHistoryRead::Unavailable {
+                reason: AvailabilityReason::Expired,
+                recovery,
+            });
         }
         if record.quarantined {
-            return Ok(unavailable(
-                AvailabilityReason::Quarantined,
-                record.recovery,
-            ));
+            return Ok(crate::AuthorizedHistoryRead::Unavailable {
+                reason: AvailabilityReason::Quarantined,
+                recovery: record.recovery,
+            });
         }
         if record.key_id != encryption_key.key_id()
             || record.key_verifier != segment_key_verifier(encryption_key)?
         {
             return Err(DesktopStorageError::SegmentKeyMismatch);
         }
-        self.read_record(identity, encryption_key, &record)
+        let payload_bytes = usize::try_from(record.payload_bytes).unwrap_or(usize::MAX);
+        if payload_bytes > maximum_payload_bytes {
+            return Err(DesktopStorageError::SegmentTooLarge {
+                requested: payload_bytes,
+                maximum: maximum_payload_bytes,
+            });
+        }
+        match self.read_record(identity, encryption_key, &record, maximum_payload_bytes)? {
+            HistoryRead::Hit(payload) => Ok(crate::AuthorizedHistoryRead::Hit {
+                payload,
+                access_policy: crate::SegmentAccessPolicy::new(
+                    record.key_id,
+                    record.key_verifier,
+                    record.retention_until,
+                    record.recovery,
+                ),
+            }),
+            HistoryRead::Unavailable { reason, recovery } => {
+                Ok(crate::AuthorizedHistoryRead::Unavailable { reason, recovery })
+            }
+        }
+    }
+
+    /// Removes one exact segment when its recorded retention deadline has passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid identity or catalog/filesystem failure.
+    pub fn remove_if_expired(
+        &mut self,
+        identity: &crate::SegmentIdentity,
+        now_unix_seconds: i64,
+    ) -> Result<bool, DesktopStorageError> {
+        identity.validate()?;
+        let segment_id = identity_token(&self.catalog_key, identity)?;
+        let Some(record) = self.catalog.find(&segment_id)? else {
+            return Ok(false);
+        };
+        if record
+            .retention_until
+            .is_none_or(|expiry| expiry > now_unix_seconds)
+        {
+            return Ok(false);
+        }
+        self.remove_records(&[record])?;
+        Ok(true)
     }
 
     /// Removes only segments made stale by the named revision or rights change.
@@ -448,6 +560,7 @@ impl HistoryStore {
         identity: &crate::SegmentIdentity,
         encryption_key: &SegmentEncryptionKey,
         record: &CatalogRecord,
+        maximum_payload_bytes: usize,
     ) -> Result<HistoryRead, DesktopStorageError> {
         let path = match self.record_path(record) {
             Ok(path) => path,
@@ -464,7 +577,8 @@ impl HistoryStore {
             }
             Err(error) => return Err(error),
         };
-        let file = match read_bounded_file(&path) {
+        let maximum_file_bytes = maximum_payload_bytes.saturating_add(SEGMENT_FILE_OVERHEAD_BYTES);
+        let file = match read_bounded_file(&path, maximum_file_bytes) {
             Ok(file) => file,
             Err(DesktopStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
                 self.quarantine_record(record, "file_missing")?;
@@ -884,10 +998,9 @@ fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
     Ok(())
 }
 
-fn read_bounded_file(path: &Path) -> Result<Vec<u8>, DesktopStorageError> {
+fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, DesktopStorageError> {
     let file = File::open(path)?;
     let length = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
-    let maximum = MAXIMUM_SEGMENT_BYTES.saturating_add(64);
     if length > maximum {
         return Err(DesktopStorageError::SegmentTooLarge {
             requested: length,

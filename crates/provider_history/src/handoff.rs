@@ -71,6 +71,11 @@ impl<T> VerifiedHistorySnapshot<T> {
     pub fn items(&self) -> &[SequencedHistory<T>] {
         &self.items
     }
+
+    #[must_use]
+    pub fn into_items(self) -> Vec<SequencedHistory<T>> {
+        self.items
+    }
 }
 
 /// Snapshot plus exactly contiguous live values accepted at cutover.
@@ -102,6 +107,7 @@ pub enum LiveAcceptance<T> {
 }
 
 /// Bounded state machine joining history and live delivery without gaps or duplicates.
+#[derive(Clone)]
 pub struct HandoffCoordinator<T> {
     maximum_buffered_live: NonZeroUsize,
     buffered_live: VecDeque<SequencedHistory<T>>,
@@ -121,6 +127,47 @@ impl<T> HandoffCoordinator<T> {
     #[must_use]
     pub const fn state(&self) -> HandoffState {
         self.state
+    }
+
+    /// Discards buffered live values and requires a snapshot covering an
+    /// observed sequence that could not be retained by a downstream bound.
+    pub fn require_snapshot(&mut self, observed_sequence: u64) {
+        let (minimum_generation, state_watermark) = match self.state {
+            HandoffState::AwaitingSnapshot => (0, 0),
+            HandoffState::Live {
+                generation,
+                last_sequence,
+            } => (generation, last_sequence),
+            HandoffState::SnapshotRequired {
+                minimum_generation,
+                minimum_watermark,
+            } => (minimum_generation, minimum_watermark),
+        };
+        let buffered_watermark = self
+            .buffered_live
+            .back()
+            .map_or(0, |item| item.sequence.get());
+        self.buffered_live.clear();
+        self.state = HandoffState::SnapshotRequired {
+            minimum_generation,
+            minimum_watermark: observed_sequence
+                .max(state_watermark)
+                .max(buffered_watermark),
+        };
+    }
+
+    /// Requires a snapshot newer than an already-published generation and at
+    /// least as complete as its watermark.
+    pub fn require_snapshot_after(&mut self, generation: u64, watermark: u64) {
+        self.require_snapshot(watermark);
+        if let HandoffState::SnapshotRequired {
+            minimum_generation,
+            minimum_watermark,
+        } = &mut self.state
+        {
+            *minimum_generation = (*minimum_generation).max(generation);
+            *minimum_watermark = (*minimum_watermark).max(watermark);
+        }
     }
 
     /// Buffers live data before history arrives, then enforces contiguous delivery.
@@ -270,7 +317,11 @@ fn buffered_suffix_gap<T>(
 
 fn validate_contiguous<T>(items: &[SequencedHistory<T>]) -> Result<(), ProviderHistoryError> {
     for pair in items.windows(2) {
-        let expected = pair[0].sequence.get().saturating_add(1);
+        let Some(expected) = pair[0].sequence.get().checked_add(1) else {
+            return Err(ProviderHistoryError::InvalidPage(
+                "snapshot sequence cannot advance beyond the maximum",
+            ));
+        };
         let actual = pair[1].sequence.get();
         if actual != expected {
             return Err(ProviderHistoryError::SequenceGap { expected, actual });
