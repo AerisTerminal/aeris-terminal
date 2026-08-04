@@ -1,18 +1,24 @@
 //! Feed/profile compatibility evidence for one live provider feed class.
 //!
-//! Evaluates every active ingest profile against the live provider's feed
-//! transport class and writes one matrix artifact: explicit `applicable` or
-//! `no_benefit` per profile with reasons, per Section 2.7.
+//! Evaluates every active provider profile against the live provider's feed
+//! transport class and writes one matrix artifact with an explicit readiness
+//! result and reason, per Section 7.1.
 
 use axiusflow_transport::{
-    FeedProfileCompatibility, FeedTransportClass, IngestProfile, compatibility_reason,
+    FeedProfileCompatibility, FeedTransportClass, ProviderFeedProfile, compatibility_reason,
     evaluate_profile_feed,
 };
 use serde::Serialize;
 use std::{env, error::Error, fs, path::Path};
 
-const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+const EVIDENCE_SCHEMA_VERSION: u32 = 2;
 const EVIDENCE_SCOPE: &str = "stage_2_feed_profile_matrix";
+const ACTIVE_PROVIDER_PROFILES: [ProviderFeedProfile; 4] = [
+    ProviderFeedProfile::ProviderWebsocket,
+    ProviderFeedProfile::ProviderNative,
+    ProviderFeedProfile::DeterministicReplay,
+    ProviderFeedProfile::CloudStream,
+];
 
 #[derive(Serialize)]
 struct ProfileEvaluation {
@@ -43,20 +49,17 @@ pub fn run(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or("GITHUB_SHA must be non-empty for feed/profile matrix evidence")?;
-    let evaluations = [
-        IngestProfile::PortableSocket,
-        IngestProfile::TunedLinuxSocket,
-    ]
-    .iter()
-    .map(|profile| {
-        let compatibility = evaluate_profile_feed(*profile, feed_class);
-        ProfileEvaluation {
-            profile: profile_name(*profile),
-            compatibility,
-            reason: compatibility_reason(compatibility),
-        }
-    })
-    .collect();
+    let evaluations = ACTIVE_PROVIDER_PROFILES
+        .iter()
+        .map(|profile| {
+            let compatibility = evaluate_profile_feed(*profile, feed_class);
+            ProfileEvaluation {
+                profile: profile_name(*profile),
+                compatibility,
+                reason: compatibility_reason(*profile, compatibility),
+            }
+        })
+        .collect();
     let report = FeedProfileMatrixReport {
         schema_version: EVIDENCE_SCHEMA_VERSION,
         evidence_scope: EVIDENCE_SCOPE,
@@ -80,11 +83,29 @@ pub fn run(
     Ok(())
 }
 
-fn profile_name(profile: IngestProfile) -> &'static str {
+fn profile_name(profile: ProviderFeedProfile) -> &'static str {
     match profile {
-        IngestProfile::PortableSocket => "portable_socket",
-        IngestProfile::TunedLinuxSocket => "tuned_linux_socket",
-        IngestProfile::LinuxAfXdp => "linux_af_xdp",
-        IngestProfile::LinuxDpdk => "linux_dpdk",
+        ProviderFeedProfile::ProviderWebsocket => "provider_websocket",
+        ProviderFeedProfile::ProviderNative => "provider_native",
+        ProviderFeedProfile::DeterministicReplay => "deterministic_replay",
+        ProviderFeedProfile::CloudStream => "cloud_stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ACTIVE_PROVIDER_PROFILES, profile_name};
+
+    #[test]
+    fn active_matrix_uses_only_provider_oriented_profile_names() {
+        assert_eq!(
+            ACTIVE_PROVIDER_PROFILES.map(profile_name),
+            [
+                "provider_websocket",
+                "provider_native",
+                "deterministic_replay",
+                "cloud_stream",
+            ]
+        );
     }
 }

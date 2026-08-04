@@ -1,15 +1,8 @@
-//! Feed-transport-class compatibility for ingest profiles.
-//!
-//! Section 2.7: a provider delivered only through TLS/TCP or a managed API does
-//! not become faster merely by selecting a kernel-bypass profile. This module
-//! makes that rule executable: every profile reports one explicit compatibility
-//! result for each feed class, and accelerated profiles report `Unavailable`
-//! for feed classes they cannot honestly carry.
+//! Provider feed-profile compatibility and readiness vocabulary.
 
-use crate::profile::IngestProfile;
 use serde::Serialize;
 
-/// The transport shape of a provider feed.
+/// The transport shape exposed by a provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedTransportClass {
@@ -17,94 +10,141 @@ pub enum FeedTransportClass {
     TlsTcpStream,
 }
 
-/// One profile's compatibility with one feed class.
+/// Active product profiles for provider messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFeedProfile {
+    ProviderWebsocket,
+    ProviderNative,
+    DeterministicReplay,
+    CloudStream,
+}
+
+/// One provider profile's current compatibility with a feed class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedProfileCompatibility {
     Applicable,
-    NoBenefit,
+    TestOnly,
     Unavailable,
 }
 
-/// Evaluates one profile against one feed class.
+/// Evaluates one active provider profile against one feed class.
 #[must_use]
 pub const fn evaluate_profile_feed(
-    profile: IngestProfile,
+    profile: ProviderFeedProfile,
     feed: FeedTransportClass,
 ) -> FeedProfileCompatibility {
     match profile {
-        IngestProfile::PortableSocket => FeedProfileCompatibility::Applicable,
-        IngestProfile::TunedLinuxSocket => match feed {
-            FeedTransportClass::PacketUdp => FeedProfileCompatibility::Applicable,
-            FeedTransportClass::TlsTcpStream => FeedProfileCompatibility::NoBenefit,
+        ProviderFeedProfile::ProviderWebsocket => match feed {
+            FeedTransportClass::TlsTcpStream => FeedProfileCompatibility::Applicable,
+            FeedTransportClass::PacketUdp => FeedProfileCompatibility::Unavailable,
         },
-        IngestProfile::LinuxAfXdp | IngestProfile::LinuxDpdk => match feed {
-            FeedTransportClass::PacketUdp => FeedProfileCompatibility::Applicable,
-            FeedTransportClass::TlsTcpStream => FeedProfileCompatibility::Unavailable,
-        },
+        ProviderFeedProfile::ProviderNative | ProviderFeedProfile::CloudStream => {
+            FeedProfileCompatibility::Unavailable
+        }
+        ProviderFeedProfile::DeterministicReplay => FeedProfileCompatibility::TestOnly,
     }
 }
 
 /// Human-readable reason for one result, used in evidence.
 #[must_use]
-pub const fn compatibility_reason(compatibility: FeedProfileCompatibility) -> &'static str {
-    match compatibility {
-        FeedProfileCompatibility::Applicable => "carries this feed class",
-        FeedProfileCompatibility::NoBenefit => {
-            "UDP tuning knobs do not apply to a TLS/TCP stream; no latency benefit"
+pub const fn compatibility_reason(
+    profile: ProviderFeedProfile,
+    compatibility: FeedProfileCompatibility,
+) -> &'static str {
+    match (profile, compatibility) {
+        (ProviderFeedProfile::ProviderWebsocket, FeedProfileCompatibility::Applicable) => {
+            "provider WebSocket profile carries this feed class"
         }
-        FeedProfileCompatibility::Unavailable => {
-            "kernel-bypass packet path cannot terminate TLS; activation fails explicitly"
+        (ProviderFeedProfile::ProviderWebsocket, FeedProfileCompatibility::Unavailable) => {
+            "provider WebSocket profile is incompatible with this feed class"
         }
+        (ProviderFeedProfile::ProviderNative, FeedProfileCompatibility::Unavailable) => {
+            "provider native profile is unavailable until a provider SDK is qualified"
+        }
+        (ProviderFeedProfile::DeterministicReplay, FeedProfileCompatibility::TestOnly) => {
+            "deterministic replay validates contracts without claiming a live connection"
+        }
+        (ProviderFeedProfile::CloudStream, FeedProfileCompatibility::Unavailable) => {
+            "cloud stream is disabled until the separate cloud-data gate passes"
+        }
+        _ => "compatibility result does not match the provider profile",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FeedProfileCompatibility, FeedTransportClass, compatibility_reason, evaluate_profile_feed,
+        FeedProfileCompatibility, FeedTransportClass, ProviderFeedProfile, compatibility_reason,
+        evaluate_profile_feed,
     };
-    use crate::IngestProfile;
 
     #[test]
-    fn tls_feed_is_unavailable_on_kernel_bypass_profiles() {
-        for profile in [IngestProfile::LinuxAfXdp, IngestProfile::LinuxDpdk] {
+    fn managed_tls_feed_uses_only_the_websocket_profile() {
+        assert_eq!(
+            evaluate_profile_feed(
+                ProviderFeedProfile::ProviderWebsocket,
+                FeedTransportClass::TlsTcpStream
+            ),
+            FeedProfileCompatibility::Applicable
+        );
+        for profile in [
+            ProviderFeedProfile::ProviderNative,
+            ProviderFeedProfile::CloudStream,
+        ] {
             assert_eq!(
                 evaluate_profile_feed(profile, FeedTransportClass::TlsTcpStream),
                 FeedProfileCompatibility::Unavailable
             );
         }
         assert_eq!(
-            evaluate_profile_feed(
-                IngestProfile::PortableSocket,
-                FeedTransportClass::TlsTcpStream
+            compatibility_reason(
+                ProviderFeedProfile::ProviderNative,
+                FeedProfileCompatibility::Unavailable
             ),
-            FeedProfileCompatibility::Applicable
+            "provider native profile is unavailable until a provider SDK is qualified"
         );
         assert_eq!(
-            evaluate_profile_feed(
-                IngestProfile::TunedLinuxSocket,
-                FeedTransportClass::TlsTcpStream
+            compatibility_reason(
+                ProviderFeedProfile::CloudStream,
+                FeedProfileCompatibility::Unavailable
             ),
-            FeedProfileCompatibility::NoBenefit
+            "cloud stream is disabled until the separate cloud-data gate passes"
         );
-        assert!(!compatibility_reason(FeedProfileCompatibility::Unavailable).is_empty());
     }
 
     #[test]
-    fn packet_udp_feed_remains_applicable_on_socket_profiles() {
+    fn websocket_and_unqualified_profiles_reject_packet_udp() {
         for profile in [
-            IngestProfile::PortableSocket,
-            IngestProfile::TunedLinuxSocket,
+            ProviderFeedProfile::ProviderWebsocket,
+            ProviderFeedProfile::ProviderNative,
+            ProviderFeedProfile::CloudStream,
         ] {
             assert_eq!(
                 evaluate_profile_feed(profile, FeedTransportClass::PacketUdp),
-                FeedProfileCompatibility::Applicable
+                FeedProfileCompatibility::Unavailable
             );
         }
-        assert_eq!(
-            evaluate_profile_feed(IngestProfile::LinuxAfXdp, FeedTransportClass::PacketUdp),
-            FeedProfileCompatibility::Applicable
+    }
+
+    #[test]
+    fn replay_is_test_only_for_every_feed_class() {
+        for feed in [
+            FeedTransportClass::PacketUdp,
+            FeedTransportClass::TlsTcpStream,
+        ] {
+            assert_eq!(
+                evaluate_profile_feed(ProviderFeedProfile::DeterministicReplay, feed),
+                FeedProfileCompatibility::TestOnly
+            );
+        }
+        assert!(
+            !compatibility_reason(
+                ProviderFeedProfile::DeterministicReplay,
+                FeedProfileCompatibility::TestOnly
+            )
+            .is_empty()
         );
     }
 }

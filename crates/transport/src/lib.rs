@@ -18,7 +18,8 @@ pub use driver::{
 };
 pub use errors::ReadinessError;
 pub use feed_class::{
-    FeedProfileCompatibility, FeedTransportClass, compatibility_reason, evaluate_profile_feed,
+    FeedProfileCompatibility, FeedTransportClass, ProviderFeedProfile, compatibility_reason,
+    evaluate_profile_feed,
 };
 pub use fixture_driver::{
     FixtureDriverError, FixtureFrame, FixtureIngestDriver, FixtureReceiveBatch,
