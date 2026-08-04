@@ -1,9 +1,7 @@
 [workspace]
 members = [
     "apps/desktop",
-    "crates/adapters/linux_af_xdp",
     "crates/adapters/coinbase_market",
-    "crates/adapters/linux_dpdk",
     "crates/adapters/linux_socket_network",
     "crates/adapters/macos_network",
     "crates/adapters/market_protocol",
@@ -35,6 +33,10 @@ members = [
     "services/authorization_service",
     "tools/ingest_conformance",
     "tools/naming_check",
+]
+exclude = [
+    "crates/adapters/linux_af_xdp",
+    "crates/adapters/linux_dpdk",
 ]
 resolver = "3"
 
@@ -95,11 +97,6 @@ origin_render_gpui = { git = "https://github.com/TradeAion/Origin_charts.git", r
 # Origin pins the published `gpui = 0.2.2`; replace it with the same Git source
 # used by GPUI Component. Cargo.lock records the immutable Zed commit.
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2" }
-# libxdp 1.6.0 leaks its AF_XDP program refcount-map descriptor during normal
-# socket deletion. Keep the exact crate source local with the upstream cleanup
-# corrected until a released libxdp-sys version contains the fix.
-libxdp-sys = { path = "third_party/libxdp-sys" }
-
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

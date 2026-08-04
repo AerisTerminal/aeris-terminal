@@ -8,15 +8,11 @@ publish.workspace = true
 
 [features]
 default = []
-af-xdp-copy = ["axiusflow_linux_af_xdp_adapter/native-copy"]
-dpdk-native = ["axiusflow_linux_dpdk_adapter/native"]
 redpanda = ["axiusflow_streaming/redpanda"]
 quic = ["dep:quinn", "dep:rcgen", "dep:tokio"]
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
-axiusflow_linux_af_xdp_adapter = { path = "../../crates/adapters/linux_af_xdp" }
-axiusflow_linux_dpdk_adapter = { path = "../../crates/adapters/linux_dpdk" }
 axiusflow_linux_socket_network_adapter = { path = "../../crates/adapters/linux_socket_network" }
 axiusflow_macos_network_adapter = { path = "../../crates/adapters/macos_network" }
 axiusflow_observability = { path = "../../crates/observability" }

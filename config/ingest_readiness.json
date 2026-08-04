@@ -12,18 +12,6 @@
       "maximum_readiness": "fixture_validated",
       "evidence": ["deterministic_packet_corpus", "bounded_receive_release", "tuned_linux_socket_implementation", "tuned_linux_socket_loopback_conformance", "ubuntu_26_04_loopback_conformance", "socket2_0_6_5_review"],
       "limitations": ["loopback_only", "busy_poll_not_enabled", "kernel_and_hardware_timestamp_not_verified", "qualified_dedicated_feed_host_not_tested", "no_authorized_live_provider"]
-    },
-    {
-      "profile": "linux_af_xdp",
-      "maximum_readiness": "implemented",
-      "evidence": ["software_fixture_adapter", "bounded_receive_release", "native_candidate_review", "xsk_rs_0_8_0_af_xdp_copy_driver_review"],
-      "limitations": ["independent_unsafe_boundary_audit_and_privileged_native_data_path_fuzzing_missing", "privileged_veth_repeated_queue_rebind_fails_with_ebusy_after_clean_descriptor_shutdown", "zero_copy_not_verified", "nic_driver_firmware_unqualified", "no_authorized_packet_feed"]
-    },
-    {
-      "profile": "linux_dpdk",
-      "maximum_readiness": "contract_only",
-      "evidence": ["software_fixture_adapter", "bounded_receive_release_contract", "native_candidate_review"],
-      "limitations": ["native_dependency_not_selected", "no_approved_exact_pinned_binding_or_dpdk_release", "mbuf_ownership_implementation_audit_and_fuzzing_missing", "huge_page_eal_virtual_device_lifecycle_not_exercised", "poll_mode_driver_not_implemented", "huge_pages_and_nic_unqualified", "no_authorized_packet_feed"]
     }
   ]
 }

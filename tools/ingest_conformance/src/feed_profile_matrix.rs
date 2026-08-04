@@ -1,10 +1,8 @@
 //! Feed/profile compatibility evidence for one live provider feed class.
 //!
-//! Evaluates every ingest profile against the live provider's feed transport
-//! class and writes one matrix artifact: explicit `applicable`, `no_benefit`,
-//! or `unavailable` per profile with reasons, per Section 2.7. An accelerated
-//! profile selected for a TLS/TCP feed is recorded as explicitly unavailable;
-//! no pretend acceleration or silent fallback exists.
+//! Evaluates every active ingest profile against the live provider's feed
+//! transport class and writes one matrix artifact: explicit `applicable` or
+//! `no_benefit` per profile with reasons, per Section 2.7.
 
 use axiusflow_transport::{
     FeedProfileCompatibility, FeedTransportClass, IngestProfile, compatibility_reason,
@@ -48,8 +46,6 @@ pub fn run(
     let evaluations = [
         IngestProfile::PortableSocket,
         IngestProfile::TunedLinuxSocket,
-        IngestProfile::LinuxAfXdp,
-        IngestProfile::LinuxDpdk,
     ]
     .iter()
     .map(|profile| {

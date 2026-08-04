@@ -137,8 +137,6 @@ impl ReadinessManifest {
         for required in [
             IngestProfile::PortableSocket,
             IngestProfile::TunedLinuxSocket,
-            IngestProfile::LinuxAfXdp,
-            IngestProfile::LinuxDpdk,
         ] {
             if !profiles.contains(&required) {
                 return Err(ReadinessError::MissingProfile(required));
@@ -216,7 +214,7 @@ mod tests {
     #[test]
     fn embedded_manifest_validates() {
         let manifest = ReadinessManifest::embedded_stage_1().expect("embedded manifest validates");
-        assert_eq!(manifest.profiles.len(), 4);
+        assert_eq!(manifest.profiles.len(), 2);
     }
 
     #[test]
@@ -246,28 +244,22 @@ mod tests {
     }
 
     #[test]
-    fn claim_above_manifest_maximum_is_rejected() {
-        let capabilities = native_capabilities(
-            IngestProfile::LinuxAfXdp,
-            ActiveIngestMode::AfXdpCopy,
-            false,
-        );
-        let error = ReadinessManifest::authorize_embedded(&ActivationRequest {
-            profile: IngestProfile::LinuxAfXdp,
-            requested: ReadinessState::ProductionEnabled,
-            active_mode: ActiveIngestMode::AfXdpCopy,
-            evidence_id: "xsk_rs_0_8_0_af_xdp_copy_driver_review",
-            capabilities: &capabilities,
-        })
-        .expect_err("AF_XDP must not reach production_enabled from the embedded manifest");
-        assert!(matches!(
-            error,
-            ReadinessError::ClaimExceedsEvidence {
-                profile: IngestProfile::LinuxAfXdp,
-                requested: ReadinessState::ProductionEnabled,
-                maximum: ReadinessState::Implemented,
-            }
-        ));
+    fn retired_acceleration_profiles_are_not_advertised() {
+        for (profile, active_mode) in [
+            (IngestProfile::LinuxAfXdp, ActiveIngestMode::AfXdpCopy),
+            (IngestProfile::LinuxDpdk, ActiveIngestMode::DpdkPollMode),
+        ] {
+            let capabilities = native_capabilities(profile, active_mode, false);
+            let error = ReadinessManifest::authorize_embedded(&ActivationRequest {
+                profile,
+                requested: ReadinessState::ContractOnly,
+                active_mode,
+                evidence_id: "historical_acceleration_evidence",
+                capabilities: &capabilities,
+            })
+            .expect_err("retired acceleration profiles must be absent from runtime readiness");
+            assert!(matches!(error, ReadinessError::MissingProfile(missing) if missing == profile));
+        }
     }
 
     #[test]
@@ -287,27 +279,27 @@ mod tests {
     #[test]
     fn mode_outside_reported_capabilities_is_rejected() {
         let capabilities = native_capabilities(
-            IngestProfile::LinuxAfXdp,
-            ActiveIngestMode::AfXdpCopy,
+            IngestProfile::TunedLinuxSocket,
+            ActiveIngestMode::TunedLinuxSocket,
             false,
         );
         let error = ReadinessManifest::authorize_embedded(&ActivationRequest {
-            profile: IngestProfile::LinuxAfXdp,
+            profile: IngestProfile::TunedLinuxSocket,
             requested: ReadinessState::Implemented,
-            active_mode: ActiveIngestMode::AfXdpZeroCopy,
-            evidence_id: "xsk_rs_0_8_0_af_xdp_copy_driver_review",
+            active_mode: ActiveIngestMode::PortableSocket,
+            evidence_id: "deterministic_packet_corpus",
             capabilities: &capabilities,
         })
         .expect_err("a mode absent from reported capabilities must be rejected");
         assert!(matches!(
             error,
-            ReadinessError::ModeUnavailable(ActiveIngestMode::AfXdpZeroCopy)
+            ReadinessError::ModeUnavailable(ActiveIngestMode::PortableSocket)
         ));
     }
 
     #[test]
     fn capability_profile_mismatch_is_rejected() {
-        let capabilities = software_fixture_capabilities(IngestProfile::LinuxDpdk);
+        let capabilities = software_fixture_capabilities(IngestProfile::TunedLinuxSocket);
         let error = ReadinessManifest::authorize_embedded(&ActivationRequest {
             profile: IngestProfile::PortableSocket,
             requested: ReadinessState::Implemented,
@@ -320,32 +312,7 @@ mod tests {
             error,
             ReadinessError::CapabilityProfileMismatch {
                 requested: IngestProfile::PortableSocket,
-                reported: IngestProfile::LinuxDpdk,
-            }
-        ));
-    }
-
-    #[test]
-    fn dpdk_poll_mode_is_capped_at_contract_only() {
-        let capabilities = native_capabilities(
-            IngestProfile::LinuxDpdk,
-            ActiveIngestMode::DpdkPollMode,
-            false,
-        );
-        let error = ReadinessManifest::authorize_embedded(&ActivationRequest {
-            profile: IngestProfile::LinuxDpdk,
-            requested: ReadinessState::Implemented,
-            active_mode: ActiveIngestMode::DpdkPollMode,
-            evidence_id: "software_fixture_adapter",
-            capabilities: &capabilities,
-        })
-        .expect_err("DPDK poll mode has no implemented-level evidence");
-        assert!(matches!(
-            error,
-            ReadinessError::ClaimExceedsEvidence {
-                profile: IngestProfile::LinuxDpdk,
-                maximum: ReadinessState::ContractOnly,
-                ..
+                reported: IngestProfile::TunedLinuxSocket,
             }
         ));
     }

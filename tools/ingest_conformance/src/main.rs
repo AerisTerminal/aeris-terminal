@@ -4,19 +4,11 @@
 //! Linux fixture conformance on Linux. It does not certify accelerated, hardware,
 //! provider, renderer-submission, or presented-pixel readiness.
 
-#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
-mod af_xdp_copy;
-#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
-mod af_xdp_fuzz;
-#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
-mod af_xdp_replay;
 mod auth_service_boundary;
 mod authorization_boundary;
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 mod clickhouse_projection;
 mod coinbase_live;
-#[cfg(all(target_os = "linux", feature = "dpdk-native"))]
-mod dpdk_lifecycle;
 mod embedded_store_spike;
 mod entitlement_enforcement;
 mod evidence_report;
@@ -409,103 +401,6 @@ fn verify_tuned_profile(fixture_baseline: &[ConformanceOutcome]) -> Result<bool,
     Ok(false)
 }
 
-fn verify_accelerated_activation_gates() -> Result<(), Box<dyn Error>> {
-    let af_xdp_config = axiusflow_linux_af_xdp_adapter::AfXdpConfig::try_new(
-        "lo",
-        0,
-        NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN),
-        NonZeroUsize::new(2_048).unwrap_or(NonZeroUsize::MIN),
-    )?;
-    let mut af_xdp = axiusflow_linux_af_xdp_adapter::AfXdpDriver::unavailable(&af_xdp_config);
-    let af_xdp_prerequisites = af_xdp.prerequisites().clone();
-    let expected_af_xdp_dependency = if axiusflow_linux_af_xdp_adapter::NATIVE_DEPENDENCY_SELECTED {
-        axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Present
-    } else {
-        axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::NotSelected
-    };
-    if af_xdp_prerequisites.native_dependency != expected_af_xdp_dependency
-        || af_xdp_prerequisites.copy_mode
-            != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::NotExercised
-        || af_xdp_prerequisites.zero_copy
-            != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Unverified
-        || (af_xdp_prerequisites.linux_target
-            && (af_xdp_prerequisites.interface
-                != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Present
-                || af_xdp_prerequisites.receive_queue
-                    != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Present))
-        || (!af_xdp_prerequisites.linux_target
-            && (af_xdp_prerequisites.interface
-                != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Missing
-                || af_xdp_prerequisites.receive_queue
-                    != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Missing
-                || af_xdp_prerequisites.kernel_btf
-                    != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Missing
-                || af_xdp_prerequisites.bpf_filesystem
-                    != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Missing
-                || af_xdp_prerequisites.xdp_diagnostics
-                    != axiusflow_linux_af_xdp_adapter::AfXdpEvidenceStatus::Missing))
-        || !af_xdp.capabilities().supported_modes.is_empty()
-        || af_xdp.start().is_ok()
-        || af_xdp.health().active_mode != ActiveIngestMode::Unavailable
-    {
-        return Err("AF_XDP activation gate overclaimed native readiness".into());
-    }
-
-    let dpdk_config = axiusflow_linux_dpdk_adapter::DpdkConfig::try_new(
-        0,
-        0,
-        NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN),
-        NonZeroUsize::new(2_048).unwrap_or(NonZeroUsize::MIN),
-    )?;
-    let mut dpdk = axiusflow_linux_dpdk_adapter::DpdkDriver::unavailable(dpdk_config);
-    let dpdk_prerequisites = dpdk.prerequisites().clone();
-    let expected_dpdk_dependency = if axiusflow_linux_dpdk_adapter::NATIVE_DEPENDENCY_SELECTED {
-        axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::Present
-    } else {
-        axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::NotSelected
-    };
-    if dpdk_prerequisites.native_dependency != expected_dpdk_dependency
-        || dpdk_prerequisites.software_device
-            != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::NotExercised
-        || dpdk_prerequisites.poll_mode_driver
-            != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::Unverified
-        || dpdk_prerequisites.huge_pages_free > dpdk_prerequisites.huge_pages_total
-        || (!dpdk_prerequisites.linux_target
-            && (dpdk_prerequisites.huge_pages_total > 0
-                || dpdk_prerequisites.huge_pages_free > 0
-                || dpdk_prerequisites.vfio_driver
-                    != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::Missing
-                || dpdk_prerequisites.vfio_control
-                    != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::Missing
-                || dpdk_prerequisites.pkg_config_metadata
-                    != axiusflow_linux_dpdk_adapter::DpdkEvidenceStatus::Missing))
-        || !dpdk.capabilities().supported_modes.is_empty()
-        || dpdk.start().is_ok()
-        || dpdk.health().active_mode != ActiveIngestMode::Unavailable
-    {
-        return Err("DPDK activation gate overclaimed native readiness".into());
-    }
-
-    println!(
-        "acceleration_prerequisites=observed af_xdp_linux_target={} af_xdp_interface={:?} af_xdp_receive_queue={:?} af_xdp_kernel_btf={:?} af_xdp_bpffs={:?} af_xdp_diagnostics={:?} af_xdp_native_dependency={:?} dpdk_linux_target={} dpdk_huge_pages_total={} dpdk_huge_pages_free={} dpdk_vfio_driver={:?} dpdk_vfio_control={:?} dpdk_pkg_config_metadata={:?} dpdk_native_dependency={:?} privileged_lifecycle_exercised=false",
-        af_xdp_prerequisites.linux_target,
-        af_xdp_prerequisites.interface,
-        af_xdp_prerequisites.receive_queue,
-        af_xdp_prerequisites.kernel_btf,
-        af_xdp_prerequisites.bpf_filesystem,
-        af_xdp_prerequisites.xdp_diagnostics,
-        af_xdp_prerequisites.native_dependency,
-        dpdk_prerequisites.linux_target,
-        dpdk_prerequisites.huge_pages_total,
-        dpdk_prerequisites.huge_pages_free,
-        dpdk_prerequisites.vfio_driver,
-        dpdk_prerequisites.vfio_control,
-        dpdk_prerequisites.pkg_config_metadata,
-        dpdk_prerequisites.native_dependency,
-    );
-    Ok(())
-}
-
 fn verify_latency_recorder() -> Result<(), Box<dyn Error>> {
     let mut vocabulary = LatencyTimestampChain::new();
     let mut previous_name = None;
@@ -606,7 +501,7 @@ fn verify_stage_2_read_only_contracts() -> Result<(), Box<dyn Error>> {
 fn verify_fixture_target_equivalence(
     fixture_baseline: &[ConformanceOutcome],
 ) -> Result<(), Box<dyn Error>> {
-    let targets: [(&str, Vec<ConformanceOutcome>); 5] = [
+    let targets: [(&str, Vec<ConformanceOutcome>); 3] = [
         (
             "windows_software_fixture",
             run_fixture(axiusflow_windows_network_adapter::fixture_driver(
@@ -622,18 +517,6 @@ fn verify_fixture_target_equivalence(
         (
             "tuned_linux_software_fixture",
             run_fixture(axiusflow_linux_socket_network_adapter::fixture_driver(
-                deterministic_ingest_corpus(),
-            )?)?,
-        ),
-        (
-            "linux_af_xdp_software_fixture",
-            run_fixture(axiusflow_linux_af_xdp_adapter::fixture_driver(
-                deterministic_ingest_corpus(),
-            )?)?,
-        ),
-        (
-            "linux_dpdk_software_fixture",
-            run_fixture(axiusflow_linux_dpdk_adapter::fixture_driver(
                 deterministic_ingest_corpus(),
             )?)?,
         ),
@@ -658,34 +541,21 @@ fn verify_readiness_caps() -> Result<(), Box<dyn Error>> {
         return Err("portable socket fixture validation was not authorized by reviewed cross-platform evidence".into());
     }
 
-    for profile in [
-        IngestProfile::TunedLinuxSocket,
-        IngestProfile::LinuxAfXdp,
-        IngestProfile::LinuxDpdk,
-    ] {
-        let capabilities = software_fixture_capabilities(profile);
-        let evidence_id = if matches!(
-            profile,
-            IngestProfile::LinuxAfXdp | IngestProfile::LinuxDpdk
-        ) {
-            "software_fixture_adapter"
-        } else {
-            "deterministic_packet_corpus"
-        };
-        if ReadinessManifest::authorize_embedded(&ActivationRequest {
-            profile,
-            requested: ReadinessState::FixtureValidated,
-            active_mode: ActiveIngestMode::SoftwareFixture,
-            evidence_id,
-            capabilities: &capabilities,
-        })
-        .is_ok()
-        {
-            return Err(format!(
-                "profile {profile:?} overclaimed fixture validation from a software fixture"
-            )
-            .into());
-        }
+    let profile = IngestProfile::TunedLinuxSocket;
+    let capabilities = software_fixture_capabilities(profile);
+    if ReadinessManifest::authorize_embedded(&ActivationRequest {
+        profile,
+        requested: ReadinessState::FixtureValidated,
+        active_mode: ActiveIngestMode::SoftwareFixture,
+        evidence_id: "deterministic_packet_corpus",
+        capabilities: &capabilities,
+    })
+    .is_ok()
+    {
+        return Err(format!(
+            "profile {profile:?} overclaimed fixture validation from a software fixture"
+        )
+        .into());
     }
     Ok(())
 }
@@ -737,7 +607,7 @@ fn print_stage_1_status(
         .filter(|outcome| matches!(outcome, ConformanceOutcome::Accepted(_)))
         .count();
     println!(
-        "stage_1_contract_smoke=passed portable_socket_loopback=passed portable_native_equivalence=true portable_market_bar_packet_to_origin=passed portable_packet_partition_fanout_origin=passed tuned_linux_native_loopback={} tuned_linux_market_bar_packet_to_origin={} tuned_linux_packet_partition_fanout_origin={} af_xdp_activation=explicitly_unavailable dpdk_activation=explicitly_unavailable latency_recorder=passed replay_to_gpui_host_benchmark=passed stage_2_binary_stream_fixture=passed stage_2_direct_canonical_market_bar_wire_fixture=passed stage_2_latest_state_snapshot_fixture=passed stage_2_snapshot_chunk_fixture=passed stage_2_client_model_fixture=passed stage_2_websocket_loopback_fixture=passed stage_2_plain_loopback_lifecycle_fixture=passed stage_2_plain_loopback_runtime_chart_fixture=passed stage_2_neutral_stream_chart_coordinator_fixture=passed actual_native_targets={} software_fixture_targets=6 corpus_outcomes={} canonical_events={} portable_readiness=fixture_validated tuned_linux_readiness=fixture_validated af_xdp_readiness=implemented dpdk_readiness=contract_only accelerated_native_equivalence=false connected_live=false websocket_loopback=true websocket_connection_owner_loopback=true websocket_background_runtime_loopback=true canonical_direct_fanout_market_bar_wire=true canonical_latest_state_fixture=true market_stream_runtime_port_loopback=true chart_stream_coordinator_loopback=true websocket_transport=false tls_certified=false auth_connected=false entitlement_enforced=false redpanda_deployed=false hardware_claims=false provider_claims=false",
+        "stage_1_contract_smoke=passed portable_socket_loopback=passed portable_native_equivalence=true portable_market_bar_packet_to_origin=passed portable_packet_partition_fanout_origin=passed tuned_linux_native_loopback={} tuned_linux_market_bar_packet_to_origin={} tuned_linux_packet_partition_fanout_origin={} acceleration_profiles=retired latency_recorder=passed replay_to_gpui_host_benchmark=passed stage_2_binary_stream_fixture=passed stage_2_direct_canonical_market_bar_wire_fixture=passed stage_2_latest_state_snapshot_fixture=passed stage_2_snapshot_chunk_fixture=passed stage_2_client_model_fixture=passed stage_2_websocket_loopback_fixture=passed stage_2_plain_loopback_lifecycle_fixture=passed stage_2_plain_loopback_runtime_chart_fixture=passed stage_2_neutral_stream_chart_coordinator_fixture=passed actual_native_targets={} software_fixture_targets=4 corpus_outcomes={} canonical_events={} portable_readiness=fixture_validated tuned_linux_readiness=fixture_validated connected_live=false websocket_loopback=true websocket_connection_owner_loopback=true websocket_background_runtime_loopback=true canonical_direct_fanout_market_bar_wire=true canonical_latest_state_fixture=true market_stream_runtime_port_loopback=true chart_stream_coordinator_loopback=true websocket_transport=false tls_certified=false auth_connected=false entitlement_enforced=false redpanda_deployed=false hardware_claims=false provider_claims=false",
         tuned_linux_native,
         tuned_linux_market_bar_origin,
         tuned_linux_market_bar_origin,
@@ -777,7 +647,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             "tuned Linux packet-to-Origin evidence disagreed with native activation".into(),
         );
     }
-    verify_accelerated_activation_gates()?;
     verify_latency_recorder()?;
     let replay_to_gpui =
         run_replay_to_gpui_host_benchmark(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN))?;
@@ -811,23 +680,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_lane_command(command: evidence_report::EvidenceCommand) -> Result<(), Box<dyn Error>> {
     match command {
-        evidence_report::EvidenceCommand::AfXdpCopy { .. } => run_af_xdp_copy_command(command),
-        evidence_report::EvidenceCommand::AfXdpCopyFuzz {
-            receive_interface,
-            transmit_interface,
-            seed,
-            rounds,
-            report_path,
-        } => run_af_xdp_copy_fuzz(
-            &receive_interface,
-            &transmit_interface,
-            seed,
-            rounds,
-            &report_path,
-        ),
-        evidence_report::EvidenceCommand::DpdkVdevLifecycle { report_path } => {
-            run_dpdk_vdev_lifecycle(&report_path)
-        }
         evidence_report::EvidenceCommand::RedpandaDurableBranch {
             brokers,
             report_path,
@@ -937,71 +789,6 @@ fn run_postgres_command(command: evidence_report::EvidenceCommand) -> Result<(),
         .map_err(|error| error.to_string().into())
 }
 
-#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
-fn run_af_xdp_copy(
-    receive_interface: &str,
-    transmit_interface: &str,
-    report_path: &std::path::Path,
-) -> Result<(), Box<dyn Error>> {
-    af_xdp_copy::run(receive_interface, transmit_interface, report_path)
-}
-
-#[cfg(not(all(target_os = "linux", feature = "af-xdp-copy")))]
-fn run_af_xdp_copy(
-    receive_interface: &str,
-    transmit_interface: &str,
-    report_path: &std::path::Path,
-) -> Result<(), Box<dyn Error>> {
-    let _ = (receive_interface, transmit_interface, report_path);
-    Err("AF_XDP copy conformance requires Linux and the af-xdp-copy feature".into())
-}
-
-#[cfg(all(target_os = "linux", feature = "af-xdp-copy"))]
-fn run_af_xdp_copy_fuzz(
-    receive_interface: &str,
-    transmit_interface: &str,
-    seed: u64,
-    rounds: u32,
-    report_path: &std::path::Path,
-) -> Result<(), Box<dyn Error>> {
-    af_xdp_fuzz::run(
-        receive_interface,
-        transmit_interface,
-        seed,
-        rounds,
-        report_path,
-    )
-}
-
-#[cfg(not(all(target_os = "linux", feature = "af-xdp-copy")))]
-fn run_af_xdp_copy_fuzz(
-    receive_interface: &str,
-    transmit_interface: &str,
-    seed: u64,
-    rounds: u32,
-    report_path: &std::path::Path,
-) -> Result<(), Box<dyn Error>> {
-    let _ = (
-        receive_interface,
-        transmit_interface,
-        seed,
-        rounds,
-        report_path,
-    );
-    Err("AF_XDP copy data-path fuzzing requires Linux and the af-xdp-copy feature".into())
-}
-
-#[cfg(all(target_os = "linux", feature = "dpdk-native"))]
-fn run_dpdk_vdev_lifecycle(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    dpdk_lifecycle::run(report_path)
-}
-
-#[cfg(not(all(target_os = "linux", feature = "dpdk-native")))]
-fn run_dpdk_vdev_lifecycle(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    let _ = report_path;
-    Err("DPDK virtual-device lifecycle requires Linux and the dpdk-native feature".into())
-}
-
 #[cfg(all(target_os = "linux", feature = "redpanda"))]
 fn run_redpanda_durable_branch(
     brokers: &str,
@@ -1070,19 +857,6 @@ fn run_quic_prototype(report_path: &std::path::Path) -> Result<(), Box<dyn Error
 fn run_quic_prototype(report_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let _ = report_path;
     Err("QUIC prototype requires Linux and the quic feature".into())
-}
-
-fn run_af_xdp_copy_command(
-    command: evidence_report::EvidenceCommand,
-) -> Result<(), Box<dyn Error>> {
-    match command {
-        evidence_report::EvidenceCommand::AfXdpCopy {
-            receive_interface,
-            transmit_interface,
-            report_path,
-        } => run_af_xdp_copy(&receive_interface, &transmit_interface, &report_path),
-        _ => Err("AF_XDP copy command dispatch mismatch".into()),
-    }
 }
 
 fn run_entitlement_command(

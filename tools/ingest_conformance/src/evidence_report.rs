@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const EVIDENCE_SCHEMA_VERSION: u32 = 5;
+const EVIDENCE_SCHEMA_VERSION: u32 = 6;
 const EVIDENCE_SCOPE: &str = "stage_1_software_conformance";
 const GENERIC_CORPUS_OUTCOMES: usize = 6;
 const GENERIC_CORPUS_ACCEPTED_EVENTS: usize = 2;
@@ -20,7 +20,7 @@ const MARKET_BAR_CORPUS_OUTCOMES: usize = 7;
 const MARKET_BAR_CORPUS_ACCEPTED_EVENTS: usize = 3;
 const MARKET_BAR_ORIGIN_LAST_SEQUENCE: u64 = 3;
 const MARKET_BAR_PARTITION_FANOUT_LAST_SEQUENCE: u64 = 3;
-const SOFTWARE_FIXTURE_TARGETS: usize = 6;
+const SOFTWARE_FIXTURE_TARGETS: usize = 4;
 const BENCHMARK_WARMUP_ITERATIONS: usize = 1;
 const BENCHMARK_MEASUREMENT_ITERATIONS: usize = 64;
 
@@ -29,7 +29,6 @@ const BENCHMARK_MEASUREMENT_ITERATIONS: usize = 64;
 enum EvidenceState {
     Passed,
     NotApplicable,
-    ExplicitlyUnavailable,
     NotExercised,
     NotMeasured,
     NotClaimed,
@@ -38,7 +37,6 @@ enum EvidenceState {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ReadinessEvidence {
-    ContractOnly,
     Implemented,
     FixtureValidated,
 }
@@ -54,8 +52,6 @@ enum ActiveModeEvidence {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum EvidenceLimitation {
-    AfXdpNativeLifecycleNotExercised,
-    DpdkNativeLifecycleNotExercised,
     RendererSubmissionNotMeasured,
     PhysicalPresentationNotMeasured,
     HardwareAndProviderNotClaimed,
@@ -91,20 +87,9 @@ struct TunedLinuxProfileEvidence {
 }
 
 #[derive(Deserialize, Serialize)]
-struct AcceleratedProfileEvidence {
-    readiness: ReadinessEvidence,
-    active_mode: ActiveModeEvidence,
-    activation: EvidenceState,
-    native_lifecycle: EvidenceState,
-    hardware: EvidenceState,
-}
-
-#[derive(Deserialize, Serialize)]
 struct ProfileEvidence {
     portable_socket: PortableProfileEvidence,
     tuned_linux_socket: TunedLinuxProfileEvidence,
-    linux_af_xdp: AcceleratedProfileEvidence,
-    linux_dpdk: AcceleratedProfileEvidence,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -172,7 +157,7 @@ struct Stage1EvidenceReport {
     corpus: CorpusEvidence,
     benchmark: BenchmarkEvidence,
     claims: ClaimEvidence,
-    limitations: [EvidenceLimitation; 5],
+    limitations: [EvidenceLimitation; 3],
 }
 
 pub enum EvidenceCommand {
@@ -181,21 +166,6 @@ pub enum EvidenceCommand {
     },
     VerifySet {
         directory: PathBuf,
-    },
-    AfXdpCopy {
-        receive_interface: String,
-        transmit_interface: String,
-        report_path: PathBuf,
-    },
-    AfXdpCopyFuzz {
-        receive_interface: String,
-        transmit_interface: String,
-        seed: u64,
-        rounds: u32,
-        report_path: PathBuf,
-    },
-    DpdkVdevLifecycle {
-        report_path: PathBuf,
     },
     RedpandaDurableBranch {
         brokers: String,
@@ -304,12 +274,6 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
     let Some(argument) = arguments.next() else {
         return Ok(EvidenceCommand::Run { report_path: None });
     };
-    if argument == OsStr::new("--af-xdp-copy-conformance") {
-        return af_xdp_copy_conformance_command(&mut arguments);
-    }
-    if argument == OsStr::new("--af-xdp-copy-fuzz") {
-        return af_xdp_copy_fuzz_command(&mut arguments);
-    }
     if argument == OsStr::new("--mint-jwks") {
         return mint_jwks_command(&mut arguments);
     }
@@ -374,9 +338,6 @@ pub fn requested_command() -> Result<EvidenceCommand, Box<dyn Error>> {
             report_path: PathBuf::from(report_path),
         });
     }
-    if argument == OsStr::new("--dpdk-vdev-lifecycle") {
-        return single_path_command(&mut arguments, SinglePathCommandKind::DpdkVdevLifecycle);
-    }
     let path = required_argument(&mut arguments, "path")?;
     if let Some(extra) = arguments.next() {
         return Err(boxed_error(format!(
@@ -423,7 +384,6 @@ fn embedded_store_command(
 #[derive(Clone, Copy)]
 enum SinglePathCommandKind {
     QuicPrototype,
-    DpdkVdevLifecycle,
 }
 
 fn single_path_command(
@@ -435,9 +395,6 @@ fn single_path_command(
     let report_path = PathBuf::from(report_path);
     Ok(match kind {
         SinglePathCommandKind::QuicPrototype => EvidenceCommand::QuicPrototype { report_path },
-        SinglePathCommandKind::DpdkVdevLifecycle => {
-            EvidenceCommand::DpdkVdevLifecycle { report_path }
-        }
     })
 }
 
@@ -466,44 +423,6 @@ fn entitlement_enforcement_command(
         plane_address: plane_address.to_string_lossy().into_owned(),
         workdir: PathBuf::from(workdir),
         resnapshot_seconds,
-        report_path: PathBuf::from(report_path),
-    })
-}
-
-fn af_xdp_copy_conformance_command(
-    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
-) -> Result<EvidenceCommand, Box<dyn Error>> {
-    let receive_interface = required_argument(arguments, "receive interface")?;
-    let transmit_interface = required_argument(arguments, "transmit interface")?;
-    let report_path = required_argument(arguments, "report path")?;
-    reject_extra(arguments)?;
-    Ok(EvidenceCommand::AfXdpCopy {
-        receive_interface: receive_interface.to_string_lossy().into_owned(),
-        transmit_interface: transmit_interface.to_string_lossy().into_owned(),
-        report_path: PathBuf::from(report_path),
-    })
-}
-
-fn af_xdp_copy_fuzz_command(
-    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
-) -> Result<EvidenceCommand, Box<dyn Error>> {
-    let receive_interface = required_argument(arguments, "receive interface")?;
-    let transmit_interface = required_argument(arguments, "transmit interface")?;
-    let seed = required_argument(arguments, "seed")?
-        .to_string_lossy()
-        .parse::<u64>()
-        .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz seed: {error}")))?;
-    let rounds = required_argument(arguments, "rounds")?
-        .to_string_lossy()
-        .parse::<u32>()
-        .map_err(|error| boxed_error(format!("invalid AF_XDP fuzz rounds: {error}")))?;
-    let report_path = required_argument(arguments, "report path")?;
-    reject_extra(arguments)?;
-    Ok(EvidenceCommand::AfXdpCopyFuzz {
-        receive_interface: receive_interface.to_string_lossy().into_owned(),
-        transmit_interface: transmit_interface.to_string_lossy().into_owned(),
-        seed,
-        rounds,
         report_path: PathBuf::from(report_path),
     })
 }
@@ -824,32 +743,7 @@ fn validate_profiles(profiles: &ProfileEvidence, tuned_linux_native: bool) -> Re
             && tuned.packet_partition_fanout_origin_equivalence == expected_state,
         "tuned Linux target-specific evidence was inconsistent",
     )?;
-    validate_accelerated_profile(
-        "linux_af_xdp",
-        &profiles.linux_af_xdp,
-        ReadinessEvidence::Implemented,
-    )?;
-    validate_accelerated_profile(
-        "linux_dpdk",
-        &profiles.linux_dpdk,
-        ReadinessEvidence::ContractOnly,
-    )?;
     Ok(())
-}
-
-fn validate_accelerated_profile(
-    name: &str,
-    profile: &AcceleratedProfileEvidence,
-    expected_readiness: ReadinessEvidence,
-) -> Result<(), String> {
-    require(
-        profile.readiness == expected_readiness
-            && profile.active_mode == ActiveModeEvidence::Unavailable
-            && profile.activation == EvidenceState::ExplicitlyUnavailable
-            && profile.native_lifecycle == EvidenceState::NotExercised
-            && profile.hardware == EvidenceState::NotClaimed,
-        &format!("{name} evidence overclaimed or changed"),
-    )
 }
 
 fn validate_boundaries(
@@ -929,7 +823,7 @@ fn validate_benchmark(benchmark: &BenchmarkEvidence) -> Result<(), String> {
 
 fn validate_claims_and_limitations(
     claims: &ClaimEvidence,
-    limitations: [EvidenceLimitation; 5],
+    limitations: [EvidenceLimitation; 3],
 ) -> Result<(), String> {
     require(
         claims.connected_live == EvidenceState::NotClaimed
@@ -942,8 +836,6 @@ fn validate_claims_and_limitations(
     require(
         limitations
             == [
-                EvidenceLimitation::AfXdpNativeLifecycleNotExercised,
-                EvidenceLimitation::DpdkNativeLifecycleNotExercised,
                 EvidenceLimitation::RendererSubmissionNotMeasured,
                 EvidenceLimitation::PhysicalPresentationNotMeasured,
                 EvidenceLimitation::HardwareAndProviderNotClaimed,
@@ -1033,8 +925,6 @@ fn build_report(
                 packet_to_origin_equivalence: tuned_origin_state,
                 packet_partition_fanout_origin_equivalence: tuned_origin_state,
             },
-            linux_af_xdp: unavailable_accelerated_profile(ReadinessEvidence::Implemented),
-            linux_dpdk: unavailable_accelerated_profile(ReadinessEvidence::ContractOnly),
         },
         boundaries: BoundaryEvidence {
             deterministic_packet_corpus: EvidenceState::Passed,
@@ -1076,22 +966,10 @@ fn build_report(
             production: EvidenceState::NotClaimed,
         },
         limitations: [
-            EvidenceLimitation::AfXdpNativeLifecycleNotExercised,
-            EvidenceLimitation::DpdkNativeLifecycleNotExercised,
             EvidenceLimitation::RendererSubmissionNotMeasured,
             EvidenceLimitation::PhysicalPresentationNotMeasured,
             EvidenceLimitation::HardwareAndProviderNotClaimed,
         ],
-    }
-}
-
-fn unavailable_accelerated_profile(readiness: ReadinessEvidence) -> AcceleratedProfileEvidence {
-    AcceleratedProfileEvidence {
-        readiness,
-        active_mode: ActiveModeEvidence::Unavailable,
-        activation: EvidenceState::ExplicitlyUnavailable,
-        native_lifecycle: EvidenceState::NotExercised,
-        hardware: EvidenceState::NotClaimed,
     }
 }
 
