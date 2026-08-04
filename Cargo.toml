@@ -16,6 +16,7 @@ members = [
     "crates/domain/market_data",
     "crates/desktop_storage",
     "crates/desktop_history",
+    "crates/desktop_provider_runtime",
     "crates/observability",
     "crates/persistence",
     "crates/platform_runtime",

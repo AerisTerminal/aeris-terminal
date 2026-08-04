@@ -1,0 +1,15 @@
+[package]
+name = "axiusflow_desktop_provider_runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_application = { path = "../application" }
+axiusflow_platform_runtime = { path = "../platform_runtime" }
+zeroize.workspace = true
+
+[lints]
+workspace = true

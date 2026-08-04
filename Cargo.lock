@@ -758,6 +758,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiusflow_desktop_provider_runtime"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_application",
+ "axiusflow_platform_runtime",
+ "zeroize",
+]
+
+[[package]]
 name = "axiusflow_desktop_storage"
 version = "0.1.0"
 dependencies = [
