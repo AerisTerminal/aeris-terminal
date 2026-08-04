@@ -440,13 +440,14 @@ jobs:
           with open("stage_2_coinbase_live_evidence_Linux.json", encoding="utf-8") as evidence_file:
               evidence = json.load(evidence_file)
 
-          assert evidence["schema_version"] == 1
+          assert evidence["schema_version"] == 2
           assert evidence["evidence_scope"] == "stage_2_coinbase_live_feed"
           assert evidence["source_revision"] == os.environ["GITHUB_SHA"]
           assert evidence["provider"] == "coinbase"
           assert evidence["entitlement_class"] == "crypto_public_realtime"
           assert evidence["products"] == ["BTC-USD", "ETH-USD"]
           assert evidence["trades"] > 0
+          assert evidence["history_bars"] > 0
           assert evidence["sequence_gaps"] == 0
           assert evidence["behavior"]["tls_transport"] == "passed"
           assert evidence["behavior"]["live_trades_received"] == "passed"
@@ -455,7 +456,9 @@ jobs:
           assert evidence["behavior"]["fixed_point_exactness"] == "passed"
           assert evidence["behavior"]["malformed_messages"] == 0
           assert evidence["behavior"]["level2_book"] == "not_exercised"
-          assert evidence["behavior"]["historical_backfill"] == "not_exercised"
+          assert evidence["behavior"]["historical_backfill"] == "passed"
+          assert evidence["behavior"]["history_transport"] == "direct_provider_https"
+          assert evidence["behavior"]["history_payload_identity"] == "passed"
           assert evidence["behavior"]["production_deployment"] == "not_exercised"
           PY
       - name: retain_coinbase_evidence
@@ -466,7 +469,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: evidence_scope
-        run: echo "This lane proves the authorized Coinbase public feed over TLS - subscription, live trades with sequence continuity, heartbeats, and exact fixed-point decoding - for BTC-USD and ETH-USD; it does not prove Level 2, historical backfill, partitions, fanout, or production deployment."
+        run: echo "This lane proves direct authorized Coinbase public HTTPS history plus the WebSocket feed over TLS - bounded one-minute backfill with payload identity, subscription, live trades with sequence continuity, heartbeats, and exact fixed-point decoding - for BTC-USD and ETH-USD; it does not prove Level 2, desktop integration, partitions, fanout, or production deployment."
 
   live_data_plane:
     name: live_data_plane_vertical

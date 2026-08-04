@@ -1,24 +1,128 @@
-use axiusflow_provider_history::{DatasetCapability, HistoryCapabilities};
+use crate::{ENTITLEMENT_CLASS, FixedPointValue};
+use axiusflow_market_data::MarketBar;
+use axiusflow_provider_history::{
+    DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
+    HistoryPageRequest, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
+};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, Stream};
+use serde::Deserialize;
+use std::{
+    io::{self, Read, Write},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::{Arc, OnceLock, mpsc},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
-/// Fail-closed capability adapter pending a desktop-local Coinbase fetch path.
-pub struct CoinbaseHistoryCapabilityAdapter {
-    capabilities: HistoryCapabilities,
+const REST_HOST: &str = "api.coinbase.com";
+const REST_PORT: u16 = 443;
+const RESPONSE_BYTE_LIMIT: usize = 1_048_576;
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const ONE_SECOND_NANOS: i64 = 1_000_000_000;
+const ONE_MINUTE_SECONDS: i64 = 60;
+const ONE_MINUTE_NANOS_I64: i64 = 60_000_000_000;
+const ONE_MINUTE_NANOS: u64 = 60_000_000_000;
+const MAXIMUM_PAGE_ITEMS: usize = 350;
+const MAXIMUM_REQUEST_SPAN_NANOS: u64 = ONE_MINUTE_NANOS * MAXIMUM_PAGE_ITEMS as u64;
+const HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXCBH1";
+const HISTORY_PAYLOAD_BYTES: usize = HISTORY_PAYLOAD_MAGIC.len() + 7 * 8;
+
+type ResolutionResult = io::Result<Vec<SocketAddr>>;
+
+struct ResolutionRequest {
+    host: String,
+    port: u16,
+    maximum_addresses: usize,
+    response: mpsc::SyncSender<ResolutionResult>,
 }
 
-impl CoinbaseHistoryCapabilityAdapter {
-    /// Builds the implemented bars/ticks/depth matrix.
+static RESOLVER: OnceLock<Result<mpsc::SyncSender<ResolutionRequest>, &'static str>> =
+    OnceLock::new();
+
+/// Account scope used by Coinbase's credential-free public market-data APIs.
+pub const COINBASE_PUBLIC_ACCOUNT_ID: &str = "coinbase_public_market_data";
+
+#[derive(Deserialize)]
+struct CandlesResponse {
+    candles: Vec<CandleMessage>,
+}
+
+#[derive(Deserialize)]
+struct CandleMessage {
+    start: String,
+    high: String,
+    low: String,
+    open: String,
+    close: String,
+    volume: String,
+}
+
+/// Bounded HTTP boundary used by the Coinbase history adapter.
+pub trait CoinbaseHistoryTransport {
+    /// Executes one public provider-relative GET and returns only the response body.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted transport or HTTP protocol failure.
+    fn get(&mut self, path: &str) -> Result<Vec<u8>, String>;
+}
+
+/// Direct rustls transport to Coinbase's public Advanced Trade API.
+pub struct CoinbaseHttpsHistoryTransport;
+
+impl CoinbaseHistoryTransport for CoinbaseHttpsHistoryTransport {
+    fn get(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        https_get(path)
+    }
+}
+
+/// Direct Coinbase public candle-history adapter for desktop background workers.
+pub struct CoinbaseHistoryCapabilityAdapter<T = CoinbaseHttpsHistoryTransport> {
+    capabilities: HistoryCapabilities,
+    transport: T,
+}
+
+impl CoinbaseHistoryCapabilityAdapter<CoinbaseHttpsHistoryTransport> {
+    /// Builds the direct public HTTPS adapter.
     ///
     /// # Errors
     ///
     /// Returns an error if the static capability profile violates shared bounds.
-    pub fn try_new() -> Result<Self, axiusflow_provider_history::ProviderHistoryError> {
+    pub fn try_new() -> Result<Self, ProviderHistoryError> {
+        Self::try_with_transport(CoinbaseHttpsHistoryTransport)
+    }
+}
+
+impl<T> CoinbaseHistoryCapabilityAdapter<T> {
+    /// Builds the adapter around an explicit bounded transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the static capability profile violates shared bounds.
+    pub fn try_with_transport(transport: T) -> Result<Self, ProviderHistoryError> {
+        let bars = DatasetCapability::supported(
+            ["1m".to_string()],
+            NonZeroU64::MAX,
+            NonZeroU64::new(MAXIMUM_REQUEST_SPAN_NANOS).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(MAXIMUM_PAGE_ITEMS).unwrap_or(NonZeroUsize::MIN),
+            PaginationStyle::None,
+            RateLimit {
+                requests: NonZeroU32::MIN,
+                window_nanos: NonZeroU64::new(ONE_SECOND_NANOS as u64).unwrap_or(NonZeroU64::MIN),
+                maximum_inflight: NonZeroUsize::MIN,
+            },
+        )?;
         let capabilities = HistoryCapabilities::try_new(
             "coinbase".to_string(),
-            DatasetCapability::unsupported("desktop-local bar history fetch is not implemented"),
+            bars,
             DatasetCapability::unsupported("historical ticks are not implemented"),
             DatasetCapability::unsupported("historical depth is not implemented"),
         )?;
-        Ok(Self { capabilities })
+        Ok(Self {
+            capabilities,
+            transport,
+        })
     }
 
     #[must_use]
@@ -27,20 +131,718 @@ impl CoinbaseHistoryCapabilityAdapter {
     }
 }
 
+impl<T: CoinbaseHistoryTransport> ProviderHistoryAdapter for CoinbaseHistoryCapabilityAdapter<T> {
+    fn capabilities(&self) -> &HistoryCapabilities {
+        &self.capabilities
+    }
+
+    fn fetch_page(&mut self, request: &HistoryPageRequest) -> Result<HistoryPage, String> {
+        validate_request(request)?;
+        let product = product_from_instrument(&request.instrument_id)?;
+        let start_seconds = request.range.start_unix_nanos / ONE_SECOND_NANOS;
+        let end_seconds = request
+            .range
+            .end_unix_nanos
+            .checked_sub(ONE_MINUTE_NANOS_I64)
+            .map(|value| value / ONE_SECOND_NANOS)
+            .ok_or_else(|| "Coinbase history end underflow".to_string())?;
+        let path = format!(
+            "/api/v3/brokerage/market/products/{product}/candles?start={start_seconds}&end={end_seconds}&granularity=ONE_MINUTE&limit={}",
+            request.maximum_items
+        );
+        let body = self.transport.get(&path)?;
+        parse_page(request, &body)
+    }
+}
+
+/// Decodes one adapter-owned history payload into a validated canonical bar.
+///
+/// # Errors
+///
+/// Returns an error if the payload schema, identity, timestamp, or OHLCV values are invalid.
+pub fn decode_history_bar(item: &HistoryItem) -> Result<MarketBar, String> {
+    if item.payload.len() != HISTORY_PAYLOAD_BYTES
+        || &item.payload[..HISTORY_PAYLOAD_MAGIC.len()] != HISTORY_PAYLOAD_MAGIC
+    {
+        return Err("unsupported Coinbase history payload".to_string());
+    }
+    let mut offset = HISTORY_PAYLOAD_MAGIC.len();
+    let sequence = read_u64(&item.payload, &mut offset)?;
+    let timestamp = read_i64(&item.payload, &mut offset)?;
+    let bar = MarketBar {
+        source_sequence: sequence,
+        exchange_timestamp_seconds: timestamp,
+        open: read_i64(&item.payload, &mut offset)?,
+        high: read_i64(&item.payload, &mut offset)?,
+        low: read_i64(&item.payload, &mut offset)?,
+        close: read_i64(&item.payload, &mut offset)?,
+        volume: read_i64(&item.payload, &mut offset)?,
+    };
+    let event_time = timestamp
+        .checked_mul(ONE_SECOND_NANOS)
+        .ok_or_else(|| "Coinbase history timestamp overflow".to_string())?;
+    if sequence != item.sequence || event_time != item.event_time_unix_nanos {
+        return Err("Coinbase history payload identity mismatch".to_string());
+    }
+    bar.validate().map_err(|error| error.to_string())?;
+    Ok(bar)
+}
+
+fn validate_request(request: &HistoryPageRequest) -> Result<(), String> {
+    if request.provider_id != "coinbase"
+        || request.account_id != COINBASE_PUBLIC_ACCOUNT_ID
+        || request.entitlement_revision != ENTITLEMENT_CLASS
+    {
+        return Err("Coinbase public history identity mismatch".to_string());
+    }
+    if request.data_class != DataClass::Bars || request.resolution != "1m" {
+        return Err("unsupported Coinbase history dataset".to_string());
+    }
+    if request.continuation.is_some() {
+        return Err("Coinbase history request does not accept continuation".to_string());
+    }
+    if request.maximum_items.get() > MAXIMUM_PAGE_ITEMS {
+        return Err("Coinbase history page exceeds provider limit".to_string());
+    }
+    let span = request
+        .range
+        .end_unix_nanos
+        .checked_sub(request.range.start_unix_nanos)
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value != 0 && *value <= MAXIMUM_REQUEST_SPAN_NANOS)
+        .ok_or_else(|| "Coinbase history range exceeds adapter limit".to_string())?;
+    if request.range.start_unix_nanos < 0
+        || request.range.start_unix_nanos % ONE_MINUTE_NANOS_I64 != 0
+        || request.range.end_unix_nanos % ONE_MINUTE_NANOS_I64 != 0
+    {
+        return Err("Coinbase history range is not minute-aligned".to_string());
+    }
+    let requested_items = usize::try_from(span / ONE_MINUTE_NANOS)
+        .map_err(|_| "Coinbase history item count overflow".to_string())?;
+    if requested_items > request.maximum_items.get() {
+        return Err("Coinbase history range exceeds requested item limit".to_string());
+    }
+    let now_unix_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .ok_or_else(|| "system time is unavailable for Coinbase history".to_string())?;
+    if request.range.end_unix_nanos > now_unix_nanos {
+        return Err("Coinbase history range ends in the future".to_string());
+    }
+    product_from_instrument(&request.instrument_id).map(|_| ())
+}
+
+fn product_from_instrument(instrument_id: &str) -> Result<String, String> {
+    let base = instrument_id
+        .strip_prefix("instrument:coinbase:")
+        .and_then(|value| value.strip_suffix(":usd"))
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        })
+        .ok_or_else(|| "unsupported Coinbase instrument identity".to_string())?;
+    match base {
+        "btc" => Ok("BTC-USD".to_string()),
+        "eth" => Ok("ETH-USD".to_string()),
+        _ => Err("Coinbase instrument precision profile is unavailable".to_string()),
+    }
+}
+
+fn parse_page(request: &HistoryPageRequest, body: &[u8]) -> Result<HistoryPage, String> {
+    if body.len() > RESPONSE_BYTE_LIMIT {
+        return Err("Coinbase history response exceeds byte limit".to_string());
+    }
+    let parsed: CandlesResponse = serde_json::from_slice(body)
+        .map_err(|_| "Coinbase history response is malformed".to_string())?;
+    if parsed.candles.len() > MAXIMUM_PAGE_ITEMS {
+        return Err("Coinbase history response exceeds item limit".to_string());
+    }
+    let mut items = parsed
+        .candles
+        .iter()
+        .map(parse_candle)
+        .collect::<Result<Vec<_>, _>>()?;
+    items.retain(|item| {
+        item.event_time_unix_nanos >= request.range.start_unix_nanos
+            && item.event_time_unix_nanos < request.range.end_unix_nanos
+    });
+    items.sort_by_key(|item| item.sequence);
+    if items.len() > request.maximum_items.get() {
+        return Err("Coinbase history response exceeds requested item limit".to_string());
+    }
+    for pair in items.windows(2) {
+        if pair[0].sequence >= pair[1].sequence {
+            return Err("Coinbase history response contains duplicate candles".to_string());
+        }
+    }
+    Ok(HistoryPage {
+        request: request.clone(),
+        items,
+        next: None,
+    })
+}
+
+fn parse_candle(candle: &CandleMessage) -> Result<HistoryItem, String> {
+    let timestamp = candle
+        .start
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 0 && *value % ONE_MINUTE_SECONDS == 0)
+        .ok_or_else(|| "Coinbase candle timestamp is invalid".to_string())?;
+    let sequence = u64::try_from(timestamp / ONE_MINUTE_SECONDS)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| "Coinbase candle sequence overflow".to_string())?;
+    let bar = MarketBar {
+        source_sequence: sequence,
+        exchange_timestamp_seconds: timestamp,
+        open: fixed_at_scale(&candle.open, 2)?,
+        high: fixed_at_scale(&candle.high, 2)?,
+        low: fixed_at_scale(&candle.low, 2)?,
+        close: fixed_at_scale(&candle.close, 2)?,
+        volume: fixed_at_scale(&candle.volume, 8)?,
+    };
+    bar.validate().map_err(|error| error.to_string())?;
+    let event_time_unix_nanos = timestamp
+        .checked_mul(ONE_SECOND_NANOS)
+        .ok_or_else(|| "Coinbase candle timestamp overflow".to_string())?;
+    Ok(HistoryItem {
+        sequence,
+        event_time_unix_nanos,
+        payload: encode_history_bar(bar),
+    })
+}
+
+fn fixed_at_scale(source: &str, target_scale: u32) -> Result<i64, String> {
+    let value = FixedPointValue::parse(source).map_err(|error| error.to_string())?;
+    if value.scale == target_scale {
+        return Ok(value.mantissa);
+    }
+    if value.scale < target_scale {
+        let shift = target_scale - value.scale;
+        return value
+            .mantissa
+            .checked_mul(10_i64.pow(shift))
+            .ok_or_else(|| "Coinbase candle fixed-point overflow".to_string());
+    }
+    let divisor = 10_i64.pow(value.scale - target_scale);
+    if value.mantissa % divisor != 0 {
+        return Err("Coinbase candle precision exceeds instrument scale".to_string());
+    }
+    Ok(value.mantissa / divisor)
+}
+
+fn encode_history_bar(bar: MarketBar) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(HISTORY_PAYLOAD_BYTES);
+    payload.extend_from_slice(HISTORY_PAYLOAD_MAGIC);
+    payload.extend_from_slice(&bar.source_sequence.to_le_bytes());
+    payload.extend_from_slice(&bar.exchange_timestamp_seconds.to_le_bytes());
+    for value in [bar.open, bar.high, bar.low, bar.close, bar.volume] {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    payload
+}
+
+fn read_u64(payload: &[u8], offset: &mut usize) -> Result<u64, String> {
+    let bytes = payload
+        .get(*offset..*offset + 8)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .ok_or_else(|| "Coinbase history payload is truncated".to_string())?;
+    *offset += 8;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_i64(payload: &[u8], offset: &mut usize) -> Result<i64, String> {
+    let bytes = payload
+        .get(*offset..*offset + 8)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .ok_or_else(|| "Coinbase history payload is truncated".to_string())?;
+    *offset += 8;
+    Ok(i64::from_le_bytes(bytes))
+}
+
+fn https_get(path: &str) -> Result<Vec<u8>, String> {
+    if !path.starts_with('/') || path.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
+        return Err("invalid Coinbase history path".to_string());
+    }
+    let config = coinbase_tls_config()?;
+    let server_name = rustls::pki_types::ServerName::try_from(REST_HOST)
+        .map_err(|_| "invalid Coinbase REST host".to_string())?;
+    let mut connection = ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|_| "Coinbase TLS initialization failed".to_string())?;
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let mut tcp = connect_coinbase_endpoint(REST_HOST, REST_PORT, deadline)?;
+    let mut tls = Stream::new(&mut connection, &mut tcp);
+    write!(
+        tls,
+        "GET {path} HTTP/1.1\r\nHost: {REST_HOST}\r\nAccept: application/json\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|_| "Coinbase REST request failed".to_string())?;
+    let response = read_bounded_response(&mut tls, deadline)?;
+    parse_http_response(&response)
+}
+
+pub(crate) fn coinbase_tls_config() -> Result<ClientConfig, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| "Coinbase TLS protocol selection failed".to_string())
+        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+}
+
+pub(crate) struct DeadlineTcpStream {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineTcpStream {
+    pub(crate) const fn set_deadline(&mut self, deadline: Instant) {
+        self.deadline = deadline;
+    }
+
+    fn prepare_read(&self) -> io::Result<()> {
+        self.stream
+            .set_read_timeout(Some(remaining_until(self.deadline)?))
+    }
+
+    fn prepare_write(&self) -> io::Result<()> {
+        self.stream
+            .set_write_timeout(Some(remaining_until(self.deadline)?))
+    }
+}
+
+impl Read for DeadlineTcpStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.prepare_read()?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for DeadlineTcpStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.prepare_write()?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.prepare_write()?;
+        self.stream.flush()
+    }
+}
+
+pub(crate) fn connect_coinbase_endpoint(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<DeadlineTcpStream, String> {
+    const MAXIMUM_RESOLVED_ADDRESSES: usize = 16;
+
+    let addresses = resolve_addresses(host, port, deadline, MAXIMUM_RESOLVED_ADDRESSES)?;
+    if addresses.is_empty() {
+        return Err("Coinbase endpoint address resolution returned no address".to_string());
+    }
+    for (index, address) in addresses.iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let attempts_left = u32::try_from(addresses.len() - index)
+            .map_err(|_| "Coinbase endpoint address count overflow".to_string())?;
+        let attempt_timeout = (remaining / attempts_left).max(Duration::from_millis(1));
+        if let Ok(stream) = TcpStream::connect_timeout(address, attempt_timeout) {
+            stream
+                .set_nodelay(true)
+                .map_err(|_| "Coinbase endpoint socket setup failed".to_string())?;
+            return Ok(DeadlineTcpStream { stream, deadline });
+        }
+    }
+    Err("Coinbase endpoint connection failed".to_string())
+}
+
+fn resolve_addresses(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    maximum_addresses: usize,
+) -> Result<Vec<SocketAddr>, String> {
+    let resolver = RESOLVER.get_or_init(start_resolver);
+    let resolver = resolver.as_ref().map_err(|error| (*error).to_string())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    resolver
+        .try_send(ResolutionRequest {
+            host: host.to_string(),
+            port,
+            maximum_addresses,
+            response: sender,
+        })
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => "Coinbase endpoint resolver is busy".to_string(),
+            mpsc::TrySendError::Disconnected(_) => "Coinbase endpoint resolver failed".to_string(),
+        })?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("Coinbase endpoint resolution deadline exceeded".to_string());
+    }
+    receiver
+        .recv_timeout(remaining)
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => {
+                "Coinbase endpoint resolution deadline exceeded".to_string()
+            }
+            mpsc::RecvTimeoutError::Disconnected => "Coinbase endpoint resolver failed".to_string(),
+        })?
+        .map_err(|_| "Coinbase endpoint address resolution failed".to_string())
+}
+
+fn start_resolver() -> Result<mpsc::SyncSender<ResolutionRequest>, &'static str> {
+    let (sender, receiver) = mpsc::sync_channel::<ResolutionRequest>(1);
+    thread::Builder::new()
+        .name("coinbase-dns".to_string())
+        .spawn(move || {
+            while let Ok(request) = receiver.recv() {
+                let result =
+                    (request.host.as_str(), request.port)
+                        .to_socket_addrs()
+                        .map(|addresses| {
+                            addresses
+                                .take(request.maximum_addresses)
+                                .collect::<Vec<_>>()
+                        });
+                let _ = request.response.send(result);
+            }
+        })
+        .map_err(|_| "Coinbase endpoint resolver startup failed")?;
+    Ok(sender)
+}
+
+fn remaining_until(deadline: Instant) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Coinbase network deadline exceeded",
+        ))
+    } else {
+        Ok(remaining)
+    }
+}
+
+fn read_bounded_response(reader: &mut impl Read, deadline: Instant) -> Result<Vec<u8>, String> {
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8_192];
+    loop {
+        if Instant::now() >= deadline {
+            return Err("Coinbase REST response deadline exceeded".to_string());
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(response),
+            Ok(read) => {
+                if response.len().saturating_add(read) > RESPONSE_BYTE_LIMIT {
+                    return Err("Coinbase REST response exceeds byte limit".to_string());
+                }
+                response.extend_from_slice(&buffer[..read]);
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    || error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => return Err("Coinbase REST response failed".to_string()),
+        }
+    }
+}
+
+fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "malformed Coinbase REST response".to_string())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "malformed Coinbase REST response".to_string())?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "malformed Coinbase REST status".to_string())?;
+    if status != 200 {
+        return Err(format!("Coinbase candle request returned HTTP {status}"));
+    }
+    let body = &response[header_end + 4..];
+    if headers.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    }) {
+        decode_chunked(body)
+    } else {
+        Ok(body.to_vec())
+    }
+}
+
+fn decode_chunked(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::new();
+    let mut offset = 0_usize;
+    loop {
+        let line_end = raw
+            .get(offset..)
+            .and_then(|remaining| remaining.windows(2).position(|window| window == b"\r\n"))
+            .and_then(|relative| offset.checked_add(relative))
+            .ok_or_else(|| "malformed Coinbase chunk size".to_string())?;
+        let size_text = std::str::from_utf8(&raw[offset..line_end])
+            .ok()
+            .and_then(|value| value.split(';').next())
+            .ok_or_else(|| "malformed Coinbase chunk size".to_string())?;
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|_| "malformed Coinbase chunk size".to_string())?;
+        offset = line_end + 2;
+        if size == 0 {
+            return Ok(decoded);
+        }
+        let chunk_end = offset
+            .checked_add(size)
+            .ok_or_else(|| "Coinbase chunk size overflow".to_string())?;
+        let terminator_end = chunk_end
+            .checked_add(2)
+            .ok_or_else(|| "Coinbase chunk size overflow".to_string())?;
+        if decoded.len().saturating_add(size) > RESPONSE_BYTE_LIMIT
+            || raw.get(chunk_end..terminator_end) != Some(b"\r\n")
+        {
+            return Err("malformed Coinbase chunk body".to_string());
+        }
+        decoded.extend_from_slice(
+            raw.get(offset..chunk_end)
+                .ok_or_else(|| "truncated Coinbase chunk body".to_string())?,
+        );
+        offset = terminator_end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CoinbaseHistoryCapabilityAdapter;
-    use axiusflow_provider_history::{DataClass, DatasetCapability};
+    use super::{
+        COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
+        decode_history_bar,
+    };
+    use crate::ENTITLEMENT_CLASS;
+    use axiusflow_provider_history::{
+        DataClass, DatasetCapability, HistoryPageRequest, HistoryRange, ProviderHistoryAdapter,
+    };
+    use std::{
+        cell::RefCell,
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        num::NonZeroUsize,
+        rc::Rc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::DeadlineTcpStream;
+
+    #[derive(Clone)]
+    struct FixtureTransport {
+        response: Vec<u8>,
+        paths: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl CoinbaseHistoryTransport for FixtureTransport {
+        fn get(&mut self, path: &str) -> Result<Vec<u8>, String> {
+            self.paths.borrow_mut().push(path.to_string());
+            Ok(self.response.clone())
+        }
+    }
 
     #[test]
-    fn profile_rejects_every_history_lane_without_a_fetch_adapter() {
+    fn absolute_socket_deadline_stops_trickle_reads() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
+        let address = listener.local_addr().expect("read loopback address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept loopback fixture");
+            for _ in 0..20 {
+                if stream.write_all(&[1]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        let stream = TcpStream::connect(address).expect("connect loopback fixture");
+        let mut stream = DeadlineTcpStream {
+            stream,
+            deadline: started + Duration::from_millis(60),
+        };
+        let mut byte = [0_u8; 1];
+        let error = loop {
+            match stream.read(&mut byte) {
+                Ok(1) => {}
+                Ok(_) => panic!("fixture stream ended before its deadline"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.join().expect("join loopback fixture");
+    }
+
+    fn request(maximum_items: usize) -> HistoryPageRequest {
+        HistoryPageRequest {
+            provider_id: "coinbase".to_string(),
+            account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            data_class: DataClass::Bars,
+            resolution: "1m".to_string(),
+            range: HistoryRange {
+                start_unix_nanos: 1_700_000_040_000_000_000,
+                end_unix_nanos: 1_700_000_220_000_000_000,
+            },
+            maximum_items: NonZeroUsize::new(maximum_items).expect("nonzero fixture limit"),
+            continuation: None,
+        }
+    }
+
+    #[test]
+    fn profile_enables_only_bounded_one_minute_bars() {
         let profile = CoinbaseHistoryCapabilityAdapter::try_new().expect("profile is valid");
         assert_eq!(profile.capabilities().provider_id(), "coinbase");
-        for data_class in [DataClass::Bars, DataClass::Ticks, DataClass::Depth] {
+        assert!(matches!(
+            profile.capabilities().dataset(DataClass::Bars),
+            DatasetCapability::Supported { .. }
+        ));
+        for data_class in [DataClass::Ticks, DataClass::Depth] {
             assert!(matches!(
                 profile.capabilities().dataset(data_class),
                 DatasetCapability::Unsupported { .. }
             ));
         }
+    }
+
+    #[test]
+    fn fetches_exact_range_and_decodes_sorted_canonical_bars() {
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let response = br#"{"candles":[
+            {"start":"1700000160","low":"37000.00","high":"37100.00","open":"37010.00","close":"37090.00","volume":"1.25000000"},
+            {"start":"1699999980","low":"36900.00","high":"37020.00","open":"36950.00","close":"37010.00","volume":"2.00000000"},
+            {"start":"1700000220","low":"37100.00","high":"37200.00","open":"37110.00","close":"37190.00","volume":"3.00000000"},
+            {"start":"1700000100","low":"37020.00","high":"37080.00","open":"37020.00","close":"37070.00","volume":"0.75000000"},
+            {"start":"1700000040","low":"36950.00","high":"37050.00","open":"37000.00","close":"37020.00","volume":"0.50000000"}
+        ]}"#
+        .to_vec();
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
+            response,
+            paths: paths.clone(),
+        })
+        .expect("fixture adapter");
+        let request = request(3);
+        let page = adapter.fetch_page(&request).expect("page fetches");
+        assert_eq!(page.request, request);
+        assert_eq!(page.items.len(), 3);
+        assert!(page.next.is_none());
+        assert!(
+            page.items
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        let bars = page
+            .items
+            .iter()
+            .map(decode_history_bar)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("payloads decode");
+        assert_eq!(bars[0].exchange_timestamp_seconds, 1_700_000_040);
+        assert_eq!(bars[0].open, 3_700_000);
+        assert_eq!(bars[0].volume, 50_000_000);
+        assert_eq!(bars[2].exchange_timestamp_seconds, 1_700_000_160);
+        assert_eq!(
+            paths.borrow().as_slice(),
+            [
+                "/api/v3/brokerage/market/products/BTC-USD/candles?start=1700000040&end=1700000160&granularity=ONE_MINUTE&limit=3"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unaligned_or_wrong_scope_requests_before_transport() {
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
+            response: br#"{"candles":[]}"#.to_vec(),
+            paths: paths.clone(),
+        })
+        .expect("fixture adapter");
+        let mut wrong_scope = request(3);
+        wrong_scope.account_id = "another-account".to_string();
+        assert!(adapter.fetch_page(&wrong_scope).is_err());
+        let mut unaligned = request(3);
+        unaligned.range.start_unix_nanos += 1;
+        assert!(adapter.fetch_page(&unaligned).is_err());
+        let too_wide_for_page = request(2);
+        assert!(adapter.fetch_page(&too_wide_for_page).is_err());
+        let mut noncanonical = request(3);
+        noncanonical.instrument_id = "instrument:coinbase:BTC:usd".to_string();
+        assert!(adapter.fetch_page(&noncanonical).is_err());
+        let mut unavailable_precision = request(3);
+        unavailable_precision.instrument_id = "instrument:coinbase:shib:usd".to_string();
+        assert!(adapter.fetch_page(&unavailable_precision).is_err());
+        assert!(paths.borrow().is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_and_over_precise_candles() {
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let duplicate = br#"{"candles":[
+            {"start":"1700000040","low":"1.00","high":"1.00","open":"1.00","close":"1.00","volume":"1.00000000"},
+            {"start":"1700000040","low":"1.00","high":"1.00","open":"1.00","close":"1.00","volume":"1.00000000"}
+        ]}"#
+        .to_vec();
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
+            response: duplicate,
+            paths: paths.clone(),
+        })
+        .expect("fixture adapter");
+        assert!(adapter.fetch_page(&request(3)).is_err());
+
+        let over_precise = br#"{"candles":[
+            {"start":"1700000040","low":"1.001","high":"1.001","open":"1.001","close":"1.001","volume":"1.00000000"}
+        ]}"#
+        .to_vec();
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
+            response: over_precise,
+            paths,
+        })
+        .expect("fixture adapter");
+        assert!(adapter.fetch_page(&request(3)).is_err());
+    }
+
+    #[test]
+    fn payload_identity_is_bound_to_the_history_item() {
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let response = br#"{"candles":[
+            {"start":"1700000040","low":"1.00","high":"1.00","open":"1.00","close":"1.00","volume":"1.00000000"}
+        ]}"#
+        .to_vec();
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
+            response,
+            paths,
+        })
+        .expect("fixture adapter");
+        let mut item = adapter
+            .fetch_page(&request(3))
+            .expect("page")
+            .items
+            .pop()
+            .expect("item");
+        assert!(decode_history_bar(&item).is_ok());
+        item.sequence += 1;
+        assert!(decode_history_bar(&item).is_err());
     }
 }

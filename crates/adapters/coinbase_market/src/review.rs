@@ -6,6 +6,8 @@ pub const PROVIDER: &str = "coinbase";
 pub const ENTITLEMENT_CLASS: &str = "crypto_public_realtime";
 /// Public advanced-trade WebSocket endpoint.
 pub const WEBSOCKET_ENDPOINT: &str = "wss://advanced-trade-ws.coinbase.com";
+/// DNS host for the public advanced-trade WebSocket endpoint.
+pub(crate) const WEBSOCKET_HOST: &str = "advanced-trade-ws.coinbase.com";
 /// Recorded provider review.
 pub const PROVIDER_REVIEW: &str = "Coinbase Advanced Trade public market data requires no API key for heartbeats, market_trades, candles, ticker, status, and level2 channels; the adapter subscribes only to public channels, sends no authenticated request, and records the venue in every event's provenance";
 /// Recorded terms review.

@@ -8,12 +8,23 @@
 //! exercised separately.
 
 use axiusflow_coinbase_market_adapter::{
-    CoinbaseConfig, CoinbaseSession, ENTITLEMENT_CLASS, PROVIDER, SessionOutcome,
+    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseSession,
+    ENTITLEMENT_CLASS, PROVIDER, SessionOutcome, decode_history_bar,
+};
+use axiusflow_provider_history::{
+    DataClass, HistoryPageRequest, HistoryRange, ProviderHistoryAdapter,
 };
 use serde::Serialize;
-use std::{env, error::Error, fs, path::Path, time::Duration};
+use std::{
+    env,
+    error::Error,
+    fs,
+    num::NonZeroUsize,
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+const EVIDENCE_SCHEMA_VERSION: u32 = 2;
 const EVIDENCE_SCOPE: &str = "stage_2_coinbase_live_feed";
 
 #[derive(Serialize)]
@@ -27,6 +38,8 @@ struct FeedBehaviorEvidence {
     malformed_messages: u64,
     level2_book: &'static str,
     historical_backfill: &'static str,
+    history_transport: &'static str,
+    history_payload_identity: &'static str,
     production_deployment: &'static str,
 }
 
@@ -44,6 +57,7 @@ struct CoinbaseLiveReport {
     trades: u64,
     duplicates_dropped: u64,
     sequence_gaps: u64,
+    history_bars: usize,
     sample_trade: Option<SampleTrade>,
     behavior: FeedBehaviorEvidence,
     limitations: [&'static str; 4],
@@ -68,6 +82,7 @@ pub fn run(
         .filter(|value| !value.trim().is_empty())
         .ok_or("GITHUB_SHA must be non-empty for Coinbase live evidence")?;
     let config = CoinbaseConfig::try_new(products.to_vec())?;
+    let history_bars = fetch_live_history(products)?;
     let session = CoinbaseSession::new(config);
     let mut sample = None;
     let health = session.collect(Duration::from_secs(window_seconds), &mut |trade| {
@@ -103,6 +118,7 @@ pub fn run(
         trades: health.metrics.trades,
         duplicates_dropped: health.metrics.duplicates_dropped,
         sequence_gaps: health.metrics.sequence_gaps,
+        history_bars,
         sample_trade: sample,
         behavior: FeedBehaviorEvidence {
             tls_transport: "passed",
@@ -113,27 +129,81 @@ pub fn run(
             fixed_point_exactness: "passed",
             malformed_messages: 0,
             level2_book: "not_exercised",
-            historical_backfill: "not_exercised",
+            historical_backfill: "passed",
+            history_transport: "direct_provider_https",
+            history_payload_identity: "passed",
             production_deployment: "not_exercised",
         },
         limitations: [
             "single_venue",
             "public_feed_rate_limits",
             "no_level2",
-            "no_backfill_in_this_lane",
+            "single_bounded_history_page_per_product",
         ],
     };
     let mut encoded = serde_json::to_vec_pretty(&report)?;
     encoded.push(b'\n');
     fs::write(report_path, encoded)?;
     println!(
-        "coinbase_live_feed=passed provider=coinbase entitlement=crypto_public_realtime tls=true trades={} heartbeats={} sequence_gaps=0 outcome={:?} report={}",
+        "coinbase_live_feed=passed provider=coinbase entitlement=crypto_public_realtime tls=true history_bars={} trades={} heartbeats={} sequence_gaps=0 outcome={:?} report={}",
+        history_bars,
         health.metrics.trades,
         health.metrics.heartbeats,
         health.outcome,
         report_path.display()
     );
     Ok(())
+}
+
+fn fetch_live_history(products: &[String]) -> Result<usize, Box<dyn Error>> {
+    const HISTORY_ITEMS_PER_PRODUCT: usize = 5;
+    const MINUTE_SECONDS: u64 = 60;
+    const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
+    let now_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let end_seconds = now_seconds / MINUTE_SECONDS * MINUTE_SECONDS;
+    let start_seconds = end_seconds
+        .checked_sub(MINUTE_SECONDS * HISTORY_ITEMS_PER_PRODUCT as u64)
+        .ok_or("Coinbase history range underflow")?;
+    let range = HistoryRange {
+        start_unix_nanos: i64::try_from(start_seconds)?
+            .checked_mul(NANOS_PER_SECOND)
+            .ok_or("Coinbase history start overflow")?,
+        end_unix_nanos: i64::try_from(end_seconds)?
+            .checked_mul(NANOS_PER_SECOND)
+            .ok_or("Coinbase history end overflow")?,
+    };
+    let mut adapter = CoinbaseHistoryCapabilityAdapter::try_new()?;
+    let mut total = 0_usize;
+    for product in products {
+        let base = product
+            .strip_suffix("-USD")
+            .filter(|value| !value.is_empty())
+            .ok_or("Coinbase live history supports USD products only")?;
+        let request = HistoryPageRequest {
+            provider_id: PROVIDER.to_string(),
+            account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+            instrument_id: format!("instrument:coinbase:{}:usd", base.to_ascii_lowercase()),
+            data_class: DataClass::Bars,
+            resolution: "1m".to_string(),
+            range,
+            maximum_items: NonZeroUsize::new(HISTORY_ITEMS_PER_PRODUCT)
+                .ok_or("Coinbase history page bound must be nonzero")?,
+            continuation: None,
+        };
+        let page = adapter.fetch_page(&request)?;
+        if page.items.is_empty() {
+            return Err(format!("no Coinbase history arrived for {product}").into());
+        }
+        for item in &page.items {
+            decode_history_bar(item)?;
+        }
+        total = total
+            .checked_add(page.items.len())
+            .ok_or("Coinbase history count overflow")?;
+    }
+    Ok(total)
 }
 
 /// Runs only when the outcome is expected to be completed; a gap or peer close

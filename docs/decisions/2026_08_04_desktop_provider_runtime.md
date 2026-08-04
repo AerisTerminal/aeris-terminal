@@ -102,10 +102,11 @@ The deterministic suite proves:
 
 ## Claim boundary
 
-This slice does not implement Rithmic, CQG, FYERS, or another direct provider
-adapter. It does not connect the lifecycle owner or native monitor to
-`apps/desktop`, or connect a provider history fetch adapter. Windows and macOS
-network-change backends remain unimplemented.
+This slice does not implement Rithmic, CQG, FYERS, or another direct streaming
+provider adapter. Coinbase now supplies a bounded direct public one-minute
+history fetch adapter, but it is not yet composed with this lifecycle/history
+owner. The lifecycle owner and native monitor remain disconnected from
+`apps/desktop`; Windows and macOS network-change backends are unimplemented.
 The composed worker proves provider-generation ownership of history callbacks,
 but no native provider SDK or application event loop drives that boundary yet.
 It also does not prove shipping-topology cloud absence, provider certification,

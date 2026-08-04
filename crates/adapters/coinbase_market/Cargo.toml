@@ -7,12 +7,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_provider_history = { path = "../../provider_history" }
 axiusflow_realtime = { path = "../../realtime" }
 axiusflow_transport = { path = "../../transport" }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tungstenite.workspace = true
+webpki-roots.workspace = true
 
 [lints]
 workspace = true

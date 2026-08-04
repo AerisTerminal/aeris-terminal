@@ -19,6 +19,9 @@ pub use config::{CoinbaseConfig, MAXIMUM_PRODUCTS};
 pub use decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
 pub use errors::CoinbaseError;
 pub use fixed_point::FixedPointValue;
-pub use history::CoinbaseHistoryCapabilityAdapter;
+pub use history::{
+    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
+    CoinbaseHttpsHistoryTransport, decode_history_bar,
+};
 pub use review::{ENTITLEMENT_CLASS, PROVIDER, PROVIDER_REVIEW, TERMS_REVIEW, WEBSOCKET_ENDPOINT};
 pub use session::{CoinbaseSession, SessionHealth, SessionOutcome};

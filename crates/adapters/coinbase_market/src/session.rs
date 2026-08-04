@@ -7,10 +7,17 @@
 use crate::config::CoinbaseConfig;
 use crate::decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
 use crate::errors::CoinbaseError;
+use crate::history::{coinbase_tls_config, connect_coinbase_endpoint};
 use crate::messages::subscribe_frame;
-use crate::review::WEBSOCKET_ENDPOINT;
-use std::time::{Duration, Instant};
-use tungstenite::Message;
+use crate::review::{WEBSOCKET_ENDPOINT, WEBSOCKET_HOST};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tungstenite::{Connector, Message};
+
+const WEBSOCKET_PORT: u16 = 443;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How one bounded session ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,8 +60,15 @@ impl CoinbaseSession {
         window: Duration,
         on_trade: &mut impl FnMut(&CanonicalTrade),
     ) -> Result<SessionHealth, CoinbaseError> {
-        let (mut socket, _response) = tungstenite::connect(WEBSOCKET_ENDPOINT)
-            .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
+        let connect_deadline = Instant::now() + CONNECT_TIMEOUT;
+        let tcp = connect_coinbase_endpoint(WEBSOCKET_HOST, WEBSOCKET_PORT, connect_deadline)
+            .map_err(CoinbaseError::Transport)?;
+        let connector = Connector::Rustls(Arc::new(
+            coinbase_tls_config().map_err(CoinbaseError::Transport)?,
+        ));
+        let (mut socket, _response) =
+            tungstenite::client_tls_with_config(WEBSOCKET_ENDPOINT, tcp, None, Some(connector))
+                .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
         for channel in ["heartbeats", "market_trades"] {
             socket
                 .send(Message::Text(
@@ -63,6 +77,9 @@ impl CoinbaseSession {
                 .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
         }
         let deadline = Instant::now() + window;
+        if let tungstenite::stream::MaybeTlsStream::Rustls(stream) = socket.get_mut() {
+            stream.get_mut().set_deadline(deadline);
+        }
         let mut decoder = CoinbaseDecoder::new();
         let mut outcome = SessionOutcome::Completed;
         loop {
@@ -73,8 +90,7 @@ impl CoinbaseSession {
             if let tungstenite::stream::MaybeTlsStream::Rustls(stream) = socket.get_mut() {
                 stream
                     .get_mut()
-                    .set_read_timeout(Some(remaining.min(Duration::from_secs(1))))
-                    .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
+                    .set_deadline(Instant::now() + remaining.min(Duration::from_secs(1)));
             }
             match socket.read() {
                 Ok(Message::Text(text)) => {

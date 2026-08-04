@@ -18,6 +18,7 @@ axiusflow_macos_network_adapter = { path = "../../crates/adapters/macos_network"
 axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
 axiusflow_persistence = { path = "../../crates/persistence" }
+axiusflow_provider_history = { path = "../../crates/provider_history" }
 axiusflow_protocols = { path = "../../crates/protocols" }
 axiusflow_portable_network_adapter = { path = "../../crates/adapters/portable_network" }
 axiusflow_realtime = { path = "../../crates/realtime" }

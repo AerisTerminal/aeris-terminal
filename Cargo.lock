@@ -719,12 +719,15 @@ dependencies = [
 name = "axiusflow_coinbase_market_adapter"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_market_data",
  "axiusflow_provider_history",
  "axiusflow_realtime",
  "axiusflow_transport",
+ "rustls",
  "serde",
  "serde_json",
  "tungstenite",
+ "webpki-roots 1.0.5",
 ]
 
 [[package]]
@@ -794,6 +797,7 @@ dependencies = [
  "axiusflow_persistence",
  "axiusflow_portable_network_adapter",
  "axiusflow_protocols",
+ "axiusflow_provider_history",
  "axiusflow_realtime",
  "axiusflow_security",
  "axiusflow_streaming",
