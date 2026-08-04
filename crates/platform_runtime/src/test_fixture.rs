@@ -70,6 +70,7 @@ fn capabilities() -> RuntimeCapabilities {
         signed_updates: CapabilityAvailability::Available,
         rollback: CapabilityAvailability::Available,
         power_notifications: CapabilityAvailability::Unavailable,
+        network_notifications: CapabilityAvailability::Unavailable,
         display_timing: CapabilityAvailability::Unavailable,
         priority_hints: CapabilityAvailability::Unavailable,
         affinity_hints: CapabilityAvailability::Unavailable,

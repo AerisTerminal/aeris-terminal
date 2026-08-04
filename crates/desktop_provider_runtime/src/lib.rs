@@ -6,6 +6,7 @@
 //! cloud client or payload-upload boundary.
 
 use axiusflow_application::MarketStreamPublication;
+pub use axiusflow_platform_runtime::NetworkEvent;
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use core::fmt;
 use std::{
@@ -69,13 +70,6 @@ pub enum RecoveryReason {
     ProviderFailure,
     TransportInvalid,
     SemanticQueueOverflow,
-}
-
-/// Connectivity transition supplied by a native platform adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkEvent {
-    Unavailable,
-    Available,
 }
 
 /// Observable provider lifecycle state.

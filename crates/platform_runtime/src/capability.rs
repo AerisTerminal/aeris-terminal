@@ -38,6 +38,7 @@ pub struct RuntimeCapabilities {
     pub signed_updates: CapabilityAvailability,
     pub rollback: CapabilityAvailability,
     pub power_notifications: CapabilityAvailability,
+    pub network_notifications: CapabilityAvailability,
     pub display_timing: CapabilityAvailability,
     pub priority_hints: CapabilityAvailability,
     pub affinity_hints: CapabilityAvailability,
@@ -61,6 +62,7 @@ impl RuntimeCapabilities {
             // durable activation and persistence still need per-OS adapters.
             rollback: CapabilityAvailability::Unavailable,
             power_notifications: crate::NativePowerMonitor::availability(),
+            network_notifications: crate::NativeNetworkMonitor::availability(),
             display_timing: crate::NativeDisplayProbe::availability(),
             priority_hints: crate::NativeThreadScheduler::priority_availability(),
             affinity_hints: crate::NativeThreadScheduler::affinity_availability(),
@@ -93,6 +95,10 @@ mod tests {
         assert_eq!(
             detected.power_notifications,
             crate::NativePowerMonitor::availability()
+        );
+        assert_eq!(
+            detected.network_notifications,
+            crate::NativeNetworkMonitor::availability()
         );
         assert_eq!(
             detected.display_timing,

@@ -8,6 +8,7 @@ mod composition;
 mod credential_vault;
 mod display_timing;
 mod loopback_callback;
+mod network_notifications;
 mod paths;
 mod pkce;
 mod power_notifications;
@@ -27,6 +28,7 @@ pub use display_timing::{
     DisplayEnvironment, DisplayOutput, DisplayTimingError, NativeDisplayProbe, PresentationClock,
 };
 pub use loopback_callback::{AuthorizationCode, LoopbackCallbackError, LoopbackRedirectListener};
+pub use network_notifications::{NativeNetworkMonitor, NetworkEvent, NetworkNotificationError};
 pub use paths::RuntimePaths;
 pub use pkce::{CODE_CHALLENGE_METHOD, PkceError, PkceSecret};
 pub use power_notifications::{NativePowerMonitor, PowerEvent, PowerNotificationError};

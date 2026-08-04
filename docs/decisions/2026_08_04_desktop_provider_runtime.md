@@ -2,7 +2,8 @@
 
 **Status:** accepted as a partial runtime foundation; direct provider and desktop integration remain open
 
-**Evidence command:** `tools/run_desktop_provider_runtime_conformance.sh`
+**Evidence commands:** `tools/run_desktop_provider_runtime_conformance.sh` and
+`tools/run_native_network_monitor_conformance.sh`
 
 ## Decision
 
@@ -44,6 +45,19 @@ the retired generation fail before reaching the history worker. Local
 visible-range hydration and chart publication remain available without an
 active provider session or Axiusflow control-plane availability.
 
+`NativeNetworkMonitor` supplies the same `NetworkEvent` type consumed by the
+lifecycle owner. Its Linux backend installs fixed-capacity, sender/path/
+interface/member-specific system-bus matches for `NetworkManager.StateChanged`
+and the service's `NameOwnerChanged`, reads the initial `State` only after both
+matches are active, and re-reads the current owner and property for each signal.
+That reconciliation prevents queued stale signals from restoring connectivity
+and maps daemon loss to unavailable. Reconciliation uses a separate system-bus
+connection so synchronous property replies cannot deadlock behind the bounded
+signal queue. Only global connectivity is provider-available; repeated local/
+site/portal/disconnected states coalesce into one unavailable condition. The
+listener blocks only on its declared background-thread API and reports bus/
+property, closed-stream, and unsupported-platform failures explicitly.
+
 ## Conformance
 
 The deterministic suite proves:
@@ -68,7 +82,7 @@ The deterministic suite proves:
   order without requiring a duplicate OS notification;
 - the runtime is statically non-`Send`, so its declared worker ownership and
   teardown cannot migrate to another thread;
-- event `Debug` output redacts the complete market publication and subscription.
+- event `Debug` output redacts the complete market publication and subscription;
 - lifecycle fencing retires real history handoffs, permits the replacement
   generation to reuse their identities, and rejects delayed live and snapshot
   callbacks before history mutation;
@@ -79,13 +93,19 @@ The deterministic suite proves:
 - composed history errors reduce decoder, storage, and continuity details to
   coarse diagnostic classes;
 - authenticated local hydration succeeds while both provider and Axiusflow
-  control-plane connectivity are unavailable.
+  control-plane connectivity are unavailable;
+- the Linux native listener constructs the exact state and owner-change match
+  rules, applies fail-closed state mapping and duplicate coalescing, and shares
+  the lifecycle event type; a live host probe opened the listener and read
+  global availability. Signal-driven `next_event` and daemon-restart integration
+  remain explicitly unproven by this deterministic suite.
 
 ## Claim boundary
 
 This slice does not implement Rithmic, CQG, FYERS, or another direct provider
-adapter. It does not add a native OS network-change monitor, connect the
-lifecycle owner to `apps/desktop`, or connect a provider history fetch adapter.
+adapter. It does not connect the lifecycle owner or native monitor to
+`apps/desktop`, or connect a provider history fetch adapter. Windows and macOS
+network-change backends remain unimplemented.
 The composed worker proves provider-generation ownership of history callbacks,
 but no native provider SDK or application event loop drives that boundary yet.
 It also does not prove shipping-topology cloud absence, provider certification,
