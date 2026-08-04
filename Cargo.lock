@@ -719,6 +719,7 @@ dependencies = [
 name = "axiusflow_coinbase_market_adapter"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_provider_history",
  "axiusflow_realtime",
  "axiusflow_transport",
  "serde",
@@ -922,6 +923,10 @@ dependencies = [
  "protoc-bin-vendored",
  "sha2 0.10.9",
 ]
+
+[[package]]
+name = "axiusflow_provider_history"
+version = "0.1.0"
 
 [[package]]
 name = "axiusflow_realtime"
