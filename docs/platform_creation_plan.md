@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 8
+**Revision:** 9
 **Last updated:** 2026-08-05
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -52,7 +52,7 @@ display, provider/environment, workload, sample window, and percentile evidence.
 | Coinbase reference feed | `in_progress` | Direct public history and live aggregation exist for BTC-USD and ETH-USD one-minute bars. The desktop integration remains under stabilization and lacks the full desktop-live gate. |
 | Coinbase chart UI | `in_progress` | The application has an emerging live worker path, but no complete desktop-live integration gate. Loading and recovery behavior are not final. |
 | Coinbase depth and timeframes | `deferred` | Coinbase is frozen at one-minute bars. It has no depth UI and no timeframe selector. |
-| Provider-neutral runtime | `in_progress` | Lifecycle fencing and history composition exist, but Coinbase types and aggregation still cross the shared runtime boundary. |
+| Provider-neutral runtime | `in_progress` | Canonical trade, quote, depth, bar-series, order-book, session-event, and sealed read-only command contracts now exist with deterministic bounds and recovery tests. Coinbase callback and aggregation types still cross the composed worker boundary. |
 | Rithmic access | `blocked_external` | Access has been offered, but the accepted package, agreements, Test login, protocol semantics, entitlements, and certification have not been verified. |
 | Rithmic adapter | `ready` | A kit-optional, read-only implementation can begin without committing proprietary material. Live validation remains externally blocked. |
 | Main Rithmic UI | `ready` | Work begins after the deterministic headless and diagnostics gates pass. |
@@ -169,7 +169,7 @@ analytics, or cloud routes.
 
 ## 6. Stage B — Provider-neutral contracts and runtime
 
-**Status:** `ready`
+**Status:** `in_progress`
 
 ### Canonical contracts
 
@@ -200,6 +200,24 @@ analytics, or cloud routes.
 Both the Coinbase adapter and deterministic Rithmic fixture adapter pass the
 same lifecycle, generation-fencing, bar, book, recovery, and publication
 conformance suites without provider-specific types in shared runtime modules.
+
+### Current implementation evidence
+
+- Canonical fixed-point trade, top-of-book quote, depth snapshot/delta, standard
+  bar-period, bar-series key, bar-update, and market-event contracts are present.
+- The bounded provider-neutral order book publishes immutable top-N snapshots,
+  ignores stale generations and sequences, and discards candidate state on gaps
+  or crossed books until a covering snapshot arrives.
+- Provider session discovery, authentication, instrument, market, heartbeat,
+  invalidation, and stop events have explicit validation and memory bounds.
+- The application command surface is closed to connect, subscription
+  replacement, recovery, disconnect, and shutdown; it has no raw payload or
+  provider-template command.
+- Coinbase decoded trades project into the canonical fixed-point trade contract
+  with exact configured scales and qualified timestamps.
+- Remaining work is to move aggregation and callback handling fully behind the
+  adapter boundary, add the deterministic Rithmic fixture adapter, and run the
+  shared lifecycle/bar/book/recovery/publication conformance suite for both.
 
 ## 7. Stage C — Rithmic read-only headless core
 

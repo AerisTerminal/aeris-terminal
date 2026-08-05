@@ -329,6 +329,7 @@ mod tests {
             trade_time_unix_nanos: minute * 60_000_000_000 + 1_000_000_000,
             provider_timestamp_unix_nanos: minute * 60_000_000_000 + 500_000_000,
             sequence_num,
+            canonical_sequence: sequence_num.saturating_add(1),
         }
     }
 }

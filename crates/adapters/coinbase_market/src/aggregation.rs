@@ -491,6 +491,7 @@ mod tests {
             trade_time_unix_nanos: minute * ONE_MINUTE_NANOS + 1_000_000_000,
             provider_timestamp_unix_nanos: 0,
             sequence_num: 0,
+            canonical_sequence: 1,
         }
     }
 

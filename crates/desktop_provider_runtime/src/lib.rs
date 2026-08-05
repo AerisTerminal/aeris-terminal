@@ -22,6 +22,7 @@ use zeroize::Zeroize;
 
 mod coinbase_driver;
 mod market_worker;
+mod session_contract;
 
 pub use coinbase_driver::{
     CoinbaseProviderDriver, CoinbaseProviderDriverError, CoinbaseProviderEvent,
@@ -30,6 +31,11 @@ pub use coinbase_driver::{
 pub use market_worker::{
     DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
     HistoryCompletionBinding, HistoryCompletionInstall,
+};
+pub use session_contract::{
+    AuthenticationState, InstrumentDescriptor, MAXIMUM_DISCOVERY_FIELD_BYTES,
+    ProviderContractError, ProviderEnvironment, ProviderInvalidationReason, ProviderSessionCommand,
+    ProviderSessionEvent, ProviderSubscription,
 };
 
 struct CredentialBytes(Vec<u8>);

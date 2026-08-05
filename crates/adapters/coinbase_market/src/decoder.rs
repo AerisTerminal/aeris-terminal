@@ -8,6 +8,7 @@
 use crate::errors::CoinbaseError;
 use crate::fixed_point::FixedPointValue;
 use crate::messages::ChannelMessage;
+use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 
 /// Maximum retained trade identifiers in the dedup window.
 const MAXIMUM_DEDUP_ENTRIES: usize = 4_096;
@@ -23,6 +24,62 @@ pub struct CanonicalTrade {
     pub trade_time_unix_nanos: i64,
     pub provider_timestamp_unix_nanos: i64,
     pub sequence_num: u64,
+    pub canonical_sequence: u64,
+}
+
+impl CanonicalTrade {
+    /// Projects the exact Coinbase value into the provider-neutral fixed-point contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when configured scales lose precision, overflow,
+    /// or produce an invalid canonical trade.
+    pub fn to_market_trade(
+        &self,
+        price_scale: u8,
+        quantity_scale: u8,
+        session_generation: u64,
+        received_unix_nanos: i64,
+    ) -> Result<MarketTrade, CoinbaseError> {
+        let instrument_id = instrument_id_for_product(&self.product_id)?;
+        let trade = MarketTrade {
+            metadata: EventMetadata {
+                provider_id: crate::PROVIDER.to_string(),
+                instrument_id,
+                entitlement_id: crate::ENTITLEMENT_CLASS.to_string(),
+                source_sequence: self.canonical_sequence,
+                session_generation,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(self.trade_time_unix_nanos),
+                    provider_unix_nanos: Some(self.provider_timestamp_unix_nanos),
+                    received_unix_nanos,
+                },
+            },
+            trade_id: self.trade_id.clone(),
+            price: crate::mantissa_at_scale(self.price, price_scale)
+                .map_err(|_| CoinbaseError::InvalidMessage)?,
+            quantity: crate::mantissa_at_scale(self.size, quantity_scale)
+                .map_err(|_| CoinbaseError::InvalidMessage)?,
+            aggressor: if self.maker_side_buy {
+                AggressorSide::Sell
+            } else {
+                AggressorSide::Buy
+            },
+        };
+        trade
+            .validate()
+            .map_err(|_| CoinbaseError::InvalidMessage)?;
+        Ok(trade)
+    }
+}
+
+fn instrument_id_for_product(product_id: &str) -> Result<String, CoinbaseError> {
+    let base = match product_id {
+        "BTC-USD" => "btc",
+        "ETH-USD" => "eth",
+        _ => return Err(CoinbaseError::InvalidMessage),
+    };
+    Ok(format!("instrument:coinbase:{base}:usd"))
 }
 
 /// Aggregate decode counters for evidence.
@@ -41,6 +98,7 @@ pub struct CoinbaseDecoder {
     dedup: std::collections::VecDeque<(String, String)>,
     dedup_set: std::collections::HashSet<(String, String)>,
     metrics: DecoderMetrics,
+    next_trade_sequence: u64,
 }
 
 impl CoinbaseDecoder {
@@ -52,6 +110,7 @@ impl CoinbaseDecoder {
             dedup: std::collections::VecDeque::new(),
             dedup_set: std::collections::HashSet::new(),
             metrics: DecoderMetrics::default(),
+            next_trade_sequence: 1,
         }
     }
 
@@ -99,6 +158,14 @@ impl CoinbaseDecoder {
         let mut trades = Vec::new();
         for event in &message.events {
             for trade in &event.trades {
+                let maker_side_buy = match trade.side.as_str() {
+                    "BUY" => true,
+                    "SELL" => false,
+                    _ => return Err(CoinbaseError::InvalidMessage),
+                };
+                let price = FixedPointValue::parse(&trade.price)?;
+                let size = FixedPointValue::parse(&trade.size)?;
+                let trade_time_unix_nanos = parse_rfc3339_nanos(&trade.time)?;
                 let dedup_key = (trade.product_id.clone(), trade.trade_id.clone());
                 if !self.dedup_set.insert(dedup_key.clone()) {
                     self.metrics.duplicates_dropped += 1;
@@ -113,13 +180,18 @@ impl CoinbaseDecoder {
                 trades.push(CanonicalTrade {
                     product_id: trade.product_id.clone(),
                     trade_id: trade.trade_id.clone(),
-                    price: FixedPointValue::parse(&trade.price)?,
-                    size: FixedPointValue::parse(&trade.size)?,
-                    maker_side_buy: trade.side == "BUY",
-                    trade_time_unix_nanos: parse_rfc3339_nanos(&trade.time)?,
+                    price,
+                    size,
+                    maker_side_buy,
+                    trade_time_unix_nanos,
                     provider_timestamp_unix_nanos: provider_timestamp,
                     sequence_num: message.sequence_num,
+                    canonical_sequence: self.next_trade_sequence,
                 });
+                self.next_trade_sequence = self
+                    .next_trade_sequence
+                    .checked_add(1)
+                    .ok_or(CoinbaseError::InvalidMessage)?;
                 self.metrics.trades += 1;
             }
         }
@@ -131,6 +203,7 @@ impl CoinbaseDecoder {
         self.next_sequence = None;
         self.dedup.clear();
         self.dedup_set.clear();
+        self.next_trade_sequence = 1;
     }
 }
 
@@ -242,10 +315,17 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{CoinbaseDecoder, parse_rfc3339_nanos};
+    use axiusflow_market_data::AggressorSide;
 
     fn trade_message(sequence: u64, trade_id: &str) -> String {
         format!(
             r#"{{"channel":"market_trades","timestamp":"2023-02-09T20:19:35.39625135Z","sequence_num":{sequence},"events":[{{"type":"update","trades":[{{"trade_id":"{trade_id}","product_id":"BTC-USD","price":"67001.25","size":"0.0042","side":"SELL","time":"2023-02-09T20:19:34.265Z"}}]}}]}}"#
+        )
+    }
+
+    fn batched_trade_message(sequence: u64) -> String {
+        format!(
+            r#"{{"channel":"market_trades","timestamp":"2023-02-09T20:19:35.39625135Z","sequence_num":{sequence},"events":[{{"type":"update","trades":[{{"trade_id":"t-1","product_id":"BTC-USD","price":"67001.25","size":"0.0042","side":"SELL","time":"2023-02-09T20:19:34.265Z"}},{{"trade_id":"t-2","product_id":"BTC-USD","price":"67001.50","size":"0.0043","side":"BUY","time":"2023-02-09T20:19:34.266Z"}}]}}]}}"#
         )
     }
 
@@ -273,6 +353,76 @@ mod tests {
         assert_eq!(trades[0].size.mantissa, 42);
         assert_eq!(trades[0].size.scale, 4);
         assert!(!trades[0].maker_side_buy);
+    }
+
+    #[test]
+    fn decoded_trade_projects_into_provider_neutral_contract() {
+        let mut decoder = CoinbaseDecoder::new();
+        let trade = decoder
+            .decode(trade_message(1, "t-1").as_bytes())
+            .expect("valid message decodes")
+            .pop()
+            .expect("message contains one trade")
+            .to_market_trade(2, 8, 9, 1_675_977_576_000_000_000)
+            .expect("trade projects without precision loss");
+        assert_eq!(trade.metadata.provider_id, crate::PROVIDER);
+        assert_eq!(trade.metadata.instrument_id, "instrument:coinbase:btc:usd");
+        assert_eq!(trade.metadata.entitlement_id, crate::ENTITLEMENT_CLASS);
+        assert_eq!(trade.metadata.source_sequence, 1);
+        assert_eq!(trade.metadata.session_generation, 9);
+        assert_eq!(trade.price, 6_700_125);
+        assert_eq!(trade.quantity, 420_000);
+        assert_eq!(trade.aggressor, AggressorSide::Buy);
+    }
+
+    #[test]
+    fn sequence_zero_projects_to_the_first_canonical_sequence() {
+        let mut decoder = CoinbaseDecoder::new();
+        let trade = decoder
+            .decode(trade_message(0, "t-0").as_bytes())
+            .expect("zero-based provider sequence decodes")
+            .pop()
+            .expect("message contains one trade")
+            .to_market_trade(2, 8, 1, 1)
+            .expect("zero-based provider sequence normalizes");
+        assert_eq!(trade.metadata.source_sequence, 1);
+    }
+
+    #[test]
+    fn batched_trades_receive_distinct_canonical_sequences() {
+        let mut decoder = CoinbaseDecoder::new();
+        let trades = decoder
+            .decode(batched_trade_message(0).as_bytes())
+            .expect("batched trades decode");
+        assert_eq!(
+            trades
+                .iter()
+                .map(|trade| trade.canonical_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn projection_rejects_products_without_a_reviewed_instrument_profile() {
+        let mut decoder = CoinbaseDecoder::new();
+        let mut trade = decoder
+            .decode(trade_message(1, "t-1").as_bytes())
+            .expect("trade decodes")
+            .pop()
+            .expect("message contains one trade");
+        trade.product_id = "SOL-USD".to_string();
+        assert!(trade.to_market_trade(2, 8, 1, 1).is_err());
+    }
+
+    #[test]
+    fn unknown_trade_sides_are_rejected_before_canonical_projection() {
+        let mut decoder = CoinbaseDecoder::new();
+        let message = trade_message(0, "t-1").replace("\"SELL\"", "\"UNKNOWN\"");
+        assert!(matches!(
+            decoder.decode(message.as_bytes()),
+            Err(crate::CoinbaseError::InvalidMessage)
+        ));
     }
 
     #[test]

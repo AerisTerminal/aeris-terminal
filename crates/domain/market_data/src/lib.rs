@@ -3,6 +3,18 @@
 use core::fmt;
 use std::error::Error;
 
+mod contracts;
+mod order_book;
+
+pub use contracts::{
+    AggressorSide, BarPeriod, BarSeriesKey, BarUpdate, BookSide, DepthDelta, DepthLevel,
+    DepthSnapshot, EventMetadata, MAXIMUM_MARKET_DATA_FIELD_BYTES, MarketEvent, MarketTrade,
+    QualifiedTimestamp, TopOfBookQuote,
+};
+pub use order_book::{
+    OrderBook, OrderBookApplyOutcome, OrderBookPublication, OrderBookRecoveryReason, OrderBookState,
+};
+
 /// Versioned rules used to construct one deterministic bar series.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BarDefinition {
@@ -80,6 +92,21 @@ pub enum MarketDataValidationError {
     ZeroSourceSequence,
     InvalidOhlc { source_sequence: u64 },
     NegativeVolume { source_sequence: u64 },
+    EmptyField(&'static str),
+    FieldTooLong { field: &'static str, maximum: usize },
+    InvalidTimestamp(&'static str),
+    InvalidPrice,
+    InvalidQuantity,
+    InvalidQuote,
+    InvalidDepth,
+    DuplicateDepthPrice,
+    InvalidPeriod,
+    InvalidRevision,
+    BarSeriesMetadataMismatch,
+    BarSourceSequenceMismatch,
+    SourceSequenceRegression,
+    DepthGap { expected: u64, actual: u64 },
+    DepthLimitExceeded { maximum: usize },
 }
 
 impl fmt::Display for MarketDataValidationError {
@@ -103,6 +130,41 @@ impl fmt::Display for MarketDataValidationError {
                 write!(
                     formatter,
                     "negative volume at source sequence {source_sequence}"
+                )
+            }
+            Self::EmptyField(field) => write!(formatter, "{field} must not be empty"),
+            Self::FieldTooLong { field, maximum } => {
+                write!(formatter, "{field} exceeds the maximum {maximum} bytes")
+            }
+            Self::InvalidTimestamp(field) => write!(formatter, "{field} timestamp is invalid"),
+            Self::InvalidPrice => formatter.write_str("market-data price is invalid"),
+            Self::InvalidQuantity => formatter.write_str("market-data quantity is invalid"),
+            Self::InvalidQuote => formatter.write_str("top-of-book quote is invalid"),
+            Self::InvalidDepth => formatter.write_str("depth update is invalid"),
+            Self::DuplicateDepthPrice => {
+                formatter.write_str("depth prices must be unique per side")
+            }
+            Self::InvalidPeriod => formatter.write_str("bar period is invalid"),
+            Self::InvalidRevision => formatter.write_str("publication revision must be non-zero"),
+            Self::BarSeriesMetadataMismatch => {
+                formatter.write_str("bar series identity does not match event metadata")
+            }
+            Self::BarSourceSequenceMismatch => {
+                formatter.write_str("bar source sequence does not match event metadata")
+            }
+            Self::SourceSequenceRegression => {
+                formatter.write_str("source sequence did not advance")
+            }
+            Self::DepthGap { expected, actual } => {
+                write!(
+                    formatter,
+                    "depth sequence gap: expected {expected}, received {actual}"
+                )
+            }
+            Self::DepthLimitExceeded { maximum } => {
+                write!(
+                    formatter,
+                    "depth level count exceeds configured maximum {maximum}"
                 )
             }
         }
