@@ -1,7 +1,7 @@
 use super::{
     COMMAND_CAPACITY, CoinbaseDesktopWorker, INBOX_BATCH, LiveLoopState, apply_environment_event,
 };
-use crate::market_worker::{MarketWorkerCommand, MarketWorkerMessage};
+use crate::market_worker::{MarketWorkerCommand, MarketWorkerSender};
 use axiusflow_desktop_provider_runtime::CoinbaseProviderEvents;
 use axiusflow_platform_runtime::{
     NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
@@ -34,7 +34,7 @@ pub(super) struct InboxDrainContext<'a> {
     pub(super) worker: &'a mut CoinbaseDesktopWorker,
     pub(super) events: &'a CoinbaseProviderEvents,
     pub(super) state: &'a mut LiveLoopState,
-    pub(super) message_tx: &'a SyncSender<MarketWorkerMessage>,
+    pub(super) message_tx: &'a MarketWorkerSender,
     pub(super) provider_wake_pending: &'a AtomicBool,
 }
 

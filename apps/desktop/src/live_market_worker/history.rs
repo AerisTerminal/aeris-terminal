@@ -2,7 +2,7 @@ use super::{
     CoinbaseDesktopWorker, HISTORY_BARS, LiveLoopState, ProductProfile, fence_failed_history,
     history_provenance, nonzero, publish_update, unix_nanos,
 };
-use crate::market_worker::MarketWorkerMessage;
+use crate::market_worker::MarketWorkerSender;
 use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot,
     ReplayStreamUpdate,
@@ -26,7 +26,6 @@ use std::{
     collections::VecDeque,
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
-    sync::mpsc::SyncSender,
 };
 
 pub(super) struct PreparedHistory {
@@ -57,7 +56,7 @@ pub(super) fn install_ready_history(
     context: &StreamingSeriesContext<'_>,
     state: &mut LiveLoopState,
     model: &mut MarketBarClientModel,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<bool, String> {
     if state.streaming_generation.is_some() {
         return Ok(false);
@@ -108,7 +107,7 @@ fn install_streaming_history(
     request: &StreamingHistoryRequest<'_>,
     prepared: &mut Option<PreparedHistory>,
     model: &mut MarketBarClientModel,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<VecDeque<ProvenancedMarketBar>, String> {
     let history = match prepared.take() {
         Some(history) => history,

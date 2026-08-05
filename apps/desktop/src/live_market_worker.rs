@@ -7,7 +7,8 @@ mod provenance;
 mod publication;
 
 use crate::market_worker::{
-    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerStartup,
+    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup,
+    market_worker_channel,
 };
 use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
@@ -75,7 +76,7 @@ pub(crate) fn start(
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let profile = product_profile(product_id)?;
     let startup = loading_startup(&profile)?;
-    let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
+    let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (inbox_tx, inbox_rx) = mpsc::sync_channel(INBOX_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
@@ -115,7 +116,7 @@ fn run_worker(
     profile: &ProductProfile,
     history_root: PathBuf,
     ui_thread: ThreadId,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
     inbox_tx: &SyncSender<WorkerInboxEvent>,
     inbox_rx: &Receiver<WorkerInboxEvent>,
     provider_wake_pending: &Arc<AtomicBool>,
@@ -229,7 +230,7 @@ fn run_worker(
 fn reconcile_provider_recovery(
     worker: &mut CoinbaseDesktopWorker,
     state: &mut LiveLoopState,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
     request_recovery_if_required(
         worker,
@@ -256,7 +257,7 @@ fn fence_failed_history(
     generation: SessionGeneration,
     retained: &mut VecDeque<ProvenancedMarketBar>,
     recovery_announced: &mut bool,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
     error: &str,
 ) -> Result<(), String> {
     worker
@@ -278,7 +279,7 @@ fn apply_environment_event(
     prepared: &mut Option<PreparedHistory>,
     streaming_generation: &mut Option<SessionGeneration>,
     retained: &mut VecDeque<ProvenancedMarketBar>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<bool, String> {
     let next = match event {
         EnvironmentalEvent::Network(NetworkEvent::Unavailable) => {
@@ -324,7 +325,7 @@ fn drain_coinbase_callbacks(
     retained: &mut VecDeque<ProvenancedMarketBar>,
     model: &mut MarketBarClientModel,
     worker_label: &str,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
     for _ in 0..PROVIDER_EVENT_BATCH {
         if !events.has_ready() {
@@ -396,7 +397,7 @@ fn request_recovery_if_required(
     reconnect_backoff: &mut ReconnectBackoff,
     recovery_announced: &mut bool,
     retained: &mut VecDeque<ProvenancedMarketBar>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
     if matches!(
         worker.provider_state().map_err(|error| error.to_string())?,
@@ -413,7 +414,7 @@ fn request_recovery_if_required(
                         "Coinbase provider recovery required; awaiting a fresh covering snapshot"
                             .to_string(),
                 })
-                .map_err(|_| "desktop market UI channel disconnected".to_string())?;
+                .map_err(|()| "desktop market UI channel disconnected".to_string())?;
             *recovery_announced = true;
         }
         if reconnect_backoff.retry_ready(Instant::now()) {

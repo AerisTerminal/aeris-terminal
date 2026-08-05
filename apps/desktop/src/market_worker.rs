@@ -16,9 +16,14 @@ use axiusflow_market_protocol_adapter::{
     try_encode_replay_snapshot_chunk_envelopes,
 };
 use std::{
+    collections::VecDeque,
     num::NonZeroUsize,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
     thread,
     time::Duration,
 };
@@ -94,6 +99,216 @@ pub(crate) enum MarketWorkerMessage {
     },
 }
 
+struct MarketWorkerMailbox {
+    queue: Mutex<VecDeque<MarketWorkerMessage>>,
+    capacity: usize,
+    sender_count: AtomicUsize,
+    receiver_alive: AtomicBool,
+}
+
+pub(crate) struct MarketWorkerSender {
+    mailbox: Arc<MarketWorkerMailbox>,
+}
+
+pub(crate) struct MarketWorkerReceiver {
+    mailbox: Arc<MarketWorkerMailbox>,
+}
+
+impl Clone for MarketWorkerSender {
+    fn clone(&self) -> Self {
+        self.mailbox.sender_count.fetch_add(1, Ordering::Relaxed);
+        Self {
+            mailbox: Arc::clone(&self.mailbox),
+        }
+    }
+}
+
+impl Drop for MarketWorkerSender {
+    fn drop(&mut self) {
+        self.mailbox.sender_count.fetch_sub(1, Ordering::Release);
+    }
+}
+
+impl MarketWorkerSender {
+    pub(crate) fn send(&self, message: MarketWorkerMessage) -> Result<(), ()> {
+        if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
+            return Err(());
+        }
+        let mut queue = self
+            .mailbox
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
+            return Err(());
+        }
+        if matches!(
+            queue.back(),
+            Some(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                ..
+            })
+        ) && !matches!(
+            &message,
+            MarketWorkerMessage::State {
+                state: ChartState::Error,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+        if matches!(&message, MarketWorkerMessage::State { .. })
+            && matches!(queue.back(), Some(MarketWorkerMessage::State { .. }))
+        {
+            queue.pop_back();
+            queue.push_back(message);
+            return Ok(());
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+            return Ok(());
+        }
+        if queue.iter().any(|queued| {
+            matches!(
+                queued,
+                MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    ..
+                }
+            )
+        }) && !matches!(
+            &message,
+            MarketWorkerMessage::State {
+                state: ChartState::Error,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+        let recovery_queued = queue
+            .iter()
+            .any(|queued| matches!(queued, MarketWorkerMessage::Recovery { .. }));
+        if recovery_queued
+            && !matches!(
+                &message,
+                MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    ..
+                }
+            )
+        {
+            let successful_recovery_queued = queue.iter().any(|queued| {
+                matches!(queued, MarketWorkerMessage::Recovery { result: Ok(_), .. })
+            });
+            let invalidation = match message {
+                MarketWorkerMessage::Update(publication)
+                    if matches!(&publication.update, ReplayStreamUpdate::Delta(_))
+                        && successful_recovery_queued =>
+                {
+                    Some(mailbox_overflow_state())
+                }
+                message @ MarketWorkerMessage::State {
+                    state: ChartState::Stale | ChartState::Recovering,
+                    ..
+                } if successful_recovery_queued => Some(message),
+                _ => None,
+            };
+            if let Some(invalidation) = invalidation {
+                queue.retain(|queued| matches!(queued, MarketWorkerMessage::Recovery { .. }));
+                queue.push_back(invalidation);
+            }
+            return Ok(());
+        }
+        replace_overflowed_queue(&mut queue, message);
+        Ok(())
+    }
+}
+
+fn replace_overflowed_queue(
+    queue: &mut VecDeque<MarketWorkerMessage>,
+    message: MarketWorkerMessage,
+) {
+    let covering_snapshot = take_covering_snapshot(queue);
+    queue.clear();
+    match message {
+        MarketWorkerMessage::Update(publication)
+            if matches!(&publication.update, ReplayStreamUpdate::Delta(_)) =>
+        {
+            if let Some(snapshot) = covering_snapshot {
+                queue.push_back(snapshot);
+            }
+            queue.push_back(mailbox_overflow_state());
+        }
+        message => queue.push_back(message),
+    }
+}
+
+fn take_covering_snapshot(
+    queue: &mut VecDeque<MarketWorkerMessage>,
+) -> Option<MarketWorkerMessage> {
+    queue
+        .iter()
+        .rposition(|queued| {
+            matches!(
+                queued,
+                MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Snapshot(_),
+                    ..
+                })
+            )
+        })
+        .and_then(|index| queue.remove(index))
+}
+
+impl MarketWorkerReceiver {
+    fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
+        let mut queue = self
+            .mailbox
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let messages = queue.drain(..).collect::<Vec<_>>();
+        let disconnected = self.mailbox.sender_count.load(Ordering::Acquire) == 0;
+        (messages, disconnected)
+    }
+}
+
+impl Drop for MarketWorkerReceiver {
+    fn drop(&mut self) {
+        self.mailbox.receiver_alive.store(false, Ordering::Release);
+        self.mailbox
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+pub(crate) fn market_worker_channel(
+    capacity: NonZeroUsize,
+) -> (MarketWorkerSender, MarketWorkerReceiver) {
+    let mailbox = Arc::new(MarketWorkerMailbox {
+        queue: Mutex::new(VecDeque::with_capacity(capacity.get().saturating_add(1))),
+        capacity: capacity.get(),
+        sender_count: AtomicUsize::new(1),
+        receiver_alive: AtomicBool::new(true),
+    });
+    (
+        MarketWorkerSender {
+            mailbox: Arc::clone(&mailbox),
+        },
+        MarketWorkerReceiver { mailbox },
+    )
+}
+
+fn mailbox_overflow_state() -> MarketWorkerMessage {
+    MarketWorkerMessage::State {
+        state: ChartState::Recovering,
+        message: "bounded market UI mailbox overflowed; a covering snapshot is required"
+            .to_string(),
+    }
+}
+
 pub(crate) enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
     Shutdown,
@@ -101,7 +316,7 @@ pub(crate) enum MarketWorkerCommand {
 
 pub(crate) struct MarketDataWorker {
     commands: Option<SyncSender<MarketWorkerCommand>>,
-    messages: Option<Receiver<MarketWorkerMessage>>,
+    messages: Option<MarketWorkerReceiver>,
     shutdown_complete: Receiver<()>,
     connected: bool,
 }
@@ -109,7 +324,8 @@ pub(crate) struct MarketDataWorker {
 impl MarketDataWorker {
     pub fn start() -> Result<(MarketWorkerStartup, Self), String> {
         let (bootstrap_tx, bootstrap_rx) = mpsc::sync_channel(1);
-        let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
+        let (message_tx, message_rx) =
+            market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         thread::Builder::new()
@@ -143,7 +359,7 @@ impl MarketDataWorker {
 
     pub(crate) const fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,
-        messages: Receiver<MarketWorkerMessage>,
+        messages: MarketWorkerReceiver,
         shutdown_complete: Receiver<()>,
     ) -> Self {
         Self {
@@ -178,23 +394,18 @@ impl MarketDataWorker {
     }
 
     pub fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
-        let mut messages = Vec::new();
         let Some(receiver) = self.messages.as_ref() else {
             let newly_disconnected = self.connected;
             self.connected = false;
-            return (messages, newly_disconnected);
+            return (Vec::new(), newly_disconnected);
         };
-        loop {
-            match receiver.try_recv() {
-                Ok(message) => messages.push(message),
-                Err(TryRecvError::Empty) => return (messages, false),
-                Err(TryRecvError::Disconnected) => {
-                    let newly_disconnected = self.connected;
-                    self.connected = false;
-                    return (messages, newly_disconnected);
-                }
-            }
+        let (messages, disconnected) = receiver.drain();
+        if disconnected {
+            let newly_disconnected = self.connected;
+            self.connected = false;
+            return (messages, newly_disconnected);
         }
+        (messages, false)
     }
 
     pub const fn is_connected(&self) -> bool {
@@ -399,7 +610,7 @@ impl FixtureMarketWorker {
 
 fn run_worker(
     bootstrap_tx: &SyncSender<Result<MarketWorkerBootstrap, String>>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
     command_rx: &Receiver<MarketWorkerCommand>,
 ) {
     let mut worker = match FixtureMarketWorker::try_new() {
@@ -461,7 +672,12 @@ fn run_worker(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChartState, MarketDataWorker, MarketWorkerCommand, MarketWorkerStartup};
+    use super::{
+        ChartState, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
+        MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, market_worker_channel,
+    };
+    use axiusflow_application::ReplayStreamUpdate;
+    use std::num::NonZeroUsize;
     use std::{
         sync::{
             Arc,
@@ -497,7 +713,7 @@ mod tests {
     #[test]
     fn dropping_worker_waits_for_shutdown_acknowledgement() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (_message_tx, message_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let acknowledged = Arc::new(AtomicBool::new(false));
         let worker_acknowledged = Arc::clone(&acknowledged);
@@ -523,36 +739,230 @@ mod tests {
     }
 
     #[test]
-    fn dropping_worker_releases_a_blocked_message_publisher() {
-        let (command_tx, _command_rx) = mpsc::sync_channel(1);
-        let (message_tx, message_rx) = mpsc::sync_channel(1);
-        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let (first_message_tx, first_message_rx) = mpsc::sync_channel(1);
-        let worker_thread = thread::spawn(move || {
-            message_tx
-                .send(super::MarketWorkerMessage::State {
+    fn state_publications_coalesce_in_the_bounded_mailbox() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        assert!(
+            sender
+                .send(MarketWorkerMessage::State {
                     state: ChartState::Loading,
-                    message: "first".to_string(),
+                    message: "loading".to_string(),
                 })
-                .expect("first message fills the queue");
-            first_message_tx.send(()).expect("publisher is ready");
-            assert!(
-                message_tx
-                    .send(super::MarketWorkerMessage::State {
-                        state: ChartState::Ready,
-                        message: "second".to_string(),
-                    })
-                    .is_err()
-            );
-            shutdown_tx
-                .send(())
-                .expect("shutdown acknowledgement sends");
-        });
-        let worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx);
-        first_message_rx.recv().expect("publisher fills the queue");
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Ready,
+                    message: "ready".to_string(),
+                })
+                .is_ok()
+        );
 
-        drop(worker);
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::State {
+                state: ChartState::Ready,
+                message,
+            }] if message == "ready"
+        ));
+    }
 
-        worker_thread.join().expect("publisher exits");
+    #[test]
+    fn ordered_delta_overflow_fences_for_one_covering_snapshot() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        assert!(
+            sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Ready,
+                    message: "ready".to_string(),
+                })
+                .is_ok()
+        );
+        let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
+        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
+        let publication = worker
+            .publish_delta(bootstrap.snapshot.stream().last_sequence())
+            .expect("delta publishes")
+            .expect("fixture has a following delta");
+        assert!(
+            sender
+                .send(MarketWorkerMessage::Update(publication))
+                .is_ok()
+        );
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::State {
+                state: ChartState::Recovering,
+                message,
+            }] if message.contains("covering snapshot")
+        ));
+    }
+
+    #[test]
+    fn ordered_delta_overflow_preserves_a_queued_covering_snapshot() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
+        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
+        let previous_sequence = bootstrap.snapshot.stream().last_sequence();
+        assert!(
+            sender
+                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
+                    generation: bootstrap.generation,
+                    subscription_id: bootstrap.subscription_id,
+                    worker_label: bootstrap.worker_label,
+                }))
+                .is_ok()
+        );
+        let publication = worker
+            .publish_delta(previous_sequence)
+            .expect("delta publishes")
+            .expect("fixture has a following delta");
+        assert!(
+            sender
+                .send(MarketWorkerMessage::Update(publication))
+                .is_ok()
+        );
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Snapshot(_),
+                    ..
+                }),
+                MarketWorkerMessage::State {
+                    state: ChartState::Recovering,
+                    message,
+                }
+            ] if message.contains("covering snapshot")
+        ));
+    }
+
+    #[test]
+    fn terminal_and_failed_recovery_messages_survive_lower_priority_states() {
+        let (error_sender, error_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        assert!(
+            error_sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message: "terminal".to_string(),
+                })
+                .is_ok()
+        );
+        assert!(
+            error_sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Ready,
+                    message: "obsolete".to_string(),
+                })
+                .is_ok()
+        );
+        let (messages, _) = error_receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message,
+            }] if message == "terminal"
+        ));
+
+        let (recovery_sender, recovery_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        assert!(
+            recovery_sender
+                .send(MarketWorkerMessage::Recovery {
+                    request_id: 7,
+                    result: Err("recovery failed".to_string()),
+                })
+                .is_ok()
+        );
+        assert!(
+            recovery_sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Recovering,
+                    message: "obsolete".to_string(),
+                })
+                .is_ok()
+        );
+        let (messages, _) = recovery_receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Recovery { request_id: 7, .. }]
+        ));
+    }
+
+    #[test]
+    fn successful_recovery_is_followed_by_newer_stream_invalidations() {
+        let (covered_sender, covered_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
+        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
+        let publication = fixture
+            .publish_delta(bootstrap.snapshot.stream().last_sequence())
+            .expect("delta publishes")
+            .expect("fixture has a following delta");
+        assert!(
+            covered_sender
+                .send(MarketWorkerMessage::Recovery {
+                    request_id: 8,
+                    result: Ok(bootstrap),
+                })
+                .is_ok()
+        );
+        assert!(
+            covered_sender
+                .send(MarketWorkerMessage::Update(publication))
+                .is_ok()
+        );
+        let (messages, _) = covered_receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                MarketWorkerMessage::Recovery { request_id: 8, .. },
+                MarketWorkerMessage::State {
+                    state: ChartState::Recovering,
+                    message,
+                }
+            ] if message.contains("covering snapshot")
+        ));
+
+        let (stale_sender, stale_receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut stale_fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
+        let stale_bootstrap = stale_fixture
+            .publish_snapshot(2)
+            .expect("new snapshot publishes");
+        assert!(
+            stale_sender
+                .send(MarketWorkerMessage::Recovery {
+                    request_id: 9,
+                    result: Ok(stale_bootstrap),
+                })
+                .is_ok()
+        );
+        assert!(
+            stale_sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Stale,
+                    message: "network changed".to_string(),
+                })
+                .is_ok()
+        );
+        let (messages, _) = stale_receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [
+                MarketWorkerMessage::Recovery { request_id: 9, .. },
+                MarketWorkerMessage::State {
+                    state: ChartState::Stale,
+                    message,
+                }
+            ] if message == "network changed"
+        ));
     }
 }

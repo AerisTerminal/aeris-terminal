@@ -1,6 +1,7 @@
 use super::{CoinbaseDesktopWorker, SUBSCRIPTION_ID};
 use crate::market_worker::{
     DesktopMarketGeneration, MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication,
+    MarketWorkerSender,
 };
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketStreamPublication, ProvenancedMarketBar,
@@ -10,12 +11,12 @@ use axiusflow_chart_integration::ReplayRecoveryCommand;
 use axiusflow_desktop_provider_runtime::SessionGeneration;
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::BarDefinition;
-use std::{collections::VecDeque, sync::mpsc::SyncSender};
+use std::collections::VecDeque;
 
 pub(super) fn publish_ready_recovery(
     streaming_generation: Option<SessionGeneration>,
     pending_recovery: &mut VecDeque<ReplayRecoveryCommand>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
     series: (&InstrumentRevision, &BarDefinition),
     retained: &VecDeque<ProvenancedMarketBar>,
     model: &mut MarketBarClientModel,
@@ -35,7 +36,7 @@ pub(super) fn publish_ready_recovery(
 
 fn publish_recovery_commands(
     pending_recovery: &mut VecDeque<ReplayRecoveryCommand>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
     instrument: &InstrumentRevision,
     bar_definition: &BarDefinition,
     retained: &VecDeque<ProvenancedMarketBar>,
@@ -63,7 +64,7 @@ pub(super) fn publish_update(
     model: &mut MarketBarClientModel,
     update: ReplayStreamUpdate,
     worker_label: &str,
-    message_tx: &SyncSender<MarketWorkerMessage>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
     let generation = published_generation(model, update.clone())?;
     let publication = MarketStreamPublication::try_new(
@@ -82,7 +83,7 @@ pub(super) fn publish_update(
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: worker_label.to_string(),
         }))
-        .map_err(|_| "desktop market UI channel disconnected".to_string())
+        .map_err(|()| "desktop market UI channel disconnected".to_string())
 }
 
 fn recovery_snapshot(
