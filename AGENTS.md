@@ -7,7 +7,8 @@ You are an expert software engineering agent operating autonomously in this repo
 - Work directly on **`main`**. There are no PRs and no side branches.
 - Treat a commit as a substantial, complete work unit. Drive work from the current stage in `docs/platform_creation_plan.md`, implement a large coherent batch with its regression coverage, and only then run the final validation/review/commit/push cycle. Do not create or push tiny checkpoint commits for individual edits.
 - Use the persisted 9router configuration for `cx/gpt-5.6` at medium reasoning for primary work and `cx/gpt-5.6-sol` at low reasoning for review. The primary implementation agent invokes the review gate explicitly as `codex exec review --uncommitted --ephemeral -m cx/gpt-5.6-sol -c 'model_reasoning_effort="low"'`; a review agent reports findings directly and never launches a nested review.
-- Before ANY commit, run the full validation gate, in order:
+- After a substantial implementation batch, run the full validation gate before
+  committing, in order:
   1. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace --all-targets --all-features`, and the relevant tests — all must pass with zero warnings.
   2. The primary implementation agent runs the explicit local Codex review command above via 9router (no external rate limits or cooldowns).
 - The review is a required gate:
@@ -16,6 +17,8 @@ You are an expert software engineering agent operating autonomously in this repo
   - Only then commit, with a clear message describing what changed and how it was verified.
 - After committing, push directly to `main` (`git push origin main`).
 - Never force-push `main`. Never commit code that has not passed the review gate.
+- Documentation-only changes do not run Cargo validation or the Codex review
+  gate. Check the diff for correctness and formatting, then commit and push.
 
 ## Autonomy & Persistence
 
