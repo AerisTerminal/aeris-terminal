@@ -20,6 +20,7 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread,
+    time::Duration,
 };
 
 const SUBSCRIPTION_ID: &str = "desktop_fixture_market_bars";
@@ -33,6 +34,7 @@ const SNAPSHOT_CHUNK_ITEMS: usize = 64;
 const MAXIMUM_FRAME_BYTES: usize = 65_536;
 const MAXIMUM_BUFFERED_BYTES: usize = 131_072;
 const FRAGMENT_BYTES: usize = 7;
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
 
@@ -98,8 +100,9 @@ pub(crate) enum MarketWorkerCommand {
 }
 
 pub(crate) struct MarketDataWorker {
-    commands: SyncSender<MarketWorkerCommand>,
-    messages: Receiver<MarketWorkerMessage>,
+    commands: Option<SyncSender<MarketWorkerCommand>>,
+    messages: Option<Receiver<MarketWorkerMessage>>,
+    shutdown_complete: Receiver<()>,
     connected: bool,
 }
 
@@ -108,9 +111,13 @@ impl MarketDataWorker {
         let (bootstrap_tx, bootstrap_rx) = mpsc::sync_channel(1);
         let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("axiusflow-market-fixture-worker".to_string())
-            .spawn(move || run_worker(&bootstrap_tx, &message_tx, &command_rx))
+            .spawn(move || {
+                run_worker(&bootstrap_tx, &message_tx, &command_rx);
+                let _ = shutdown_tx.send(());
+            })
             .map_err(|error| error.to_string())?;
         let bootstrap = bootstrap_rx
             .recv()
@@ -118,8 +125,9 @@ impl MarketDataWorker {
         Ok((
             MarketWorkerStartup::Ready(Box::new(bootstrap)),
             Self {
-                commands: command_tx,
-                messages: message_rx,
+                commands: Some(command_tx),
+                messages: Some(message_rx),
+                shutdown_complete: shutdown_rx,
                 connected: true,
             },
         ))
@@ -136,10 +144,12 @@ impl MarketDataWorker {
     pub(crate) const fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,
         messages: Receiver<MarketWorkerMessage>,
+        shutdown_complete: Receiver<()>,
     ) -> Self {
         Self {
-            commands,
-            messages,
+            commands: Some(commands),
+            messages: Some(messages),
+            shutdown_complete,
             connected: true,
         }
     }
@@ -148,7 +158,10 @@ impl MarketDataWorker {
         &self,
         command: ReplayRecoveryCommand,
     ) -> Result<(), TrySendError<ReplayRecoveryCommand>> {
-        self.commands
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(command));
+        };
+        commands
             .try_send(MarketWorkerCommand::Recovery(command))
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::Recovery(command)) => {
@@ -166,8 +179,13 @@ impl MarketDataWorker {
 
     pub fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
         let mut messages = Vec::new();
+        let Some(receiver) = self.messages.as_ref() else {
+            let newly_disconnected = self.connected;
+            self.connected = false;
+            return (messages, newly_disconnected);
+        };
         loop {
-            match self.messages.try_recv() {
+            match receiver.try_recv() {
                 Ok(message) => messages.push(message),
                 Err(TryRecvError::Empty) => return (messages, false),
                 Err(TryRecvError::Disconnected) => {
@@ -190,7 +208,12 @@ impl MarketDataWorker {
 
 impl Drop for MarketDataWorker {
     fn drop(&mut self) {
-        let _ = self.commands.try_send(MarketWorkerCommand::Shutdown);
+        if let Some(commands) = self.commands.take() {
+            let _ = commands.try_send(MarketWorkerCommand::Shutdown);
+            drop(commands);
+        }
+        drop(self.messages.take());
+        let _ = self.shutdown_complete.recv_timeout(SHUTDOWN_TIMEOUT);
     }
 }
 
@@ -438,7 +461,15 @@ fn run_worker(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChartState, MarketDataWorker, MarketWorkerStartup};
+    use super::{ChartState, MarketDataWorker, MarketWorkerCommand, MarketWorkerStartup};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        thread,
+    };
 
     #[test]
     fn shipping_worker_bootstraps_only_the_disconnected_fixture() {
@@ -461,5 +492,67 @@ mod tests {
         assert_eq!(ChartState::Stale.label(), "Stale");
         assert_eq!(ChartState::Recovering.label(), "Recovering");
         assert_eq!(ChartState::Error.label(), "Error");
+    }
+
+    #[test]
+    fn dropping_worker_waits_for_shutdown_acknowledgement() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = mpsc::sync_channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let acknowledged = Arc::new(AtomicBool::new(false));
+        let worker_acknowledged = Arc::clone(&acknowledged);
+        let worker_thread = thread::spawn(move || {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::Shutdown)
+            ));
+            worker_acknowledged.store(true, Ordering::Release);
+            shutdown_tx
+                .send(())
+                .expect("shutdown acknowledgement sends");
+        });
+
+        drop(MarketDataWorker::from_channels(
+            command_tx,
+            message_rx,
+            shutdown_rx,
+        ));
+
+        assert!(acknowledged.load(Ordering::Acquire));
+        worker_thread.join().expect("worker exits");
+    }
+
+    #[test]
+    fn dropping_worker_releases_a_blocked_message_publisher() {
+        let (command_tx, _command_rx) = mpsc::sync_channel(1);
+        let (message_tx, message_rx) = mpsc::sync_channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let (first_message_tx, first_message_rx) = mpsc::sync_channel(1);
+        let worker_thread = thread::spawn(move || {
+            message_tx
+                .send(super::MarketWorkerMessage::State {
+                    state: ChartState::Loading,
+                    message: "first".to_string(),
+                })
+                .expect("first message fills the queue");
+            first_message_tx.send(()).expect("publisher is ready");
+            assert!(
+                message_tx
+                    .send(super::MarketWorkerMessage::State {
+                        state: ChartState::Ready,
+                        message: "second".to_string(),
+                    })
+                    .is_err()
+            );
+            shutdown_tx
+                .send(())
+                .expect("shutdown acknowledgement sends");
+        });
+        let worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx);
+        first_message_rx.recv().expect("publisher fills the queue");
+
+        drop(worker);
+
+        worker_thread.join().expect("publisher exits");
     }
 }

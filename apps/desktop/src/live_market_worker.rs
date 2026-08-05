@@ -78,6 +78,7 @@ pub(crate) fn start(
     let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (inbox_tx, inbox_rx) = mpsc::sync_channel(INBOX_CAPACITY);
+    let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let provider_wake_pending = Arc::new(AtomicBool::new(false));
     let command_inbox_tx = inbox_tx.clone();
     thread::Builder::new()
@@ -101,11 +102,12 @@ pub(crate) fn start(
                     message: error,
                 });
             }
+            let _ = shutdown_tx.send(());
         })
         .map_err(|error| error.to_string())?;
     Ok((
         startup,
-        MarketDataWorker::from_channels(command_tx, message_rx),
+        MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx),
     ))
 }
 
