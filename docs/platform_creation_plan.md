@@ -27,7 +27,8 @@ Allowed status values:
 A contract, fixture, or passing unit test does not by itself justify `verified`
 for provider or product behavior. Open **§1 Active now**, finish that stage's
 gate, then advance. Do not mine §12, archives, or decision history for work.
-Batching, validation, review, commit, and push rules live in `AGENTS.md`.
+Batching, clean-code, validation, commit, and push rules live in `AGENTS.md`.
+Focus on large coherent implementation batches; do not treat process as the work.
 Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 ## 1. Active now
