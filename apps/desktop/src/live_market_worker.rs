@@ -1,8 +1,8 @@
 //! Explicit direct-device Coinbase desktop composition.
 
 use crate::market_worker::{
-    DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap, MarketWorkerMessage,
-    MarketWorkerPublication,
+    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
 };
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, MarketStreamPublication,
@@ -137,40 +137,26 @@ pub(crate) fn start(
     product_id: String,
     history_root: PathBuf,
     ui_thread: ThreadId,
-) -> Result<(MarketWorkerBootstrap, MarketDataWorker), String> {
+) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let profile = product_profile(product_id)?;
-    let placeholder = placeholder_snapshot(&profile)?;
-    let mut model = client_model();
-    let generation = published_generation(
-        &mut model,
-        ReplayStreamUpdate::Snapshot(placeholder.clone()),
-    )?;
-    let bootstrap = MarketWorkerBootstrap {
-        snapshot: placeholder,
-        subscription_id: SUBSCRIPTION_ID.to_string(),
-        generation,
-        worker_label: "Coinbase direct · loading local provider history".to_string(),
-    };
+    let startup = loading_startup(&profile)?;
     let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-    let thread_placeholder = bootstrap.snapshot.clone();
     thread::Builder::new()
         .name("axiusflow-coinbase-market-worker".to_string())
         .spawn(move || {
-            if let Err(error) = run_worker(
-                &profile,
-                history_root,
-                ui_thread,
-                thread_placeholder,
-                &message_tx,
-                &command_rx,
-            ) {
-                let _ = message_tx.send(MarketWorkerMessage::Failed(error));
+            if let Err(error) =
+                run_worker(&profile, history_root, ui_thread, &message_tx, &command_rx)
+            {
+                let _ = message_tx.send(MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message: error,
+                });
             }
         })
         .map_err(|error| error.to_string())?;
     Ok((
-        bootstrap,
+        startup,
         MarketDataWorker::from_channels(command_tx, message_rx),
     ))
 }
@@ -179,7 +165,6 @@ fn run_worker(
     profile: &ProductProfile,
     history_root: PathBuf,
     ui_thread: ThreadId,
-    placeholder: ReplaySnapshot,
     message_tx: &SyncSender<MarketWorkerMessage>,
     command_rx: &Receiver<ReplayRecoveryCommand>,
 ) -> Result<(), String> {
@@ -196,14 +181,13 @@ fn run_worker(
     let bar_definition = bar_definition();
     let worker_label = worker_label(monitors_active);
     let mut model = client_model();
-    published_generation(&mut model, ReplayStreamUpdate::Snapshot(placeholder))?;
     let mut retained = VecDeque::<ProvenancedMarketBar>::new();
     let mut streaming_generation = None;
     let mut reconnect_backoff = ReconnectBackoff::new();
     let mut recovery_announced = false;
 
     loop {
-        apply_environment_events(
+        recovery_announced |= apply_environment_events(
             &mut worker,
             &events,
             &environment_rx,
@@ -323,9 +307,10 @@ fn fence_failed_history(
         .map_err(|failure| failure.to_string())?;
     retained.clear();
     *recovery_announced = true;
-    let _ = message_tx.send(MarketWorkerMessage::Failed(format!(
-        "Coinbase history recovery required: {error}"
-    )));
+    let _ = message_tx.send(MarketWorkerMessage::State {
+        state: ChartState::Recovering,
+        message: format!("Coinbase history recovery required: {error}"),
+    });
     Ok(())
 }
 
@@ -426,8 +411,10 @@ fn apply_environment_events(
     streaming_generation: &mut Option<SessionGeneration>,
     retained: &mut VecDeque<ProvenancedMarketBar>,
     message_tx: &SyncSender<MarketWorkerMessage>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut changed = false;
     while let Ok(event) = environment_rx.try_recv() {
+        changed = true;
         let next = match event {
             EnvironmentalEvent::Network(NetworkEvent::Unavailable) => {
                 let next = worker.handle_network_event(NetworkEvent::Unavailable);
@@ -454,11 +441,20 @@ fn apply_environment_events(
         }
         *streaming_generation = None;
         retained.clear();
-        let _ = message_tx.send(MarketWorkerMessage::Failed(
-            "direct provider lifecycle changed; a fresh snapshot is required".to_string(),
-        ));
+        let _ = message_tx.send(MarketWorkerMessage::State {
+            state: ChartState::Stale,
+            message: "direct provider lifecycle changed; a fresh snapshot is required".to_string(),
+        });
     }
-    Ok(())
+    Ok(changed)
+}
+
+fn loading_startup(profile: &ProductProfile) -> Result<MarketWorkerStartup, String> {
+    Ok(MarketWorkerStartup::Loading {
+        instrument: instrument(profile)?,
+        subscription_id: SUBSCRIPTION_ID.to_string(),
+        worker_label: "Coinbase direct · loading local provider history".to_string(),
+    })
 }
 
 fn discard_coinbase_callbacks(events: &CoinbaseProviderEvents) {
@@ -564,10 +560,12 @@ fn request_recovery_if_required(
         retained.clear();
         if !*recovery_announced {
             message_tx
-                .send(MarketWorkerMessage::Failed(
-                    "Coinbase provider recovery required; awaiting a fresh covering snapshot"
-                        .to_string(),
-                ))
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Recovering,
+                    message:
+                        "Coinbase provider recovery required; awaiting a fresh covering snapshot"
+                            .to_string(),
+                })
                 .map_err(|_| "desktop market UI channel disconnected".to_string())?;
             *recovery_announced = true;
         }
@@ -907,53 +905,6 @@ fn provenanced(
     Ok(item)
 }
 
-fn placeholder_snapshot(profile: &ProductProfile) -> Result<ReplaySnapshot, String> {
-    let bar = MarketBar {
-        source_sequence: 1,
-        exchange_timestamp_seconds: 60,
-        open: 1,
-        high: 1,
-        low: 1,
-        close: 1,
-        volume: 0,
-    };
-    let item = Provenanced::new(
-        bar,
-        MarketEventProvenance {
-            event_id: "desktop_coinbase_loading_placeholder".to_string(),
-            event_time_unix_nanos: 60_000_000_000,
-            publication_time_unix_nanos: 60_000_000_000,
-            producer: "desktop_loading_fixture".to_string(),
-            schema_version: SCHEMA_VERSION,
-            correlation_id: "desktop_coinbase_startup".to_string(),
-            causation_id: String::new(),
-            entitlement_revision: "loading_fixture_v1".to_string(),
-            partition_id: PARTITION_ID,
-            ownership_epoch: 1,
-            source_id: "desktop_loading_fixture".to_string(),
-            source_sequence: 1,
-            exchange_timestamp_unix_nanos: 60_000_000_000,
-            provider_receive_timestamp_unix_nanos: 60_000_000_000,
-            nic_receive_timestamp_unix_nanos: None,
-            axiusflow_receive_timestamp_unix_nanos: 60_000_000_000,
-            normalized_timestamp_unix_nanos: 60_000_000_000,
-            fanout_enqueue_timestamp_unix_nanos: None,
-            correction_flags: 0,
-            quality_flags: 0,
-            nic_timestamp_source: 0,
-            semantic_class: 1,
-        },
-    );
-    ReplaySnapshot::try_from_provenanced_values(
-        instrument(profile)?,
-        ReplayProvenance::EmbeddedFixture,
-        bar_definition(),
-        1,
-        vec![item],
-    )
-    .map_err(|error| error.to_string())
-}
-
 fn product_profile(product_id: String) -> Result<ProductProfile, String> {
     let (base, instrument_id) = match product_id.as_str() {
         "BTC-USD" => ("BTC", "instrument:coinbase:btc:usd"),
@@ -1149,10 +1100,10 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 #[cfg(test)]
 mod tests {
     use super::{
-        MINIMUM_RECONNECT_DELAY, ReconnectBackoff, bar_definition, history_installation_time,
-        placeholder_snapshot, product_profile,
+        MINIMUM_RECONNECT_DELAY, ReconnectBackoff, SUBSCRIPTION_ID, history_installation_time,
+        loading_startup, product_profile,
     };
-    use axiusflow_application::ReplayProvenance;
+    use crate::market_worker::MarketWorkerStartup;
     use std::time::Instant;
 
     #[test]
@@ -1163,15 +1114,19 @@ mod tests {
     }
 
     #[test]
-    fn startup_placeholder_is_explicitly_non_live_and_series_compatible() {
+    fn live_startup_is_loading_metadata_without_synthetic_market_data() {
         let profile = product_profile("BTC-USD".to_string()).expect("profile validates");
-        let snapshot = placeholder_snapshot(&profile).expect("placeholder validates");
-        assert_eq!(snapshot.provenance(), ReplayProvenance::EmbeddedFixture);
-        assert_eq!(
-            snapshot.instrument().instrument_id.as_str(),
-            profile.instrument_id
-        );
-        assert_eq!(snapshot.bar_definition(), &bar_definition());
+        let MarketWorkerStartup::Loading {
+            instrument,
+            subscription_id,
+            worker_label,
+        } = loading_startup(&profile).expect("loading startup validates")
+        else {
+            panic!("live startup must wait for a provider snapshot");
+        };
+        assert_eq!(instrument.instrument_id.as_str(), profile.instrument_id);
+        assert_eq!(subscription_id, SUBSCRIPTION_ID);
+        assert!(worker_label.contains("loading"));
     }
 
     #[test]

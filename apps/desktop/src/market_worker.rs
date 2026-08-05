@@ -36,11 +36,41 @@ const FRAGMENT_BYTES: usize = 7;
 
 pub(crate) type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChartState {
+    Loading,
+    Ready,
+    Stale,
+    Recovering,
+    Error,
+}
+
+impl ChartState {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "Loading",
+            Self::Ready => "Ready",
+            Self::Stale => "Stale",
+            Self::Recovering => "Recovering",
+            Self::Error => "Error",
+        }
+    }
+}
+
 pub(crate) struct MarketWorkerBootstrap {
     pub snapshot: ReplaySnapshot,
     pub subscription_id: String,
     pub generation: DesktopMarketGeneration,
     pub worker_label: String,
+}
+
+pub(crate) enum MarketWorkerStartup {
+    Loading {
+        instrument: axiusflow_instruments::InstrumentRevision,
+        subscription_id: String,
+        worker_label: String,
+    },
+    Ready(Box<MarketWorkerBootstrap>),
 }
 
 pub(crate) struct MarketWorkerPublication {
@@ -56,7 +86,10 @@ pub(crate) enum MarketWorkerMessage {
         request_id: u64,
         result: Result<MarketWorkerBootstrap, String>,
     },
-    Failed(String),
+    State {
+        state: ChartState,
+        message: String,
+    },
 }
 
 pub(crate) struct MarketDataWorker {
@@ -66,7 +99,7 @@ pub(crate) struct MarketDataWorker {
 }
 
 impl MarketDataWorker {
-    pub fn start() -> Result<(MarketWorkerBootstrap, Self), String> {
+    pub fn start() -> Result<(MarketWorkerStartup, Self), String> {
         let (bootstrap_tx, bootstrap_rx) = mpsc::sync_channel(1);
         let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
@@ -78,7 +111,7 @@ impl MarketDataWorker {
             .recv()
             .map_err(|_| "market fixture worker stopped before bootstrap".to_string())??;
         Ok((
-            bootstrap,
+            MarketWorkerStartup::Ready(Box::new(bootstrap)),
             Self {
                 commands: command_tx,
                 messages: message_rx,
@@ -91,7 +124,7 @@ impl MarketDataWorker {
         product_id: String,
         history_root: PathBuf,
         ui_thread: thread::ThreadId,
-    ) -> Result<(MarketWorkerBootstrap, Self), String> {
+    ) -> Result<(MarketWorkerStartup, Self), String> {
         crate::live_market_worker::start(product_id, history_root, ui_thread)
     }
 
@@ -345,7 +378,10 @@ fn run_worker(
             Ok(Some(publication)) => publication,
             Ok(None) => break,
             Err(error) => {
-                let _ = message_tx.send(MarketWorkerMessage::Failed(error));
+                let _ = message_tx.send(MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message: error,
+                });
                 return;
             }
         };
@@ -373,16 +409,28 @@ fn run_worker(
 
 #[cfg(test)]
 mod tests {
-    use super::MarketDataWorker;
+    use super::{ChartState, MarketDataWorker, MarketWorkerStartup};
 
     #[test]
     fn shipping_worker_bootstraps_only_the_disconnected_fixture() {
-        let (bootstrap, worker) = MarketDataWorker::start().expect("fixture worker starts");
+        let (startup, worker) = MarketDataWorker::start().expect("fixture worker starts");
+        let MarketWorkerStartup::Ready(bootstrap) = startup else {
+            panic!("fixture worker must bootstrap a ready chart");
+        };
         assert_eq!(bootstrap.subscription_id, "desktop_fixture_market_bars");
         assert_eq!(
             bootstrap.worker_label,
             "binary fixture worker · disconnected"
         );
         assert!(worker.is_connected());
+    }
+
+    #[test]
+    fn chart_states_have_explicit_user_facing_labels() {
+        assert_eq!(ChartState::Loading.label(), "Loading");
+        assert_eq!(ChartState::Ready.label(), "Ready");
+        assert_eq!(ChartState::Stale.label(), "Stale");
+        assert_eq!(ChartState::Recovering.label(), "Recovering");
+        assert_eq!(ChartState::Error.label(), "Error");
     }
 }

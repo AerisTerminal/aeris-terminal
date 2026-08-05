@@ -17,8 +17,8 @@ use gpui_component::{
 };
 use gpui_platform::application;
 use market_worker::{
-    DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap, MarketWorkerMessage,
-    MarketWorkerPublication,
+    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
 };
 use std::{sync::mpsc::TrySendError, time::Duration};
 
@@ -52,8 +52,26 @@ fn bridge_status(metrics: ChartBridgeMetrics) -> String {
     )
 }
 
+fn publication_chart_state(accepted: bool, recovery_pending: bool) -> ChartState {
+    if accepted && !recovery_pending {
+        ChartState::Ready
+    } else {
+        ChartState::Recovering
+    }
+}
+
+fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> ChartState {
+    if current == ChartState::Ready && recovery_pending {
+        ChartState::Recovering
+    } else {
+        current
+    }
+}
+
 struct TerminalApp {
-    chart: Entity<OriginChartView>,
+    chart: Option<Entity<OriginChartView>>,
+    chart_state: ChartState,
+    chart_state_message: String,
     theme: AxiusflowTheme,
     theme_revision: u64,
     instrument_label: String,
@@ -67,23 +85,61 @@ struct TerminalApp {
 impl TerminalApp {
     fn new(
         cx: &mut Context<Self>,
-        bootstrap: MarketWorkerBootstrap,
+        startup: MarketWorkerStartup,
         market_worker: MarketDataWorker,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
-        let replay_label = generation_status(
-            &bootstrap.worker_label,
-            &bootstrap.subscription_id,
-            &bootstrap.generation,
-        );
-        let instrument = bootstrap.snapshot.instrument();
+        let (
+            chart,
+            chart_state,
+            chart_state_message,
+            instrument,
+            replay_label,
+            worker_label,
+            subscription_id,
+        ) = match startup {
+            MarketWorkerStartup::Loading {
+                instrument,
+                subscription_id,
+                worker_label,
+            } => (
+                None,
+                ChartState::Loading,
+                "waiting for a covering market snapshot".to_string(),
+                instrument,
+                "waiting for a covering market snapshot".to_string(),
+                worker_label,
+                subscription_id,
+            ),
+            MarketWorkerStartup::Ready(bootstrap) => {
+                let replay_label = generation_status(
+                    &bootstrap.worker_label,
+                    &bootstrap.subscription_id,
+                    &bootstrap.generation,
+                );
+                let instrument = bootstrap.snapshot.instrument().clone();
+                let snapshot = bootstrap.snapshot;
+                let chart =
+                    cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                (
+                    Some(chart),
+                    ChartState::Ready,
+                    "market snapshot is current".to_string(),
+                    instrument,
+                    replay_label,
+                    bootstrap.worker_label,
+                    bootstrap.subscription_id,
+                )
+            }
+        };
         let instrument_label = format!(
             "{} · {} · instrument r{}",
             instrument.symbol, instrument.venue_id, instrument.revision
         );
-        let snapshot = bootstrap.snapshot;
-        let chart = cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
-        let bridge_label = bridge_status(chart.read(cx).replay_bridge_metrics());
+        let bridge_label = chart.as_ref().map_or_else(
+            || "bridge awaiting snapshot".to_string(),
+            |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
+        );
         let poll_executor = cx.background_executor().clone();
         cx.spawn(async move |app, cx| {
             loop {
@@ -96,12 +152,14 @@ impl TerminalApp {
         .detach();
         Self {
             chart,
+            chart_state,
+            chart_state_message,
             theme,
             theme_revision: 0,
             instrument_label,
             replay_label,
-            worker_label: bootstrap.worker_label,
-            subscription_id: bootstrap.subscription_id,
+            worker_label,
+            subscription_id,
             bridge_label,
             market_worker,
         }
@@ -122,12 +180,43 @@ impl TerminalApp {
             &self.subscription_id,
             &publication.generation,
         );
-        self.chart.update(cx, |chart, chart_cx| {
-            if chart.try_queue_replay_update(publication.update).is_err() {
-                eprintln!("bounded chart queue overflowed; fixture resnapshot required");
+        let next_state = match (&self.chart, publication.update) {
+            (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
+                let theme = self.theme;
+                self.chart =
+                    Some(cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot)));
+                ChartState::Ready
             }
-            chart_cx.notify();
-        });
+            (Some(chart), update) => {
+                let (accepted, recovery_pending) = chart.update(cx, |chart, chart_cx| {
+                    let accepted = chart.try_queue_replay_update(update).is_ok();
+                    if !accepted {
+                        eprintln!("bounded chart queue overflowed; fixture resnapshot required");
+                    }
+                    chart_cx.notify();
+                    (accepted, chart.replay_bridge_metrics().recovery_pending)
+                });
+                publication_chart_state(accepted, recovery_pending)
+            }
+            (None, axiusflow_application::ReplayStreamUpdate::Delta(_)) => {
+                self.set_chart_state(
+                    ChartState::Error,
+                    "market delta arrived before the initial covering snapshot".to_string(),
+                    cx,
+                );
+                return;
+            }
+        };
+        if next_state == ChartState::Ready {
+            self.chart_state = ChartState::Ready;
+            self.chart_state_message = "market snapshot is current".to_string();
+        } else {
+            self.set_chart_state(
+                ChartState::Recovering,
+                "chart update requires a correlated covering snapshot".to_string(),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -140,15 +229,26 @@ impl TerminalApp {
         let bootstrap = match result {
             Ok(bootstrap) => bootstrap,
             Err(error) => {
-                self.chart.update(cx, |chart, chart_cx| {
-                    chart.mark_replay_recovery_failed(request_id);
-                    chart_cx.notify();
-                });
+                if let Some(chart) = &self.chart {
+                    chart.update(cx, |chart, chart_cx| {
+                        chart.mark_replay_recovery_failed(request_id);
+                        chart_cx.notify();
+                    });
+                }
+                self.set_chart_state(ChartState::Error, error.clone(), cx);
                 eprintln!("fixture recovery {request_id} failed: {error}");
                 return;
             }
         };
-        let install = self.chart.update(cx, |chart, chart_cx| {
+        let Some(chart) = &self.chart else {
+            self.set_chart_state(
+                ChartState::Error,
+                "recovery response arrived before the initial snapshot".to_string(),
+                cx,
+            );
+            return;
+        };
+        let install = chart.update(cx, |chart, chart_cx| {
             let installed = chart.install_replay_recovery(request_id, &bootstrap.snapshot);
             chart_cx.notify();
             installed
@@ -160,11 +260,13 @@ impl TerminalApp {
                     &bootstrap.subscription_id,
                     &bootstrap.generation,
                 );
+                self.chart_state = ChartState::Ready;
+                self.chart_state_message = "market snapshot is current".to_string();
                 cx.notify();
             }
             Ok(false) => eprintln!("ignored stale fixture recovery response {request_id}"),
             Err(error) => {
-                self.chart.update(cx, |chart, chart_cx| {
+                chart.update(cx, |chart, chart_cx| {
                     chart.mark_replay_recovery_failed(request_id);
                     chart_cx.notify();
                 });
@@ -174,19 +276,33 @@ impl TerminalApp {
     }
 
     fn mark_market_stream_invalid(&mut self, message: &str, cx: &mut Context<Self>) {
-        self.chart.update(cx, |chart, chart_cx| {
-            chart.mark_replay_stream_invalid();
-            chart_cx.notify();
-        });
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.mark_replay_stream_invalid();
+                chart_cx.notify();
+            });
+        }
         eprintln!("fixture market worker invalidated the stream: {message}");
+    }
+
+    fn set_chart_state(&mut self, state: ChartState, message: String, cx: &mut Context<Self>) {
+        if matches!(state, ChartState::Stale | ChartState::Recovering) {
+            self.mark_market_stream_invalid(&message, cx);
+        }
+        self.chart_state = state;
+        self.chart_state_message = message;
+        cx.notify();
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
         if !self.market_worker.is_connected() {
             return;
         }
+        let Some(chart) = &self.chart else {
+            return;
+        };
         let worker = &self.market_worker;
-        let dispatch = self.chart.update(cx, |chart, chart_cx| {
+        let dispatch = chart.update(cx, |chart, chart_cx| {
             let result =
                 chart.try_dispatch_replay_recovery(|command| worker.try_send_recovery(command));
             if result.as_ref().is_ok_and(|dispatched| *dispatched) {
@@ -198,7 +314,7 @@ impl TerminalApp {
             Ok(_) | Err(TrySendError::Full(_)) => {}
             Err(TrySendError::Disconnected(command)) => {
                 self.market_worker.mark_disconnected();
-                self.chart.update(cx, |chart, chart_cx| {
+                chart.update(cx, |chart, chart_cx| {
                     chart.mark_replay_recovery_failed(command.request_id);
                     chart_cx.notify();
                 });
@@ -216,17 +332,35 @@ impl TerminalApp {
                 MarketWorkerMessage::Recovery { request_id, result } => {
                     self.apply_recovery(request_id, result, cx);
                 }
-                MarketWorkerMessage::Failed(error) => {
-                    self.mark_market_stream_invalid(&error, cx);
+                MarketWorkerMessage::State { state, message } => {
+                    self.set_chart_state(state, message, cx);
                 }
             }
         }
-        if disconnected {
-            self.mark_market_stream_invalid("worker channel disconnected", cx);
+        if disconnected && self.chart_state != ChartState::Error {
+            self.set_chart_state(
+                ChartState::Error,
+                "worker channel disconnected".to_string(),
+                cx,
+            );
         }
         self.dispatch_recovery(cx);
 
-        let status = bridge_status(self.chart.read(cx).replay_bridge_metrics());
+        let status = self.chart.as_ref().map_or_else(
+            || "bridge awaiting snapshot".to_string(),
+            |chart| {
+                let metrics = chart.read(cx).replay_bridge_metrics();
+                let reconciled =
+                    reconciled_bridge_state(self.chart_state, metrics.recovery_pending);
+                if reconciled != self.chart_state {
+                    self.chart_state = reconciled;
+                    self.chart_state_message =
+                        "chart validation requires a correlated covering snapshot".to_string();
+                    cx.notify();
+                }
+                bridge_status(metrics)
+            },
+        );
         if self.bridge_label != status {
             self.bridge_label = status;
             cx.notify();
@@ -236,13 +370,23 @@ impl TerminalApp {
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let theme = self.theme.toggled();
         sync_component_theme(&theme, Some(window), cx);
-        self.chart.update(cx, |chart, chart_cx| {
-            chart.set_theme(theme);
-            chart_cx.notify();
-        });
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.set_theme(theme);
+                chart_cx.notify();
+            });
+        }
         self.theme = theme;
         self.theme_revision = self.theme_revision.saturating_add(1);
         cx.notify();
+    }
+
+    fn chart_state_label(&self) -> String {
+        format!(
+            "{} · {}",
+            self.chart_state.label(),
+            self.chart_state_message
+        )
     }
 }
 
@@ -267,6 +411,8 @@ impl Render for TerminalApp {
         let instrument_label = self.instrument_label.clone();
         let replay_label = self.replay_label.clone();
         let bridge_label = self.bridge_label.clone();
+        let chart_state_label = self.chart_state_label();
+        let market_state_label = format!("{} · {replay_label}", self.chart_state.label());
 
         div()
             .v_flex()
@@ -305,7 +451,7 @@ impl Render for TerminalApp {
                             .gap_2()
                             .child(
                                 Button::new("market_data_source")
-                                    .label(replay_label)
+                                    .label(market_state_label)
                                     .rounded(button_radius)
                                     .custom(passive_button),
                             )
@@ -336,7 +482,16 @@ impl Render for TerminalApp {
                     .border_1()
                     .border_color(gpui_color(colors.border))
                     .bg(gpui_color(colors.card))
-                    .child(self.chart.clone()),
+                    .children(self.chart.clone())
+                    .children(self.chart.is_none().then(|| {
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(gpui_color(colors.muted_foreground))
+                            .child(chart_state_label)
+                    })),
             )
     }
 }
@@ -475,4 +630,28 @@ fn main() {
         .expect("the Axiusflow terminal window opens");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChartState, publication_chart_state, reconciled_bridge_state};
+
+    #[test]
+    fn publication_is_ready_only_after_bridge_acceptance_without_recovery() {
+        assert_eq!(publication_chart_state(true, false), ChartState::Ready);
+        assert_eq!(publication_chart_state(false, true), ChartState::Recovering);
+        assert_eq!(publication_chart_state(true, true), ChartState::Recovering);
+    }
+
+    #[test]
+    fn bridge_recovery_replaces_ready_after_deferred_gap_validation() {
+        assert_eq!(
+            reconciled_bridge_state(ChartState::Ready, true),
+            ChartState::Recovering
+        );
+        assert_eq!(
+            reconciled_bridge_state(ChartState::Stale, true),
+            ChartState::Stale
+        );
+    }
 }
