@@ -20,14 +20,9 @@ use std::{
 };
 use zeroize::Zeroize;
 
-mod coinbase_driver;
 mod market_worker;
 mod session_contract;
 
-pub use coinbase_driver::{
-    CoinbaseProviderDriver, CoinbaseProviderDriverError, CoinbaseProviderEvent,
-    CoinbaseProviderEvents, CoinbaseProviderInvalidReason,
-};
 pub use market_worker::{
     DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
     HistoryCompletionBinding, HistoryCompletionInstall,
@@ -61,6 +56,12 @@ impl Drop for CredentialBytes {
 pub struct SessionGeneration(NonZeroU64);
 
 impl SessionGeneration {
+    /// Creates a nonzero session generation for adapter-owned fixtures and callbacks.
+    #[must_use]
+    pub const fn new(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
     /// Returns the nonzero generation value.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -880,6 +881,14 @@ where
             return Err(DesktopProviderError::WorkerThreadMismatch);
         }
         Ok(())
+    }
+
+    pub(crate) fn driver_matches(
+        &self,
+        predicate: impl FnOnce(&D) -> bool,
+    ) -> Result<bool, DesktopProviderError> {
+        self.ensure_owner()?;
+        Ok(predicate(&self.driver))
     }
 }
 

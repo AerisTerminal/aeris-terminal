@@ -9,6 +9,7 @@
 mod aggregation;
 mod config;
 mod decoder;
+mod desktop_driver;
 mod errors;
 mod fixed_point;
 mod history;
@@ -22,6 +23,12 @@ pub use aggregation::{
 };
 pub use config::{CoinbaseConfig, MAXIMUM_PRODUCTS};
 pub use decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
+pub use desktop_driver::{
+    CoinbaseDesktopEventError, CoinbaseProviderDriver, CoinbaseProviderDriverError,
+    CoinbaseProviderEvent, CoinbaseProviderEvents, CoinbaseProviderInvalidReason,
+    seed_coinbase_bar_history, try_recv_coinbase_aggregated_bar, try_recv_coinbase_bar,
+    try_recv_coinbase_trade,
+};
 pub use errors::CoinbaseError;
 pub use fixed_point::FixedPointValue;
 pub use history::{

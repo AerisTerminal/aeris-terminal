@@ -2,7 +2,7 @@ use super::{
     COMMAND_CAPACITY, CoinbaseDesktopWorker, INBOX_BATCH, LiveLoopState, apply_environment_event,
 };
 use crate::market_worker::{MarketWorkerCommand, MarketWorkerSender};
-use axiusflow_desktop_provider_runtime::CoinbaseProviderEvents;
+use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
 use axiusflow_platform_runtime::{
     NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
 };

@@ -1,9 +1,9 @@
-use crate::{
-    DesktopProviderRuntime, ProviderCredentialRequirement, ProviderSessionDriver, SessionGeneration,
+use crate::{CanonicalTrade, CoinbaseConfig, CoinbaseSession, SessionOutcome};
+use axiusflow_desktop_provider_runtime::{
+    DesktopMarketWorker, DesktopMarketWorkerError, ProviderCredentialRequirement,
+    ProviderSessionDriver, SessionGeneration,
 };
-use axiusflow_coinbase_market_adapter::{
-    CanonicalTrade, CoinbaseConfig, CoinbaseSession, SessionOutcome,
-};
+use axiusflow_platform_runtime::CredentialVault;
 use core::fmt;
 use std::{
     collections::VecDeque,
@@ -292,12 +292,6 @@ impl CoinbaseProviderDriver {
     }
 }
 
-impl<V> DesktopProviderRuntime<V, CoinbaseProviderDriver> {
-    pub(crate) fn owns_coinbase_events(&self, events: &CoinbaseProviderEvents) -> bool {
-        self.driver.owns_events(events)
-    }
-}
-
 impl ProviderSessionDriver for CoinbaseProviderDriver {
     type Error = CoinbaseProviderDriverError;
 
@@ -371,6 +365,241 @@ impl Drop for CoinbaseProviderDriver {
     }
 }
 
+/// Redacted failures while applying Coinbase callbacks to the shared desktop runtime.
+#[derive(Debug)]
+pub enum CoinbaseDesktopEventError {
+    Runtime(DesktopMarketWorkerError),
+    Aggregation,
+    AggregatorLimit { maximum: usize },
+    DuplicateAggregator,
+    ProductNotRegistered,
+    HistoryIdentityMismatch,
+    HistoryUnavailable,
+}
+
+impl fmt::Display for CoinbaseDesktopEventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime(error) => write!(formatter, "Coinbase callback failed: {error}"),
+            Self::Aggregation => formatter.write_str("Coinbase trade aggregation failed"),
+            Self::AggregatorLimit { maximum } => {
+                write!(
+                    formatter,
+                    "Coinbase aggregation exceeds its {maximum}-product bound"
+                )
+            }
+            Self::DuplicateAggregator => {
+                formatter.write_str("Coinbase bar product is registered more than once")
+            }
+            Self::ProductNotRegistered => {
+                formatter.write_str("Coinbase bar product is not registered")
+            }
+            Self::HistoryIdentityMismatch => {
+                formatter.write_str("Coinbase bar history identity mismatched")
+            }
+            Self::HistoryUnavailable => formatter.write_str("Coinbase bar history is unavailable"),
+        }
+    }
+}
+
+impl Error for CoinbaseDesktopEventError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Runtime(error) => Some(error),
+            Self::Aggregation
+            | Self::AggregatorLimit { .. }
+            | Self::DuplicateAggregator
+            | Self::ProductNotRegistered
+            | Self::HistoryIdentityMismatch
+            | Self::HistoryUnavailable => None,
+        }
+    }
+}
+
+impl From<DesktopMarketWorkerError> for CoinbaseDesktopEventError {
+    fn from(error: DesktopMarketWorkerError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+/// Applies at most one adapter callback and returns a generation-fenced trade.
+///
+/// # Errors
+///
+/// Returns a redacted source or lifecycle failure.
+pub fn try_recv_coinbase_trade<T: Clone, V: CredentialVault>(
+    worker: &mut DesktopMarketWorker<T, V, CoinbaseProviderDriver>,
+    events: &CoinbaseProviderEvents,
+) -> Result<Option<(SessionGeneration, CanonicalTrade)>, CoinbaseDesktopEventError> {
+    if !worker.callback_source_matches(|driver| driver.owns_events(events))? {
+        return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
+    }
+    let Some(event) = events.try_recv() else {
+        return Ok(None);
+    };
+    match event {
+        CoinbaseProviderEvent::Established { generation } => {
+            worker.session_established(generation)?;
+            Ok(None)
+        }
+        CoinbaseProviderEvent::Trade { generation, trade } => {
+            worker.ensure_streaming_generation(generation)?;
+            Ok(Some((generation, trade)))
+        }
+        CoinbaseProviderEvent::Invalid { generation, reason } => {
+            if reason == CoinbaseProviderInvalidReason::EventQueueOverflow {
+                worker.session_callback_queue_overflow(generation)?;
+            } else {
+                worker.session_invalid(generation)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Applies at most one callback and aggregates a completed provider bar.
+///
+/// # Errors
+///
+/// Returns a redacted source, lifecycle, or aggregation failure.
+pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
+    worker: &mut DesktopMarketWorker<T, V, CoinbaseProviderDriver>,
+    events: &CoinbaseProviderEvents,
+    aggregators: &mut [crate::CoinbaseBarAggregator],
+) -> Result<Option<(SessionGeneration, crate::CoinbaseAggregatedBar)>, CoinbaseDesktopEventError> {
+    if !worker.callback_source_matches(|driver| driver.owns_events(events))? {
+        return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
+    }
+    validate_aggregators(aggregators)?;
+    let Some(event) = events.try_recv() else {
+        return Ok(None);
+    };
+    match event {
+        CoinbaseProviderEvent::Established { generation } => {
+            worker.session_established(generation)?;
+            reset_aggregators(aggregators);
+            Ok(None)
+        }
+        CoinbaseProviderEvent::Trade { generation, trade } => {
+            worker.ensure_streaming_generation(generation)?;
+            let Some(aggregator) = aggregators
+                .iter_mut()
+                .find(|aggregator| aggregator.product_id() == trade.product_id)
+            else {
+                reset_aggregators(aggregators);
+                worker.session_invalid(generation)?;
+                return Err(CoinbaseDesktopEventError::ProductNotRegistered);
+            };
+            let Ok(completed) = aggregator.apply_trade_with_evidence(&trade) else {
+                reset_aggregators(aggregators);
+                worker.session_invalid(generation)?;
+                return Err(CoinbaseDesktopEventError::Aggregation);
+            };
+            Ok(completed.map(|bar| (generation, bar)))
+        }
+        CoinbaseProviderEvent::Invalid { generation, reason } => {
+            reset_aggregators(aggregators);
+            if reason == CoinbaseProviderInvalidReason::EventQueueOverflow {
+                worker.session_callback_queue_overflow(generation)?;
+            } else {
+                worker.session_invalid(generation)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Applies at most one callback and returns only the completed canonical bar.
+///
+/// # Errors
+///
+/// Returns a redacted source, lifecycle, or aggregation failure.
+pub fn try_recv_coinbase_bar<T: Clone, V: CredentialVault>(
+    worker: &mut DesktopMarketWorker<T, V, CoinbaseProviderDriver>,
+    events: &CoinbaseProviderEvents,
+    aggregators: &mut [crate::CoinbaseBarAggregator],
+) -> Result<Option<(SessionGeneration, axiusflow_market_data::MarketBar)>, CoinbaseDesktopEventError>
+{
+    try_recv_coinbase_aggregated_bar(worker, events, aggregators)
+        .map(|completed| completed.map(|(generation, completed)| (generation, completed.bar)))
+}
+
+fn reset_aggregators(aggregators: &mut [crate::CoinbaseBarAggregator]) {
+    for aggregator in aggregators {
+        aggregator.reset();
+    }
+}
+
+fn validate_aggregators(
+    aggregators: &[crate::CoinbaseBarAggregator],
+) -> Result<(), CoinbaseDesktopEventError> {
+    if aggregators.len() > crate::MAXIMUM_PRODUCTS {
+        return Err(CoinbaseDesktopEventError::AggregatorLimit {
+            maximum: crate::MAXIMUM_PRODUCTS,
+        });
+    }
+    let mut products = std::collections::BTreeSet::new();
+    if aggregators
+        .iter()
+        .any(|aggregator| !products.insert(aggregator.product_id()))
+    {
+        return Err(CoinbaseDesktopEventError::DuplicateAggregator);
+    }
+    Ok(())
+}
+
+/// Seeds adapter-owned aggregation from an authorized provider history publication.
+///
+/// # Errors
+///
+/// Returns a redacted lifecycle, identity, history, or aggregation failure.
+pub fn seed_coinbase_bar_history<V: CredentialVault>(
+    worker: &mut DesktopMarketWorker<axiusflow_market_data::MarketBar, V, CoinbaseProviderDriver>,
+    aggregator: &mut crate::CoinbaseBarAggregator,
+    generation: SessionGeneration,
+    product_id: &str,
+    identity: &axiusflow_desktop_storage::SegmentIdentity,
+    encryption_key: &axiusflow_desktop_storage::SegmentEncryptionKey,
+    now_unix_seconds: i64,
+) -> Result<usize, CoinbaseDesktopEventError> {
+    worker.ensure_history_callback(generation, identity)?;
+    if product_id != aggregator.product_id()
+        || identity.scope.provider_id != "coinbase"
+        || identity.scope.account_id != crate::COINBASE_PUBLIC_ACCOUNT_ID
+        || identity.scope.entitlement_revision != crate::ENTITLEMENT_CLASS
+        || identity.instrument_id != aggregator.instrument_id()
+        || identity.data_kind != axiusflow_desktop_storage::DataKind::Bars
+        || identity.resolution != "1m"
+        || aggregator.price_scale() != 2
+        || aggregator.quantity_scale() != 8
+    {
+        return Err(CoinbaseDesktopEventError::HistoryIdentityMismatch);
+    }
+    let publication = worker
+        .current_history_publication(identity, encryption_key, now_unix_seconds)?
+        .ok_or(CoinbaseDesktopEventError::HistoryUnavailable)?;
+    let latest_completed_minute = now_unix_seconds
+        .div_euclid(60)
+        .checked_mul(60)
+        .and_then(|minute| minute.checked_sub(60))
+        .ok_or(CoinbaseDesktopEventError::HistoryUnavailable)?;
+    if publication
+        .values
+        .last()
+        .is_none_or(|item| item.value.exchange_timestamp_seconds != latest_completed_minute)
+    {
+        return Err(CoinbaseDesktopEventError::HistoryUnavailable);
+    }
+    let bars = publication
+        .values
+        .iter()
+        .map(|item| item.value)
+        .collect::<Vec<_>>();
+    aggregator
+        .seed_completed_history(&bars)
+        .map_err(|_| CoinbaseDesktopEventError::Aggregation)
+}
+
 fn direct_session_task() -> Arc<SessionTask> {
     Arc::new(|config, _generation, stop, emitter| {
         let session = CoinbaseSession::new(config);
@@ -416,18 +645,21 @@ fn direct_session_task() -> Arc<SessionTask> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CoinbaseProviderDriver, CoinbaseProviderDriverError, CoinbaseProviderEvent,
-        CoinbaseProviderEvents, CoinbaseProviderInvalidReason, SessionEmitter, SessionTask,
+        CoinbaseDesktopEventError, CoinbaseProviderDriver, CoinbaseProviderDriverError,
+        CoinbaseProviderEvent, CoinbaseProviderEvents, CoinbaseProviderInvalidReason,
+        SessionEmitter, SessionTask, seed_coinbase_bar_history, try_recv_coinbase_bar,
+        try_recv_coinbase_trade,
     };
     use crate::{
-        ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
-        DesktopProviderConfig, DesktopProviderRuntime, DesktopProviderState, ProviderSessionDriver,
-        RecoveryReason, SessionGeneration,
-    };
-    use axiusflow_coinbase_market_adapter::{
-        CanonicalTrade, CoinbaseBarAggregatorConfig, CoinbaseConfig, FixedPointValue,
+        CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig,
+        FixedPointValue,
     };
     use axiusflow_desktop_history::{HistoryWorkerConfig, StartupCacheState};
+    use axiusflow_desktop_provider_runtime::{
+        ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig,
+        DesktopProviderRuntime, DesktopProviderState, ProviderSessionDriver, RecoveryReason,
+        SessionGeneration,
+    };
     use axiusflow_desktop_storage::{
         CatalogKey, DataKind, HistoryScope, SegmentEncryptionKey, SegmentIdentity,
     };
@@ -468,7 +700,7 @@ mod tests {
     }
 
     fn generation(value: u64) -> SessionGeneration {
-        SessionGeneration(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN))
+        SessionGeneration::new(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN))
     }
 
     fn config() -> CoinbaseConfig {
@@ -480,8 +712,17 @@ mod tests {
     }
 
     fn trade_at(second: i64, price: &str, sequence_num: u64) -> CanonicalTrade {
+        trade_for_at("BTC-USD", second, price, sequence_num)
+    }
+
+    fn trade_for_at(
+        product_id: &str,
+        second: i64,
+        price: &str,
+        sequence_num: u64,
+    ) -> CanonicalTrade {
         CanonicalTrade {
-            product_id: "BTC-USD".to_string(),
+            product_id: product_id.to_string(),
             trade_id: format!("redacted-trade-{sequence_num}"),
             price: FixedPointValue::parse(price).expect("price parses"),
             size: FixedPointValue::parse("0.5").expect("size parses"),
@@ -576,10 +817,8 @@ mod tests {
         SegmentIdentity {
             scope: HistoryScope {
                 provider_id: "coinbase".to_string(),
-                account_id: axiusflow_coinbase_market_adapter::COINBASE_PUBLIC_ACCOUNT_ID
-                    .to_string(),
-                entitlement_revision: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS
-                    .to_string(),
+                account_id: crate::COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+                entitlement_revision: crate::ENTITLEMENT_CLASS.to_string(),
             },
             instrument_id: "instrument:coinbase:btc:usd".to_string(),
             data_kind: DataKind::Bars,
@@ -750,8 +989,7 @@ mod tests {
             .expect("public session starts");
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            worker
-                .try_recv_coinbase_trade(&events)
+            try_recv_coinbase_trade(&mut worker, &events)
                 .expect("established callback is generation fenced");
             if matches!(
                 worker.provider_state().expect("provider state is readable"),
@@ -765,8 +1003,7 @@ mod tests {
         established.wait();
         overflowed.wait();
         loop {
-            worker
-                .try_recv_coinbase_trade(&events)
+            try_recv_coinbase_trade(&mut worker, &events)
                 .expect("overflow callback is generation fenced");
             if matches!(
                 worker.provider_state().expect("provider state is readable"),
@@ -799,8 +1036,10 @@ mod tests {
             CoinbaseProviderDriver::with_task(config(), nonzero(2), controlled_task(false));
         let (mut worker, root) = worker(driver);
         assert!(matches!(
-            worker.try_recv_coinbase_trade(&other_events),
-            Err(crate::DesktopMarketWorkerError::CallbackSourceMismatch)
+            try_recv_coinbase_trade(&mut worker, &other_events),
+            Err(CoinbaseDesktopEventError::Runtime(
+                axiusflow_desktop_provider_runtime::DesktopMarketWorkerError::CallbackSourceMismatch
+            ))
         ));
         drop(worker);
         fs::remove_dir_all(root).expect("history root removes");
@@ -878,8 +1117,7 @@ mod tests {
             .expect("public session starts");
         let deadline = Instant::now() + Duration::from_secs(1);
         let received = loop {
-            if let Some(received) = worker
-                .try_recv_coinbase_trade(&events)
+            if let Some(received) = try_recv_coinbase_trade(&mut worker, &events)
                 .expect("callback is generation fenced")
             {
                 break received;
@@ -908,20 +1146,19 @@ mod tests {
         let (driver, events) =
             CoinbaseProviderDriver::with_task(config(), nonzero(4), malformed_task);
         let (mut worker, root) = open_worker::<MarketBar>(driver);
-        worker
-            .register_coinbase_bar_product(
-                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
-                    .expect("bar config validates"),
-            )
-            .expect("bar product registers");
+        let mut aggregator = CoinbaseBarAggregator::new(
+            CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                .expect("bar config validates"),
+        );
         let active = worker
             .connect(ConnectTrigger::Initial)
             .expect("public session starts");
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            match worker.try_recv_coinbase_bar(&events) {
+            match try_recv_coinbase_bar(&mut worker, &events, std::slice::from_mut(&mut aggregator))
+            {
                 Ok(None) => {}
-                Err(DesktopMarketWorkerError::CoinbaseAggregation) => break,
+                Err(CoinbaseDesktopEventError::Aggregation) => break,
                 result => panic!("unexpected composed result: {result:?}"),
             }
             assert!(Instant::now() < deadline, "malformed trade timed out");
@@ -956,19 +1193,16 @@ mod tests {
         let (driver, events) =
             CoinbaseProviderDriver::with_task(config(), nonzero(8), aggregation_task);
         let (mut worker, root) = open_worker::<MarketBar>(driver);
-        worker
-            .register_coinbase_bar_product(
-                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
-                    .expect("bar config validates"),
-            )
-            .expect("bar product registers");
+        let mut aggregator = CoinbaseBarAggregator::new(
+            CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                .expect("bar config validates"),
+        );
         let active = worker
             .connect(ConnectTrigger::Initial)
             .expect("public session starts");
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            worker
-                .try_recv_coinbase_bar(&events)
+            try_recv_coinbase_bar(&mut worker, &events, std::slice::from_mut(&mut aggregator))
                 .expect("establishment is accepted");
             if matches!(
                 worker.provider_state().expect("provider state is readable"),
@@ -1003,22 +1237,23 @@ mod tests {
             )
             .expect("history snapshot installs");
         assert_eq!(
-            worker
-                .seed_coinbase_bar_history(
-                    active,
-                    "BTC-USD",
-                    &identity,
-                    &encryption_key,
-                    1_700_000_161,
-                )
-                .expect("authorized history seeds aggregation"),
+            seed_coinbase_bar_history(
+                &mut worker,
+                &mut aggregator,
+                active,
+                "BTC-USD",
+                &identity,
+                &encryption_key,
+                1_700_000_161,
+            )
+            .expect("authorized history seeds aggregation"),
             2
         );
         seeded.wait();
         let completed = loop {
-            if let Some(completed) = worker
-                .try_recv_coinbase_bar(&events)
-                .expect("live trade aggregates")
+            if let Some(completed) =
+                try_recv_coinbase_bar(&mut worker, &events, std::slice::from_mut(&mut aggregator))
+                    .expect("live trade aggregates")
             {
                 break completed;
             }
@@ -1032,6 +1267,138 @@ mod tests {
         assert_eq!(completed.1.high, 3_800_000);
         assert_eq!(completed.1.close, 3_800_000);
         assert_eq!(completed.1.volume, 50_000_000);
+        worker.stop().expect("composed worker stops");
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn composed_aggregation_routes_each_trade_to_its_product() {
+        let aggregation_task: Arc<SessionTask> = Arc::new(
+            |_config, _generation, stop: Arc<AtomicBool>, emitter: SessionEmitter| {
+                assert!(emitter.established());
+                assert!(emitter.trade(trade_for_at("ETH-USD", 1_700_000_101, "1800.00", 8,)));
+                assert!(emitter.trade(trade_for_at("ETH-USD", 1_700_000_161, "1900.00", 9,)));
+                while !stop.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            },
+        );
+        let multi_product_config =
+            CoinbaseConfig::try_new(vec!["BTC-USD".to_string(), "ETH-USD".to_string()])
+                .expect("multi-product config validates");
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(multi_product_config, nonzero(8), aggregation_task);
+        let (mut worker, root) = open_worker::<MarketBar>(driver);
+        let mut aggregators = [
+            CoinbaseBarAggregator::new(
+                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                    .expect("BTC bar config validates"),
+            ),
+            CoinbaseBarAggregator::new(
+                CoinbaseBarAggregatorConfig::try_new("ETH-USD", 2, 8, nonzero(8))
+                    .expect("ETH bar config validates"),
+            ),
+        ];
+        let active = worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let completed = loop {
+            if let Some(completed) = try_recv_coinbase_bar(&mut worker, &events, &mut aggregators)
+                .expect("multi-product trade routes")
+            {
+                break completed;
+            }
+            assert!(Instant::now() < deadline, "ETH bar timed out");
+            thread::yield_now();
+        };
+
+        assert_eq!(completed.0, active);
+        assert_eq!(completed.1.exchange_timestamp_seconds, 1_700_000_100);
+        assert!(aggregators[0].history().is_empty());
+        assert_eq!(aggregators[1].history(), vec![completed.1]);
+        worker.stop().expect("composed worker stops");
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn composed_aggregation_rejects_duplicate_and_oversized_product_sets() {
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(4), controlled_task(false));
+        let (mut worker, root) = open_worker::<MarketBar>(driver);
+        let mut duplicates = [
+            CoinbaseBarAggregator::new(
+                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                    .expect("bar config validates"),
+            ),
+            CoinbaseBarAggregator::new(
+                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                    .expect("bar config validates"),
+            ),
+        ];
+        assert!(matches!(
+            try_recv_coinbase_bar(&mut worker, &events, &mut duplicates),
+            Err(CoinbaseDesktopEventError::DuplicateAggregator)
+        ));
+
+        let mut oversized = (0..=crate::MAXIMUM_PRODUCTS)
+            .map(|index| {
+                CoinbaseBarAggregator::new(
+                    CoinbaseBarAggregatorConfig::try_new(format!("P{index}-USD"), 2, 8, nonzero(8))
+                        .expect("bar config validates"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            try_recv_coinbase_bar(&mut worker, &events, &mut oversized),
+            Err(CoinbaseDesktopEventError::AggregatorLimit {
+                maximum: crate::MAXIMUM_PRODUCTS
+            })
+        ));
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn fresh_generation_establishment_resets_adapter_aggregation() {
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(4), controlled_task(false));
+        let (mut worker, root) = open_worker::<MarketBar>(driver);
+        let mut aggregator = CoinbaseBarAggregator::new(
+            CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                .expect("bar config validates"),
+        );
+        aggregator
+            .seed_completed_history(&[MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 1_700_000_040,
+                open: 3_700_000,
+                high: 3_700_000,
+                low: 3_700_000,
+                close: 3_700_000,
+                volume: 50_000_000,
+            }])
+            .expect("prior generation history seeds");
+        let active = worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            try_recv_coinbase_bar(&mut worker, &events, std::slice::from_mut(&mut aggregator))
+                .expect("establishment is accepted");
+            if matches!(
+                worker.provider_state().expect("provider state is readable"),
+                DesktopProviderState::Streaming { generation } if generation == active
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "establishment timed out");
+            thread::yield_now();
+        }
+
+        assert!(aggregator.history().is_empty());
         worker.stop().expect("composed worker stops");
         drop(worker);
         fs::remove_dir_all(root).expect("history root removes");

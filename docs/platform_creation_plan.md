@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 9
+**Revision:** 10
 **Last updated:** 2026-08-05
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -215,9 +215,16 @@ conformance suites without provider-specific types in shared runtime modules.
   provider-template command.
 - Coinbase decoded trades project into the canonical fixed-point trade contract
   with exact configured scales and qualified timestamps.
-- Remaining work is to move aggregation and callback handling fully behind the
-  adapter boundary, add the deterministic Rithmic fixture adapter, and run the
-  shared lifecycle/bar/book/recovery/publication conformance suite for both.
+- Coinbase session driving, callback validation, live aggregation, and history
+  seeding now live behind the Coinbase adapter boundary; shared runtime modules
+  contain no Coinbase driver, aggregation map, type, or method.
+- A deterministic Rithmic Test semantic fixture emits bounded discovery,
+  authentication, instrument, trade, depth, heartbeat, forming-bar, and
+  completed-bar evidence. The shared adapter harness validates lifecycle order,
+  generation fencing, canonical bars, and Rithmic book publication while also
+  exercising the reviewed Coinbase trade/bar projection.
+- Remaining work is full same-corpus book/recovery/publication coverage for
+  Coinbase and authorized Rithmic WSS/Protobuf fixture decoding after protocol-kit access.
 
 ## 7. Stage C — Rithmic read-only headless core
 

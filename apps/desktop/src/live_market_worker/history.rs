@@ -120,9 +120,7 @@ fn install_streaming_history(
         &history,
         request.segment_key,
     )?;
-    let bars = worker
-        .coinbase_bar_history(&request.profile.product_id)
-        .map_err(|error| error.to_string())?;
+    let bars = worker.coinbase_bar_history(&request.profile.product_id)?;
     let retained = bars
         .into_iter()
         .map(|bar| history_provenance(bar, request.generation, history.received_unix_nanos))
@@ -192,15 +190,13 @@ fn install_history(
             |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
         )
         .map_err(|error| error.to_string())?;
-    worker
-        .seed_coinbase_bar_history(
-            generation,
-            &profile.product_id,
-            &history.identity,
-            segment_key,
-            now_seconds,
-        )
-        .map_err(|error| error.to_string())?;
+    worker.seed_coinbase_bar_history(
+        generation,
+        &profile.product_id,
+        &history.identity,
+        segment_key,
+        now_seconds,
+    )?;
     Ok(())
 }
 

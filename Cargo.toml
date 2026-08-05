@@ -6,6 +6,7 @@ members = [
     "crates/adapters/macos_network",
     "crates/adapters/market_protocol",
     "crates/adapters/portable_network",
+    "crates/adapters/rithmic_fixture",
     "crates/adapters/stream_websocket",
     "crates/adapters/windows_network",
     "crates/application",

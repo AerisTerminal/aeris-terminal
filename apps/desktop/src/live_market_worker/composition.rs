@@ -4,13 +4,16 @@ use super::{
 };
 use crate::market_worker::MarketWorkerStartup;
 use axiusflow_application::MarketBarClientModel;
-use axiusflow_coinbase_market_adapter::{CoinbaseBarAggregatorConfig, CoinbaseConfig};
+use axiusflow_coinbase_market_adapter::{
+    CoinbaseAggregatedBar, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig,
+    CoinbaseDesktopEventError, CoinbaseProviderDriver, CoinbaseProviderEvents,
+    seed_coinbase_bar_history, try_recv_coinbase_aggregated_bar,
+};
 use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
-    CoinbaseProviderDriver, CoinbaseProviderEvents, DesktopMarketWorker, DesktopMarketWorkerConfig,
-    DesktopProviderConfig,
+    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig, SessionGeneration,
 };
-use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey};
+use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -18,6 +21,7 @@ use axiusflow_market_data::{BarDefinition, MarketBar};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use std::{
     num::NonZeroUsize,
+    ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
         Arc,
@@ -37,8 +41,70 @@ pub(super) struct ProductProfile {
     pub(super) symbol: String,
 }
 
-pub(super) type CoinbaseDesktopWorker =
-    DesktopMarketWorker<MarketBar, NativeCredentialVault, CoinbaseProviderDriver>;
+type ProviderWorker = DesktopMarketWorker<MarketBar, NativeCredentialVault, CoinbaseProviderDriver>;
+
+pub(super) struct CoinbaseDesktopWorker {
+    runtime: ProviderWorker,
+    aggregator: CoinbaseBarAggregator,
+}
+
+impl CoinbaseDesktopWorker {
+    pub(super) fn try_recv_coinbase_aggregated_bar(
+        &mut self,
+        events: &CoinbaseProviderEvents,
+    ) -> Result<Option<(SessionGeneration, CoinbaseAggregatedBar)>, CoinbaseDesktopEventError> {
+        try_recv_coinbase_aggregated_bar(
+            &mut self.runtime,
+            events,
+            std::slice::from_mut(&mut self.aggregator),
+        )
+    }
+
+    pub(super) fn coinbase_bar_history(&self, product_id: &str) -> Result<Vec<MarketBar>, String> {
+        if product_id != self.aggregator.product_id() {
+            return Err("Coinbase bar product is not registered".to_string());
+        }
+        Ok(self.aggregator.history())
+    }
+
+    pub(super) fn seed_coinbase_bar_history(
+        &mut self,
+        generation: SessionGeneration,
+        product_id: &str,
+        identity: &SegmentIdentity,
+        encryption_key: &SegmentEncryptionKey,
+        now_unix_seconds: i64,
+    ) -> Result<usize, String> {
+        seed_coinbase_bar_history(
+            &mut self.runtime,
+            &mut self.aggregator,
+            generation,
+            product_id,
+            identity,
+            encryption_key,
+            now_unix_seconds,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub(super) fn reset_aggregation(&mut self) {
+        self.aggregator.reset();
+    }
+}
+
+impl Deref for CoinbaseDesktopWorker {
+    type Target = ProviderWorker;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl DerefMut for CoinbaseDesktopWorker {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
 
 pub(super) struct OpenedWorker {
     pub(super) worker: CoinbaseDesktopWorker,
@@ -78,7 +144,7 @@ pub(super) fn open_worker(
         nonzero(PROVIDER_EVENT_CAPACITY),
         wake,
     );
-    let mut worker = DesktopMarketWorker::try_open(
+    let runtime = DesktopMarketWorker::try_open(
         runtime_vault,
         driver,
         "coinbase-public-session",
@@ -88,17 +154,19 @@ pub(super) fn open_worker(
         worker_config(),
     )
     .map_err(|error| error.to_string())?;
-    worker
-        .register_coinbase_bar_product(
-            CoinbaseBarAggregatorConfig::try_new(
-                profile.product_id.clone(),
-                2,
-                8,
-                nonzero(MODEL_ITEM_CAPACITY),
-            )
-            .map_err(|error| error.to_string())?,
+    let aggregator = CoinbaseBarAggregator::new(
+        CoinbaseBarAggregatorConfig::try_new(
+            profile.product_id.clone(),
+            2,
+            8,
+            nonzero(MODEL_ITEM_CAPACITY),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?,
+    );
+    let worker = CoinbaseDesktopWorker {
+        runtime,
+        aggregator,
+    };
     Ok(OpenedWorker {
         worker,
         events,

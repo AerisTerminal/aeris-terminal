@@ -14,9 +14,8 @@ use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
 };
 use axiusflow_chart_integration::ReplayRecoveryCommand;
-use axiusflow_desktop_provider_runtime::{
-    CoinbaseProviderEvents, DesktopProviderState, SessionGeneration,
-};
+use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
+use axiusflow_desktop_provider_runtime::{DesktopProviderState, SessionGeneration};
 use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
 use std::{
     collections::VecDeque,
@@ -260,6 +259,7 @@ fn fence_failed_history(
     message_tx: &MarketWorkerSender,
     error: &str,
 ) -> Result<(), String> {
+    worker.reset_aggregation();
     worker
         .session_invalid(generation)
         .map_err(|failure| failure.to_string())?;
@@ -302,6 +302,7 @@ fn apply_environment_event(
         }
     }
     .map_err(|error| error.to_string())?;
+    worker.reset_aggregation();
     if next.is_some() {
         *prepared = None;
     }
@@ -403,6 +404,7 @@ fn request_recovery_if_required(
         worker.provider_state().map_err(|error| error.to_string())?,
         DesktopProviderState::RecoveryRequired { .. }
     ) {
+        worker.reset_aggregation();
         *streaming_generation = None;
         *prepared = None;
         retained.clear();

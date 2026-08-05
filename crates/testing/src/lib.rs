@@ -12,6 +12,7 @@ mod loopback_fixture;
 mod market_bar_packet;
 mod packet_corpus;
 mod plain_loopback_lifecycle;
+mod provider_adapter;
 mod realtime_recovery;
 mod replay_benchmark;
 mod runtime_chart;
@@ -37,6 +38,9 @@ pub use packet_corpus::{
 };
 pub use plain_loopback_lifecycle::{
     PlainLoopbackLifecycleConformance, run_plain_loopback_lifecycle_conformance,
+};
+pub use provider_adapter::{
+    ProviderAdapterConformance, ProviderAdapterFixture, run_provider_adapter_conformance,
 };
 pub use realtime_recovery::{
     RealtimeRecoveryReport, SnapshotIntegrityOutcome, run_realtime_recovery_conformance,
