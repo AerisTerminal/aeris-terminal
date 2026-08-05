@@ -228,8 +228,12 @@ pub(super) const fn nonzero(value: usize) -> NonZeroUsize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SUBSCRIPTION_ID, loading_startup, product_profile};
+    use super::{SUBSCRIPTION_ID, loading_startup, nonzero, product_profile};
     use crate::market_worker::MarketWorkerStartup;
+    use axiusflow_coinbase_market_adapter::{
+        CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, FixedPointValue,
+    };
+    use axiusflow_market_data::MarketBar;
 
     #[test]
     fn live_mode_accepts_only_reviewed_coinbase_precision_profiles() {
@@ -252,5 +256,79 @@ mod tests {
         assert_eq!(instrument.instrument_id.as_str(), profile.instrument_id);
         assert_eq!(subscription_id, SUBSCRIPTION_ID);
         assert!(worker_label.contains("loading"));
+    }
+
+    #[test]
+    fn reviewed_products_handoff_completed_history_to_live_without_gaps() {
+        for product_id in ["BTC-USD", "ETH-USD"] {
+            assert_history_live_handoff(product_id);
+        }
+    }
+
+    fn assert_history_live_handoff(product_id: &str) {
+        let profile = product_profile(product_id.to_string()).expect("profile validates");
+        let config = CoinbaseBarAggregatorConfig::try_new(product_id.to_string(), 2, 8, nonzero(4))
+            .expect("aggregation config validates");
+        let mut aggregator = CoinbaseBarAggregator::new(config);
+        assert_eq!(aggregator.instrument_id(), profile.instrument_id);
+        assert_eq!(
+            aggregator
+                .seed_completed_history(&[bar(100, 10_000), bar(101, 10_100)])
+                .expect("completed history seeds"),
+            2
+        );
+        assert!(
+            aggregator
+                .apply_trade_with_evidence(&trade(product_id, 101, 10))
+                .expect("overlapping live trade is classified")
+                .is_none()
+        );
+        assert!(
+            aggregator
+                .apply_trade_with_evidence(&trade(product_id, 102, 11))
+                .expect("following live minute opens")
+                .is_none()
+        );
+        let completed = aggregator
+            .apply_trade_with_evidence(&trade(product_id, 103, 12))
+            .expect("next minute rolls")
+            .expect("live minute completes");
+
+        assert_eq!(completed.bar.source_sequence, 3);
+        assert_eq!(completed.bar.exchange_timestamp_seconds, 102 * 60);
+        assert_eq!(completed.provider_sequence_num, Some(11));
+        let history = aggregator.history();
+        assert_eq!(
+            history
+                .iter()
+                .map(|bar| (bar.source_sequence, bar.exchange_timestamp_seconds))
+                .collect::<Vec<_>>(),
+            vec![(1, 100 * 60), (2, 101 * 60), (3, 102 * 60)]
+        );
+    }
+
+    fn bar(minute: i64, price: i64) -> MarketBar {
+        MarketBar {
+            source_sequence: u64::try_from(minute).expect("fixture minute is positive"),
+            exchange_timestamp_seconds: minute * 60,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 100_000_000,
+        }
+    }
+
+    fn trade(product_id: &str, minute: i64, sequence_num: u64) -> CanonicalTrade {
+        CanonicalTrade {
+            product_id: product_id.to_string(),
+            trade_id: format!("{product_id}-{sequence_num}"),
+            price: FixedPointValue::parse("102.00").expect("fixture price parses"),
+            size: FixedPointValue::parse("0.5").expect("fixture size parses"),
+            maker_side_buy: true,
+            trade_time_unix_nanos: minute * 60_000_000_000 + 1_000_000_000,
+            provider_timestamp_unix_nanos: minute * 60_000_000_000 + 500_000_000,
+            sequence_num,
+        }
     }
 }
