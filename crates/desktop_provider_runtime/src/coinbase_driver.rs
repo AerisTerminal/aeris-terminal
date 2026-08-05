@@ -130,6 +130,7 @@ struct CallbackState {
 struct SharedCallbacks {
     capacity: NonZeroUsize,
     state: Mutex<CallbackState>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -158,20 +159,24 @@ impl SessionEmitter {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.failed {
-            return false;
-        }
-        if state.queue.len() >= self.callbacks.capacity.get() {
+        let (accepted, notify) = if state.failed {
+            (false, false)
+        } else if state.queue.len() >= self.callbacks.capacity.get() {
             state.failed = true;
             state.terminal = Some(CoinbaseProviderEvent::Invalid {
                 generation: self.generation,
                 reason: CoinbaseProviderInvalidReason::EventQueueOverflow,
             });
-            false
+            (false, true)
         } else {
             state.queue.push_back(event);
-            true
+            (true, true)
+        };
+        drop(state);
+        if notify {
+            self.wake();
         }
+        accepted
     }
 
     fn invalid(&self, reason: CoinbaseProviderInvalidReason) {
@@ -180,12 +185,25 @@ impl SessionEmitter {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.failed {
+        let notify = if state.failed {
+            false
+        } else {
             state.failed = true;
             state.terminal = Some(CoinbaseProviderEvent::Invalid {
                 generation: self.generation,
                 reason,
             });
+            true
+        };
+        drop(state);
+        if notify {
+            self.wake();
+        }
+    }
+
+    fn wake(&self) {
+        if let Some(wake) = &self.callbacks.wake {
+            wake();
         }
     }
 }
@@ -205,13 +223,34 @@ impl CoinbaseProviderDriver {
         config: CoinbaseConfig,
         event_capacity: NonZeroUsize,
     ) -> (Self, CoinbaseProviderEvents) {
-        Self::with_task(config, event_capacity, direct_session_task())
+        Self::with_task_and_wake(config, event_capacity, direct_session_task(), None)
     }
 
+    /// Creates a direct driver that invokes a nonblocking worker wake callback
+    /// whenever a provider callback becomes ready.
+    #[must_use]
+    pub fn new_with_wake(
+        config: CoinbaseConfig,
+        event_capacity: NonZeroUsize,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> (Self, CoinbaseProviderEvents) {
+        Self::with_task_and_wake(config, event_capacity, direct_session_task(), Some(wake))
+    }
+
+    #[cfg(test)]
     fn with_task(
         config: CoinbaseConfig,
         event_capacity: NonZeroUsize,
         task: Arc<SessionTask>,
+    ) -> (Self, CoinbaseProviderEvents) {
+        Self::with_task_and_wake(config, event_capacity, task, None)
+    }
+
+    fn with_task_and_wake(
+        config: CoinbaseConfig,
+        event_capacity: NonZeroUsize,
+        task: Arc<SessionTask>,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> (Self, CoinbaseProviderEvents) {
         let callbacks = Arc::new(SharedCallbacks {
             capacity: event_capacity,
@@ -220,6 +259,7 @@ impl CoinbaseProviderDriver {
                 terminal: None,
                 failed: false,
             }),
+            wake,
         });
         (
             Self {
@@ -399,7 +439,7 @@ mod tests {
         num::{NonZeroU64, NonZeroUsize},
         sync::{
             Arc, Barrier,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -601,6 +641,37 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("redacted-trade-id"));
         runtime.stop().expect("active session stop is confirmed");
+    }
+
+    #[test]
+    fn provider_callbacks_invoke_the_worker_wake_hook() {
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        let wake = Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        });
+        let (driver, events) = CoinbaseProviderDriver::with_task_and_wake(
+            config(),
+            nonzero(2),
+            controlled_task(false),
+            Some(wake),
+        );
+        let mut runtime = DesktopProviderRuntime::try_new(
+            UnavailableVault,
+            driver,
+            "coinbase_public",
+            DesktopProviderConfig::new(nonzero(8), nonzero(1)),
+        )
+        .expect("runtime configures");
+        let generation = runtime
+            .connect(ConnectTrigger::Initial)
+            .expect("public provider connects");
+        assert_eq!(
+            wait_event(&events),
+            CoinbaseProviderEvent::Established { generation }
+        );
+        assert!(wake_count.load(Ordering::Acquire) >= 1);
+        runtime.stop().expect("provider stops cleanly");
     }
 
     #[test]

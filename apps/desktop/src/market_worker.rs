@@ -92,8 +92,13 @@ pub(crate) enum MarketWorkerMessage {
     },
 }
 
+pub(crate) enum MarketWorkerCommand {
+    Recovery(ReplayRecoveryCommand),
+    Shutdown,
+}
+
 pub(crate) struct MarketDataWorker {
-    commands: SyncSender<ReplayRecoveryCommand>,
+    commands: SyncSender<MarketWorkerCommand>,
     messages: Receiver<MarketWorkerMessage>,
     connected: bool,
 }
@@ -129,7 +134,7 @@ impl MarketDataWorker {
     }
 
     pub(crate) const fn from_channels(
-        commands: SyncSender<ReplayRecoveryCommand>,
+        commands: SyncSender<MarketWorkerCommand>,
         messages: Receiver<MarketWorkerMessage>,
     ) -> Self {
         Self {
@@ -143,7 +148,20 @@ impl MarketDataWorker {
         &self,
         command: ReplayRecoveryCommand,
     ) -> Result<(), TrySendError<ReplayRecoveryCommand>> {
-        self.commands.try_send(command)
+        self.commands
+            .try_send(MarketWorkerCommand::Recovery(command))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::Recovery(command)) => {
+                    TrySendError::Full(command)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::Recovery(command)) => {
+                    TrySendError::Disconnected(command)
+                }
+                TrySendError::Full(MarketWorkerCommand::Shutdown)
+                | TrySendError::Disconnected(MarketWorkerCommand::Shutdown) => {
+                    unreachable!("recovery send errors retain the recovery command")
+                }
+            })
     }
 
     pub fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
@@ -167,6 +185,12 @@ impl MarketDataWorker {
 
     pub fn mark_disconnected(&mut self) {
         self.connected = false;
+    }
+}
+
+impl Drop for MarketDataWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.try_send(MarketWorkerCommand::Shutdown);
     }
 }
 
@@ -353,7 +377,7 @@ impl FixtureMarketWorker {
 fn run_worker(
     bootstrap_tx: &SyncSender<Result<MarketWorkerBootstrap, String>>,
     message_tx: &SyncSender<MarketWorkerMessage>,
-    command_rx: &Receiver<ReplayRecoveryCommand>,
+    command_rx: &Receiver<MarketWorkerCommand>,
 ) {
     let mut worker = match FixtureMarketWorker::try_new() {
         Ok(worker) => worker,
@@ -394,15 +418,20 @@ fn run_worker(
         }
     }
     while let Ok(command) = command_rx.recv() {
-        let result = worker.recover();
-        if message_tx
-            .send(MarketWorkerMessage::Recovery {
-                request_id: command.request_id,
-                result,
-            })
-            .is_err()
-        {
-            return;
+        match command {
+            MarketWorkerCommand::Recovery(command) => {
+                let result = worker.recover();
+                if message_tx
+                    .send(MarketWorkerMessage::Recovery {
+                        request_id: command.request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            MarketWorkerCommand::Shutdown => return,
         }
     }
 }
