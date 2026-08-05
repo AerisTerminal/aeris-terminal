@@ -7,8 +7,8 @@ mod windowed_benchmark;
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use gpui::{
-    App, Bounds, Context, Entity, Hsla, Render, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    App, Bounds, Context, Entity, Hsla, Render, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, StyledExt,
@@ -73,8 +73,6 @@ struct TerminalApp {
     chart_state: ChartState,
     chart_state_message: String,
     theme: AxiusflowTheme,
-    theme_revision: u64,
-    instrument_label: String,
     replay_label: String,
     worker_label: String,
     subscription_id: String,
@@ -89,53 +87,42 @@ impl TerminalApp {
         market_worker: MarketDataWorker,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
-        let (
-            chart,
-            chart_state,
-            chart_state_message,
-            instrument,
-            replay_label,
-            worker_label,
-            subscription_id,
-        ) = match startup {
-            MarketWorkerStartup::Loading {
-                instrument,
-                subscription_id,
-                worker_label,
-            } => (
-                None,
-                ChartState::Loading,
-                "waiting for a covering market snapshot".to_string(),
-                instrument,
-                "waiting for a covering market snapshot".to_string(),
-                worker_label,
-                subscription_id,
-            ),
-            MarketWorkerStartup::Ready(bootstrap) => {
-                let replay_label = generation_status(
-                    &bootstrap.worker_label,
-                    &bootstrap.subscription_id,
-                    &bootstrap.generation,
-                );
-                let instrument = bootstrap.snapshot.instrument().clone();
-                let snapshot = bootstrap.snapshot;
-                let chart =
-                    cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
-                (
-                    Some(chart),
-                    ChartState::Ready,
-                    "market snapshot is current".to_string(),
+        let (chart, chart_state, chart_state_message, replay_label, worker_label, subscription_id) =
+            match startup {
+                MarketWorkerStartup::Loading {
                     instrument,
-                    replay_label,
-                    bootstrap.worker_label,
-                    bootstrap.subscription_id,
-                )
-            }
-        };
-        let instrument_label = format!(
-            "{} · {} · instrument r{}",
-            instrument.symbol, instrument.venue_id, instrument.revision
-        );
+                    subscription_id,
+                    worker_label,
+                } => {
+                    let _ = instrument;
+                    (
+                        None,
+                        ChartState::Loading,
+                        "waiting for a covering market snapshot".to_string(),
+                        "waiting for a covering market snapshot".to_string(),
+                        worker_label,
+                        subscription_id,
+                    )
+                }
+                MarketWorkerStartup::Ready(bootstrap) => {
+                    let replay_label = generation_status(
+                        &bootstrap.worker_label,
+                        &bootstrap.subscription_id,
+                        &bootstrap.generation,
+                    );
+                    let snapshot = bootstrap.snapshot;
+                    let chart =
+                        cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                    (
+                        Some(chart),
+                        ChartState::Ready,
+                        "market snapshot is current".to_string(),
+                        replay_label,
+                        bootstrap.worker_label,
+                        bootstrap.subscription_id,
+                    )
+                }
+            };
         let bridge_label = chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
@@ -155,8 +142,6 @@ impl TerminalApp {
             chart_state,
             chart_state_message,
             theme,
-            theme_revision: 0,
-            instrument_label,
             replay_label,
             worker_label,
             subscription_id,
@@ -168,13 +153,6 @@ impl TerminalApp {
     fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
         self.worker_label = publication.worker_label;
         self.subscription_id = publication.subscription_id;
-        if let axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot) = &publication.update {
-            let instrument = snapshot.instrument();
-            self.instrument_label = format!(
-                "{} · {} · instrument r{}",
-                instrument.symbol, instrument.venue_id, instrument.revision
-            );
-        }
         self.replay_label = generation_status(
             &self.worker_label,
             &self.subscription_id,
@@ -377,7 +355,6 @@ impl TerminalApp {
             });
         }
         self.theme = theme;
-        self.theme_revision = self.theme_revision.saturating_add(1);
         cx.notify();
     }
 
@@ -407,8 +384,6 @@ impl Render for TerminalApp {
             .hover(gpui_color(colors.accent))
             .active(gpui_color(colors.muted));
         let toggle_label = format!("Switch to {}", theme.mode.toggled().label());
-        let revision_label = format!("theme r{}", self.theme_revision);
-        let instrument_label = self.instrument_label.clone();
         let replay_label = self.replay_label.clone();
         let bridge_label = self.bridge_label.clone();
         let chart_state_label = self.chart_state_label();
@@ -428,23 +403,7 @@ impl Render for TerminalApp {
                     .px_4()
                     .border_b_1()
                     .border_color(gpui_color(colors.border))
-                    .child(
-                        div()
-                            .items_center()
-                            .gap_3()
-                            .child("AXIUSFLOW")
-                            .child(
-                                div()
-                                    .text_color(gpui_color(colors.muted_foreground))
-                                    .child(instrument_label),
-                            )
-                            .child(
-                                div()
-                                    .text_color(gpui_color(colors.muted_foreground))
-                                    .text_xs()
-                                    .child(revision_label),
-                            ),
-                    )
+                    .child("Axiusflow")
                     .child(
                         div()
                             .items_center()
@@ -620,6 +579,10 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Axiusflow".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             move |window, cx| {
