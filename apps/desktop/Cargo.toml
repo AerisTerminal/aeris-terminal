@@ -8,16 +8,25 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
+axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
 axiusflow_design_system = { path = "../../crates/ui/design_system" }
+axiusflow_desktop_history = { path = "../../crates/desktop_history" }
+axiusflow_desktop_provider_runtime = { path = "../../crates/desktop_provider_runtime" }
+axiusflow_desktop_storage = { path = "../../crates/desktop_storage" }
+axiusflow_instruments = { path = "../../crates/domain/instruments" }
+axiusflow_market_data = { path = "../../crates/domain/market_data" }
 axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
+axiusflow_provider_history = { path = "../../crates/provider_history" }
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

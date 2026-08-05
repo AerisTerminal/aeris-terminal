@@ -17,6 +17,7 @@ use axiusflow_market_protocol_adapter::{
 };
 use std::{
     num::NonZeroUsize,
+    path::PathBuf,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread,
 };
@@ -45,6 +46,8 @@ pub(crate) struct MarketWorkerBootstrap {
 pub(crate) struct MarketWorkerPublication {
     pub update: ReplayStreamUpdate,
     pub generation: DesktopMarketGeneration,
+    pub subscription_id: String,
+    pub worker_label: String,
 }
 
 pub(crate) enum MarketWorkerMessage {
@@ -82,6 +85,25 @@ impl MarketDataWorker {
                 connected: true,
             },
         ))
+    }
+
+    pub fn start_coinbase(
+        product_id: String,
+        history_root: PathBuf,
+        ui_thread: thread::ThreadId,
+    ) -> Result<(MarketWorkerBootstrap, Self), String> {
+        crate::live_market_worker::start(product_id, history_root, ui_thread)
+    }
+
+    pub(crate) const fn from_channels(
+        commands: SyncSender<ReplayRecoveryCommand>,
+        messages: Receiver<MarketWorkerMessage>,
+    ) -> Self {
+        Self {
+            commands,
+            messages,
+            connected: true,
+        }
     }
 
     pub fn try_send_recovery(
@@ -284,6 +306,8 @@ impl FixtureMarketWorker {
         Ok(MarketWorkerPublication {
             update: projected.update,
             generation,
+            subscription_id: SUBSCRIPTION_ID.to_string(),
+            worker_label: "binary fixture worker · disconnected".to_string(),
         })
     }
 

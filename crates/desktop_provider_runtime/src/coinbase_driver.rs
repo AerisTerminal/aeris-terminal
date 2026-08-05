@@ -69,6 +69,17 @@ pub struct CoinbaseProviderEvents {
 }
 
 impl CoinbaseProviderEvents {
+    /// Reports whether at least one callback is ready without consuming it.
+    #[must_use]
+    pub fn has_ready(&self) -> bool {
+        let state = self
+            .callbacks
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.queue.is_empty() || state.terminal.is_some()
+    }
+
     /// Receives at most one ready callback without blocking.
     #[must_use]
     pub fn try_recv(&self) -> Option<CoinbaseProviderEvent> {

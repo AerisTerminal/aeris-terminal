@@ -145,6 +145,38 @@ impl ReplaySnapshot {
         })
     }
 
+    /// Builds integrity evidence for an already-provenanced bounded snapshot.
+    ///
+    /// This is the application boundary for direct provider adapters whose
+    /// event provenance is known before the snapshot checksum is constructed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty values, invalid provenance, identity,
+    /// sequence, timestamp, generation, or stream bounds.
+    pub fn try_from_provenanced_values(
+        instrument: InstrumentRevision,
+        provenance: ReplayProvenance,
+        bar_definition: BarDefinition,
+        generation: u64,
+        bars: Vec<ProvenancedMarketBar>,
+    ) -> Result<Self, ReplayValidationError> {
+        let first = bars.first().ok_or(StreamProtocolError::EmptySnapshot)?;
+        let last = bars.last().ok_or(StreamProtocolError::EmptySnapshot)?;
+        let first_provenance = first.provenance();
+        let mut evidence = SnapshotEvidence {
+            partition_id: first_provenance.partition_id,
+            ownership_epoch: first_provenance.ownership_epoch,
+            generation,
+            first_sequence: first.value().source_sequence,
+            last_sequence: last.value().source_sequence,
+            schema_version: first_provenance.schema_version,
+            checksum: [0; 32],
+        };
+        evidence.checksum = snapshot_checksum(&evidence, &instrument, &bar_definition, &bars);
+        Self::try_new_provenanced(instrument, provenance, bar_definition, evidence, bars)
+    }
+
     /// Returns the immutable instrument revision associated with every bar.
     #[must_use]
     pub const fn instrument(&self) -> &InstrumentRevision {

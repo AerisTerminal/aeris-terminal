@@ -6,8 +6,8 @@ use crate::{
 };
 use axiusflow_application::MarketStreamPublication;
 use axiusflow_coinbase_market_adapter::{
-    COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
-    ENTITLEMENT_CLASS, MAXIMUM_PRODUCTS,
+    COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseAggregatedBar, CoinbaseBarAggregator,
+    CoinbaseBarAggregatorConfig, ENTITLEMENT_CLASS, MAXIMUM_PRODUCTS,
 };
 use axiusflow_desktop_history::{
     ChartId, DesktopHistoryError, HistoryDecoder, HistoryPublication, HistoryWorker,
@@ -281,6 +281,17 @@ where
         trigger: ConnectTrigger,
     ) -> Result<SessionGeneration, DesktopMarketWorkerError> {
         self.provider.connect(trigger).map_err(Into::into)
+    }
+
+    /// Records connection intent and starts when environmental fences allow.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted lifecycle, driver, vault, or queue failure.
+    pub fn request_connection(
+        &mut self,
+    ) -> Result<Option<SessionGeneration>, DesktopMarketWorkerError> {
+        self.provider.request_connection().map_err(Into::into)
     }
 
     /// Accepts provider establishment for the active generation.
@@ -891,6 +902,19 @@ where
         &mut self,
         events: &CoinbaseProviderEvents,
     ) -> Result<Option<(SessionGeneration, MarketBar)>, DesktopMarketWorkerError> {
+        self.try_recv_coinbase_aggregated_bar(events)
+            .map(|completed| completed.map(|(generation, completed)| (generation, completed.bar)))
+    }
+
+    /// Applies at most one direct Coinbase callback and returns a completed bar with evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted lifecycle, source, product, or aggregation error.
+    pub fn try_recv_coinbase_aggregated_bar(
+        &mut self,
+        events: &CoinbaseProviderEvents,
+    ) -> Result<Option<(SessionGeneration, CoinbaseAggregatedBar)>, DesktopMarketWorkerError> {
         if !self.provider.owns_coinbase_events(events) {
             return Err(DesktopMarketWorkerError::CallbackSourceMismatch);
         }
@@ -908,7 +932,7 @@ where
                     self.session_invalid(generation)?;
                     return Err(DesktopMarketWorkerError::CoinbaseProductNotRegistered);
                 };
-                let Ok(bar) = aggregator.apply_trade(&trade) else {
+                let Ok(bar) = aggregator.apply_trade_with_evidence(&trade) else {
                     self.session_invalid(generation)?;
                     return Err(DesktopMarketWorkerError::CoinbaseAggregation);
                 };
@@ -930,6 +954,21 @@ impl<V> DesktopMarketWorker<MarketBar, V, CoinbaseProviderDriver>
 where
     V: CredentialVault,
 {
+    /// Returns the registered product's bounded completed-bar history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the product is not registered.
+    pub fn coinbase_bar_history(
+        &self,
+        product_id: &str,
+    ) -> Result<Vec<MarketBar>, DesktopMarketWorkerError> {
+        self.coinbase_bars
+            .get(product_id)
+            .map(CoinbaseBarAggregator::history)
+            .ok_or(DesktopMarketWorkerError::CoinbaseProductNotRegistered)
+    }
+
     /// Seeds one registered product from its authorized current history publication.
     ///
     /// The latest completed minute anchors the following live current minute.

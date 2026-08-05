@@ -17,8 +17,8 @@ mod review;
 mod session;
 
 pub use aggregation::{
-    CoinbaseBarAggregationError, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
-    MAXIMUM_AGGREGATED_HISTORY_BARS, mantissa_at_scale,
+    CoinbaseAggregatedBar, CoinbaseBarAggregationError, CoinbaseBarAggregator,
+    CoinbaseBarAggregatorConfig, MAXIMUM_AGGREGATED_HISTORY_BARS, mantissa_at_scale,
 };
 pub use config::{CoinbaseConfig, MAXIMUM_PRODUCTS};
 pub use decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};

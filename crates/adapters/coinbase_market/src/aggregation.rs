@@ -20,6 +20,16 @@ struct InFlightBar {
     low: i64,
     close: i64,
     volume: i64,
+    provider_timestamp_unix_nanos: Option<i64>,
+    provider_sequence_num: Option<u64>,
+}
+
+/// One completed bar plus the final provider message evidence that formed it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoinbaseAggregatedBar {
+    pub bar: MarketBar,
+    pub provider_timestamp_unix_nanos: Option<i64>,
+    pub provider_sequence_num: Option<u64>,
 }
 
 /// Explicit identity, precision, and retention bounds for one product aggregator.
@@ -235,6 +245,8 @@ impl CoinbaseBarAggregator {
                     low: bar.low,
                     close: bar.close,
                     volume: bar.volume,
+                    provider_timestamp_unix_nanos: None,
+                    provider_sequence_num: None,
                 })
             })
             .flatten();
@@ -257,6 +269,19 @@ impl CoinbaseBarAggregator {
         &mut self,
         trade: &CanonicalTrade,
     ) -> Result<Option<MarketBar>, CoinbaseBarAggregationError> {
+        self.apply_trade_with_evidence(trade)
+            .map(|completed| completed.map(|completed| completed.bar))
+    }
+
+    /// Applies one canonical trade and retains the final provider timestamp and sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded validation failures as [`Self::apply_trade`].
+    pub fn apply_trade_with_evidence(
+        &mut self,
+        trade: &CanonicalTrade,
+    ) -> Result<Option<CoinbaseAggregatedBar>, CoinbaseBarAggregationError> {
         if trade.product_id != self.config.product_id {
             return Err(CoinbaseBarAggregationError::ProductMismatch);
         }
@@ -277,6 +302,8 @@ impl CoinbaseBarAggregator {
                     .volume
                     .checked_add(size)
                     .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
+                bar.provider_timestamp_unix_nanos = Some(trade.provider_timestamp_unix_nanos);
+                bar.provider_sequence_num = Some(trade.sequence_num);
             }
             Some(_) => {
                 let finished = self
@@ -289,7 +316,7 @@ impl CoinbaseBarAggregator {
                     return Ok(None);
                 }
                 completed = Some(self.complete(finished)?);
-                self.open_bar(minute, price, size);
+                self.open_bar(minute, price, size, trade);
             }
             None => {
                 if self
@@ -300,7 +327,7 @@ impl CoinbaseBarAggregator {
                     self.late_trades = self.late_trades.saturating_add(1);
                     return Ok(None);
                 }
-                self.open_bar(minute, price, size);
+                self.open_bar(minute, price, size, trade);
             }
         }
         Ok(completed)
@@ -332,7 +359,7 @@ impl CoinbaseBarAggregator {
         })
     }
 
-    fn open_bar(&mut self, minute: i64, price: i64, size: i64) {
+    fn open_bar(&mut self, minute: i64, price: i64, size: i64, trade: &CanonicalTrade) {
         self.in_flight = Some(InFlightBar {
             minute_unix_seconds: minute,
             open: price,
@@ -340,10 +367,15 @@ impl CoinbaseBarAggregator {
             low: price,
             close: price,
             volume: size,
+            provider_timestamp_unix_nanos: Some(trade.provider_timestamp_unix_nanos),
+            provider_sequence_num: Some(trade.sequence_num),
         });
     }
 
-    fn complete(&mut self, bar: InFlightBar) -> Result<MarketBar, CoinbaseBarAggregationError> {
+    fn complete(
+        &mut self,
+        bar: InFlightBar,
+    ) -> Result<CoinbaseAggregatedBar, CoinbaseBarAggregationError> {
         let completed = MarketBar {
             source_sequence: self.next_sequence,
             exchange_timestamp_seconds: bar.minute_unix_seconds,
@@ -364,7 +396,11 @@ impl CoinbaseBarAggregator {
         if self.history.len() > self.config.maximum_history_bars.get() {
             self.history.pop_front();
         }
-        Ok(completed)
+        Ok(CoinbaseAggregatedBar {
+            bar: completed,
+            provider_timestamp_unix_nanos: bar.provider_timestamp_unix_nanos,
+            provider_sequence_num: bar.provider_sequence_num,
+        })
     }
 }
 
@@ -514,6 +550,20 @@ mod tests {
         assert_eq!(completed.high, 10_200);
         assert_eq!(completed.close, 10_200);
         assert_eq!(completed.volume, 150_000_000);
+    }
+
+    #[test]
+    fn seeded_in_flight_bar_reports_missing_live_provider_evidence() {
+        let mut aggregator = aggregator();
+        aggregator
+            .seed_backfill(&[bar(100, 10_000), bar(101, 10_100)])
+            .expect("backfill seeds");
+        let completed = aggregator
+            .apply_trade_with_evidence(&trade(102, "103.00", "0.5"))
+            .expect("minute rolls")
+            .expect("seeded open minute completes");
+        assert_eq!(completed.provider_timestamp_unix_nanos, None);
+        assert_eq!(completed.provider_sequence_num, None);
     }
 
     #[test]

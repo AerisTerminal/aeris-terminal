@@ -741,15 +741,24 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_application",
  "axiusflow_chart_integration",
+ "axiusflow_coinbase_market_adapter",
  "axiusflow_design_system",
+ "axiusflow_desktop_history",
+ "axiusflow_desktop_provider_runtime",
+ "axiusflow_desktop_storage",
+ "axiusflow_instruments",
+ "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
  "axiusflow_platform_runtime",
+ "axiusflow_provider_history",
  "axiusflow_terminal_ui",
+ "getrandom 0.4.3",
  "gpui",
  "gpui-component",
  "gpui_platform",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]

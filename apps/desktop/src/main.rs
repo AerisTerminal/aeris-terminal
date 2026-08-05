@@ -1,5 +1,6 @@
 //! Axiusflow's native GPUI terminal entry point.
 
+mod live_market_worker;
 mod market_worker;
 mod windowed_benchmark;
 
@@ -107,6 +108,15 @@ impl TerminalApp {
     }
 
     fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
+        self.worker_label = publication.worker_label;
+        self.subscription_id = publication.subscription_id;
+        if let axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot) = &publication.update {
+            let instrument = snapshot.instrument();
+            self.instrument_label = format!(
+                "{} · {} · instrument r{}",
+                instrument.symbol, instrument.venue_id, instrument.revision
+            );
+        }
         self.replay_label = generation_status(
             &self.worker_label,
             &self.subscription_id,
@@ -405,7 +415,7 @@ fn gpui_color(color: ThemeColor) -> Hsla {
 
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
-    if let Some(argument) = arguments.next() {
+    let worker = if let Some(argument) = arguments.next() {
         if argument == "--windowed-benchmark" {
             let report_path = arguments
                 .next()
@@ -414,11 +424,39 @@ fn main() {
                 .expect("the windowed benchmark completes");
             return;
         }
-        eprintln!("unsupported argument: {}", argument.to_string_lossy());
-        std::process::exit(2);
-    }
-    let (bootstrap, market_worker) =
-        MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps");
+        if argument == "--coinbase-live" {
+            let product = arguments.next().unwrap_or_else(|| {
+                eprintln!(
+                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root>"
+                );
+                std::process::exit(2);
+            });
+            let history_root = arguments.next().unwrap_or_else(|| {
+                eprintln!(
+                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root>"
+                );
+                std::process::exit(2);
+            });
+            if arguments.next().is_some() {
+                eprintln!(
+                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root>"
+                );
+                std::process::exit(2);
+            }
+            MarketDataWorker::start_coinbase(
+                product.to_string_lossy().into_owned(),
+                std::path::PathBuf::from(history_root),
+                std::thread::current().id(),
+            )
+            .expect("the bounded direct Coinbase worker starts")
+        } else {
+            eprintln!("unsupported argument: {}", argument.to_string_lossy());
+            std::process::exit(2);
+        }
+    } else {
+        MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps")
+    };
+    let (bootstrap, market_worker) = worker;
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         sync_component_theme(&AxiusflowTheme::dark(), None, cx);

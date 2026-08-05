@@ -449,6 +449,43 @@ where
         Ok(generation)
     }
 
+    /// Records connection intent and starts now when environmental fences allow.
+    ///
+    /// Unlike [`Self::connect`], this method can be called while suspended or
+    /// offline. The intent is retained and the matching native restoration event
+    /// starts a fresh generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread use, a stopped or already-active
+    /// runtime, or a provider/vault/queue failure while starting immediately.
+    pub fn request_connection(
+        &mut self,
+    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
+        self.ensure_owner()?;
+        if matches!(
+            self.state,
+            DesktopProviderState::Stopped
+                | DesktopProviderState::Connecting { .. }
+                | DesktopProviderState::Streaming { .. }
+        ) {
+            return Err(DesktopProviderError::InvalidTransition);
+        }
+        self.connection_desired = true;
+        if self.suspended
+            || !self.network_available
+            || matches!(self.state, DesktopProviderState::StopUnconfirmed { .. })
+        {
+            return Ok(None);
+        }
+        let trigger = if matches!(self.state, DesktopProviderState::RecoveryRequired { .. }) {
+            ConnectTrigger::Retry
+        } else {
+            ConnectTrigger::Initial
+        };
+        self.connect(trigger).map(Some)
+    }
+
     /// Accepts provider confirmation for the active generation.
     ///
     /// # Errors
@@ -1144,6 +1181,37 @@ mod tests {
                 .starts
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn requested_connection_waits_for_native_environmental_restoration() {
+        let (mut runtime, driver) = runtime(8);
+        runtime
+            .handle_network_event(NetworkEvent::Unavailable)
+            .expect("idle network loss is recorded");
+        assert_eq!(
+            runtime
+                .request_connection()
+                .expect("offline connection intent is retained"),
+            None
+        );
+        assert!(
+            driver
+                .lock()
+                .expect("driver state lock is available")
+                .starts
+                .is_empty()
+        );
+        let generation = runtime
+            .handle_network_event(NetworkEvent::Available)
+            .expect("restoration is accepted")
+            .expect("restoration starts the requested connection");
+        let starts = &driver
+            .lock()
+            .expect("driver state lock is available")
+            .starts;
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].0, generation);
     }
 
     #[test]
