@@ -5,12 +5,16 @@ use crate::{
     NetworkEvent, ProviderSessionDriver, SessionGeneration,
 };
 use axiusflow_application::MarketStreamPublication;
-use axiusflow_coinbase_market_adapter::CanonicalTrade;
+use axiusflow_coinbase_market_adapter::{
+    COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
+    ENTITLEMENT_CLASS, MAXIMUM_PRODUCTS,
+};
 use axiusflow_desktop_history::{
     ChartId, DesktopHistoryError, HistoryDecoder, HistoryPublication, HistoryWorker,
     HistoryWorkerConfig, HydrationOutcome, HydrationRequest, StartupCacheState, WorkerMetrics,
 };
-use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
+use axiusflow_desktop_storage::{CatalogKey, DataKind, SegmentEncryptionKey, SegmentIdentity};
+use axiusflow_market_data::MarketBar;
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use axiusflow_provider_history::{
     Completion, DataClass, HistoryItem, RequestInterest, SequencedHistory, VerifiedHistorySnapshot,
@@ -44,6 +48,12 @@ pub enum DesktopMarketWorkerError {
     HandoffGenerationMismatch,
     ProviderNotStreaming,
     CallbackSourceMismatch,
+    CoinbaseProductLimit { maximum: usize },
+    CoinbaseProductAlreadyRegistered,
+    CoinbaseProductNotRegistered,
+    CoinbaseAggregation,
+    CoinbaseHistoryIdentityMismatch,
+    CoinbaseHistoryUnavailable,
 }
 
 impl fmt::Display for DesktopMarketWorkerError {
@@ -88,6 +98,25 @@ impl fmt::Display for DesktopMarketWorkerError {
             Self::CallbackSourceMismatch => {
                 formatter.write_str("provider callback source mismatched")
             }
+            Self::CoinbaseProductLimit { maximum } => {
+                write!(
+                    formatter,
+                    "desktop market worker reached its {maximum}-product bound"
+                )
+            }
+            Self::CoinbaseProductAlreadyRegistered => {
+                formatter.write_str("Coinbase bar product is already registered")
+            }
+            Self::CoinbaseProductNotRegistered => {
+                formatter.write_str("Coinbase bar product is not registered")
+            }
+            Self::CoinbaseAggregation => formatter.write_str("Coinbase trade aggregation failed"),
+            Self::CoinbaseHistoryIdentityMismatch => {
+                formatter.write_str("Coinbase bar history identity mismatched")
+            }
+            Self::CoinbaseHistoryUnavailable => {
+                formatter.write_str("Coinbase bar history is unavailable")
+            }
         }
     }
 }
@@ -110,7 +139,13 @@ impl Error for DesktopMarketWorkerError {
             | Self::HandoffNotTracked
             | Self::HandoffGenerationMismatch
             | Self::ProviderNotStreaming
-            | Self::CallbackSourceMismatch => None,
+            | Self::CallbackSourceMismatch
+            | Self::CoinbaseProductLimit { .. }
+            | Self::CoinbaseProductAlreadyRegistered
+            | Self::CoinbaseProductNotRegistered
+            | Self::CoinbaseAggregation
+            | Self::CoinbaseHistoryIdentityMismatch
+            | Self::CoinbaseHistoryUnavailable => None,
         }
     }
 }
@@ -171,6 +206,7 @@ pub struct DesktopMarketWorker<T, V, D: ProviderSessionDriver> {
         BTreeMap<SegmentIdentity, (RequestInterest, HistoryCompletionBinding)>,
     next_history_completion_binding: NonZeroU64,
     maximum_handoffs: NonZeroUsize,
+    coinbase_bars: BTreeMap<String, CoinbaseBarAggregator>,
 }
 
 impl<T: Clone, V, D> DesktopMarketWorker<T, V, D>
@@ -209,6 +245,7 @@ where
             history_completion_bindings: BTreeMap::new(),
             next_history_completion_binding: NonZeroU64::MIN,
             maximum_handoffs,
+            coinbase_bars: BTreeMap::new(),
         })
     }
 
@@ -280,6 +317,7 @@ where
             DesktopProviderState::Streaming { generation: active } if active == generation
         );
         let history_result = if was_active && !remains_active {
+            self.reset_coinbase_bars();
             self.retire_handoffs()
         } else {
             Ok(())
@@ -326,6 +364,7 @@ where
         );
         let provider_result = self.provider.session_invalid(generation);
         let history_result = if active {
+            self.reset_coinbase_bars();
             self.retire_handoffs()
         } else {
             Ok(())
@@ -345,6 +384,7 @@ where
         );
         let provider_result = self.provider.session_callback_queue_overflow(generation);
         let history_result = if active {
+            self.reset_coinbase_bars();
             self.retire_handoffs()
         } else {
             Ok(())
@@ -363,6 +403,7 @@ where
     ) -> Result<Option<SessionGeneration>, DesktopMarketWorkerError> {
         let provider_result = self.provider.handle_power_event(event);
         let history_result = if event == PowerEvent::Suspending {
+            self.reset_coinbase_bars();
             self.retire_handoffs()
         } else {
             Ok(())
@@ -381,6 +422,7 @@ where
     ) -> Result<Option<SessionGeneration>, DesktopMarketWorkerError> {
         let provider_result = self.provider.handle_network_event(event);
         let history_result = if event == NetworkEvent::Unavailable {
+            self.reset_coinbase_bars();
             self.retire_handoffs()
         } else {
             Ok(())
@@ -406,6 +448,7 @@ where
     /// Returns a redacted provider or history-retirement failure.
     pub fn stop(&mut self) -> Result<(), DesktopMarketWorkerError> {
         let provider_result = self.provider.stop();
+        self.reset_coinbase_bars();
         let history_result = self.retire_handoffs();
         Self::finish_fence(provider_result, history_result)
     }
@@ -752,6 +795,12 @@ where
         first_error.map_or(Ok(()), Err)
     }
 
+    fn reset_coinbase_bars(&mut self) {
+        for aggregator in self.coinbase_bars.values_mut() {
+            aggregator.reset();
+        }
+    }
+
     fn finish_fence<R>(
         provider_result: Result<R, DesktopProviderError>,
         history_result: Result<(), DesktopHistoryError>,
@@ -768,6 +817,30 @@ impl<T: Clone, V> DesktopMarketWorker<T, V, CoinbaseProviderDriver>
 where
     V: CredentialVault,
 {
+    /// Registers one explicitly bounded Coinbase product bar stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate registration or the provider product bound.
+    pub fn register_coinbase_bar_product(
+        &mut self,
+        config: CoinbaseBarAggregatorConfig,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        if self.coinbase_bars.contains_key(config.product_id()) {
+            return Err(DesktopMarketWorkerError::CoinbaseProductAlreadyRegistered);
+        }
+        if self.coinbase_bars.len() >= MAXIMUM_PRODUCTS {
+            return Err(DesktopMarketWorkerError::CoinbaseProductLimit {
+                maximum: MAXIMUM_PRODUCTS,
+            });
+        }
+        self.coinbase_bars.insert(
+            config.product_id().to_string(),
+            CoinbaseBarAggregator::new(config),
+        );
+        Ok(())
+    }
+
     /// Applies at most one ready direct Coinbase callback on the owning worker.
     ///
     /// Established and invalid callbacks advance the provider lifecycle here;
@@ -804,6 +877,117 @@ where
                 Ok(None)
             }
         }
+    }
+
+    /// Applies at most one direct Coinbase callback and returns a completed bar.
+    ///
+    /// Lifecycle callbacks are applied before data; trades are accepted only
+    /// from this worker's receiver, active generation, and registered product.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted lifecycle, source, product, or aggregation error.
+    pub fn try_recv_coinbase_bar(
+        &mut self,
+        events: &CoinbaseProviderEvents,
+    ) -> Result<Option<(SessionGeneration, MarketBar)>, DesktopMarketWorkerError> {
+        if !self.provider.owns_coinbase_events(events) {
+            return Err(DesktopMarketWorkerError::CallbackSourceMismatch);
+        }
+        let Some(event) = events.try_recv() else {
+            return Ok(None);
+        };
+        match event {
+            CoinbaseProviderEvent::Established { generation } => {
+                self.session_established(generation)?;
+                Ok(None)
+            }
+            CoinbaseProviderEvent::Trade { generation, trade } => {
+                self.ensure_streaming_generation(generation)?;
+                let Some(aggregator) = self.coinbase_bars.get_mut(&trade.product_id) else {
+                    self.session_invalid(generation)?;
+                    return Err(DesktopMarketWorkerError::CoinbaseProductNotRegistered);
+                };
+                let Ok(bar) = aggregator.apply_trade(&trade) else {
+                    self.session_invalid(generation)?;
+                    return Err(DesktopMarketWorkerError::CoinbaseAggregation);
+                };
+                Ok(bar.map(|bar| (generation, bar)))
+            }
+            CoinbaseProviderEvent::Invalid { generation, reason } => {
+                if reason == CoinbaseProviderInvalidReason::EventQueueOverflow {
+                    self.session_callback_queue_overflow(generation)?;
+                } else {
+                    self.session_invalid(generation)?;
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl<V> DesktopMarketWorker<MarketBar, V, CoinbaseProviderDriver>
+where
+    V: CredentialVault,
+{
+    /// Seeds one registered product from its authorized current history publication.
+    ///
+    /// The latest completed minute anchors the following live current minute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing products/history, identity mismatch,
+    /// authorization/storage failure, or invalid aggregation input.
+    pub fn seed_coinbase_bar_history(
+        &mut self,
+        generation: SessionGeneration,
+        product_id: &str,
+        identity: &SegmentIdentity,
+        encryption_key: &SegmentEncryptionKey,
+        now_unix_seconds: i64,
+    ) -> Result<usize, DesktopMarketWorkerError> {
+        self.ensure_history_callback(generation, identity)?;
+        let aggregator = self
+            .coinbase_bars
+            .get(product_id)
+            .ok_or(DesktopMarketWorkerError::CoinbaseProductNotRegistered)?;
+        if identity.scope.provider_id != "coinbase"
+            || identity.scope.account_id != COINBASE_PUBLIC_ACCOUNT_ID
+            || identity.scope.entitlement_revision != ENTITLEMENT_CLASS
+            || identity.instrument_id != aggregator.instrument_id()
+            || identity.data_kind != DataKind::Bars
+            || identity.resolution != "1m"
+            || aggregator.price_scale() != 2
+            || aggregator.quantity_scale() != 8
+        {
+            return Err(DesktopMarketWorkerError::CoinbaseHistoryIdentityMismatch);
+        }
+        let publication = self
+            .history
+            .current_publication(identity, encryption_key, now_unix_seconds)?
+            .ok_or(DesktopMarketWorkerError::CoinbaseHistoryUnavailable)?;
+        let latest_completed_minute = now_unix_seconds
+            .div_euclid(60)
+            .checked_mul(60)
+            .and_then(|minute| minute.checked_sub(60))
+            .ok_or(DesktopMarketWorkerError::CoinbaseHistoryUnavailable)?;
+        if publication
+            .values
+            .last()
+            .is_none_or(|item| item.value.exchange_timestamp_seconds != latest_completed_minute)
+        {
+            return Err(DesktopMarketWorkerError::CoinbaseHistoryUnavailable);
+        }
+        let bars = publication
+            .values
+            .iter()
+            .map(|item| item.value)
+            .collect::<Vec<_>>();
+        self.coinbase_bars
+            .get_mut(product_id)
+            .ok_or(DesktopMarketWorkerError::CoinbaseProductNotRegistered)?
+            .seed_completed_history(&bars)
+            .map_err(|_| DesktopMarketWorkerError::CoinbaseAggregation)
     }
 }
 

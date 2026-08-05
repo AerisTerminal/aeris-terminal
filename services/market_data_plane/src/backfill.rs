@@ -4,8 +4,7 @@
 //! client snapshot has history before the first live bar completes. The HTTP
 //! client is deliberately minimal: one bounded GET per product over rustls.
 
-use crate::instruments::mantissa_at_scale;
-use axiusflow_coinbase_market_adapter::FixedPointValue;
+use axiusflow_coinbase_market_adapter::{FixedPointValue, mantissa_at_scale};
 use axiusflow_market_data::MarketBar;
 use serde::Deserialize;
 use std::io::{Read, Write};
@@ -55,11 +54,16 @@ pub fn backfill_bars(product: &str, maximum: usize) -> Result<Vec<MarketBar>, St
                     .start
                     .parse::<i64>()
                     .map_err(|_| "candle start is not a unix timestamp".to_string())?,
-                open: mantissa_at_scale(parse_fixed(&candle.open)?, 2)?,
-                high: mantissa_at_scale(parse_fixed(&candle.high)?, 2)?,
-                low: mantissa_at_scale(parse_fixed(&candle.low)?, 2)?,
-                close: mantissa_at_scale(parse_fixed(&candle.close)?, 2)?,
-                volume: mantissa_at_scale(parse_fixed(&candle.volume)?, 8)?,
+                open: mantissa_at_scale(parse_fixed(&candle.open)?, 2)
+                    .map_err(|error| error.to_string())?,
+                high: mantissa_at_scale(parse_fixed(&candle.high)?, 2)
+                    .map_err(|error| error.to_string())?,
+                low: mantissa_at_scale(parse_fixed(&candle.low)?, 2)
+                    .map_err(|error| error.to_string())?,
+                close: mantissa_at_scale(parse_fixed(&candle.close)?, 2)
+                    .map_err(|error| error.to_string())?,
+                volume: mantissa_at_scale(parse_fixed(&candle.volume)?, 8)
+                    .map_err(|error| error.to_string())?,
             })
         })
         .collect::<Result<_, String>>()?;

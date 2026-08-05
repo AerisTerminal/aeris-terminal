@@ -64,37 +64,9 @@ pub fn map_product(coinbase_product: &str) -> Result<ProductMapping, String> {
     })
 }
 
-/// Converts an adapter fixed-point value to the instrument scale as a bare
-/// mantissa, rejecting any value that would lose precision or overflow.
-///
-/// # Errors
-///
-/// Returns an error for precision loss or overflow.
-pub fn mantissa_at_scale(
-    value: axiusflow_coinbase_market_adapter::FixedPointValue,
-    target_scale: u8,
-) -> Result<i64, String> {
-    let source = i128::from(value.mantissa);
-    let scaled = if value.scale <= u32::from(target_scale) {
-        let shift = u32::from(target_scale) - value.scale;
-        source
-            .checked_mul(10_i128.pow(shift))
-            .ok_or_else(|| "fixed-point conversion overflow".to_string())?
-    } else {
-        let shift = value.scale - u32::from(target_scale);
-        let divisor = 10_i128.pow(shift);
-        if source % divisor != 0 {
-            return Err("fixed-point conversion would lose precision".to_string());
-        }
-        source / divisor
-    };
-    i64::try_from(scaled).map_err(|_| "fixed-point conversion overflow".to_string())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{mantissa_at_scale, map_product};
-    use axiusflow_coinbase_market_adapter::FixedPointValue;
+    use super::map_product;
 
     #[test]
     fn btc_usd_maps_to_a_crypto_asset_instrument() {
@@ -102,15 +74,5 @@ mod tests {
         assert_eq!(mapping.instrument.symbol, "BTC");
         assert_eq!(mapping.instrument.venue_id, "COINBASE");
         assert_eq!(mapping.bar_definition.interval_seconds, 60);
-    }
-
-    #[test]
-    fn fixed_point_scales_exactly() {
-        let price = FixedPointValue::parse("67001.25").expect("valid");
-        assert_eq!(mantissa_at_scale(price, 2).expect("exact"), 6_700_125);
-        let size = FixedPointValue::parse("0.00000001").expect("valid");
-        assert_eq!(mantissa_at_scale(size, 8).expect("exact"), 1);
-        let fractional = FixedPointValue::parse("1.234").expect("valid");
-        assert!(mantissa_at_scale(fractional, 2).is_err());
     }
 }

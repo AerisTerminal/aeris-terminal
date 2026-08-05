@@ -369,14 +369,20 @@ mod tests {
         CoinbaseProviderEvents, CoinbaseProviderInvalidReason, SessionEmitter, SessionTask,
     };
     use crate::{
-        ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig,
-        DesktopProviderRuntime, DesktopProviderState, ProviderSessionDriver, RecoveryReason,
-        SessionGeneration,
+        ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
+        DesktopProviderConfig, DesktopProviderRuntime, DesktopProviderState, ProviderSessionDriver,
+        RecoveryReason, SessionGeneration,
     };
-    use axiusflow_coinbase_market_adapter::{CanonicalTrade, CoinbaseConfig, FixedPointValue};
-    use axiusflow_desktop_history::HistoryWorkerConfig;
-    use axiusflow_desktop_storage::CatalogKey;
+    use axiusflow_coinbase_market_adapter::{
+        CanonicalTrade, CoinbaseBarAggregatorConfig, CoinbaseConfig, FixedPointValue,
+    };
+    use axiusflow_desktop_history::{HistoryWorkerConfig, StartupCacheState};
+    use axiusflow_desktop_storage::{
+        CatalogKey, DataKind, HistoryScope, SegmentEncryptionKey, SegmentIdentity,
+    };
+    use axiusflow_market_data::MarketBar;
     use axiusflow_platform_runtime::CredentialVault;
+    use axiusflow_provider_history::{SequencedHistory, VerifiedHistorySnapshot};
     use std::{
         fs,
         num::{NonZeroU64, NonZeroUsize},
@@ -419,15 +425,19 @@ mod tests {
     }
 
     fn trade() -> CanonicalTrade {
+        trade_at(1_700_000_040, "37000.00", 7)
+    }
+
+    fn trade_at(second: i64, price: &str, sequence_num: u64) -> CanonicalTrade {
         CanonicalTrade {
             product_id: "BTC-USD".to_string(),
-            trade_id: "redacted-trade-id".to_string(),
-            price: FixedPointValue::parse("37000.00").expect("price parses"),
+            trade_id: format!("redacted-trade-{sequence_num}"),
+            price: FixedPointValue::parse(price).expect("price parses"),
             size: FixedPointValue::parse("0.5").expect("size parses"),
             maker_side_buy: true,
-            trade_time_unix_nanos: 1_700_000_040_000_000_000,
-            provider_timestamp_unix_nanos: 1_700_000_040_100_000_000,
-            sequence_num: 7,
+            trade_time_unix_nanos: second * 1_000_000_000 + 1_000_000,
+            provider_timestamp_unix_nanos: second * 1_000_000_000 + 2_000_000,
+            sequence_num,
         }
     }
 
@@ -458,10 +468,10 @@ mod tests {
         )
     }
 
-    fn worker(
+    fn open_worker<T: Clone>(
         driver: CoinbaseProviderDriver,
     ) -> (
-        DesktopMarketWorker<u64, UnavailableVault, CoinbaseProviderDriver>,
+        DesktopMarketWorker<T, UnavailableVault, CoinbaseProviderDriver>,
         std::path::PathBuf,
     ) {
         let unique = SystemTime::now()
@@ -499,6 +509,52 @@ mod tests {
         )
         .expect("market worker opens");
         (worker, root)
+    }
+
+    fn worker(
+        driver: CoinbaseProviderDriver,
+    ) -> (
+        DesktopMarketWorker<u64, UnavailableVault, CoinbaseProviderDriver>,
+        std::path::PathBuf,
+    ) {
+        open_worker(driver)
+    }
+
+    fn history_identity() -> SegmentIdentity {
+        SegmentIdentity {
+            scope: HistoryScope {
+                provider_id: "coinbase".to_string(),
+                account_id: axiusflow_coinbase_market_adapter::COINBASE_PUBLIC_ACCOUNT_ID
+                    .to_string(),
+                entitlement_revision: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS
+                    .to_string(),
+            },
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            data_kind: DataKind::Bars,
+            resolution: "1m".to_string(),
+            range_start_unix_nanos: 1_700_000_040_000_000_000,
+            range_end_unix_nanos: 1_700_000_160_000_000_000,
+            source_revision: 1,
+            schema_revision: 1,
+            calendar_revision: 1,
+            adjustment_revision: 1,
+            correction_revision: 1,
+        }
+    }
+
+    fn history_bar(sequence: u64, second: i64, price: i64) -> SequencedHistory<MarketBar> {
+        SequencedHistory {
+            sequence: NonZeroU64::new(sequence).unwrap_or(NonZeroU64::MIN),
+            value: MarketBar {
+                source_sequence: sequence,
+                exchange_timestamp_seconds: second,
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+                volume: 100_000_000,
+            },
+        }
     }
 
     #[test]
@@ -749,7 +805,150 @@ mod tests {
             thread::yield_now();
         };
         assert_eq!(received.0, active);
-        assert_eq!(received.1.trade_id, "redacted-trade-id");
+        assert_eq!(received.1.trade_id, "redacted-trade-7");
+        worker.stop().expect("composed worker stops");
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn malformed_live_trade_invalidates_the_streaming_generation() {
+        let malformed_task: Arc<SessionTask> = Arc::new(
+            |_config, _generation, stop: Arc<AtomicBool>, emitter: SessionEmitter| {
+                assert!(emitter.established());
+                assert!(emitter.trade(trade_at(1_700_000_101, "38000.001", 8)));
+                while !stop.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            },
+        );
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(4), malformed_task);
+        let (mut worker, root) = open_worker::<MarketBar>(driver);
+        worker
+            .register_coinbase_bar_product(
+                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                    .expect("bar config validates"),
+            )
+            .expect("bar product registers");
+        let active = worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match worker.try_recv_coinbase_bar(&events) {
+                Ok(None) => {}
+                Err(DesktopMarketWorkerError::CoinbaseAggregation) => break,
+                result => panic!("unexpected composed result: {result:?}"),
+            }
+            assert!(Instant::now() < deadline, "malformed trade timed out");
+            thread::yield_now();
+        }
+        assert_eq!(
+            worker.provider_state().expect("provider state is readable"),
+            DesktopProviderState::RecoveryRequired {
+                generation: Some(active),
+                reason: RecoveryReason::TransportInvalid,
+            }
+        );
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn composed_history_seeds_live_coinbase_bar_aggregation() {
+        let seeded = Arc::new(Barrier::new(2));
+        let task_seeded = Arc::clone(&seeded);
+        let aggregation_task: Arc<SessionTask> = Arc::new(
+            move |_config, _generation, stop: Arc<AtomicBool>, emitter: SessionEmitter| {
+                assert!(emitter.established());
+                task_seeded.wait();
+                assert!(emitter.trade(trade_at(1_700_000_161, "38000.00", 8)));
+                assert!(emitter.trade(trade_at(1_700_000_221, "39000.00", 9)));
+                while !stop.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            },
+        );
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(8), aggregation_task);
+        let (mut worker, root) = open_worker::<MarketBar>(driver);
+        worker
+            .register_coinbase_bar_product(
+                CoinbaseBarAggregatorConfig::try_new("BTC-USD", 2, 8, nonzero(8))
+                    .expect("bar config validates"),
+            )
+            .expect("bar product registers");
+        let active = worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            worker
+                .try_recv_coinbase_bar(&events)
+                .expect("establishment is accepted");
+            if matches!(
+                worker.provider_state().expect("provider state is readable"),
+                DesktopProviderState::Streaming { generation } if generation == active
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "establishment timed out");
+            thread::yield_now();
+        }
+        let identity = history_identity();
+        let encryption_key =
+            SegmentEncryptionKey::try_new("segment-key-v1".to_string(), [0x52; 32])
+                .expect("segment key validates");
+        worker
+            .begin_history_handoff(active, identity.clone(), &encryption_key, 1_700_000_200)
+            .expect("history handoff starts");
+        worker
+            .install_history_snapshot(
+                active,
+                &identity,
+                VerifiedHistorySnapshot::try_new(
+                    NonZeroU64::MIN,
+                    vec![
+                        history_bar(1, 1_700_000_040, 3_600_000),
+                        history_bar(2, 1_700_000_100, 3_700_000),
+                    ],
+                )
+                .expect("history snapshot validates"),
+                2 * size_of::<SequencedHistory<MarketBar>>(),
+                StartupCacheState::Cold,
+            )
+            .expect("history snapshot installs");
+        assert_eq!(
+            worker
+                .seed_coinbase_bar_history(
+                    active,
+                    "BTC-USD",
+                    &identity,
+                    &encryption_key,
+                    1_700_000_161,
+                )
+                .expect("authorized history seeds aggregation"),
+            2
+        );
+        seeded.wait();
+        let completed = loop {
+            if let Some(completed) = worker
+                .try_recv_coinbase_bar(&events)
+                .expect("live trade aggregates")
+            {
+                break completed;
+            }
+            assert!(Instant::now() < deadline, "completed bar timed out");
+            thread::yield_now();
+        };
+        assert_eq!(completed.0, active);
+        assert_eq!(completed.1.source_sequence, 3);
+        assert_eq!(completed.1.exchange_timestamp_seconds, 1_700_000_160);
+        assert_eq!(completed.1.open, 3_800_000);
+        assert_eq!(completed.1.high, 3_800_000);
+        assert_eq!(completed.1.close, 3_800_000);
+        assert_eq!(completed.1.volume, 50_000_000);
         worker.stop().expect("composed worker stops");
         drop(worker);
         fs::remove_dir_all(root).expect("history root removes");

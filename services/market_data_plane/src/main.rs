@@ -1,6 +1,5 @@
 //! Live market data plane: Coinbase ingest to binary client streams.
 
-mod aggregation;
 mod backfill;
 mod entitlement;
 mod fanout;

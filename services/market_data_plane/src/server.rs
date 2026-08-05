@@ -10,7 +10,6 @@
 //! in the same binary market-bar protocol the desktop already decodes.
 //! Overloaded clients are disconnected, never buffered without bound.
 
-use crate::aggregation::BarAggregator;
 use crate::backfill::backfill_bars;
 use crate::entitlement::{EntitlementError, EntitlementGuard};
 use crate::fanout::ProductFanout;
@@ -18,7 +17,9 @@ use crate::fanout::ProductFanout;
 use crate::fanout::{durable_envelope, durable_partition_key};
 use crate::instruments::{ProductMapping, map_product};
 use axiusflow_application::ReplayProvenance;
-use axiusflow_coinbase_market_adapter::{CoinbaseConfig, CoinbaseSession};
+use axiusflow_coinbase_market_adapter::{
+    CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig, CoinbaseSession,
+};
 use axiusflow_market_protocol_adapter::{
     DecimalConvention, encode_market_bar_stream_frame,
     try_encode_canonical_market_bar_delta_envelope, try_encode_replay_snapshot_chunk_envelopes,
@@ -50,7 +51,7 @@ struct ClientHandle {
 /// One product lane: mapping, aggregator, fenced fanout, and client broadcast.
 struct ProductLane {
     mapping: ProductMapping,
-    aggregator: BarAggregator,
+    aggregator: CoinbaseBarAggregator,
     fanout: ProductFanout,
     clients: Vec<ClientHandle>,
 }
@@ -248,11 +249,20 @@ impl MarketDataPlane {
         for (index, product) in products.iter().enumerate() {
             let partition_id = u32::try_from(index + 1)
                 .map_err(|_| "too many products for partition identity".to_string())?;
+            let mapping = map_product(product)?;
+            let aggregation_config = CoinbaseBarAggregatorConfig::try_new(
+                product.clone(),
+                mapping.price_scale,
+                mapping.quantity_scale,
+                NonZeroUsize::new(MAXIMUM_LATEST_STATE_ITEMS)
+                    .ok_or_else(|| "bar history bound must be nonzero".to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
             lanes.insert(
                 product.clone(),
                 ProductLane {
-                    mapping: map_product(product)?,
-                    aggregator: BarAggregator::new(),
+                    mapping,
+                    aggregator: CoinbaseBarAggregator::new(aggregation_config),
                     fanout: ProductFanout::try_new(
                         partition_id,
                         "market_data_plane",
@@ -424,7 +434,10 @@ impl MarketDataPlane {
             let lane = lanes
                 .get_mut(product)
                 .ok_or_else(|| "lane disappeared".to_string())?;
-            let seeded = lane.aggregator.seed_backfill(bars)?;
+            let seeded = lane
+                .aggregator
+                .seed_backfill(&bars)
+                .map_err(|error| error.to_string())?;
             let history = lane.aggregator.history();
             lane.fanout
                 .install_backfill(&lane.mapping, &history, unix_nanos_now())?;

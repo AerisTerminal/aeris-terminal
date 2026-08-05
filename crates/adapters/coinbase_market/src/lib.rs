@@ -6,6 +6,7 @@
 //! vocabulary. The feed is legally authorized public data; the entitlement class
 //! is `crypto_public_realtime` and every event carries `coinbase` provenance.
 
+mod aggregation;
 mod config;
 mod decoder;
 mod errors;
@@ -15,6 +16,10 @@ mod messages;
 mod review;
 mod session;
 
+pub use aggregation::{
+    CoinbaseBarAggregationError, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
+    MAXIMUM_AGGREGATED_HISTORY_BARS, mantissa_at_scale,
+};
 pub use config::{CoinbaseConfig, MAXIMUM_PRODUCTS};
 pub use decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
 pub use errors::CoinbaseError;

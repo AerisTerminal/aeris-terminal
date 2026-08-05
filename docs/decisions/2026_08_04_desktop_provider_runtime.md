@@ -61,6 +61,18 @@ next generation atomically clears prior queued callbacks only after that join.
 The composed market worker advances lifecycle state before returning a trade
 from the matching streaming generation.
 
+The Coinbase adapter also owns the reusable deterministic one-minute bar
+aggregator used by both the reference service and desktop runtime. Each product
+has an explicit precision profile, a hard 4,096-bar retention ceiling, exact
+fixed-point conversion, contiguous local sequences, and one newest in-flight
+minute. The desktop worker caps registered products and seeds only from the
+authorized current publication for the matching active handoff generation and
+exact provider/account/entitlement/instrument/dataset/resolution identity. The
+latest fetchable completed minute anchors the sequence and the following live
+minute opens without duplicating history. Every provider lifecycle fence clears seeded and live
+aggregate state; malformed live input invalidates the generation rather than
+allowing a partially trusted stream to continue.
+
 `NativeNetworkMonitor` supplies the same `NetworkEvent` type consumed by the
 lifecycle owner. Its Linux backend installs fixed-capacity, sender/path/
 interface/member-specific system-bus matches for `NetworkManager.StateChanged`
@@ -90,6 +102,11 @@ The deterministic suite proves:
   the stopped generation cannot precede its replacement;
 - the composed market worker accepts establishment before returning a Coinbase
   trade and fences both by the same provider generation;
+- authorized current Coinbase history seeds the bounded one-minute aggregator,
+  the latest fetchable completed minute anchors generation-fenced live trades,
+  and the following minute emits one contiguous bar without duplication;
+- malformed live trade precision invalidates the active generation instead of
+  preserving partially aggregated state;
 - provider start failures expose only a coarse recovery class;
 - network loss and suspend stop the active generation, while restoration and
   resume create strictly newer generations;
@@ -140,9 +157,9 @@ The deterministic suite proves:
 This slice does not implement Rithmic, CQG, FYERS, or a credentialed streaming
 provider adapter. Coinbase now supplies bounded direct public WebSocket and
 one-minute history connections; deterministic suites compose its streaming
-lifecycle and validated scheduler completion with the worker. No trade-to-bar,
-history-seeding, or application event loop drives those boundaries. The
-lifecycle owner and native monitor remain disconnected from `apps/desktop`;
+lifecycle, validated scheduler completion, current-history seeding, and bounded
+trade-to-bar aggregation with the worker. No application event loop drives
+those boundaries. The lifecycle owner and native monitor remain disconnected from `apps/desktop`;
 Windows and macOS network-change backends are unimplemented.
 It also does not prove shipping-topology cloud absence, provider certification,
 cross-platform recovery, GPUI responsiveness, or performance. `S2-19` therefore
