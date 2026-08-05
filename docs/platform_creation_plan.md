@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 11
+**Revision:** 12
 **Last updated:** 2026-08-05
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -55,6 +55,7 @@ display, provider/environment, workload, sample window, and percentile evidence.
 | Provider-neutral runtime | `verified` | Shared runtime modules are provider-neutral. Coinbase and deterministic Rithmic semantic fixtures pass the same bounded lifecycle, generation, bar, book-gap recovery, covering-snapshot, invalidation, and immutable publication conformance gate. |
 | Rithmic access | `blocked_external` | Access has been offered, but the accepted package, agreements, Test login, protocol semantics, entitlements, and certification have not been verified. |
 | Rithmic adapter | `ready` | A kit-optional, read-only implementation can begin without committing proprietary material. Live validation remains externally blocked. |
+| Lightweight diagnostics | `in_progress` | A bounded provider-neutral feed-health accumulator now covers counters, rates, queue and memory high-water marks, generation fencing, recovery state, clock-relative provider age, 4 Hz snapshots, and opt-in fixed histograms. Runtime wiring and named overhead evidence remain. |
 | Main Rithmic UI | `ready` | Work begins after the deterministic headless and diagnostics gates pass. |
 | IQFeed | `deferred` | Access is preliminary and it is not on the current delivery path. |
 | CQG | `deferred` | No implementation or certification work is active. |
@@ -272,7 +273,7 @@ marked `verified`.
 
 ## 8. Stage D — Lightweight diagnostics
 
-**Status:** `ready`
+**Status:** `in_progress`
 
 Always-on instrumentation consists of allocation-free counters and current or
 high-water values. Bounded detailed histograms are opt-in. Publish an immutable
@@ -294,6 +295,27 @@ snapshot no faster than 4 Hz containing:
 Diagnostics exclude credentials, raw payloads, account data, and licensed
 subscription inventories. Detailed diagnostics must not regress p99 by more
 than 5% or p99.9 by more than 10% under the same measured workload.
+
+### Current implementation evidence
+
+- The observability owner retains always-on counters and current/high-water
+  queue and approximate-memory gauges in fixed-size storage. Impossible
+  occupancy, changing capacity, and memory-bound violations fail explicitly.
+- Immutable snapshots are suppressed inside a 250 ms window and calculate
+  deterministic trade, quote, depth, and publication rates from the prior
+  accepted snapshot.
+- Session generations, reconnects, uptime, heartbeat age, last-message age,
+  history state, order-book state, and coarse recovery reasons are explicit.
+- Provider timestamp age is signed and labelled `ProviderClockRelativeAge`; it
+  is never presented as network or local processing latency.
+- Detailed local latency histograms are opt-in, fixed-size, bounded by a
+  maximum accepted sample, and expose p50, p95, p99, p99.9, maximum, accepted,
+  and rejected sample evidence.
+- The overhead evidence contract requires named hardware, operating system,
+  workload, warm-up, sample count, ordered percentiles, and identical
+  gap/overflow/recovery outcomes before enforcing the 5% and 10% budgets.
+- Remaining work is wiring the accumulator into the Rithmic headless runtime
+  and UI frame path, then capturing the named disabled/enabled benchmark.
 
 ### Gate
 

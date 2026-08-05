@@ -1,5 +1,21 @@
 //! Bounded low-overhead latency vocabulary and deterministic reports.
 
+mod feed_diagnostics;
+mod overhead;
+
+pub use feed_diagnostics::{
+    ClockRelativeAge, DiagnosticsError, DiagnosticsQueue, FeedConnectionState, FeedCounter,
+    FeedCounterSnapshot, FeedDiagnostics, FeedDiagnosticsSnapshot, FeedIdentity, FeedRateSnapshot,
+    FeedRecoveryReason, HistoryDiagnosticsState, LatencyHistogramSnapshot, LocalLatencyMetric,
+    MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES, MINIMUM_DIAGNOSTICS_SNAPSHOT_INTERVAL_NANOS,
+    MemoryDiagnostics, OrderBookDiagnosticsState, QueueDiagnostics, TimingLabel,
+};
+pub use overhead::{
+    DiagnosticsBenchmarkArm, DiagnosticsBenchmarkContext, DiagnosticsOverheadAssessment,
+    DiagnosticsOverheadError, DiagnosticsOverheadEvidence, MAXIMUM_P99_9_REGRESSION_BASIS_POINTS,
+    MAXIMUM_P99_REGRESSION_BASIS_POINTS,
+};
+
 use core::fmt;
 use std::error::Error;
 use std::num::NonZeroUsize;
@@ -11,28 +27,38 @@ pub enum LatencyBoundary {
     Exchange,
     ProviderReceive,
     NicReceive,
+    SocketRead,
     AxiusflowReceive,
+    Decode,
     Normalized,
+    CanonicalAccept,
     FanoutEnqueue,
     GatewaySend,
     ClientReceive,
     ModelApply,
+    ModelPublish,
+    UiEnqueue,
     FrameSubmit,
     Present,
 }
 
 impl LatencyBoundary {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 16;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Exchange,
         Self::ProviderReceive,
         Self::NicReceive,
+        Self::SocketRead,
         Self::AxiusflowReceive,
+        Self::Decode,
         Self::Normalized,
+        Self::CanonicalAccept,
         Self::FanoutEnqueue,
         Self::GatewaySend,
         Self::ClientReceive,
         Self::ModelApply,
+        Self::ModelPublish,
+        Self::UiEnqueue,
         Self::FrameSubmit,
         Self::Present,
     ];
@@ -43,12 +69,17 @@ impl LatencyBoundary {
             Self::Exchange => "exchange_timestamp",
             Self::ProviderReceive => "provider_receive_timestamp",
             Self::NicReceive => "nic_receive_timestamp",
+            Self::SocketRead => "socket_read_timestamp",
             Self::AxiusflowReceive => "axiusflow_receive_timestamp",
+            Self::Decode => "decode_timestamp",
             Self::Normalized => "normalized_timestamp",
+            Self::CanonicalAccept => "canonical_accept_timestamp",
             Self::FanoutEnqueue => "fanout_enqueue_timestamp",
             Self::GatewaySend => "gateway_send_timestamp",
             Self::ClientReceive => "client_receive_timestamp",
             Self::ModelApply => "model_apply_timestamp",
+            Self::ModelPublish => "model_publish_timestamp",
+            Self::UiEnqueue => "ui_enqueue_timestamp",
             Self::FrameSubmit => "frame_submit_timestamp",
             Self::Present => "present_timestamp_if_measurable",
         }
@@ -143,6 +174,51 @@ impl LatencySample {
             end,
             elapsed_nanos,
         })
+    }
+}
+
+impl FeedDiagnostics {
+    /// Records one validated timestamp-chain interval into an opt-in local histogram.
+    ///
+    /// Disabled detailed diagnostics still validate the timestamp chain but retain
+    /// no sample. Provider-clock-relative age is intentionally not accepted here.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-boundary, reversed-boundary, or timestamp-regression error.
+    pub fn record_latency_chain(
+        &mut self,
+        metric: LocalLatencyMetric,
+        chain: &LatencyTimestampChain,
+    ) -> Result<(), LatencyError> {
+        let (start, end) = metric.boundaries();
+        let sample = chain.try_sample(start, end)?;
+        self.record_local_latency(metric, sample.elapsed_nanos);
+        Ok(())
+    }
+}
+
+impl LocalLatencyMetric {
+    /// Returns the only timestamp boundary pair valid for this published label.
+    #[must_use]
+    pub const fn boundaries(self) -> (LatencyBoundary, LatencyBoundary) {
+        match self {
+            Self::SocketReadToDecode => (LatencyBoundary::SocketRead, LatencyBoundary::Decode),
+            Self::DecodeToCanonicalAccept => {
+                (LatencyBoundary::Decode, LatencyBoundary::CanonicalAccept)
+            }
+            Self::CanonicalAcceptToModelPublish => (
+                LatencyBoundary::CanonicalAccept,
+                LatencyBoundary::ModelPublish,
+            ),
+            Self::ModelPublishToUiEnqueue => {
+                (LatencyBoundary::ModelPublish, LatencyBoundary::UiEnqueue)
+            }
+            Self::UiEnqueueToFrameSubmit => {
+                (LatencyBoundary::UiEnqueue, LatencyBoundary::FrameSubmit)
+            }
+            Self::FrameSubmitToPresent => (LatencyBoundary::FrameSubmit, LatencyBoundary::Present),
+        }
     }
 }
 
