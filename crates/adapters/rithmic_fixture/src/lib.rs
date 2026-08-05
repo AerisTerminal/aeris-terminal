@@ -14,6 +14,7 @@ use axiusflow_market_data::{
 pub struct RithmicFixtureSession {
     pub events: Vec<ProviderSessionEvent>,
     pub bar_updates: Vec<BarUpdate>,
+    pub book_recovery_events: Vec<MarketEvent>,
 }
 
 /// Produces one bounded read-only Test-system session with trade, depth, and bars.
@@ -81,14 +82,55 @@ pub fn deterministic_session(generation: SessionGeneration) -> RithmicFixtureSes
             generation,
             received_unix_nanos: 1_800_000_003_000_000_000,
         },
+        ProviderSessionEvent::Invalidated {
+            generation: Some(generation),
+            reason: axiusflow_desktop_provider_runtime::ProviderInvalidationReason::Transport,
+        },
         ProviderSessionEvent::Stopped,
     ];
     let forming = bar_update(series.clone(), generation_value, 4, false);
-    let completed = bar_update(series, generation_value, 5, true);
+    let completed = bar_update(series.clone(), generation_value, 5, true);
+    let next_forming = next_bar_update(series, generation_value, 6);
     RithmicFixtureSession {
         events,
-        bar_updates: vec![forming, completed],
+        bar_updates: vec![forming, completed, next_forming],
+        book_recovery_events: book_recovery_events(generation_value),
     }
+}
+
+fn book_recovery_events(generation: u64) -> Vec<MarketEvent> {
+    vec![
+        MarketEvent::DepthSnapshot(DepthSnapshot {
+            metadata: metadata(10, generation),
+            bids: vec![level(525_000, 8), level(524_975, 6)],
+            asks: vec![level(525_025, 7), level(525_050, 5)],
+        }),
+        MarketEvent::DepthDelta(DepthDelta {
+            metadata: metadata(11, generation),
+            side: BookSide::Bid,
+            level: level(525_000, 10),
+        }),
+        MarketEvent::DepthDelta(DepthDelta {
+            metadata: metadata(13, generation),
+            side: BookSide::Ask,
+            level: level(525_025, 9),
+        }),
+        MarketEvent::DepthSnapshot(DepthSnapshot {
+            metadata: metadata(12, generation),
+            bids: vec![level(525_000, 9), level(524_975, 6)],
+            asks: vec![level(525_025, 8), level(525_050, 5)],
+        }),
+        MarketEvent::DepthSnapshot(DepthSnapshot {
+            metadata: metadata(13, generation),
+            bids: vec![level(525_000, 11), level(524_975, 7)],
+            asks: vec![level(525_025, 9), level(525_050, 6)],
+        }),
+        MarketEvent::DepthDelta(DepthDelta {
+            metadata: metadata(14, generation),
+            side: BookSide::Ask,
+            level: level(525_025, 12),
+        }),
+    ]
 }
 
 fn metadata(sequence: u64, generation: u64) -> EventMetadata {
@@ -153,6 +195,18 @@ fn bar_update(series: BarSeriesKey, generation: u64, sequence: u64, completed: b
     }
 }
 
+fn next_bar_update(series: BarSeriesKey, generation: u64, sequence: u64) -> BarUpdate {
+    let mut update = bar_update(series, generation, sequence, false);
+    let BarUpdate::Forming { metadata, bar, .. } = &mut update else {
+        unreachable!("requested a forming fixture bar");
+    };
+    bar.exchange_timestamp_seconds += 60;
+    metadata.timestamps.exchange_unix_nanos = Some(1_800_000_060_000_000_000);
+    metadata.timestamps.provider_unix_nanos = Some(1_800_000_061_000_000_000);
+    metadata.timestamps.received_unix_nanos = 1_800_000_062_000_000_000;
+    update
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +222,9 @@ mod tests {
         }
         for update in &session.bar_updates {
             update.validate().expect("fixture bar update validates");
+        }
+        for event in &session.book_recovery_events {
+            event.validate(2).expect("fixture recovery event validates");
         }
     }
 }

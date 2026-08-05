@@ -1,8 +1,18 @@
 use crate::ConformanceHarnessError;
-use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, ProviderSessionEvent, SessionGeneration,
+use axiusflow_application::{
+    MarketBarClientModel, MarketBarModelOutcome, MarketStreamPublication, Provenanced,
+    ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason, StreamDelta,
 };
-use axiusflow_market_data::{BarUpdate, MarketEvent, OrderBook, OrderBookApplyOutcome};
+use axiusflow_desktop_provider_runtime::{
+    AuthenticationState, InstrumentDescriptor, ProviderEnvironment, ProviderSessionEvent,
+    SessionGeneration,
+};
+use axiusflow_instruments::InstrumentRevision;
+use axiusflow_market_data::{
+    BarDefinition, BarUpdate, MarketEvent, OrderBook, OrderBookApplyOutcome,
+    OrderBookRecoveryReason, OrderBookState,
+};
+use axiusflow_protocols::MarketEventProvenance;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
@@ -13,6 +23,9 @@ use std::{
 pub struct ProviderAdapterFixture {
     pub events: Vec<ProviderSessionEvent>,
     pub bar_updates: Vec<BarUpdate>,
+    pub book_recovery_events: Vec<MarketEvent>,
+    pub publication_instrument: InstrumentRevision,
+    pub bar_definition: BarDefinition,
 }
 
 /// Evidence produced by one successful provider adapter conformance run.
@@ -22,6 +35,10 @@ pub struct ProviderAdapterConformance {
     pub depth_publications: usize,
     pub forming_bars: usize,
     pub completed_bars: usize,
+    pub book_recoveries: usize,
+    pub covering_snapshots: usize,
+    pub stream_publications: usize,
+    pub stream_recoveries: usize,
 }
 
 struct SessionEvidence {
@@ -29,7 +46,13 @@ struct SessionEvidence {
     depth_publications: usize,
     generation: SessionGeneration,
     provider_ids: BTreeSet<String>,
-    instrument_ids: BTreeSet<String>,
+    instruments: InstrumentEvidence,
+}
+
+#[derive(Default)]
+struct InstrumentEvidence {
+    ids: BTreeSet<String>,
+    descriptors: BTreeMap<String, InstrumentDescriptor>,
 }
 
 #[derive(Clone, Copy)]
@@ -49,11 +72,23 @@ pub fn run_provider_adapter_conformance(
 ) -> Result<ProviderAdapterConformance, ConformanceHarnessError> {
     let evidence = validate_session_events(&fixture.events)?;
     let (forming_bars, completed_bars) = validate_bar_updates(&fixture.bar_updates, &evidence)?;
+    let (book_recoveries, covering_snapshots) =
+        validate_book_recovery(&fixture.book_recovery_events, &evidence)?;
+    let (stream_publications, stream_recoveries) = validate_stream_publications(
+        &fixture.bar_updates,
+        &fixture.publication_instrument,
+        &fixture.bar_definition,
+        &evidence,
+    )?;
     Ok(ProviderAdapterConformance {
         market_events: evidence.market_events,
         depth_publications: evidence.depth_publications,
         forming_bars,
         completed_bars,
+        book_recoveries,
+        covering_snapshots,
+        stream_publications,
+        stream_recoveries,
     })
 }
 
@@ -72,7 +107,7 @@ fn validate_session_events(
     let mut market_sequences = BTreeMap::new();
     let mut books = BTreeMap::new();
     let mut provider_ids = BTreeSet::new();
-    let mut instrument_ids = BTreeSet::new();
+    let mut instrument_evidence = InstrumentEvidence::default();
     let mut invalidated = false;
 
     for (index, event) in events.iter().enumerate() {
@@ -90,11 +125,7 @@ fn validate_session_events(
             ProviderSessionEvent::SystemsDiscovered { environments }
                 if !systems_discovered && !environments.is_empty() =>
             {
-                provider_ids.extend(
-                    environments
-                        .iter()
-                        .map(|environment| environment.provider_id.clone()),
-                );
+                record_provider_ids(&mut provider_ids, environments);
                 systems_discovered = true;
             }
             ProviderSessionEvent::AuthenticationChanged {
@@ -106,18 +137,14 @@ fn validate_session_events(
             ProviderSessionEvent::InstrumentsDiscovered { instruments, .. }
                 if authenticated && !instruments_discovered && !instruments.is_empty() =>
             {
-                instrument_ids.extend(
-                    instruments
-                        .iter()
-                        .map(|instrument| instrument.instrument_id.clone()),
-                );
+                record_instruments(&mut instrument_evidence, instruments)?;
                 instruments_discovered = true;
             }
             ProviderSessionEvent::Market { event, .. } if instruments_discovered => {
                 let published_depth = validate_market_event(
                     event,
                     &provider_ids,
-                    &instrument_ids,
+                    &instrument_evidence.ids,
                     &mut market_sequences,
                     &mut books,
                     maximum_depth,
@@ -132,7 +159,9 @@ fn validate_session_events(
             }
             ProviderSessionEvent::DiscoveryStarted if index == 0 => {}
             ProviderSessionEvent::Stopped if index + 1 == events.len() => {}
-            ProviderSessionEvent::Invalidated { .. } => invalidated = true,
+            ProviderSessionEvent::Invalidated { generation, .. } => {
+                invalidated = terminal_invalidation_matches(*generation, session_generation)?;
+            }
             ProviderSessionEvent::Market { .. }
             | ProviderSessionEvent::Heartbeat { .. }
             | ProviderSessionEvent::InstrumentsDiscovered { .. }
@@ -144,14 +173,16 @@ fn validate_session_events(
             }
         }
     }
-    if !(systems_discovered
-        && authenticated
-        && instruments_discovered
-        && heartbeat_seen
-        && market_events > 0)
-    {
-        return Err(driver_error("fixture omits required lifecycle evidence"));
-    }
+    validate_required_session_evidence(
+        market_events,
+        [
+            systems_discovered,
+            authenticated,
+            instruments_discovered,
+            heartbeat_seen,
+            invalidated,
+        ],
+    )?;
     let generation = session_generation
         .ok_or_else(|| driver_error("fixture omits provider session generation evidence"))?;
     Ok(SessionEvidence {
@@ -159,8 +190,56 @@ fn validate_session_events(
         depth_publications,
         generation,
         provider_ids,
-        instrument_ids,
+        instruments: instrument_evidence,
     })
+}
+
+fn validate_required_session_evidence(
+    market_events: usize,
+    phases: [bool; 5],
+) -> Result<(), ConformanceHarnessError> {
+    if market_events == 0 || phases.contains(&false) {
+        return Err(driver_error("fixture omits required lifecycle evidence"));
+    }
+    Ok(())
+}
+
+fn record_provider_ids(provider_ids: &mut BTreeSet<String>, environments: &[ProviderEnvironment]) {
+    provider_ids.extend(
+        environments
+            .iter()
+            .map(|environment| environment.provider_id.clone()),
+    );
+}
+
+fn record_instruments(
+    evidence: &mut InstrumentEvidence,
+    instruments: &[InstrumentDescriptor],
+) -> Result<(), ConformanceHarnessError> {
+    for instrument in instruments {
+        if !evidence.ids.insert(instrument.instrument_id.clone())
+            || evidence
+                .descriptors
+                .insert(instrument.instrument_id.clone(), instrument.clone())
+                .is_some()
+        {
+            return Err(driver_error("fixture discovered a duplicate instrument"));
+        }
+    }
+    Ok(())
+}
+
+fn terminal_invalidation_matches(
+    invalidated: Option<SessionGeneration>,
+    active: Option<SessionGeneration>,
+) -> Result<bool, ConformanceHarnessError> {
+    if invalidated.is_some() && invalidated == active {
+        Ok(true)
+    } else {
+        Err(driver_error(
+            "terminal invalidation did not fence the active generation",
+        ))
+    }
 }
 
 fn validate_lifecycle_endpoints(
@@ -277,7 +356,8 @@ fn validate_bar_updates(
         }
         if !evidence.provider_ids.contains(&update.series().provider_id)
             || !evidence
-                .instrument_ids
+                .instruments
+                .ids
                 .contains(&update.series().instrument_id)
         {
             return Err(driver_error(
@@ -336,6 +416,400 @@ fn validate_bar_progression(
     Ok(())
 }
 
+fn validate_book_recovery(
+    events: &[MarketEvent],
+    evidence: &SessionEvidence,
+) -> Result<(usize, usize), ConformanceHarnessError> {
+    if events.len() != 6 {
+        return Err(driver_error(
+            "book recovery corpus must contain six canonical transitions",
+        ));
+    }
+    let maximum_depth = conformance_limits().2;
+    let mut book = OrderBook::new(maximum_depth);
+    let mut immutable_baseline = None;
+    for (index, event) in events.iter().enumerate() {
+        if !evidence
+            .provider_ids
+            .contains(&event.metadata().provider_id)
+            || !evidence
+                .instruments
+                .ids
+                .contains(&event.metadata().instrument_id)
+            || event.metadata().session_generation != evidence.generation.get()
+        {
+            return Err(driver_error(
+                "book recovery event identity or generation was not discovered",
+            ));
+        }
+        event
+            .validate(maximum_depth.get())
+            .map_err(|error| driver_error(error.to_string()))?;
+        match (index, event) {
+            (0, MarketEvent::DepthSnapshot(snapshot)) => {
+                let OrderBookApplyOutcome::Published(publication) = book
+                    .install_snapshot(snapshot)
+                    .map_err(|error| driver_error(error.to_string()))?
+                else {
+                    return Err(driver_error("book recovery baseline did not publish"));
+                };
+                immutable_baseline = Some(publication);
+            }
+            (1, MarketEvent::DepthDelta(delta)) => {
+                if !matches!(
+                    book.apply_delta(delta)
+                        .map_err(|error| driver_error(error.to_string()))?,
+                    OrderBookApplyOutcome::Published(_)
+                ) {
+                    return Err(driver_error("ordered pre-gap delta did not publish"));
+                }
+            }
+            (2, MarketEvent::DepthDelta(delta)) => {
+                let Err(error) = book.apply_delta(delta) else {
+                    return Err(driver_error("depth gap was accepted"));
+                };
+                if !matches!(
+                    error,
+                    axiusflow_market_data::MarketDataValidationError::DepthGap { .. }
+                ) || book.state()
+                    != OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
+                    || !book.publication().bids.is_empty()
+                    || !book.publication().asks.is_empty()
+                {
+                    return Err(driver_error("depth gap did not fail closed"));
+                }
+            }
+            (3, MarketEvent::DepthSnapshot(snapshot)) => {
+                if book
+                    .install_snapshot(snapshot)
+                    .map_err(|error| driver_error(error.to_string()))?
+                    != OrderBookApplyOutcome::IgnoredStale
+                {
+                    return Err(driver_error("non-covering recovery snapshot was accepted"));
+                }
+            }
+            (4, MarketEvent::DepthSnapshot(snapshot)) => {
+                if !matches!(
+                    book.install_snapshot(snapshot)
+                        .map_err(|error| driver_error(error.to_string()))?,
+                    OrderBookApplyOutcome::Published(_)
+                ) || book.state() != OrderBookState::Ready
+                {
+                    return Err(driver_error("covering recovery snapshot did not publish"));
+                }
+            }
+            (5, MarketEvent::DepthDelta(delta)) => {
+                if !matches!(
+                    book.apply_delta(delta)
+                        .map_err(|error| driver_error(error.to_string()))?,
+                    OrderBookApplyOutcome::Published(_)
+                ) || book.publication().source_watermark != delta.metadata.source_sequence
+                {
+                    return Err(driver_error("post-recovery delta did not publish"));
+                }
+            }
+            _ => return Err(driver_error("book recovery corpus shape is invalid")),
+        }
+    }
+    validate_immutable_book_baseline(immutable_baseline, events, &book)?;
+    Ok((1, 1))
+}
+
+fn validate_immutable_book_baseline(
+    baseline: Option<axiusflow_market_data::OrderBookPublication>,
+    events: &[MarketEvent],
+    book: &OrderBook,
+) -> Result<(), ConformanceHarnessError> {
+    let baseline = baseline
+        .ok_or_else(|| driver_error("book recovery corpus omitted its immutable baseline"))?;
+    if baseline.source_watermark == events[0].metadata().source_sequence
+        && baseline.state == OrderBookState::Ready
+        && baseline != book.publication()
+    {
+        Ok(())
+    } else {
+        Err(driver_error(
+            "book publication was mutated or recovery did not replace it",
+        ))
+    }
+}
+
+fn validate_stream_publications(
+    updates: &[BarUpdate],
+    instrument: &InstrumentRevision,
+    bar_definition: &BarDefinition,
+    evidence: &SessionEvidence,
+) -> Result<(usize, usize), ConformanceHarnessError> {
+    let completed_index = updates
+        .iter()
+        .position(|update| matches!(update, BarUpdate::Completed { .. }))
+        .ok_or_else(|| driver_error("publication corpus omits a completed baseline bar"))?;
+    let baseline = &updates[completed_index];
+    let next = updates
+        .iter()
+        .skip(completed_index + 1)
+        .find(|update| {
+            matches!(update, BarUpdate::Forming { .. })
+                && update.series() == baseline.series()
+                && update.bar().exchange_timestamp_seconds
+                    > baseline.bar().exchange_timestamp_seconds
+        })
+        .ok_or_else(|| driver_error("publication corpus omits the next forming bar"))?;
+    let descriptor = evidence
+        .instruments
+        .descriptors
+        .get(&baseline.series().instrument_id)
+        .ok_or_else(|| driver_error("publication instrument was not discovered"))?;
+    validate_publication_identity(baseline, instrument, descriptor, bar_definition)?;
+
+    let baseline_item = provenanced_bar(baseline, evidence.generation)?;
+    let next_item = provenanced_bar(next, evidence.generation)?;
+    let snapshot = ReplaySnapshot::try_from_provenanced_values(
+        instrument.clone(),
+        ReplayProvenance::EmbeddedFixture,
+        bar_definition.clone(),
+        1,
+        vec![baseline_item],
+    )
+    .map_err(|error| driver_error(error.to_string()))?;
+    let capacity = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+    let mut model = MarketBarClientModel::new(capacity);
+    let snapshot_publication = publish_update(
+        &mut model,
+        ReplayStreamUpdate::Snapshot(snapshot),
+        baseline.series().provider_id.as_str(),
+    )?;
+    let delta = StreamDelta::try_new(
+        baseline.bar().source_sequence,
+        next.bar().source_sequence,
+        next_item.clone(),
+    )
+    .map_err(|error| driver_error(error.to_string()))?;
+    let delta_publication = publish_update(
+        &mut model,
+        ReplayStreamUpdate::Delta(delta),
+        baseline.series().provider_id.as_str(),
+    )?;
+    let frozen_generation = delta_publication.generation().clone();
+
+    let gap_item = gap_item_after(next_item)?;
+    let gap_sequence = gap_item.value().source_sequence;
+    let gap_previous = gap_sequence
+        .checked_sub(1)
+        .ok_or_else(|| driver_error("publication gap sequence underflowed"))?;
+    let gap_delta = StreamDelta::try_new(gap_previous, gap_sequence, gap_item.clone())
+        .map_err(|error| driver_error(error.to_string()))?;
+    let gap_outcome = model
+        .apply_update(ReplayStreamUpdate::Delta(gap_delta))
+        .map_err(|error| driver_error(error.to_string()))?;
+    if gap_outcome != MarketBarModelOutcome::ResnapshotRequired(ResnapshotReason::SequenceGap)
+        || model.current_generation() != Some(&frozen_generation)
+        || !model.requires_snapshot()
+    {
+        return Err(driver_error(
+            "application publication model did not freeze on a sequence gap",
+        ));
+    }
+
+    let recovery = ReplaySnapshot::try_from_provenanced_values(
+        instrument.clone(),
+        ReplayProvenance::EmbeddedFixture,
+        bar_definition.clone(),
+        frozen_generation.generation().saturating_add(1),
+        vec![gap_item],
+    )
+    .map_err(|error| driver_error(error.to_string()))?;
+    let recovery_publication = publish_update(
+        &mut model,
+        ReplayStreamUpdate::Snapshot(recovery),
+        baseline.series().provider_id.as_str(),
+    )?;
+    validate_publication_evidence(
+        &snapshot_publication,
+        &delta_publication,
+        &recovery_publication,
+        baseline.bar().source_sequence,
+        next.bar().source_sequence,
+        gap_sequence,
+        &model,
+    )?;
+    Ok((3, 1))
+}
+
+fn validate_publication_identity(
+    baseline: &BarUpdate,
+    instrument: &InstrumentRevision,
+    descriptor: &InstrumentDescriptor,
+    bar_definition: &BarDefinition,
+) -> Result<(), ConformanceHarnessError> {
+    let interval_matches = match baseline.series().period {
+        axiusflow_market_data::BarPeriod::Time { seconds } => {
+            bar_definition.interval_seconds == seconds
+        }
+        axiusflow_market_data::BarPeriod::Daily => bar_definition.interval_seconds == 86_400,
+        axiusflow_market_data::BarPeriod::Tick { .. } => false,
+    };
+    if instrument.instrument_id.as_str() == baseline.series().instrument_id
+        && instrument.symbol == descriptor.display_symbol
+        && instrument.venue_id == descriptor.venue_id
+        && instrument.precision.price_scale() == descriptor.price_scale
+        && instrument.precision.quantity_scale() == descriptor.quantity_scale
+        && bar_definition.definition_id == publication_definition_id(baseline)
+        && bar_definition.version == baseline.series().definition_version
+        && interval_matches
+    {
+        Ok(())
+    } else {
+        Err(driver_error(
+            "publication reference identity does not match the adapter series",
+        ))
+    }
+}
+
+fn validate_publication_evidence(
+    snapshot: &MarketStreamPublication,
+    delta: &MarketStreamPublication,
+    recovery: &MarketStreamPublication,
+    baseline_sequence: u64,
+    next_sequence: u64,
+    recovery_sequence: u64,
+    model: &MarketBarClientModel,
+) -> Result<(), ConformanceHarnessError> {
+    let immutable_snapshot = snapshot.generation().sequence_range()
+        == (baseline_sequence, baseline_sequence)
+        && snapshot.predecessor_generation().is_none();
+    let ordered_delta = delta.predecessor_generation() == Some(snapshot.generation().generation())
+        && delta.generation().sequence_range().1 == next_sequence;
+    let recovered = recovery.predecessor_generation().is_none()
+        && recovery.generation().sequence_range() == (recovery_sequence, recovery_sequence)
+        && !model.requires_snapshot();
+    if immutable_snapshot && ordered_delta && recovered {
+        Ok(())
+    } else {
+        Err(driver_error(
+            "immutable publication provenance or recovery evidence is incomplete",
+        ))
+    }
+}
+
+fn publication_definition_id(update: &BarUpdate) -> String {
+    format!(
+        "{}:{}:{:?}",
+        update.series().provider_id,
+        update.series().instrument_id,
+        update.series().period
+    )
+}
+
+fn provenanced_bar(
+    update: &BarUpdate,
+    generation: SessionGeneration,
+) -> Result<axiusflow_application::ProvenancedMarketBar, ConformanceHarnessError> {
+    if update.metadata().session_generation != generation.get() {
+        return Err(driver_error(
+            "publication bar crossed the provider session generation",
+        ));
+    }
+    let exchange_timestamp = update
+        .metadata()
+        .timestamps
+        .exchange_unix_nanos
+        .ok_or_else(|| driver_error("publication bar omits exchange time"))?;
+    let provider_timestamp = update
+        .metadata()
+        .timestamps
+        .provider_unix_nanos
+        .unwrap_or(update.metadata().timestamps.received_unix_nanos);
+    if provider_timestamp < exchange_timestamp
+        || update.metadata().timestamps.received_unix_nanos < provider_timestamp
+    {
+        return Err(driver_error(
+            "publication bar timestamp chronology is invalid",
+        ));
+    }
+    Ok(Provenanced::new(
+        update.bar(),
+        MarketEventProvenance {
+            event_id: format!(
+                "{}-bar-{}",
+                update.series().provider_id,
+                update.bar().source_sequence
+            ),
+            event_time_unix_nanos: exchange_timestamp,
+            publication_time_unix_nanos: update.metadata().timestamps.received_unix_nanos,
+            producer: format!("{}_fixture_adapter", update.series().provider_id),
+            schema_version: 1,
+            correlation_id: format!("{}-fixture", update.series().provider_id),
+            causation_id: String::new(),
+            entitlement_revision: update.series().entitlement_id.clone(),
+            partition_id: 1,
+            ownership_epoch: generation.get(),
+            source_id: update.series().provider_id.clone(),
+            source_sequence: update.bar().source_sequence,
+            exchange_timestamp_unix_nanos: exchange_timestamp,
+            provider_receive_timestamp_unix_nanos: provider_timestamp,
+            nic_receive_timestamp_unix_nanos: None,
+            axiusflow_receive_timestamp_unix_nanos: update
+                .metadata()
+                .timestamps
+                .received_unix_nanos,
+            normalized_timestamp_unix_nanos: update.metadata().timestamps.received_unix_nanos,
+            fanout_enqueue_timestamp_unix_nanos: None,
+            correction_flags: 0,
+            quality_flags: 0,
+            nic_timestamp_source: 0,
+            semantic_class: 0,
+        },
+    ))
+}
+
+fn gap_item_after(
+    item: axiusflow_application::ProvenancedMarketBar,
+) -> Result<axiusflow_application::ProvenancedMarketBar, ConformanceHarnessError> {
+    let (mut bar, mut provenance) = item.into_parts();
+    bar.source_sequence = bar
+        .source_sequence
+        .checked_add(2)
+        .ok_or_else(|| driver_error("publication gap sequence overflowed"))?;
+    bar.exchange_timestamp_seconds = bar
+        .exchange_timestamp_seconds
+        .checked_add(120)
+        .ok_or_else(|| driver_error("publication gap timestamp overflowed"))?;
+    let exchange_timestamp = bar
+        .exchange_timestamp_seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| driver_error("publication gap timestamp overflowed"))?;
+    provenance.event_id = format!("{}-gap-{}", provenance.source_id, bar.source_sequence);
+    provenance.source_sequence = bar.source_sequence;
+    provenance.event_time_unix_nanos = exchange_timestamp;
+    provenance.exchange_timestamp_unix_nanos = exchange_timestamp;
+    provenance.publication_time_unix_nanos = exchange_timestamp.saturating_add(1_000);
+    provenance.provider_receive_timestamp_unix_nanos = exchange_timestamp.saturating_add(500);
+    provenance.axiusflow_receive_timestamp_unix_nanos = exchange_timestamp.saturating_add(1_000);
+    provenance.normalized_timestamp_unix_nanos = exchange_timestamp.saturating_add(1_000);
+    Ok(Provenanced::new(bar, provenance))
+}
+
+fn publish_update(
+    model: &mut MarketBarClientModel,
+    update: ReplayStreamUpdate,
+    provider_id: &str,
+) -> Result<MarketStreamPublication, ConformanceHarnessError> {
+    let generation = match model
+        .apply_update(update.clone())
+        .map_err(|error| driver_error(error.to_string()))?
+    {
+        MarketBarModelOutcome::Published(generation) => generation,
+        outcome => {
+            return Err(driver_error(format!(
+                "publication update did not publish: {outcome:?}"
+            )));
+        }
+    };
+    MarketStreamPublication::try_new(format!("{provider_id}-fixture"), update, generation)
+        .map_err(|error| driver_error(error.to_string()))
+}
+
 fn driver_error(message: impl Into<String>) -> ConformanceHarnessError {
     ConformanceHarnessError::Driver(message.into())
 }
@@ -343,12 +817,9 @@ fn driver_error(message: impl Into<String>) -> ConformanceHarnessError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_coinbase_market_adapter::CoinbaseDecoder;
-    use axiusflow_desktop_provider_runtime::{
-        InstrumentDescriptor, ProviderEnvironment, ProviderInvalidationReason, SessionGeneration,
-    };
-    use axiusflow_market_data::{
-        BarPeriod, BarSeriesKey, EventMetadata, MarketBar, QualifiedTimestamp,
+    use axiusflow_desktop_provider_runtime::{ProviderInvalidationReason, SessionGeneration};
+    use axiusflow_instruments::{
+        AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
     };
     use std::num::NonZeroU64;
 
@@ -358,22 +829,18 @@ mod tests {
         let coinbase = coinbase_fixture(generation);
         let coinbase_report =
             run_provider_adapter_conformance(&coinbase).expect("Coinbase fixture conforms");
-        assert_eq!(coinbase_report.market_events, 1);
-        assert_eq!(coinbase_report.depth_publications, 0);
+        assert_eq!(coinbase_report.market_events, 3);
+        assert_eq!(coinbase_report.depth_publications, 2);
 
-        let rithmic = axiusflow_rithmic_fixture_adapter::deterministic_session(generation);
-        let rithmic_report = run_provider_adapter_conformance(&ProviderAdapterFixture {
-            events: rithmic.events,
-            bar_updates: rithmic.bar_updates,
-        })
-        .expect("Rithmic fixture conforms");
+        let rithmic_report = run_provider_adapter_conformance(&rithmic_fixture(generation))
+            .expect("Rithmic fixture conforms");
         assert_eq!(rithmic_report.market_events, 3);
         assert_eq!(rithmic_report.depth_publications, 2);
-        assert_eq!(rithmic_report.forming_bars, coinbase_report.forming_bars);
-        assert_eq!(
-            rithmic_report.completed_bars,
-            coinbase_report.completed_bars
-        );
+        assert_eq!(rithmic_report, coinbase_report);
+        assert_eq!(coinbase_report.book_recoveries, 1);
+        assert_eq!(coinbase_report.covering_snapshots, 1);
+        assert_eq!(coinbase_report.stream_publications, 3);
+        assert_eq!(coinbase_report.stream_recoveries, 1);
     }
 
     #[test]
@@ -472,9 +939,9 @@ mod tests {
     #[test]
     fn shared_harness_tracks_depth_books_per_instrument() {
         let generation = SessionGeneration::new(NonZeroU64::MIN);
-        let mut session = axiusflow_rithmic_fixture_adapter::deterministic_session(generation);
+        let mut fixture = rithmic_fixture(generation);
         let ProviderSessionEvent::InstrumentsDiscovered { instruments, .. } =
-            &mut session.events[3]
+            &mut fixture.events[3]
         else {
             panic!("fixture instrument event is stable");
         };
@@ -486,7 +953,7 @@ mod tests {
             price_scale: 2,
             quantity_scale: 0,
         });
-        let mut second_snapshot = session.events[5].clone();
+        let mut second_snapshot = fixture.events[5].clone();
         let ProviderSessionEvent::Market {
             event: MarketEvent::DepthSnapshot(snapshot),
             ..
@@ -496,13 +963,10 @@ mod tests {
         };
         snapshot.metadata.instrument_id = "instrument:rithmic:cme:nq".to_string();
         snapshot.metadata.source_sequence = 1;
-        session.events.insert(7, second_snapshot);
+        fixture.events.insert(7, second_snapshot);
 
-        let report = run_provider_adapter_conformance(&ProviderAdapterFixture {
-            events: session.events,
-            bar_updates: session.bar_updates,
-        })
-        .expect("independent instrument books conform");
+        let report = run_provider_adapter_conformance(&fixture)
+            .expect("independent instrument books conform");
         assert_eq!(report.market_events, 4);
         assert_eq!(report.depth_publications, 3);
     }
@@ -521,6 +985,74 @@ mod tests {
         assert!(run_provider_adapter_conformance(&reversed).is_err());
     }
 
+    #[test]
+    fn shared_harness_rejects_noncovering_book_recovery() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = coinbase_fixture(generation);
+        let MarketEvent::DepthSnapshot(snapshot) = &mut fixture.book_recovery_events[4] else {
+            panic!("fixture covering snapshot is stable");
+        };
+        snapshot.metadata.source_sequence = 12;
+
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
+    #[test]
+    fn shared_harness_rejects_mismatched_publication_identity() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = rithmic_fixture(generation);
+        fixture.bar_definition.definition_id = "wrong-series".to_string();
+
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
+    #[test]
+    fn shared_harness_rejects_publication_precision_mismatch() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = coinbase_fixture(generation);
+        fixture.publication_instrument.precision =
+            InstrumentPrecision::try_new(4, 8).expect("mismatched fixture precision");
+
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
+    #[test]
+    fn shared_harness_rejects_unfenced_terminal_invalidation() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = coinbase_fixture(generation);
+        let ProviderSessionEvent::Invalidated {
+            generation: invalidation_generation,
+            ..
+        } = &mut fixture.events[8]
+        else {
+            panic!("fixture invalidation event is stable");
+        };
+        *invalidation_generation = None;
+
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
+    #[test]
+    fn shared_harness_rejects_bar_interval_mismatch() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = rithmic_fixture(generation);
+        fixture.bar_definition.interval_seconds = 300;
+
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
+    #[test]
+    fn shared_harness_rejects_reversed_publication_timestamps() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = coinbase_fixture(generation);
+        let BarUpdate::Forming { metadata, .. } = &mut fixture.bar_updates[2] else {
+            panic!("fixture next forming bar is stable");
+        };
+        metadata.timestamps.received_unix_nanos = 1_800_000_000_000_000_000;
+
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
     fn set_bar_sequence(update: &mut BarUpdate, sequence: u64) {
         match update {
             BarUpdate::Forming { metadata, bar, .. }
@@ -532,103 +1064,74 @@ mod tests {
     }
 
     fn coinbase_fixture(generation: SessionGeneration) -> ProviderAdapterFixture {
-        let mut decoder = CoinbaseDecoder::new();
-        let trades = decoder
-            .decode(
-                br#"{"channel":"market_trades","timestamp":"2023-02-09T20:19:35.39625135Z","sequence_num":0,"events":[{"type":"update","trades":[{"trade_id":"fixture-coinbase-1","product_id":"BTC-USD","price":"37000.00","size":"0.50000000","side":"SELL","time":"2023-02-09T20:19:34.265Z"}]}]}"#,
-            )
-            .expect("fixture decodes");
-        let trade = trades[0]
-            .to_market_trade(2, 8, generation.get(), 1_800_000_002_000_000_000)
-            .expect("fixture projects");
-        let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: "crypto_public_realtime".to_string(),
-            period: BarPeriod::Time { seconds: 60 },
-            definition_version: 1,
-        };
+        let session = axiusflow_coinbase_market_adapter::deterministic_fixture_session(generation)
+            .expect("Coinbase fixture builds");
         ProviderAdapterFixture {
-            events: vec![
-                ProviderSessionEvent::DiscoveryStarted,
-                ProviderSessionEvent::SystemsDiscovered {
-                    environments: vec![ProviderEnvironment {
-                        provider_id: "coinbase".to_string(),
-                        system_id: "advanced_trade_public".to_string(),
-                        environment: "production".to_string(),
-                    }],
-                },
-                ProviderSessionEvent::AuthenticationChanged {
-                    generation,
-                    state: AuthenticationState::Accepted,
-                },
-                ProviderSessionEvent::InstrumentsDiscovered {
-                    generation,
-                    instruments: vec![InstrumentDescriptor {
-                        instrument_id: series.instrument_id.clone(),
-                        provider_symbol: "BTC-USD".to_string(),
-                        display_symbol: "BTC/USD".to_string(),
-                        venue_id: "COINBASE".to_string(),
-                        price_scale: 2,
-                        quantity_scale: 8,
-                    }],
-                },
-                ProviderSessionEvent::Market {
-                    generation,
-                    event: MarketEvent::Trade(trade),
-                },
-                ProviderSessionEvent::Heartbeat {
-                    generation,
-                    received_unix_nanos: 1_800_000_003_000_000_000,
-                },
-                ProviderSessionEvent::Stopped,
-            ],
-            bar_updates: vec![
-                bar_update(series.clone(), generation.get(), 2, false),
-                bar_update(series, generation.get(), 3, true),
-            ],
+            events: session.events,
+            bar_updates: session.bar_updates,
+            book_recovery_events: session.book_recovery_events,
+            publication_instrument: fixture_instrument(
+                "instrument:coinbase:btc:usd",
+                AssetClass::CryptoAsset,
+                "BTC/USD",
+                "COINBASE",
+                "USD",
+                2,
+                8,
+            ),
+            bar_definition: fixture_bar_definition("coinbase", "instrument:coinbase:btc:usd"),
         }
     }
 
-    fn bar_update(
-        series: BarSeriesKey,
-        generation: u64,
-        sequence: u64,
-        completed: bool,
-    ) -> BarUpdate {
-        let metadata = EventMetadata {
-            provider_id: series.provider_id.clone(),
-            instrument_id: series.instrument_id.clone(),
-            entitlement_id: series.entitlement_id.clone(),
-            source_sequence: sequence,
-            session_generation: generation,
-            timestamps: QualifiedTimestamp {
-                exchange_unix_nanos: Some(1_800_000_000_000_000_000),
-                provider_unix_nanos: Some(1_800_000_001_000_000_000),
-                received_unix_nanos: 1_800_000_002_000_000_000,
-            },
-        };
-        let bar = MarketBar {
-            source_sequence: sequence,
-            exchange_timestamp_seconds: 1_800_000_000,
-            open: 3_700_000,
-            high: 3_701_000,
-            low: 3_699_000,
-            close: 3_700_500,
-            volume: 50_000_000,
-        };
-        if completed {
-            BarUpdate::Completed {
-                series,
-                metadata,
-                bar,
-            }
-        } else {
-            BarUpdate::Forming {
-                series,
-                metadata,
-                bar,
-            }
+    fn rithmic_fixture(generation: SessionGeneration) -> ProviderAdapterFixture {
+        let session = axiusflow_rithmic_fixture_adapter::deterministic_session(generation);
+        ProviderAdapterFixture {
+            events: session.events,
+            bar_updates: session.bar_updates,
+            book_recovery_events: session.book_recovery_events,
+            publication_instrument: fixture_instrument(
+                "instrument:rithmic:cme:es",
+                AssetClass::Future,
+                "ES",
+                "CME",
+                "USD",
+                2,
+                0,
+            ),
+            bar_definition: fixture_bar_definition("rithmic", "instrument:rithmic:cme:es"),
+        }
+    }
+
+    fn fixture_instrument(
+        instrument_id: &str,
+        asset_class: AssetClass,
+        symbol: &str,
+        venue_id: &str,
+        trading_currency: &str,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> InstrumentRevision {
+        InstrumentRevision {
+            instrument_id: InstrumentId::try_new(instrument_id).expect("fixture instrument id"),
+            revision: 1,
+            asset_class,
+            symbol: symbol.to_string(),
+            venue_id: venue_id.to_string(),
+            trading_currency: trading_currency.to_string(),
+            precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
+                .expect("fixture precision"),
+            lifecycle: InstrumentLifecycle::Active,
+        }
+    }
+
+    fn fixture_bar_definition(provider_id: &str, instrument_id: &str) -> BarDefinition {
+        BarDefinition {
+            definition_id: format!(
+                "{provider_id}:{instrument_id}:{:?}",
+                axiusflow_market_data::BarPeriod::Time { seconds: 60 }
+            ),
+            version: 1,
+            interval_seconds: 60,
         }
     }
 }

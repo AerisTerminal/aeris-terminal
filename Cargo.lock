@@ -1010,6 +1010,7 @@ dependencies = [
  "axiusflow_chart_integration",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_desktop_provider_runtime",
+ "axiusflow_instruments",
  "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
  "axiusflow_protocols",

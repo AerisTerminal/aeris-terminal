@@ -10,6 +10,7 @@ publish.workspace = true
 axiusflow_application = { path = "../application" }
 axiusflow_coinbase_market_adapter = { path = "../adapters/coinbase_market" }
 axiusflow_desktop_provider_runtime = { path = "../desktop_provider_runtime" }
+axiusflow_instruments = { path = "../domain/instruments" }
 axiusflow_chart_integration = { path = "../ui/chart_integration" }
 axiusflow_market_protocol_adapter = { path = "../adapters/market_protocol" }
 axiusflow_protocols = { path = "../protocols" }

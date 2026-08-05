@@ -12,6 +12,7 @@ mod decoder;
 mod desktop_driver;
 mod errors;
 mod fixed_point;
+mod fixture;
 mod history;
 mod messages;
 mod review;
@@ -31,6 +32,7 @@ pub use desktop_driver::{
 };
 pub use errors::CoinbaseError;
 pub use fixed_point::FixedPointValue;
+pub use fixture::{CoinbaseFixtureSession, deterministic_fixture_session};
 pub use history::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
     CoinbaseHttpsHistoryTransport, decode_history_bar,
