@@ -1,4 +1,10 @@
-> **Historical archive — non-authoritative.** This is the frozen revision 7 plan as it stood on 2026-08-04. It preserves prior CI narratives, completed investigations, and retired AF_XDP/DPDK work. Do not use it to select or track current work. The authoritative roadmap is [`../platform_creation_plan.md`](../platform_creation_plan.md).
+> **Historical archive — non-authoritative.** This is the frozen revision 7 plan
+> as it stood on 2026-08-04. It preserves prior CI narratives, completed
+> investigations, and retired AF_XDP/DPDK work. Stage 3 (OMS/execution), Stage 5
+> (cloud market data), and acceleration checklists here are not an active
+> backlog. Do not use this file to select or track current work. The
+> authoritative roadmap is
+> [`../platform_creation_plan.md`](../platform_creation_plan.md).
 
 # Axiusflow Platform Creation Plan
 

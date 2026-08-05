@@ -11,9 +11,13 @@ does not compile or exercise them.
 
 The provider-neutral transport contracts remain authoritative: bounded receive ownership and
 release, canonical source sequence, explicit timestamp provenance, overflow accounting, bounded
-partition and fanout queues, and deterministic replay. The historical adapter source, vendored
-patch, fuzz target, privileged harnesses, and recorded evidence remain in the repository for audit
-and possible contract extraction, but are excluded from supported build and release surfaces.
+partition and fanout queues, and deterministic replay.
+
+**Supersedes the prior “remain in the repository” retention sentence.** Historical adapter
+source, vendored patches, fuzz targets, privileged harnesses, and recorded evidence are
+**deleted from `main`**. Audit and contract extraction use git history and an annotated tag
+`retired/af_xdp_dpdk_<shortsha>` created immediately before deletion (Stage 0 of
+`docs/platform_creation_plan.md`). Live excluded crates are not an audit surface.
 
 The transport profile enum retains the retired variants so old evidence and serialized diagnostic
 vocabulary remain interpretable. Runtime readiness rejects both variants because neither appears

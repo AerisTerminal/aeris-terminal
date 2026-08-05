@@ -1,20 +1,21 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 13
-**Last updated:** 2026-08-05
+**Revision:** 15
+**Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
-## 1. Document authority
+## 0. How to use this document
 
-This document is the single active execution roadmap for Axiusflow.
+This document is the single active execution backlog for Axiusflow.
 
-The frozen revision 7 plan is retained at
+Frozen history lives at
+[`archive/platform_creation_plan_revision_14_2026_08_05.md`](archive/platform_creation_plan_revision_14_2026_08_05.md)
+and
 [`archive/platform_creation_plan_revision_7_2026_08_04.md`](archive/platform_creation_plan_revision_7_2026_08_04.md).
-It is historical evidence, not an active backlog. Historical CI narratives and
-retired AF_XDP/DPDK work remain there and are intentionally absent here.
+Those files are not backlogs.
 
-Allowed status values are:
+Allowed status values:
 
 - `ready`: specified and free of known external blockers.
 - `in_progress`: implementation exists or is being changed but its gate is not met.
@@ -23,8 +24,27 @@ Allowed status values are:
 - `verified`: the declared gate has evidence and passes.
 - `retired`: removed from active product scope.
 
-No other status token is valid in this plan. A contract, fixture, or passing unit
-test does not by itself justify `verified` for provider or product behavior.
+A contract, fixture, or passing unit test does not by itself justify `verified`
+for provider or product behavior. Open **§1 Active now**, finish that stage's
+gate, then advance. Do not mine §12, archives, or decision history for work.
+Batching, validation, review, commit, and push rules live in `AGENTS.md`.
+Inspect the working tree before changing it; do not overwrite concurrent edits.
+
+## 1. Active now
+
+| Field | Value |
+|---|---|
+| Current stage(s) | Stage 0 (`ready`), Stage A (`in_progress`), Stage D (`in_progress`) |
+| Blocked | Stage C — Rithmic package, agreements, Test login, schema, entitlements |
+| Next after current | Stage E (after C+D deterministic gates), then Stage F |
+| Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R\|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
+| Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
+
+Remaining work for current `in_progress` / cleanup stages:
+
+- **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane, align companion decisions (see §5).
+- **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
+- **Stage D:** capture and validate the named disabled/enabled diagnostics overhead benchmark against the p99 / p99.9 budgets.
 
 ## 2. Product thesis
 
@@ -32,118 +52,105 @@ Axiusflow is a lightweight, local-first professional market terminal. The first
 bounded product path is a read-only Rithmic Test terminal with charts, standard
 timeframes, tick charts, and a DOM/order book.
 
-Its product edge is transparent speed and correctness:
+Product edge: direct-to-device provider connectivity, off-UI-thread processing,
+visible latency/queue/gap/recovery/provenance, bounded resources, deterministic
+recovery, and authorized fixture replay. Performance claims require named
+hardware, OS, display, provider/environment, workload, sample window, and
+percentile evidence—never unmeasured superiority over other terminals.
 
-- connect directly from the user's device to the authorized provider;
-- keep network, decoding, aggregation, and storage work off the UI thread;
-- display latency boundaries, queue pressure, gaps, recovery, and provenance;
-- bound memory, queues, payloads, deadlines, and retries;
-- recover deterministically instead of concealing loss;
-- reproduce behavior from authorized deterministic fixtures.
+Full scope policy:
+[`decisions/2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md).
 
-Axiusflow does not claim unmeasured superiority over ATAS, Sierra Chart, TOS, or
-another terminal. Performance claims require named hardware, operating system,
-display, provider/environment, workload, sample window, and percentile evidence.
-
-## 3. Current truth
+## 3. Active truth
 
 | Area | Status | Current reality |
 |---|---|---|
-| Coinbase reference feed | `in_progress` | Direct public history and live aggregation exist for BTC-USD and ETH-USD one-minute bars. The desktop integration remains under stabilization and lacks the full desktop-live gate. |
-| Coinbase chart UI | `in_progress` | The application has an emerging live worker path, but no complete desktop-live integration gate. Loading and recovery behavior are not final. |
-| Coinbase depth and timeframes | `deferred` | Coinbase is frozen at one-minute bars. It has no depth UI and no timeframe selector. |
-| Provider-neutral runtime | `verified` | Shared runtime modules are provider-neutral. Coinbase and deterministic Rithmic semantic fixtures pass the same bounded lifecycle, generation, bar, book-gap recovery, covering-snapshot, invalidation, and immutable publication conformance gate. |
-| Rithmic access | `blocked_external` | Access has been offered, but the accepted package, agreements, Test login, protocol semantics, entitlements, and certification have not been verified. |
-| Rithmic adapter | `ready` | A kit-optional, read-only implementation can begin without committing proprietary material. Live validation remains externally blocked. |
-| Lightweight diagnostics | `in_progress` | The bounded feed-health accumulator is wired to the provider-neutral headless event boundary and exercised by both Coinbase and Rithmic semantic fixtures. UI frame-path wiring and named overhead evidence remain. |
-| Main Rithmic UI | `ready` | Work begins after the deterministic headless and diagnostics gates pass. |
-| IQFeed | `deferred` | Access is preliminary and it is not on the current delivery path. |
-| CQG | `deferred` | No implementation or certification work is active. |
-| R|API+ | `deferred` | Native R|API+ is distinct from R|Protocol and outside this roadmap. |
-| Orders and execution | `deferred` | Orders, OMS, risk, positions, accounts, and execution are excluded. |
-| Cloud market data | `deferred` | Provider data remains direct-to-device; Axiusflow does not relay it through its cloud. |
-| AF_XDP and DPDK | `retired` | Historical experiments are archived and are not product dependencies. |
+| Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete. |
+| Provider-neutral runtime | `verified` | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance. |
+| Rithmic access | `blocked_external` | Package, agreements, Test login, schema, entitlements, and certification unverified. |
+| Rithmic adapter (kit-optional) | `ready` | Read-only kit-optional work can proceed; live validation stays blocked. |
+| Lightweight diagnostics | `in_progress` | Feed-health path ships; named disabled/enabled overhead evidence remains. |
+| Main Rithmic UI | `ready` | Starts after Stages C and D deterministic headless gates. |
+| Readiness / endurance | `ready` | Stage F. |
+| Descope cleanup | `ready` | Stage 0 — remove retired keep-alives and quarantine deferred build surfaces. |
 
-The current working tree must be inspected before every change. Existing edits
-belong to their author until understood. No stage may overwrite or discard them.
+Deferred and retired items are listed only in §12.
 
 ## 4. Guardrails
 
 ### 4.1 Product scope
 
-- Rithmic Test through R|Protocol is the primary provider target; the first
-  milestone is read-only market data.
+- Rithmic Test through R|Protocol is the primary provider target; first milestone
+  is read-only market data.
 - Coinbase is a correctness and regression reference only.
-- Main UI work follows the bounded headless Rithmic gate; complete provider
-  template coverage is not required first.
+- Main UI follows the bounded headless Rithmic gate.
 - Unsupported symbols, periods, systems, or history semantics fail explicitly.
-- No raw protobuf-send escape hatch is part of the application API.
+- No raw protobuf-send escape hatch in the application API.
 
 ### 4.2 Provider and licensed material
 
-- Store an accepted local kit only under
-  `.cache/provider_kits/rithmic/current/`.
+- Accepted local kit only under `.cache/provider_kits/rithmic/current/`.
 - Ignore ZIPs, guides, `.proto` files, generated bindings, credentials, captures,
-  licensed inventories, and payload fixtures unless a license review explicitly
-  permits tracking them.
+  licensed inventories, and payload fixtures unless license review permits.
 - Generate bindings into `OUT_DIR` when the kit is present; otherwise build an
   explicit `RithmicKitUnavailable` backend.
-- Keep ordinary validation green without proprietary files; add a private
-  kit-enabled lane only when secure CI material is available.
+- Ordinary validation stays green without proprietary files.
 - Manual agreement acceptance occurs through R|Trader or R|Trader Pro.
 
 ### 4.3 Credential handling
 
 - Provision credentials through a TTY prompt into `NativeCredentialVault`.
-- Never accept passwords in command-line arguments, environment variables,
-  configuration files, logs, fixtures, debug output, or panic messages.
-- Load credential bytes only for the connection attempt, bound their size, and
-  zeroize temporary buffers immediately afterward.
-- Diagnostics and errors expose coarse classes, never provider text that may
-  echo secrets or account information.
+- Never accept passwords in argv, environment, config, logs, fixtures, debug
+  output, or panic messages.
+- Load credential bytes only for the connection attempt, bound size, and zeroize
+  temporary buffers immediately afterward.
+- Diagnostics expose coarse classes only—never provider text that may echo
+  secrets or account information.
 
 ### 4.4 Runtime and UI boundaries
 
 - One provider-neutral coordinator owns session and chart-recovery fencing.
-- Provider adapters own transport and wire decoding.
-- Provider-neutral workers own lifecycle, bars, books, recovery, diagnostics,
-  and immutable publication.
-- GPUI owns presentation only; it performs no network, storage, protobuf, or
-  aggregation work.
-- All queues are bounded and all overflow behavior is explicit.
+- Adapters own transport and wire decoding; provider-neutral workers own
+  lifecycle, bars, books, recovery, diagnostics, and immutable publication.
+- GPUI is presentation-only: no network, storage, protobuf, or aggregation.
+- All queues are bounded with explicit overflow behavior.
 - State and forming updates may coalesce; ordered completed bars and book deltas
-  may not silently drop.
-- Old generations, callbacks, recovery identifiers, and UI selections can never
-  mutate the current workspace.
+  must not silently drop.
+- Old generations, callbacks, recovery IDs, and UI selections never mutate the
+  current workspace.
 
-### 4.5 Validation and delivery
+## 5. Stage 0 — Descope cleanup
 
-Work continuously through a very large coherent batch from the current roadmap
-stage, including its regression coverage. Do not stop for full-workspace
-validation, review, commits, or pushes after individual edits or small
-checkpoints. Use focused builds and tests during implementation only when they
-provide useful feedback.
+**Status:** `ready`
 
-After the large work unit is complete, run one commit-boundary gate in order:
+Prefer completing Stage 0 before expanding Stages E/F. It may run in parallel
+with Stages A and D. New agents pick Stage 0 when it is not `verified`.
 
-1. `cargo fmt --all -- --check`.
-2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
-3. `cargo build --workspace --all-targets --all-features`.
-4. Relevant tests and provider conformance suites.
-5. Run the configured `cx/gpt-5.6-sol` low-reasoning review with
-   `codex exec review --uncommitted --ephemeral -m cx/gpt-5.6-sol -c
-   'model_reasoning_effort="low"'` until it reports no findings.
-6. Commit to `main`, then `git push origin main` without force.
+### Remaining work
 
-If validation or review finds problems, fix them as one batch, use focused
-checks while iterating, and repeat the complete gate only when the batch is
-again ready to commit.
+1. Create tag `retired/af_xdp_dpdk_<shortsha>`; delete
+   `crates/adapters/linux_af_xdp`, `crates/adapters/linux_dpdk`, and related fuzz
+   / exclude entries; confirm `cargo build --workspace` stays green.
+2. Quarantine `services/market_data_plane` via `workspace.exclude` (do not delete
+   `crates/domain/market_data`).
+3. Update `docs/linux_development.md` after the deletions so it no longer claims
+   source is retained in-tree.
 
-## 5. Stage A — Stabilize and freeze Coinbase
+Retirement decision, store decision, provider-priority Stage 0 note, and archive
+banners (rev 7 / rev 14) already landed with revision 15.
+
+### Gate
+
+- Stage 0 deletions and quarantine land with a green workspace build.
+- Workspace builds do not compile AF_XDP/DPDK adapters or the cloud MD plane.
+- §12 lists every deferred/retired disposition; none appear as Work in A–F.
+- `docs/linux_development.md` matches the delete-from-main policy.
+
+## 6. Stage A — Stabilize and freeze Coinbase
 
 **Status:** `in_progress`
 
-### Work
+### Remaining work
 
 - Replace the synthetic placeholder bar with explicit chart states:
   `Loading`, `Ready`, `Stale`, `Recovering`, and `Error`.
@@ -168,77 +175,31 @@ owner, nonblocking publication, and no unreviewed warnings. After this gate,
 Coinbase receives correctness fixes only—no symbols, timeframes, depth,
 analytics, or cloud routes.
 
-## 6. Stage B — Provider-neutral contracts and runtime
+## 7. Stage B — Provider-neutral contracts and runtime
 
 **Status:** `verified`
 
-### Canonical contracts
+### Remaining work
 
-- Fixed-point `MarketTrade` and `TopOfBookQuote`.
-- `BookSide`, `DepthLevel`, `DepthSnapshot`, and `DepthDelta`.
-- `BarSeriesKey` and `BarUpdate::{Forming, Completed}`.
-- `OrderBookPublication` with revision, source watermark, bounded top-N levels,
-  and stale/recovery state.
-- `MarketEvent::{Trade, Quote, DepthSnapshot, DepthDelta}`.
-- Every event carries provider, instrument, entitlement, source sequence,
-  session generation, and qualified timestamps.
-
-### Session boundary
-
-- `ProviderSessionEvent` exposes discovery, authentication, instruments, market
-  events, heartbeat, invalidation, and stop.
-- Sealed read-only commands are connect, replace subscriptions, request
-  recovery, disconnect, and shutdown.
-- Remove Coinbase types, aggregation maps, and Coinbase-specific methods from
-  `desktop_provider_runtime`.
-- Keep wire frames and raw protobuf outside public runtime contracts.
-- Define tick, 1m, 5m, 15m, 1h, and daily series semantics.
-- Enable a period only after its trade semantics and exchange-session calendar
-  are defined.
+None — gate met. Contracts live in `crates/domain/market_data` and
+`crates/desktop_provider_runtime`.
 
 ### Gate
 
-Both the Coinbase adapter and deterministic Rithmic fixture adapter pass the
-same lifecycle, generation-fencing, bar, book, recovery, and publication
-conformance suites without provider-specific types in shared runtime modules.
+Coinbase adapter and deterministic Rithmic fixture adapter pass the same
+lifecycle, generation-fencing, bar, book, recovery, and publication conformance
+suites without provider-specific types in shared runtime modules.
 
-### Current implementation evidence
-
-- Canonical fixed-point trade, top-of-book quote, depth snapshot/delta, standard
-  bar-period, bar-series key, bar-update, and market-event contracts are present.
-- The bounded provider-neutral order book publishes immutable top-N snapshots,
-  ignores stale generations and sequences, and discards candidate state on gaps
-  or crossed books until a covering snapshot arrives.
-- Provider session discovery, authentication, instrument, market, heartbeat,
-  invalidation, and stop events have explicit validation and memory bounds.
-- The application command surface is closed to connect, subscription
-  replacement, recovery, disconnect, and shutdown; it has no raw payload or
-  provider-template command.
-- Coinbase decoded trades project into the canonical fixed-point trade contract
-  with exact configured scales and qualified timestamps.
-- Coinbase session driving, callback validation, live aggregation, and history
-  seeding now live behind the Coinbase adapter boundary; shared runtime modules
-  contain no Coinbase driver, aggregation map, type, or method.
-- A deterministic Rithmic Test semantic fixture emits bounded discovery,
-  authentication, instrument, trade, depth, heartbeat, forming-bar, and
-  completed-bar evidence. Coinbase owns an equivalent deterministic semantic
-  fixture that retains the reviewed public trade decode and projection path.
-- The shared adapter harness runs both fixtures through the same steady-state
-  book publications, sequence-gap fail-closed transition, rejected non-covering
-  snapshot, covering recovery snapshot, post-recovery delta, terminal
-  invalidation, and immutable application publication/recovery checks.
-- Authorized Rithmic WSS/Protobuf decoding and provider-behavior evidence remain
-  externally blocked and belong to the Stage C gate after protocol-kit access.
-
-## 7. Stage C — Rithmic read-only headless core
+## 8. Stage C — Rithmic read-only headless core
 
 **Status:** `blocked_external`
 
-Implementation that does not require the kit is `ready`; authorized Test and
-schema validation remain `blocked_external` until package and account access are
-verified.
+Kit-optional implementation is `ready`; authorized Test and schema validation
+remain `blocked_external` until package and account access are verified.
 
-### Protocol lifecycle
+### Remaining work
+
+#### Protocol lifecycle
 
 1. Open validated WSS for system discovery.
 2. Request and bound system information.
@@ -247,7 +208,7 @@ verified.
 5. Authenticate specifically to the Test system.
 6. Establish heartbeat, instruments, and read-only subscriptions.
 
-### Required behavior
+#### Required behavior
 
 - Bound TLS, handshake, frame, protobuf, repeated-field, symbol, depth, queue,
   and deadline sizes.
@@ -271,13 +232,13 @@ disconnect/reconnect, recovery, clean stop, bounds, allowlisting, and redaction.
 Authorized Rithmic Test traffic must repeat the gate before provider behavior is
 marked `verified`.
 
-## 8. Stage D — Lightweight diagnostics
+## 9. Stage D — Lightweight diagnostics
 
 **Status:** `in_progress`
 
-Always-on instrumentation consists of allocation-free counters and current or
-high-water values. Bounded detailed histograms are opt-in. Publish an immutable
-snapshot no faster than 4 Hz containing:
+Always-on instrumentation: allocation-free counters and current/high-water
+values. Bounded detailed histograms are opt-in. Publish an immutable snapshot no
+faster than 4 Hz containing:
 
 - provider, system, environment, and connection state;
 - session generation, uptime, reconnect count, and recovery reason;
@@ -296,46 +257,23 @@ Diagnostics exclude credentials, raw payloads, account data, and licensed
 subscription inventories. Detailed diagnostics must not regress p99 by more
 than 5% or p99.9 by more than 10% under the same measured workload.
 
-### Current implementation evidence
+### Remaining work
 
-- The observability owner retains always-on counters and current/high-water
-  queue and approximate-memory gauges in fixed-size storage. Impossible
-  occupancy, changing capacity, and memory-bound violations fail explicitly.
-- Immutable snapshots are suppressed inside a 250 ms window and calculate
-  deterministic trade, quote, depth, and publication rates from the prior
-  accepted snapshot.
-- Session generations, reconnects, uptime, heartbeat age, last-message age,
-  history state, order-book state, and coarse recovery reasons are explicit.
-- Provider timestamp age is signed and labelled `ProviderClockRelativeAge`; it
-  is never presented as network or local processing latency.
-- Detailed local latency histograms are opt-in, fixed-size, bounded by a
-  maximum accepted sample, and expose p50, p95, p99, p99.9, maximum, accepted,
-  and rejected sample evidence.
-- The overhead evidence contract requires named hardware, operating system,
-  workload, warm-up, sample count, ordered percentiles, and identical
-  gap/overflow/recovery outcomes before enforcing the 5% and 10% budgets.
-- The provider-neutral headless diagnostics boundary consumes validated
-  discovery, authentication, instrument, market, heartbeat, invalidation, and
-  stop events; fences stale generations and unfenced invalidations; maps coarse
-  recovery reasons; and records canonical publication evidence.
-- Coinbase and deterministic Rithmic sessions pass the same diagnostics
-  conformance checks for identity, generation, market/depth/publication counts,
-  heartbeat age, last-message age, recovery, and immutable snapshot output.
-- Remaining work is wiring UI enqueue, frame-submit, and measurable presentation
-  timestamps, then capturing the named disabled/enabled benchmark.
+- Capture and validate the named disabled/enabled overhead benchmark against the
+  p99 and p99.9 budgets.
 
 ### Gate
 
 Snapshot cadence, memory bounds, redaction, counter accuracy, latency labels,
 and disabled/enabled overhead pass deterministic tests and a named benchmark.
 
-## 9. Stage E — Main Rithmic UI vertical
+## 10. Stage E — Main Rithmic UI vertical
 
 **Status:** `ready`
 
 Begin only after Stages C and D pass their deterministic headless gates.
 
-### Work
+### Remaining work
 
 - Launch a reliable local shell before login or history completion.
 - Show provider profile, Test environment, and connection state.
@@ -356,11 +294,13 @@ No GPUI-thread network, storage, protobuf, or aggregation work; correct DOM gap
 recovery; responsive symbol/timeframe replacement; and measured 60/120/144 Hz
 frame pacing on named hardware. Test and live states must be visually explicit.
 
-## 10. Stage F — Readiness and endurance
+## 11. Stage F — Readiness and endurance
 
 **Status:** `ready`
 
-Before readiness or performance claims, capture evidence for:
+### Remaining work
+
+Capture evidence for:
 
 - slow consumers and publication overflow;
 - heartbeat and message-silence loss;
@@ -379,7 +319,25 @@ within declared bounds; no stale generation reaches the model or UI; and the
 eight-hour run records no unexplained gap, deadlock, secret exposure, or
 unbounded growth.
 
-## 11. Performance targets
+## 12. Deferred / retired
+
+Reopening any row requires a new accepted decision. Do not reopen via archive
+Stage 3 / 5B checklists.
+
+| Item | Status | Disposition | Pointer |
+|---|---|---|---|
+| Coinbase depth and timeframes | `deferred` | (c) freeze — no work | Stage A gate; provider_priority decision |
+| IQFeed | `deferred` | (c) no work | provider_priority decision |
+| CQG | `deferred` | (c) no work | provider_priority decision |
+| R\|API+ | `deferred` | (c) no work | provider_priority decision |
+| Orders / OMS / execution | `deferred` | (c) no work | provider_priority; amended store decision |
+| Cloud market data | `deferred` | (b) quarantine crate in Stage 0 | provider_priority; Stage 0 |
+| AF_XDP and DPDK | `retired` | (a) delete from `main` in Stage 0 | acceleration_retirement; Stage 0 |
+
+Disposition classes: **(a)** delete from `main`, **(b)** quarantine + pointer,
+**(c)** defer-with-no-work.
+
+## 13. Performance targets
 
 Targets guide measurement; they are not current claims.
 
@@ -397,7 +355,7 @@ Latency reporting must separate provider clock-relative timestamp age from local
 socket-to-present processing. Every percentile report includes p50, p95, p99,
 p99.9, maximum, sample count, warm-up, and loss/recovery counters.
 
-## 12. Completion definition
+## 14. Completion definition
 
 This roadmap is complete when a user can launch the native shell, securely
 authenticate to Rithmic Test, discover and switch supported instruments, view

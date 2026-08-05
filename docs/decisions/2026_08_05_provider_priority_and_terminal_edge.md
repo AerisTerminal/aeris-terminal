@@ -61,6 +61,9 @@ without comparable measurements on named hardware and workloads.
   expansion does not compete with the Rithmic path.
 - Cloud market-data, packet acceleration, and execution work cannot silently
   return to active scope through implementation convenience.
+- Descoped artifacts are cleaned in Stage 0 of `docs/platform_creation_plan.md`
+  (delete retired AF_XDP/DPDK from `main`; quarantine deferred cloud MD build
+  surfaces). Deferred items must not remain as workspace keep-alives.
 
 ## Revisit conditions
 

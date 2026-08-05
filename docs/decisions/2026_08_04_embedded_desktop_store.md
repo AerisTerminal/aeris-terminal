@@ -7,8 +7,14 @@
 ## Decision
 
 Use exact-pinned `rusqlite 0.40.1` with its bundled SQLite `3.53.2` in WAL
-mode for desktop workspace state, cache manifests, schema/migration state,
-provider recovery checkpoints, and local OMS/order-intent metadata.
+mode for desktop workspace state, cache manifests, schema/migration state, and
+provider recovery checkpoints for the **read-only** terminal path.
+
+Orders, OMS, risk, positions, accounts, and execution metadata are **out of
+scope** for the current catalog. They remain deferred per
+[`2026_08_05_provider_priority_and_terminal_edge.md`](2026_08_05_provider_priority_and_terminal_edge.md).
+Paper OMS intent transactions in the spike evidence below are a **historical
+selection workload**, not a current schema requirement.
 
 This decision does not store tick, depth, bar, or derived-history payloads as
 database rows. Those remain separately versioned, immutable, checksummed
@@ -24,7 +30,8 @@ correctness review and reproduces under the same workload.
 The checked-in lane runs five fresh databases per candidate in an optimized
 build. Each run performs 64 individually durable workspace updates, one
 4,096-entry cache-manifest transaction, and 128 individually durable paper OMS
-intent transactions. It then closes, reopens, and verifies all state.
+intent transactions (historical spike workload only; not a current schema
+requirement). It then closes, reopens, and verifies all state.
 The runner builds the release binary itself and records the Git revision plus a
 content hash of every tracked and untracked, non-ignored workspace file, so a
 dirty evidence run cannot be mislabeled as its parent commit.
@@ -66,21 +73,24 @@ for the production terminal boundary and materially favors SQLite.
 The abrupt-exit probe is not a power-cut/torn-write test, and deterministic
 capacity limits are not a physically full filesystem. Power-loss, torn-write,
 real disk-full, backup/restore, and destructive migration matrices remain
-required before live-order use.
+required before any future live-order use; they are not Stage 0–F blockers for
+the read-only terminal.
 
 ## Correctness and schema rationale
 
 The selected workload is relational metadata, not a generic key/value cache.
-SQLite provides one transaction across workspace revisions, manifests, recovery
-checkpoints, and order-intent state; strict tables, constraints, indexed queries,
-explicit migrations, integrity checks, and mature inspection/recovery tooling
-are directly useful. Implementing those properties over redb would add custom
+SQLite provides one transaction across workspace revisions, manifests, and
+recovery checkpoints; strict tables, constraints, indexed queries, explicit
+migrations, integrity checks, and mature inspection/recovery tooling are
+directly useful. Implementing those properties over redb would add custom
 secondary indexes, constraint code, migration conventions, and diagnostic
 tooling that must all be proven separately.
 
 SQLite runs with `journal_mode=WAL`, `synchronous=FULL`, foreign keys enabled,
 and bounded busy timeouts. A successful performance result never permits
-weakening those settings for OMS state.
+weakening those settings for durable catalog state. Live-order / OMS durability
+matrices remain deferred with execution scope and are not required for the
+read-only terminal catalog.
 
 ## Dependency, packaging, and maintenance review
 
@@ -112,11 +122,13 @@ change the bundled SQLite version or durability configuration.
 SQLite and redb do not by themselves satisfy Axiusflow's encryption policy.
 Database files live in a per-user private application directory with restrictive
 permissions. Provider credentials never enter the database and remain in the OS
-credential vault. Sensitive workspace, account-binding, and order payloads must
-be encrypted and authenticated at the application-record boundary with a
-versioned key from the OS vault before live use; plaintext searchable columns
-are limited to the minimum non-secret routing/index metadata. Logs, crash
-reports, and diagnostics must redact both values and database pages.
+credential vault. Sensitive workspace and account-binding payloads must be
+encrypted and authenticated at the application-record boundary with a versioned
+key from the OS vault before storing secrets or account bindings; plaintext
+searchable columns are limited to the minimum non-secret routing/index
+metadata. Logs, crash reports, and diagnostics must redact both values and
+database pages. Order payloads remain out of scope until execution is
+re-accepted.
 
 SQLCipher is not adopted by this decision. It would add a separate native crypto
 and packaging boundary and requires its own threat model, dependency review, and
