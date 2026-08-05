@@ -36,6 +36,9 @@ pub enum CoinbaseProviderEvent {
         generation: SessionGeneration,
         trade: CanonicalTrade,
     },
+    Heartbeat {
+        generation: SessionGeneration,
+    },
     Invalid {
         generation: SessionGeneration,
         reason: CoinbaseProviderInvalidReason,
@@ -53,6 +56,10 @@ impl fmt::Debug for CoinbaseProviderEvent {
                 .debug_struct("Trade")
                 .field("generation", generation)
                 .field("trade", &"[REDACTED]")
+                .finish(),
+            Self::Heartbeat { generation } => formatter
+                .debug_struct("Heartbeat")
+                .field("generation", generation)
                 .finish(),
             Self::Invalid { generation, reason } => formatter
                 .debug_struct("Invalid")
@@ -150,6 +157,12 @@ impl SessionEmitter {
         self.send(CoinbaseProviderEvent::Trade {
             generation: self.generation,
             trade,
+        })
+    }
+
+    fn heartbeat(&self) -> bool {
+        self.send(CoinbaseProviderEvent::Heartbeat {
+            generation: self.generation,
         })
     }
 
@@ -444,7 +457,14 @@ pub fn try_recv_coinbase_trade<T: Clone, V: CredentialVault>(
         }
         CoinbaseProviderEvent::Trade { generation, trade } => {
             worker.ensure_streaming_generation(generation)?;
+            worker
+                .record_trade_diagnostics(generation, Some(trade.provider_timestamp_unix_nanos))?;
             Ok(Some((generation, trade)))
+        }
+        CoinbaseProviderEvent::Heartbeat { generation } => {
+            worker.ensure_streaming_generation(generation)?;
+            worker.record_heartbeat_diagnostics(generation)?;
+            Ok(None)
         }
         CoinbaseProviderEvent::Invalid { generation, reason } => {
             if reason == CoinbaseProviderInvalidReason::EventQueueOverflow {
@@ -482,6 +502,8 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
         }
         CoinbaseProviderEvent::Trade { generation, trade } => {
             worker.ensure_streaming_generation(generation)?;
+            worker
+                .record_trade_diagnostics(generation, Some(trade.provider_timestamp_unix_nanos))?;
             let Some(aggregator) = aggregators
                 .iter_mut()
                 .find(|aggregator| aggregator.product_id() == trade.product_id)
@@ -496,6 +518,11 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
                 return Err(CoinbaseDesktopEventError::Aggregation);
             };
             Ok(completed.map(|bar| (generation, bar)))
+        }
+        CoinbaseProviderEvent::Heartbeat { generation } => {
+            worker.ensure_streaming_generation(generation)?;
+            worker.record_heartbeat_diagnostics(generation)?;
+            Ok(None)
         }
         CoinbaseProviderEvent::Invalid { generation, reason } => {
             reset_aggregators(aggregators);
@@ -613,12 +640,19 @@ fn direct_session_task() -> Arc<SessionTask> {
             stop.store(true, Ordering::Release);
             return;
         }
-        let result =
-            connection.collect_until_stopped(&mut || stop.load(Ordering::Acquire), &mut |trade| {
+        let result = connection.collect_until_stopped_with_heartbeat(
+            &mut || stop.load(Ordering::Acquire),
+            &mut |trade| {
                 if !emitter.trade(trade.clone()) {
                     stop.store(true, Ordering::Release);
                 }
-            });
+            },
+            &mut || {
+                if !emitter.heartbeat() {
+                    stop.store(true, Ordering::Release);
+                }
+            },
+        );
         if stop.load(Ordering::Acquire) {
             return;
         }
@@ -647,8 +681,8 @@ mod tests {
     use super::{
         CoinbaseDesktopEventError, CoinbaseProviderDriver, CoinbaseProviderDriverError,
         CoinbaseProviderEvent, CoinbaseProviderEvents, CoinbaseProviderInvalidReason,
-        SessionEmitter, SessionTask, seed_coinbase_bar_history, try_recv_coinbase_bar,
-        try_recv_coinbase_trade,
+        SessionEmitter, SessionTask, seed_coinbase_bar_history, try_recv_coinbase_aggregated_bar,
+        try_recv_coinbase_bar, try_recv_coinbase_trade,
     };
     use crate::{
         CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig,
@@ -656,9 +690,9 @@ mod tests {
     };
     use axiusflow_desktop_history::{HistoryWorkerConfig, StartupCacheState};
     use axiusflow_desktop_provider_runtime::{
-        ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig,
-        DesktopProviderRuntime, DesktopProviderState, ProviderSessionDriver, RecoveryReason,
-        SessionGeneration,
+        ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
+        DesktopProviderConfig, DesktopProviderRuntime, DesktopProviderState, ProviderEnvironment,
+        ProviderSessionDriver, RecoveryReason, SessionGeneration,
     };
     use axiusflow_desktop_storage::{
         CatalogKey, DataKind, HistoryScope, SegmentEncryptionKey, SegmentIdentity,
@@ -767,6 +801,28 @@ mod tests {
         DesktopMarketWorker<T, UnavailableVault, CoinbaseProviderDriver>,
         std::path::PathBuf,
     ) {
+        open_worker_with_provider_config(
+            driver,
+            DesktopProviderConfig::new(nonzero(8), nonzero(1))
+                .with_diagnostics(
+                    ProviderEnvironment {
+                        provider_id: "coinbase".to_string(),
+                        system_id: "advanced_trade_public".to_string(),
+                        environment: "production".to_string(),
+                    },
+                    None,
+                )
+                .expect("diagnostics identity validates"),
+        )
+    }
+
+    fn open_worker_with_provider_config<T: Clone>(
+        driver: CoinbaseProviderDriver,
+        provider: DesktopProviderConfig,
+    ) -> (
+        DesktopMarketWorker<T, UnavailableVault, CoinbaseProviderDriver>,
+        std::path::PathBuf,
+    ) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time follows Unix epoch")
@@ -788,7 +844,7 @@ mod tests {
                 .expect("catalog key validates"),
             ui_thread,
             DesktopMarketWorkerConfig {
-                provider: DesktopProviderConfig::new(nonzero(8), nonzero(1)),
+                provider,
                 history: HistoryWorkerConfig {
                     maximum_cache_entries: nonzero(2),
                     maximum_decoded_bytes: nonzero(1024),
@@ -1024,6 +1080,103 @@ mod tests {
                 reason: RecoveryReason::SemanticQueueOverflow,
             }
         );
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn composed_worker_forwards_live_heartbeat_diagnostics() {
+        let emitted = Arc::new(Barrier::new(2));
+        let task_emitted = Arc::clone(&emitted);
+        let heartbeat_task: Arc<SessionTask> = Arc::new(
+            move |_config, _generation, stop: Arc<AtomicBool>, emitter: SessionEmitter| {
+                assert!(emitter.established());
+                assert!(emitter.heartbeat());
+                task_emitted.wait();
+                while !stop.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            },
+        );
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(4), heartbeat_task);
+        let (mut worker, root) = worker(driver);
+        worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        emitted.wait();
+        while events.has_ready() {
+            try_recv_coinbase_trade(&mut worker, &events)
+                .expect("heartbeat callback is generation fenced");
+        }
+
+        let snapshot = worker
+            .try_diagnostics_snapshot()
+            .expect("diagnostics snapshot succeeds")
+            .expect("first snapshot publishes");
+        assert!(snapshot.heartbeat_age_nanos.is_some());
+        assert!(snapshot.last_message_age_nanos.is_some());
+        assert_eq!(snapshot.counters.trades, 0);
+        worker.stop().expect("heartbeat session stops");
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+    }
+
+    #[test]
+    fn heartbeat_callbacks_are_generation_fenced_without_diagnostics() {
+        let heartbeat_task: Arc<SessionTask> = Arc::new(
+            |_config, _generation, stop: Arc<AtomicBool>, emitter: SessionEmitter| {
+                assert!(emitter.heartbeat());
+                while !stop.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            },
+        );
+
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(2), Arc::clone(&heartbeat_task));
+        let (mut worker, root) = open_worker_with_provider_config::<u64>(
+            driver,
+            DesktopProviderConfig::new(nonzero(8), nonzero(1)),
+        );
+        worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match try_recv_coinbase_trade(&mut worker, &events) {
+                Err(CoinbaseDesktopEventError::Runtime(
+                    DesktopMarketWorkerError::ProviderNotStreaming,
+                )) => break,
+                Ok(None) if Instant::now() < deadline => thread::yield_now(),
+                result => panic!("unexpected heartbeat callback result: {result:?}"),
+            }
+        }
+        worker.stop().expect("heartbeat session stops");
+        drop(worker);
+        fs::remove_dir_all(root).expect("history root removes");
+
+        let (driver, events) =
+            CoinbaseProviderDriver::with_task(config(), nonzero(2), heartbeat_task);
+        let (mut worker, root) = open_worker_with_provider_config::<u64>(
+            driver,
+            DesktopProviderConfig::new(nonzero(8), nonzero(1)),
+        );
+        worker
+            .connect(ConnectTrigger::Initial)
+            .expect("public session starts");
+        let mut aggregators = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match try_recv_coinbase_aggregated_bar(&mut worker, &events, &mut aggregators) {
+                Err(CoinbaseDesktopEventError::Runtime(
+                    DesktopMarketWorkerError::ProviderNotStreaming,
+                )) => break,
+                Ok(None) if Instant::now() < deadline => thread::yield_now(),
+                result => panic!("unexpected heartbeat callback result: {result:?}"),
+            }
+        }
+        worker.stop().expect("heartbeat session stops");
         drop(worker);
         fs::remove_dir_all(root).expect("history root removes");
     }

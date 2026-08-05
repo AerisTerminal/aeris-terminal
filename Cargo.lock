@@ -782,6 +782,7 @@ dependencies = [
  "axiusflow_desktop_history",
  "axiusflow_desktop_storage",
  "axiusflow_market_data",
+ "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
  "zeroize",

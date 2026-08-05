@@ -9,6 +9,7 @@ use axiusflow_desktop_history::{
     HistoryWorkerConfig, HydrationOutcome, HydrationRequest, StartupCacheState, WorkerMetrics,
 };
 use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
+use axiusflow_observability::FeedDiagnosticsSnapshot;
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use axiusflow_provider_history::{
     Completion, DataClass, HistoryItem, RequestInterest, SequencedHistory, VerifiedHistorySnapshot,
@@ -140,7 +141,7 @@ impl From<DesktopHistoryError> for DesktopMarketWorkerError {
 }
 
 /// Bounds for the composed provider and history worker.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DesktopMarketWorkerConfig {
     pub provider: DesktopProviderConfig,
     pub history: HistoryWorkerConfig,
@@ -240,6 +241,17 @@ where
         self.provider.metrics().map_err(Into::into)
     }
 
+    /// Publishes the production feed diagnostics snapshot when cadence allows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread, clock, or diagnostics failure.
+    pub fn try_diagnostics_snapshot(
+        &mut self,
+    ) -> Result<Option<FeedDiagnosticsSnapshot>, DesktopMarketWorkerError> {
+        self.provider.try_diagnostics_snapshot().map_err(Into::into)
+    }
+
     pub const fn history_metrics(&self) -> WorkerMetrics {
         self.history.metrics()
     }
@@ -278,6 +290,35 @@ where
     ) -> Result<(), DesktopMarketWorkerError> {
         self.provider
             .session_established(generation)
+            .map_err(Into::into)
+    }
+
+    /// Records one live trade callback in production feed diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale generation, wrong-thread, or diagnostics failure.
+    pub fn record_trade_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        provider_timestamp_unix_nanos: Option<i64>,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.provider
+            .record_trade_diagnostics(generation, provider_timestamp_unix_nanos)
+            .map_err(Into::into)
+    }
+
+    /// Records one live heartbeat callback in production feed diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale generation, wrong-thread, or diagnostics failure.
+    pub fn record_heartbeat_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.provider
+            .record_heartbeat_diagnostics(generation)
             .map_err(Into::into)
     }
 

@@ -4,8 +4,8 @@ use axiusflow_application::{
     ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason, StreamDelta,
 };
 use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, InstrumentDescriptor, ProviderEnvironment, ProviderSessionEvent,
-    SessionGeneration,
+    AuthenticationState, InstrumentDescriptor, ProviderEnvironment, ProviderFeedDiagnostics,
+    ProviderSessionEvent, SessionGeneration,
 };
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::{
@@ -15,13 +15,14 @@ use axiusflow_market_data::{
 use axiusflow_protocols::MarketEventProvenance;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
 };
 
 /// Provider-neutral semantic fixture consumed by the shared adapter harness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderAdapterFixture {
     pub events: Vec<ProviderSessionEvent>,
+    pub selected_environment: ProviderEnvironment,
     pub bar_updates: Vec<BarUpdate>,
     pub book_recovery_events: Vec<MarketEvent>,
     pub publication_instrument: InstrumentRevision,
@@ -71,6 +72,7 @@ pub fn run_provider_adapter_conformance(
     fixture: &ProviderAdapterFixture,
 ) -> Result<ProviderAdapterConformance, ConformanceHarnessError> {
     let evidence = validate_session_events(&fixture.events)?;
+    validate_session_diagnostics(&fixture.events, &fixture.selected_environment, &evidence)?;
     let (forming_bars, completed_bars) = validate_bar_updates(&fixture.bar_updates, &evidence)?;
     let (book_recoveries, covering_snapshots) =
         validate_book_recovery(&fixture.book_recovery_events, &evidence)?;
@@ -90,6 +92,76 @@ pub fn run_provider_adapter_conformance(
         stream_publications,
         stream_recoveries,
     })
+}
+
+fn validate_session_diagnostics(
+    events: &[ProviderSessionEvent],
+    selected_environment: &ProviderEnvironment,
+    evidence: &SessionEvidence,
+) -> Result<(), ConformanceHarnessError> {
+    let selected_was_discovered = events.iter().any(|event| match event {
+        ProviderSessionEvent::SystemsDiscovered { environments } => {
+            environments.contains(selected_environment)
+        }
+        _ => false,
+    });
+    if !selected_was_discovered {
+        return Err(driver_error(
+            "fixture selected an undiscovered diagnostics environment",
+        ));
+    }
+    let mut diagnostics = ProviderFeedDiagnostics::try_new(
+        selected_environment.provider_id.clone(),
+        selected_environment.system_id.clone(),
+        selected_environment.environment.clone(),
+        None,
+    )
+    .map_err(|error| driver_error(error.to_string()))?;
+    let mut monotonic_nanos = 0_u64;
+    for event in events {
+        monotonic_nanos = monotonic_nanos.saturating_add(100_000_000);
+        diagnostics
+            .observe_event(event, monotonic_nanos)
+            .map_err(|error| driver_error(error.to_string()))?;
+        if matches!(event, ProviderSessionEvent::Market { .. }) {
+            diagnostics
+                .record_publication(evidence.generation, monotonic_nanos)
+                .map_err(|error| driver_error(error.to_string()))?;
+        }
+    }
+    let snapshot = diagnostics
+        .try_snapshot(
+            monotonic_nanos.saturating_add(250_000_000),
+            1_900_000_000_000_000_000,
+        )
+        .map_err(|error| driver_error(error.to_string()))?
+        .ok_or_else(|| driver_error("fixture diagnostics snapshot was suppressed"))?;
+    let market_events = snapshot
+        .counters
+        .trades
+        .saturating_add(snapshot.counters.quotes)
+        .saturating_add(snapshot.counters.depth_snapshots)
+        .saturating_add(snapshot.counters.depth_deltas);
+    let depth_events = snapshot
+        .counters
+        .depth_snapshots
+        .saturating_add(snapshot.counters.depth_deltas);
+    if snapshot.identity.provider() != selected_environment.provider_id
+        || snapshot.identity.system() != selected_environment.system_id
+        || snapshot.identity.environment() != selected_environment.environment
+        || snapshot.session_generation.map(NonZeroU64::get) != Some(evidence.generation.get())
+        || market_events != u64::try_from(evidence.market_events).unwrap_or(u64::MAX)
+        || depth_events != u64::try_from(evidence.depth_publications).unwrap_or(u64::MAX)
+        || snapshot.counters.publications
+            != u64::try_from(evidence.market_events).unwrap_or(u64::MAX)
+        || snapshot.heartbeat_age_nanos.is_none()
+        || snapshot.last_message_age_nanos.is_none()
+    {
+        return Err(driver_error(
+            "fixture diagnostics diverged from provider session evidence",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_session_events(
@@ -844,6 +916,29 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_bind_to_the_explicit_selected_environment() {
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let mut fixture = rithmic_fixture(generation);
+        let ProviderSessionEvent::SystemsDiscovered { environments } = &mut fixture.events[1]
+        else {
+            panic!("fixture systems event is stable");
+        };
+        environments.insert(
+            0,
+            ProviderEnvironment {
+                provider_id: "rithmic".to_string(),
+                system_id: "RITHMIC_PAPER".to_string(),
+                environment: "Paper".to_string(),
+            },
+        );
+        run_provider_adapter_conformance(&fixture)
+            .expect("selected Test environment remains authoritative");
+
+        fixture.selected_environment.system_id = "UNDISCOVERED".to_string();
+        assert!(run_provider_adapter_conformance(&fixture).is_err());
+    }
+
+    #[test]
     fn shared_harness_rejects_cross_generation_lifecycle_output() {
         let first_generation = SessionGeneration::new(NonZeroU64::MIN);
         let second_generation = SessionGeneration::new(NonZeroU64::new(2).expect("nonzero"));
@@ -1068,6 +1163,11 @@ mod tests {
             .expect("Coinbase fixture builds");
         ProviderAdapterFixture {
             events: session.events,
+            selected_environment: ProviderEnvironment {
+                provider_id: "coinbase".to_string(),
+                system_id: "advanced_trade_public".to_string(),
+                environment: "production".to_string(),
+            },
             bar_updates: session.bar_updates,
             book_recovery_events: session.book_recovery_events,
             publication_instrument: fixture_instrument(
@@ -1087,6 +1187,11 @@ mod tests {
         let session = axiusflow_rithmic_fixture_adapter::deterministic_session(generation);
         ProviderAdapterFixture {
             events: session.events,
+            selected_environment: ProviderEnvironment {
+                provider_id: "rithmic".to_string(),
+                system_id: "RITHMIC_TEST".to_string(),
+                environment: "Test".to_string(),
+            },
             bar_updates: session.bar_updates,
             book_recovery_events: session.book_recovery_events,
             publication_instrument: fixture_instrument(

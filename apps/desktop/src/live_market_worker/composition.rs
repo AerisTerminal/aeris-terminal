@@ -11,7 +11,8 @@ use axiusflow_coinbase_market_adapter::{
 };
 use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
-    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig, SessionGeneration,
+    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig, ProviderEnvironment,
+    SessionGeneration,
 };
 use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
 use axiusflow_instruments::{
@@ -151,7 +152,7 @@ pub(super) fn open_worker(
         history_root,
         catalog_key,
         ui_thread,
-        worker_config(),
+        worker_config()?,
     )
     .map_err(|error| error.to_string())?;
     let aggregator = CoinbaseBarAggregator::new(
@@ -226,9 +227,18 @@ pub(super) fn bar_definition() -> BarDefinition {
     }
 }
 
-fn worker_config() -> DesktopMarketWorkerConfig {
-    DesktopMarketWorkerConfig {
-        provider: DesktopProviderConfig::new(nonzero(32), nonzero(1)),
+fn worker_config() -> Result<DesktopMarketWorkerConfig, String> {
+    Ok(DesktopMarketWorkerConfig {
+        provider: DesktopProviderConfig::new(nonzero(32), nonzero(1))
+            .with_diagnostics(
+                ProviderEnvironment {
+                    provider_id: "coinbase".to_string(),
+                    system_id: "advanced_trade_public".to_string(),
+                    environment: "production".to_string(),
+                },
+                None,
+            )
+            .map_err(|error| error.to_string())?,
         history: HistoryWorkerConfig {
             maximum_cache_entries: nonzero(2),
             maximum_decoded_bytes: nonzero(2 * 1024 * 1024),
@@ -238,7 +248,7 @@ fn worker_config() -> DesktopMarketWorkerConfig {
             maximum_handoffs: nonzero(1),
         },
         maximum_catalog_entries: 64,
-    }
+    })
 }
 
 pub(super) fn client_model() -> MarketBarClientModel {

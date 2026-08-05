@@ -10,6 +10,7 @@ pub const MAXIMUM_DISCOVERY_FIELD_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderContractError {
     EmptyField(&'static str),
+    ControlCharacter(&'static str),
     FieldTooLong { field: &'static str, maximum: usize },
     ScaleOutOfRange,
     SystemLimitExceeded { maximum: usize },
@@ -592,9 +593,9 @@ mod tests {
 
     #[test]
     fn discovery_fields_have_explicit_byte_bounds() {
-        let oversized = "x".repeat(MAXIMUM_DISCOVERY_FIELD_BYTES + 1);
+        let oversized_environment = "x".repeat(MAXIMUM_DISCOVERY_FIELD_BYTES + 1);
         let environment = ProviderEnvironment {
-            provider_id: oversized.clone(),
+            provider_id: oversized_environment,
             system_id: "test".to_string(),
             environment: "test".to_string(),
         };
@@ -606,6 +607,7 @@ mod tests {
             })
         );
 
+        let oversized = "x".repeat(MAXIMUM_DISCOVERY_FIELD_BYTES + 1);
         let instrument = InstrumentDescriptor {
             instrument_id: "instrument:fixture:es".to_string(),
             provider_symbol: oversized,

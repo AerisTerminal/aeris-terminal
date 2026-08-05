@@ -145,7 +145,7 @@ impl CoinbaseConnection {
         on_trade: &mut impl FnMut(&CanonicalTrade),
     ) -> Result<SessionHealth, CoinbaseError> {
         let deadline = Instant::now() + window;
-        self.collect_with_deadline(Some(deadline), should_stop, on_trade)
+        self.collect_with_deadline(Some(deadline), should_stop, on_trade, &mut || {})
     }
 
     /// Collects trades until the provider invalidates the stream or
@@ -159,7 +159,16 @@ impl CoinbaseConnection {
         should_stop: &mut impl FnMut() -> bool,
         on_trade: &mut impl FnMut(&CanonicalTrade),
     ) -> Result<SessionHealth, CoinbaseError> {
-        self.collect_with_deadline(None, should_stop, on_trade)
+        self.collect_with_deadline(None, should_stop, on_trade, &mut || {})
+    }
+
+    pub(crate) fn collect_until_stopped_with_heartbeat(
+        self,
+        should_stop: &mut impl FnMut() -> bool,
+        on_trade: &mut impl FnMut(&CanonicalTrade),
+        on_heartbeat: &mut impl FnMut(),
+    ) -> Result<SessionHealth, CoinbaseError> {
+        self.collect_with_deadline(None, should_stop, on_trade, on_heartbeat)
     }
 
     fn collect_with_deadline(
@@ -167,8 +176,15 @@ impl CoinbaseConnection {
         deadline: Option<Instant>,
         should_stop: &mut impl FnMut() -> bool,
         on_trade: &mut impl FnMut(&CanonicalTrade),
+        on_heartbeat: &mut impl FnMut(),
     ) -> Result<SessionHealth, CoinbaseError> {
-        self.collect_with_limits(deadline, INACTIVITY_TIMEOUT, should_stop, on_trade)
+        self.collect_with_limits(
+            deadline,
+            INACTIVITY_TIMEOUT,
+            should_stop,
+            on_trade,
+            on_heartbeat,
+        )
     }
 
     fn collect_with_limits(
@@ -177,6 +193,7 @@ impl CoinbaseConnection {
         inactivity_timeout: Duration,
         should_stop: &mut impl FnMut() -> bool,
         on_trade: &mut impl FnMut(&CanonicalTrade),
+        on_heartbeat: &mut impl FnMut(),
     ) -> Result<SessionHealth, CoinbaseError> {
         let mut outcome = SessionOutcome::Completed;
         let mut last_message = Instant::now();
@@ -204,9 +221,12 @@ impl CoinbaseConnection {
                         return Err(CoinbaseError::InvalidMessage);
                     }
                     match self.decoder.decode_with_liveness(text.as_bytes()) {
-                        Ok((trades, subscribed_channel)) => {
+                        Ok((trades, subscribed_channel, heartbeat)) => {
                             if subscribed_channel {
                                 last_message = Instant::now();
+                            }
+                            if heartbeat {
+                                on_heartbeat();
                             }
                             for trade in &trades {
                                 on_trade(trade);
@@ -306,7 +326,13 @@ mod tests {
             decoder: CoinbaseDecoder::new(),
         };
         let health = connection
-            .collect_with_limits(None, Duration::from_millis(100), &mut || false, &mut |_| {})
+            .collect_with_limits(
+                None,
+                Duration::from_millis(100),
+                &mut || false,
+                &mut |_| {},
+                &mut || {},
+            )
             .expect("silence returns bounded health");
         assert_eq!(health.outcome, SessionOutcome::InactivityTimeout);
         assert!(started.elapsed() < Duration::from_millis(500));
@@ -344,7 +370,13 @@ mod tests {
             decoder: CoinbaseDecoder::new(),
         };
         let health = connection
-            .collect_with_limits(None, Duration::from_millis(100), &mut || false, &mut |_| {})
+            .collect_with_limits(
+                None,
+                Duration::from_millis(100),
+                &mut || false,
+                &mut |_| {},
+                &mut || {},
+            )
             .expect("control traffic returns bounded health");
         assert_eq!(health.outcome, SessionOutcome::InactivityTimeout);
         assert!(started.elapsed() < Duration::from_millis(300));

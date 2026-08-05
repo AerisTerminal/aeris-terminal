@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 12
+**Revision:** 13
 **Last updated:** 2026-08-05
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -55,7 +55,7 @@ display, provider/environment, workload, sample window, and percentile evidence.
 | Provider-neutral runtime | `verified` | Shared runtime modules are provider-neutral. Coinbase and deterministic Rithmic semantic fixtures pass the same bounded lifecycle, generation, bar, book-gap recovery, covering-snapshot, invalidation, and immutable publication conformance gate. |
 | Rithmic access | `blocked_external` | Access has been offered, but the accepted package, agreements, Test login, protocol semantics, entitlements, and certification have not been verified. |
 | Rithmic adapter | `ready` | A kit-optional, read-only implementation can begin without committing proprietary material. Live validation remains externally blocked. |
-| Lightweight diagnostics | `in_progress` | A bounded provider-neutral feed-health accumulator now covers counters, rates, queue and memory high-water marks, generation fencing, recovery state, clock-relative provider age, 4 Hz snapshots, and opt-in fixed histograms. Runtime wiring and named overhead evidence remain. |
+| Lightweight diagnostics | `in_progress` | The bounded feed-health accumulator is wired to the provider-neutral headless event boundary and exercised by both Coinbase and Rithmic semantic fixtures. UI frame-path wiring and named overhead evidence remain. |
 | Main Rithmic UI | `ready` | Work begins after the deterministic headless and diagnostics gates pass. |
 | IQFeed | `deferred` | Access is preliminary and it is not on the current delivery path. |
 | CQG | `deferred` | No implementation or certification work is active. |
@@ -314,8 +314,15 @@ than 5% or p99.9 by more than 10% under the same measured workload.
 - The overhead evidence contract requires named hardware, operating system,
   workload, warm-up, sample count, ordered percentiles, and identical
   gap/overflow/recovery outcomes before enforcing the 5% and 10% budgets.
-- Remaining work is wiring the accumulator into the Rithmic headless runtime
-  and UI frame path, then capturing the named disabled/enabled benchmark.
+- The provider-neutral headless diagnostics boundary consumes validated
+  discovery, authentication, instrument, market, heartbeat, invalidation, and
+  stop events; fences stale generations and unfenced invalidations; maps coarse
+  recovery reasons; and records canonical publication evidence.
+- Coinbase and deterministic Rithmic sessions pass the same diagnostics
+  conformance checks for identity, generation, market/depth/publication counts,
+  heartbeat age, last-message age, recovery, and immutable snapshot output.
+- Remaining work is wiring UI enqueue, frame-submit, and measurable presentation
+  timestamps, then capturing the named disabled/enabled benchmark.
 
 ### Gate
 

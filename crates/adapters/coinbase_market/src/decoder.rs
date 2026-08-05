@@ -126,13 +126,14 @@ impl CoinbaseDecoder {
     ///
     /// Returns an error for malformed messages or a sequence gap.
     pub fn decode(&mut self, bytes: &[u8]) -> Result<Vec<CanonicalTrade>, CoinbaseError> {
-        self.decode_with_liveness(bytes).map(|(trades, _)| trades)
+        self.decode_with_liveness(bytes)
+            .map(|(trades, _, _)| trades)
     }
 
     pub(crate) fn decode_with_liveness(
         &mut self,
         bytes: &[u8],
-    ) -> Result<(Vec<CanonicalTrade>, bool), CoinbaseError> {
+    ) -> Result<(Vec<CanonicalTrade>, bool, bool), CoinbaseError> {
         let message: ChannelMessage =
             serde_json::from_slice(bytes).map_err(|_| CoinbaseError::InvalidMessage)?;
         self.metrics.messages += 1;
@@ -149,10 +150,10 @@ impl CoinbaseDecoder {
 
         if message.channel == "heartbeats" {
             self.metrics.heartbeats += 1;
-            return Ok((Vec::new(), true));
+            return Ok((Vec::new(), true, true));
         }
         if message.channel != "market_trades" {
-            return Ok((Vec::new(), false));
+            return Ok((Vec::new(), false, false));
         }
         let provider_timestamp = parse_rfc3339_nanos(&message.timestamp)?;
         let mut trades = Vec::new();
@@ -195,7 +196,7 @@ impl CoinbaseDecoder {
                 self.metrics.trades += 1;
             }
         }
-        Ok((trades, true))
+        Ok((trades, true, false))
     }
 
     /// Resets sequence and dedup state for a reconnect.
