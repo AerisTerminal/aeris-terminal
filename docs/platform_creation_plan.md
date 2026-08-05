@@ -117,14 +117,26 @@ belong to their author until understood. No stage may overwrite or discard them.
 
 ### 4.5 Validation and delivery
 
-Before each commit, run in order:
+Work continuously through a very large coherent batch from the current roadmap
+stage, including its regression coverage. Do not stop for full-workspace
+validation, review, commits, or pushes after individual edits or small
+checkpoints. Use focused builds and tests during implementation only when they
+provide useful feedback.
+
+After the large work unit is complete, run one commit-boundary gate in order:
 
 1. `cargo fmt --all -- --check`.
 2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 3. `cargo build --workspace --all-targets --all-features`.
 4. Relevant tests and provider conformance suites.
-5. `codex exec review --uncommitted --ephemeral` until it reports no findings.
+5. Run the configured `cx/gpt-5.6-sol` low-reasoning review with
+   `codex exec review --uncommitted --ephemeral -m cx/gpt-5.6-sol -c
+   'model_reasoning_effort="low"'` until it reports no findings.
 6. Commit to `main`, then `git push origin main` without force.
+
+If validation or review finds problems, fix them as one batch, use focused
+checks while iterating, and repeat the complete gate only when the batch is
+again ready to commit.
 
 ## 5. Stage A — Stabilize and freeze Coinbase
 
