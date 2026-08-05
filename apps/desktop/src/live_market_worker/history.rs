@@ -295,3 +295,18 @@ fn history_identity(profile: &ProductProfile, start: i64, end: i64) -> SegmentId
         correction_revision: 1,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::history_installation_time;
+
+    #[test]
+    fn history_installation_rejects_a_crossed_minute_boundary() {
+        let requested_end = 120_000_000_000;
+        assert_eq!(
+            history_installation_time(requested_end, requested_end + 30_000_000_000),
+            Ok(150)
+        );
+        assert!(history_installation_time(requested_end, requested_end + 60_000_000_000).is_err());
+    }
+}
