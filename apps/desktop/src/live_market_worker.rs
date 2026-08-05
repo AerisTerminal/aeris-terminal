@@ -1,8 +1,11 @@
 //! Explicit direct-device Coinbase desktop composition.
 
+mod history;
+mod lifecycle;
+
 use crate::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
 };
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, MarketStreamPublication,
@@ -11,43 +14,43 @@ use axiusflow_application::{
 };
 use axiusflow_chart_integration::ReplayRecoveryCommand;
 use axiusflow_coinbase_market_adapter::{
-    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseAggregatedBar, CoinbaseBarAggregatorConfig, CoinbaseConfig,
-    CoinbaseHistoryCapabilityAdapter, ENTITLEMENT_CLASS, decode_history_bar,
+    CoinbaseAggregatedBar, CoinbaseBarAggregatorConfig, CoinbaseConfig, ENTITLEMENT_CLASS,
 };
-use axiusflow_desktop_history::{HistoryWorkerConfig, StartupCacheState};
+use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
     CoinbaseProviderDriver, CoinbaseProviderEvents, DesktopMarketWorker, DesktopMarketWorkerConfig,
-    DesktopProviderConfig, DesktopProviderState, HistoryCompletionInstall, SessionGeneration,
+    DesktopProviderConfig, DesktopProviderState, SessionGeneration,
 };
-use axiusflow_desktop_storage::{
-    CatalogKey, DataKind, HistoryScope, SegmentEncryptionKey, SegmentIdentity,
-};
+use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_market_data::{BarDefinition, MarketBar};
 use axiusflow_platform_runtime::{
-    CredentialVault, NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent,
-    PowerEvent,
-};
-use axiusflow_provider_history::{
-    Completion, DataClass, HistoryPageRequest, HistoryRange, HistoryScheduler,
-    ProviderHistoryAdapter, RequestInterest, RequestPriority, SchedulerConfig,
+    CredentialVault, NativeCredentialVault, NetworkEvent, PowerEvent,
 };
 use std::{
     collections::VecDeque,
-    mem::size_of,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroUsize,
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+        mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, ThreadId},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+use history::{
+    PreparedHistory, StreamingSeriesContext, install_ready_history, prepare_initial_history,
+};
+use lifecycle::{
+    EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
+    apply_initial_network, drain_worker_inbox, environment_events, forward_commands,
+    wait_for_inbox,
+};
 
 const HISTORY_BARS: usize = 300;
 const MODEL_ITEM_CAPACITY: usize = 350;
@@ -59,52 +62,15 @@ const PARTITION_ID: u32 = 7;
 const SCHEMA_VERSION: u32 = 1;
 const INBOX_CAPACITY: usize = 64;
 const INBOX_BATCH: usize = 1_024;
-const MINIMUM_RECONNECT_DELAY: Duration = Duration::from_millis(250);
-const MAXIMUM_RECONNECT_DELAY: Duration = Duration::from_secs(8);
 const SUBSCRIPTION_ID: &str = "desktop_coinbase_one_minute_bars";
 const VAULT_SERVICE: &str = "axiusflow-desktop-market-history";
 const CATALOG_KEY_ID: &str = "history-catalog-key-v1";
 const SEGMENT_KEY_ID: &str = "coinbase-public-bars-key-v1";
 
-#[derive(Clone, Copy)]
-enum EnvironmentalEvent {
-    Network(NetworkEvent),
-    Power(PowerEvent),
-}
-
-enum WorkerInboxEvent {
-    ProviderReady,
-    Environment(EnvironmentalEvent),
-    Command(MarketWorkerCommand),
-}
-
-struct PreparedHistory {
-    identity: SegmentIdentity,
-    completion: Completion,
-    received_unix_nanos: i64,
-}
-
 struct ProductProfile {
     product_id: String,
     instrument_id: String,
     symbol: String,
-}
-
-struct StreamingHistoryRequest<'a> {
-    generation: SessionGeneration,
-    profile: &'a ProductProfile,
-    segment_key: &'a SegmentEncryptionKey,
-    instrument: &'a InstrumentRevision,
-    bar_definition: &'a BarDefinition,
-    worker_label: &'a str,
-}
-
-struct StreamingSeriesContext<'a> {
-    profile: &'a ProductProfile,
-    segment_key: &'a SegmentEncryptionKey,
-    instrument: &'a InstrumentRevision,
-    bar_definition: &'a BarDefinition,
-    worker_label: &'a str,
 }
 
 type CoinbaseDesktopWorker =
@@ -123,59 +89,6 @@ struct LiveLoopState {
     reconnect_backoff: ReconnectBackoff,
     recovery_announced: bool,
     pending_recovery: VecDeque<ReplayRecoveryCommand>,
-}
-
-struct InboxDrainContext<'a> {
-    worker: &'a mut CoinbaseDesktopWorker,
-    events: &'a CoinbaseProviderEvents,
-    state: &'a mut LiveLoopState,
-    message_tx: &'a SyncSender<MarketWorkerMessage>,
-    provider_wake_pending: &'a AtomicBool,
-}
-
-struct ReconnectBackoff {
-    delay: Duration,
-    retry_at: Option<Instant>,
-}
-
-impl ReconnectBackoff {
-    const fn new() -> Self {
-        Self {
-            delay: MINIMUM_RECONNECT_DELAY,
-            retry_at: None,
-        }
-    }
-
-    fn retry_ready(&mut self, now: Instant) -> bool {
-        let Some(retry_at) = self.retry_at else {
-            self.retry_at = Some(now + self.delay);
-            return false;
-        };
-        if now < retry_at {
-            return false;
-        }
-        self.retry_at = None;
-        self.delay = self
-            .delay
-            .checked_mul(2)
-            .unwrap_or(MAXIMUM_RECONNECT_DELAY)
-            .min(MAXIMUM_RECONNECT_DELAY);
-        true
-    }
-
-    fn reset(&mut self) {
-        self.delay = MINIMUM_RECONNECT_DELAY;
-        self.retry_at = None;
-    }
-
-    fn wait_duration(&self, recovery_required: bool, now: Instant) -> Option<Duration> {
-        if recovery_required {
-            self.retry_at
-                .map(|retry_at| retry_at.saturating_duration_since(now))
-        } else {
-            None
-        }
-    }
 }
 
 pub(crate) fn start(
@@ -217,30 +130,6 @@ pub(crate) fn start(
         startup,
         MarketDataWorker::from_channels(command_tx, message_rx),
     ))
-}
-
-fn forward_commands(
-    command_rx: &Receiver<MarketWorkerCommand>,
-    inbox_tx: &SyncSender<WorkerInboxEvent>,
-) {
-    loop {
-        match command_rx.recv() {
-            Ok(MarketWorkerCommand::Recovery(command)) => {
-                if inbox_tx
-                    .send(WorkerInboxEvent::Command(MarketWorkerCommand::Recovery(
-                        command,
-                    )))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            Ok(MarketWorkerCommand::Shutdown) | Err(_) => {
-                let _ = inbox_tx.send(WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown));
-                return;
-            }
-        }
-    }
 }
 
 fn run_worker(
@@ -374,96 +263,6 @@ fn reconcile_provider_recovery(
     )
 }
 
-fn drain_worker_inbox(
-    inbox_rx: &Receiver<WorkerInboxEvent>,
-    ready_event: &mut Option<WorkerInboxEvent>,
-    context: &mut InboxDrainContext<'_>,
-) -> Result<bool, String> {
-    for _ in 0..INBOX_BATCH {
-        let event = ready_event.take().or_else(|| inbox_rx.try_recv().ok());
-        let Some(event) = event else {
-            return Ok(false);
-        };
-        match event {
-            WorkerInboxEvent::ProviderReady => {
-                context
-                    .provider_wake_pending
-                    .store(false, Ordering::Release);
-            }
-            WorkerInboxEvent::Environment(event) => {
-                context.state.recovery_announced |= apply_environment_event(
-                    context.worker,
-                    context.events,
-                    event,
-                    &mut context.state.prepared,
-                    &mut context.state.streaming_generation,
-                    &mut context.state.retained,
-                    context.message_tx,
-                )?;
-            }
-            WorkerInboxEvent::Command(MarketWorkerCommand::Recovery(command)) => {
-                if context.state.pending_recovery.len() >= COMMAND_CAPACITY {
-                    return Err("desktop recovery command inbox overflowed".to_string());
-                }
-                context.state.pending_recovery.push_back(command);
-            }
-            WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown) => return Ok(true),
-        }
-    }
-    Ok(false)
-}
-
-fn install_ready_history(
-    worker: &mut CoinbaseDesktopWorker,
-    context: &StreamingSeriesContext<'_>,
-    state: &mut LiveLoopState,
-    model: &mut MarketBarClientModel,
-    message_tx: &SyncSender<MarketWorkerMessage>,
-) -> Result<bool, String> {
-    if state.streaming_generation.is_some() {
-        return Ok(false);
-    }
-    let DesktopProviderState::Streaming { generation } =
-        worker.provider_state().map_err(|error| error.to_string())?
-    else {
-        return Ok(false);
-    };
-    let history = install_streaming_history(
-        worker,
-        &StreamingHistoryRequest {
-            generation,
-            profile: context.profile,
-            segment_key: context.segment_key,
-            instrument: context.instrument,
-            bar_definition: context.bar_definition,
-            worker_label: context.worker_label,
-        },
-        &mut state.prepared,
-        model,
-        message_tx,
-    );
-    match history {
-        Ok(history) => {
-            state.retained = history;
-            state.streaming_generation = Some(generation);
-            state.reconnect_backoff.reset();
-            state.recovery_announced = false;
-            Ok(false)
-        }
-        Err(error) => {
-            fence_failed_history(
-                worker,
-                generation,
-                &mut state.retained,
-                &mut state.recovery_announced,
-                message_tx,
-                &error,
-            )?;
-            Ok(true)
-        }
-    }
-}
-
 fn worker_label(monitors_active: bool) -> String {
     if monitors_active {
         "Coinbase direct · native lifecycle monitored"
@@ -560,53 +359,6 @@ fn open_worker(
         events,
         segment_key,
     })
-}
-
-fn install_streaming_history(
-    worker: &mut CoinbaseDesktopWorker,
-    request: &StreamingHistoryRequest<'_>,
-    prepared: &mut Option<PreparedHistory>,
-    model: &mut MarketBarClientModel,
-    message_tx: &SyncSender<MarketWorkerMessage>,
-) -> Result<VecDeque<ProvenancedMarketBar>, String> {
-    let history = match prepared.take() {
-        Some(history) => history,
-        None => fetch_history(request.profile)?,
-    };
-    install_history(
-        worker,
-        request.generation,
-        request.profile,
-        &history,
-        request.segment_key,
-    )?;
-    let bars = worker
-        .coinbase_bar_history(&request.profile.product_id)
-        .map_err(|error| error.to_string())?;
-    let retained = bars
-        .into_iter()
-        .map(|bar| history_provenance(bar, request.generation, history.received_unix_nanos))
-        .collect::<Result<VecDeque<_>, _>>()?;
-    let snapshot_generation = model
-        .current_generation()
-        .map_or(1, |current| current.generation().saturating_add(1));
-    let snapshot = ReplaySnapshot::try_from_provenanced_values(
-        request.instrument.clone(),
-        ReplayProvenance::LiveProvider,
-        request.bar_definition.clone(),
-        snapshot_generation,
-        retained.iter().cloned().collect(),
-    )
-    .map_err(|error| error.to_string())?;
-    publish_update(
-        worker,
-        request.generation,
-        model,
-        ReplayStreamUpdate::Snapshot(snapshot),
-        request.worker_label,
-        message_tx,
-    )?;
-    Ok(retained)
 }
 
 fn apply_environment_event(
@@ -735,15 +487,6 @@ fn establish_coinbase_stream_if_ready(
     Ok(())
 }
 
-fn prepare_initial_history(
-    worker: &mut CoinbaseDesktopWorker,
-) -> Result<Option<PreparedHistory>, String> {
-    worker
-        .request_connection()
-        .map_err(|error| error.to_string())?;
-    Ok(None)
-}
-
 fn request_recovery_if_required(
     worker: &mut CoinbaseDesktopWorker,
     prepared: &mut Option<PreparedHistory>,
@@ -823,123 +566,6 @@ fn publish_ready_recovery(
             model,
             worker_label,
         )
-}
-
-fn install_history(
-    worker: &mut CoinbaseDesktopWorker,
-    generation: SessionGeneration,
-    profile: &ProductProfile,
-    history: &PreparedHistory,
-    segment_key: &SegmentEncryptionKey,
-) -> Result<(), String> {
-    let interest = RequestInterest::new(NonZeroU64::MIN);
-    let now_seconds =
-        history_installation_time(history.identity.range_end_unix_nanos, unix_nanos()?)?;
-    let binding = worker
-        .begin_scheduled_history_handoff(
-            generation,
-            history.identity.clone(),
-            interest,
-            segment_key,
-            now_seconds,
-        )
-        .map_err(|error| error.to_string())?;
-    worker
-        .install_history_completion(
-            generation,
-            &history.identity,
-            &history.completion,
-            HistoryCompletionInstall {
-                binding,
-                snapshot_generation: NonZeroU64::new(generation.get()).unwrap_or(NonZeroU64::MIN),
-                empty_cutover_watermark: None,
-                startup_cache_state: StartupCacheState::Cold,
-            },
-            |_| Ok(size_of::<MarketBar>()),
-            |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
-        )
-        .map_err(|error| error.to_string())?;
-    worker
-        .seed_coinbase_bar_history(
-            generation,
-            &profile.product_id,
-            &history.identity,
-            segment_key,
-            now_seconds,
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn history_installation_time(
-    range_end_unix_nanos: i64,
-    now_unix_nanos: i64,
-) -> Result<i64, String> {
-    let current_minute = now_unix_nanos.div_euclid(60_000_000_000) * 60_000_000_000;
-    if range_end_unix_nanos != current_minute {
-        return Err("Coinbase history became stale before installation".to_string());
-    }
-    Ok(now_unix_nanos / 1_000_000_000)
-}
-
-fn fetch_history(profile: &ProductProfile) -> Result<PreparedHistory, String> {
-    let now = unix_nanos()?;
-    let minute_nanos = 60_000_000_000_i64;
-    let end = now.div_euclid(minute_nanos) * minute_nanos;
-    let start = end
-        .checked_sub(minute_nanos * i64::try_from(HISTORY_BARS).map_err(|error| error.to_string())?)
-        .ok_or_else(|| "Coinbase history range underflow".to_string())?;
-    let identity = history_identity(profile, start, end);
-    let request = HistoryPageRequest {
-        provider_id: "coinbase".to_string(),
-        account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
-        entitlement_revision: ENTITLEMENT_CLASS.to_string(),
-        instrument_id: profile.instrument_id.clone(),
-        data_class: DataClass::Bars,
-        resolution: "1m".to_string(),
-        range: HistoryRange {
-            start_unix_nanos: start,
-            end_unix_nanos: end,
-        },
-        maximum_items: nonzero(HISTORY_BARS),
-        continuation: None,
-    };
-    let mut adapter =
-        CoinbaseHistoryCapabilityAdapter::try_new().map_err(|error| error.to_string())?;
-    let mut scheduler = HistoryScheduler::try_new(
-        adapter.capabilities().clone(),
-        SchedulerConfig {
-            maximum_queued_requests: NonZeroUsize::MIN,
-            maximum_total_inflight: NonZeroUsize::MIN,
-            maximum_interests_per_request: NonZeroUsize::MIN,
-            maximum_continuations_per_request: NonZeroUsize::MIN,
-            maximum_fetch_attempts: NonZeroUsize::MIN,
-            adjacent_prefetch_windows: 0,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    let interest = RequestInterest::new(NonZeroU64::MIN);
-    scheduler
-        .submit(request, interest, RequestPriority::Visible, now)
-        .map_err(|error| error.to_string())?;
-    let dispatch = scheduler
-        .dispatch_next(now, 0)
-        .map_err(|error| error.to_string())?
-        .dispatch
-        .ok_or_else(|| "Coinbase history request was not dispatchable".to_string())?;
-    let page = adapter.fetch_page(&dispatch.request)?;
-    if page.items.is_empty() {
-        return Err("Coinbase returned no completed history bars".to_string());
-    }
-    let received_unix_nanos = unix_nanos()?;
-    let completion = scheduler
-        .complete(dispatch.dispatch_id, page, received_unix_nanos)
-        .map_err(|error| error.to_string())?;
-    Ok(PreparedHistory {
-        identity,
-        completion,
-        received_unix_nanos,
-    })
 }
 
 fn publish_update(
@@ -1142,26 +768,6 @@ fn bar_definition() -> BarDefinition {
     }
 }
 
-fn history_identity(profile: &ProductProfile, start: i64, end: i64) -> SegmentIdentity {
-    SegmentIdentity {
-        scope: HistoryScope {
-            provider_id: "coinbase".to_string(),
-            account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
-            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
-        },
-        instrument_id: profile.instrument_id.clone(),
-        data_kind: DataKind::Bars,
-        resolution: "1m".to_string(),
-        range_start_unix_nanos: start,
-        range_end_unix_nanos: end,
-        source_revision: 1,
-        schema_revision: 1,
-        calendar_revision: 1,
-        adjustment_revision: 1,
-        correction_revision: 1,
-    }
-}
-
 fn worker_config() -> DesktopMarketWorkerConfig {
     DesktopMarketWorkerConfig {
         provider: DesktopProviderConfig::new(nonzero(32), nonzero(1)),
@@ -1214,84 +820,6 @@ fn load_or_create_key(vault: &NativeCredentialVault, key_id: &str) -> Result<[u8
     Ok(result)
 }
 
-fn environment_events(sender: SyncSender<WorkerInboxEvent>) -> (Option<NetworkEvent>, bool) {
-    let network = NativeNetworkMonitor::connect().ok();
-    let power = NativePowerMonitor::connect().ok();
-    let network_active = if let Some(mut monitor) = network {
-        let initial = monitor.current();
-        let network_sender = sender.clone();
-        let active = thread::Builder::new()
-            .name("axiusflow-network-monitor".to_string())
-            .spawn(move || {
-                while let Ok(event) = monitor.next_event() {
-                    if network_sender
-                        .send(WorkerInboxEvent::Environment(EnvironmentalEvent::Network(
-                            event,
-                        )))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .is_ok();
-        (Some(initial), active)
-    } else {
-        (None, false)
-    };
-    let power_active = if let Some(mut monitor) = power {
-        thread::Builder::new()
-            .name("axiusflow-power-monitor".to_string())
-            .spawn(move || {
-                while let Ok(event) = monitor.next_event() {
-                    if sender
-                        .send(WorkerInboxEvent::Environment(EnvironmentalEvent::Power(
-                            event,
-                        )))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .is_ok()
-    } else {
-        false
-    };
-    (network_active.0, network_active.1 && power_active)
-}
-
-fn apply_initial_network(
-    worker: &mut CoinbaseDesktopWorker,
-    event: Option<NetworkEvent>,
-) -> Result<(), String> {
-    if event == Some(NetworkEvent::Unavailable) {
-        worker
-            .handle_network_event(NetworkEvent::Unavailable)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-fn wait_for_inbox(
-    receiver: &Receiver<WorkerInboxEvent>,
-    wait: Option<Duration>,
-) -> Result<Option<WorkerInboxEvent>, String> {
-    match wait {
-        Some(wait) => match receiver.recv_timeout(wait) {
-            Ok(event) => Ok(Some(event)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err("desktop market inbox disconnected".to_string())
-            }
-        },
-        None => receiver
-            .recv()
-            .map(Some)
-            .map_err(|_| "desktop market inbox disconnected".to_string()),
-    }
-}
-
 fn unix_nanos() -> Result<i64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1310,17 +838,9 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MINIMUM_RECONNECT_DELAY, ReconnectBackoff, SUBSCRIPTION_ID, WorkerInboxEvent,
-        forward_commands, history_installation_time, loading_startup, product_profile,
-        wait_for_inbox,
-    };
-    use crate::market_worker::{MarketWorkerCommand, MarketWorkerStartup};
-    use std::{
-        sync::mpsc,
-        thread,
-        time::{Duration, Instant},
-    };
+    use super::history::history_installation_time;
+    use super::{SUBSCRIPTION_ID, loading_startup, product_profile};
+    use crate::market_worker::MarketWorkerStartup;
 
     #[test]
     fn live_mode_accepts_only_reviewed_coinbase_precision_profiles() {
@@ -1343,53 +863,6 @@ mod tests {
         assert_eq!(instrument.instrument_id.as_str(), profile.instrument_id);
         assert_eq!(subscription_id, SUBSCRIPTION_ID);
         assert!(worker_label.contains("loading"));
-    }
-
-    #[test]
-    fn reconnect_backoff_delays_and_resets_attempts() {
-        let started = Instant::now();
-        let mut backoff = ReconnectBackoff::new();
-        assert!(!backoff.retry_ready(started));
-        assert_eq!(
-            backoff.wait_duration(false, started + MINIMUM_RECONNECT_DELAY),
-            None
-        );
-        assert_eq!(
-            backoff.wait_duration(true, started),
-            Some(MINIMUM_RECONNECT_DELAY)
-        );
-        assert!(!backoff.retry_ready(started + MINIMUM_RECONNECT_DELAY / 2));
-        assert!(backoff.retry_ready(started + MINIMUM_RECONNECT_DELAY));
-        assert_eq!(backoff.delay, MINIMUM_RECONNECT_DELAY * 2);
-
-        backoff.reset();
-        assert_eq!(backoff.delay, MINIMUM_RECONNECT_DELAY);
-        assert_eq!(backoff.retry_at, None);
-    }
-
-    #[test]
-    fn disconnected_command_channel_wakes_the_worker_for_shutdown() {
-        let (command_tx, command_rx) = mpsc::sync_channel(1);
-        let (inbox_tx, inbox_rx) = mpsc::sync_channel(1);
-        let forwarder = thread::spawn(move || forward_commands(&command_rx, &inbox_tx));
-        drop(command_tx);
-        assert!(matches!(
-            inbox_rx.recv().expect("shutdown reaches worker inbox"),
-            WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown)
-        ));
-        forwarder.join().expect("command forwarder stops cleanly");
-    }
-
-    #[test]
-    fn worker_inbox_wait_uses_reconnect_deadlines_without_polling() {
-        let (_sender, receiver) = mpsc::sync_channel(1);
-        let started = Instant::now();
-        assert!(
-            wait_for_inbox(&receiver, Some(Duration::from_millis(5)))
-                .expect("deadline wait succeeds")
-                .is_none()
-        );
-        assert!(started.elapsed() >= Duration::from_millis(5));
     }
 
     #[test]
