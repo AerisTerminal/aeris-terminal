@@ -421,7 +421,7 @@ impl Render for TerminalApp {
             .text_color(gpui_color(colors.foreground))
             .child(
                 div()
-                    .h(px(theme.dimensions.dashboard_header_height.logical_pixels))
+                    .h(px(theme.dimensions.app_header_height.logical_pixels))
                     .flex_none()
                     .items_center()
                     .justify_between()

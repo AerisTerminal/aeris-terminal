@@ -1,6 +1,8 @@
 //! Bounded coordinator translating runtime-port events into chart transitions.
 
-use crate::bridge::{ChartDataBridge, MergedChartData, ReplayRecoveryCommand};
+use crate::bridge::{
+    ChartDataBridge, MergedChartData, RebaselineSnapshotQueueOutcome, ReplayRecoveryCommand,
+};
 use axiusflow_application::{
     MarketStreamCommand, MarketStreamCommandOffer, MarketStreamControlSignal, MarketStreamEvent,
     MarketStreamPublication, MarketStreamRuntimePort, ReplayStreamUpdate, ReplayValidationError,
@@ -40,10 +42,25 @@ pub enum ChartStreamPollOutcome {
         first_sequence: u64,
         last_sequence: u64,
     },
+    PublicationSubscriptionMismatch {
+        generation: u64,
+        first_sequence: u64,
+        last_sequence: u64,
+    },
     PublicationGenerationDiscontinuity {
         expected_predecessor: Option<u64>,
         actual_predecessor: Option<u64>,
         generation: u64,
+        last_sequence: u64,
+    },
+    PublicationRejectedAwaitingRecovery {
+        generation: u64,
+        first_sequence: u64,
+        last_sequence: u64,
+    },
+    PublicationSnapshotSuperseded {
+        generation: u64,
+        first_sequence: u64,
         last_sequence: u64,
     },
     PublicationBackpressured {
@@ -135,6 +152,7 @@ impl<RuntimeError: Error + 'static> Error for ChartStreamCoordinatorError<Runtim
 pub struct ChartStreamCoordinator {
     bridge_capacity: NonZeroUsize,
     bridge: Option<ChartDataBridge>,
+    subscription_id: Option<String>,
     publication_generation: Option<u64>,
     connected_events: u64,
     control_events: u64,
@@ -155,6 +173,7 @@ impl ChartStreamCoordinator {
         Self {
             bridge_capacity,
             bridge: None,
+            subscription_id: None,
             publication_generation: None,
             connected_events: 0,
             control_events: 0,
@@ -299,10 +318,9 @@ impl ChartStreamCoordinator {
             } => {
                 self.recovery_exhaustions = self.recovery_exhaustions.saturating_add(1);
                 self.record_dropped_events(dropped_events);
-                let canceled = request_id.is_some_and(|request_id| {
-                    self.bridge
-                        .as_mut()
-                        .is_some_and(|bridge| bridge.cancel_recovery(request_id))
+                let canceled = self.bridge.as_mut().is_some_and(|bridge| match request_id {
+                    Some(request_id) => bridge.cancel_recovery(request_id),
+                    None => bridge.cancel_pending_recovery_for(reason),
                 });
                 Ok(ChartStreamPollOutcome::RecoveryExhausted {
                     request_id,
@@ -343,43 +361,76 @@ impl ChartStreamCoordinator {
         &mut self,
         publication: MarketStreamPublication,
     ) -> Result<ChartStreamPollOutcome, ReplayValidationError> {
-        let (_, update, publication_generation, predecessor_generation) = publication.into_parts();
+        let (subscription_id, update, publication_generation, predecessor_generation) =
+            publication.into_parts();
         let generation = publication_generation.generation();
         let (first_sequence, last_sequence) = publication_generation.sequence_range();
+        if let Some(outcome) = self.reject_subscription_mismatch(
+            &subscription_id,
+            generation,
+            first_sequence,
+            last_sequence,
+        ) {
+            return Ok(outcome);
+        }
         let Some(bridge) = self.bridge.as_mut() else {
-            return match update {
-                ReplayStreamUpdate::Snapshot(snapshot) => {
-                    self.bridge = Some(ChartDataBridge::try_new(self.bridge_capacity, &snapshot)?);
-                    self.publication_generation = Some(generation);
-                    self.publications_accepted = self.publications_accepted.saturating_add(1);
-                    Ok(ChartStreamPollOutcome::InitialSnapshot {
-                        generation,
-                        first_sequence,
-                        last_sequence,
-                    })
-                }
-                ReplayStreamUpdate::Delta(_) => {
-                    self.publications_rejected = self.publications_rejected.saturating_add(1);
-                    Ok(ChartStreamPollOutcome::PublicationRejectedBeforeSnapshot {
-                        generation,
-                        first_sequence,
-                        last_sequence,
-                    })
-                }
-            };
+            return self.apply_initial_publication(
+                subscription_id,
+                update,
+                generation,
+                first_sequence,
+                last_sequence,
+            );
         };
-        if matches!(&update, ReplayStreamUpdate::Delta(_))
-            && predecessor_generation != self.publication_generation
+        let update_is_delta = matches!(&update, ReplayStreamUpdate::Delta(_));
+        let snapshot_required = bridge.requires_snapshot();
+        let recovery_pending = bridge.metrics().recovery_pending;
+        if snapshot_required
+            && (recovery_pending || (update_is_delta && !bridge.has_queued_rebaseline_snapshot()))
         {
             self.publications_rejected = self.publications_rejected.saturating_add(1);
-            return Ok(ChartStreamPollOutcome::PublicationGenerationDiscontinuity {
-                expected_predecessor: self.publication_generation,
-                actual_predecessor: predecessor_generation,
-                generation,
-                last_sequence,
-            });
+            return Ok(
+                ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery {
+                    generation,
+                    first_sequence,
+                    last_sequence,
+                },
+            );
         }
-        if bridge.try_push(update).is_ok() {
+        if snapshot_required && !update_is_delta {
+            let (outcome, selected_generation) =
+                queue_required_snapshot(bridge, update, generation, first_sequence, last_sequence);
+            if let Some(selected_generation) = selected_generation {
+                self.publication_generation = Some(selected_generation);
+                self.publications_accepted = self.publications_accepted.saturating_add(1);
+            } else {
+                self.publications_rejected = self.publications_rejected.saturating_add(1);
+            }
+            return Ok(outcome);
+        }
+        if let Some(outcome) = reject_mismatched_rebaseline_delta(
+            bridge,
+            &update,
+            generation,
+            first_sequence,
+            last_sequence,
+        ) {
+            self.publications_rejected = self.publications_rejected.saturating_add(1);
+            return Ok(outcome);
+        }
+        if let Some(outcome) = publication_generation_discontinuity(
+            update_is_delta,
+            predecessor_generation,
+            self.publication_generation,
+            generation,
+            last_sequence,
+        ) {
+            self.publications_rejected = self.publications_rejected.saturating_add(1);
+            self.stream_invalidations = self.stream_invalidations.saturating_add(1);
+            bridge.mark_stream_invalid_for(ResnapshotReason::SequenceGap);
+            return Ok(outcome);
+        }
+        if bridge.try_push_publication(update, generation).is_ok() {
             self.publication_generation = Some(generation);
             self.publications_accepted = self.publications_accepted.saturating_add(1);
             Ok(ChartStreamPollOutcome::PublicationQueued {
@@ -402,15 +453,25 @@ impl ChartStreamCoordinator {
         request_id: u64,
         publication: MarketStreamPublication,
     ) -> Result<ChartStreamPollOutcome, ReplayValidationError> {
-        let (_, update, publication_generation, _) = publication.into_parts();
+        let (subscription_id, update, publication_generation, _) = publication.into_parts();
         let generation = publication_generation.generation();
         let last_sequence = publication_generation.sequence_range().1;
-        let installed = match (self.bridge.as_mut(), update) {
-            (Some(bridge), ReplayStreamUpdate::Snapshot(snapshot)) => {
+        let installed = match (
+            self.subscription_id.as_deref() == Some(subscription_id.as_str()),
+            self.bridge.as_mut(),
+            update,
+        ) {
+            (true, Some(bridge), ReplayStreamUpdate::Snapshot(snapshot)) => {
                 bridge.install_recovery_snapshot(request_id, &snapshot)?
             }
             _ => false,
         };
+        if !installed {
+            let _ = self
+                .bridge
+                .as_mut()
+                .is_some_and(|bridge| bridge.mark_recovery_failed(request_id));
+        }
         if installed {
             self.publication_generation = Some(generation);
             self.recovery_snapshots_installed = self.recovery_snapshots_installed.saturating_add(1);
@@ -431,6 +492,55 @@ impl ChartStreamCoordinator {
             .saturating_add(u64::try_from(dropped_events).unwrap_or(u64::MAX));
     }
 
+    fn reject_subscription_mismatch(
+        &mut self,
+        subscription_id: &str,
+        generation: u64,
+        first_sequence: u64,
+        last_sequence: u64,
+    ) -> Option<ChartStreamPollOutcome> {
+        if self.bridge.is_none() || self.subscription_id.as_deref() == Some(subscription_id) {
+            return None;
+        }
+        self.publications_rejected = self.publications_rejected.saturating_add(1);
+        Some(ChartStreamPollOutcome::PublicationSubscriptionMismatch {
+            generation,
+            first_sequence,
+            last_sequence,
+        })
+    }
+
+    fn apply_initial_publication(
+        &mut self,
+        subscription_id: String,
+        update: ReplayStreamUpdate,
+        generation: u64,
+        first_sequence: u64,
+        last_sequence: u64,
+    ) -> Result<ChartStreamPollOutcome, ReplayValidationError> {
+        match update {
+            ReplayStreamUpdate::Snapshot(snapshot) => {
+                self.bridge = Some(ChartDataBridge::try_new(self.bridge_capacity, &snapshot)?);
+                self.subscription_id = Some(subscription_id);
+                self.publication_generation = Some(generation);
+                self.publications_accepted = self.publications_accepted.saturating_add(1);
+                Ok(ChartStreamPollOutcome::InitialSnapshot {
+                    generation,
+                    first_sequence,
+                    last_sequence,
+                })
+            }
+            ReplayStreamUpdate::Delta(_) => {
+                self.publications_rejected = self.publications_rejected.saturating_add(1);
+                Ok(ChartStreamPollOutcome::PublicationRejectedBeforeSnapshot {
+                    generation,
+                    first_sequence,
+                    last_sequence,
+                })
+            }
+        }
+    }
+
     /// Latches a consumer-detected invalidation while preserving the last chart state.
     pub fn mark_stream_invalid(&mut self, reason: ResnapshotReason) -> bool {
         self.bridge.as_mut().is_some_and(|bridge| {
@@ -445,9 +555,14 @@ impl ChartStreamCoordinator {
     ///
     /// Returns replay validation failures from the bounded chart bridge.
     pub fn drain_merged(&mut self) -> Result<Option<MergedChartData>, ReplayValidationError> {
-        self.bridge
-            .as_mut()
-            .map_or(Ok(None), ChartDataBridge::drain_merged)
+        let Some(bridge) = self.bridge.as_mut() else {
+            return Ok(None);
+        };
+        let merged = bridge.drain_merged()?;
+        if merged.is_some() {
+            self.publication_generation = Some(bridge.accepted_publication_generation());
+        }
+        Ok(merged)
     }
 
     /// Returns the installed chart bridge, if the runtime supplied an initial snapshot.
@@ -474,4 +589,79 @@ impl ChartStreamCoordinator {
             stopped: self.stopped,
         }
     }
+}
+
+fn reject_mismatched_rebaseline_delta(
+    bridge: &ChartDataBridge,
+    update: &ReplayStreamUpdate,
+    generation: u64,
+    first_sequence: u64,
+    last_sequence: u64,
+) -> Option<ChartStreamPollOutcome> {
+    let ReplayStreamUpdate::Delta(delta) = update else {
+        return None;
+    };
+    (!bridge.delta_matches_queued_rebaseline(delta)).then_some(
+        ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery {
+            generation,
+            first_sequence,
+            last_sequence,
+        },
+    )
+}
+
+fn queue_required_snapshot(
+    bridge: &mut ChartDataBridge,
+    update: ReplayStreamUpdate,
+    generation: u64,
+    first_sequence: u64,
+    last_sequence: u64,
+) -> (ChartStreamPollOutcome, Option<u64>) {
+    let ReplayStreamUpdate::Snapshot(snapshot) = update else {
+        return (
+            ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery {
+                generation,
+                first_sequence,
+                last_sequence,
+            },
+            None,
+        );
+    };
+    match bridge.queue_rebaseline_snapshot(snapshot, generation) {
+        RebaselineSnapshotQueueOutcome::Selected {
+            publication_generation,
+        } => (
+            ChartStreamPollOutcome::PublicationQueued {
+                generation,
+                first_sequence,
+                last_sequence,
+            },
+            Some(publication_generation),
+        ),
+        RebaselineSnapshotQueueOutcome::Superseded => (
+            ChartStreamPollOutcome::PublicationSnapshotSuperseded {
+                generation,
+                first_sequence,
+                last_sequence,
+            },
+            None,
+        ),
+    }
+}
+
+fn publication_generation_discontinuity(
+    update_is_delta: bool,
+    actual_predecessor: Option<u64>,
+    expected_predecessor: Option<u64>,
+    generation: u64,
+    last_sequence: u64,
+) -> Option<ChartStreamPollOutcome> {
+    (update_is_delta && actual_predecessor != expected_predecessor).then_some(
+        ChartStreamPollOutcome::PublicationGenerationDiscontinuity {
+            expected_predecessor,
+            actual_predecessor,
+            generation,
+            last_sequence,
+        },
+    )
 }

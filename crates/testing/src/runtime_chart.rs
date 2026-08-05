@@ -17,7 +17,7 @@ use crate::loopback_fixture::{
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketBarReplayPort, MarketStreamCommand, MarketStreamCommandOffer, MarketStreamEvent,
-    MarketStreamPublication, MarketStreamPublicationError, MarketStreamRuntimePort,
+    MarketStreamPublication, MarketStreamPublicationError, MarketStreamRuntimePort, ReplaySnapshot,
     ReplayStreamUpdate, ResnapshotReason,
 };
 use axiusflow_chart_integration::{
@@ -237,9 +237,31 @@ impl MarketStreamRuntimePort for ScriptedMarketStreamPort {
 struct ScriptedStreamPublications {
     baseline: MarketStreamPublication,
     delta: MarketStreamPublication,
+    queued_tail_delta: MarketStreamPublication,
     unrelated_delta: MarketStreamPublication,
+    fallback_delta: MarketStreamPublication,
+    fallback_tail_delta: MarketStreamPublication,
+    fallback_partial: MarketStreamPublication,
+    fallback_next_delta: MarketStreamPublication,
+    fallback_stale: MarketStreamPublication,
+    fallback_older: MarketStreamPublication,
+    fallback_new_epoch: MarketStreamPublication,
+    fallback_new_series: MarketStreamPublication,
     recovered: MarketStreamPublication,
     mismatched_rejected: bool,
+}
+
+struct ScriptedFallbackPublications {
+    queued_tail_delta: MarketStreamPublication,
+    delta: MarketStreamPublication,
+    tail_delta: MarketStreamPublication,
+    next_delta: MarketStreamPublication,
+    partial: MarketStreamPublication,
+    stale: MarketStreamPublication,
+    older: MarketStreamPublication,
+    new_epoch: MarketStreamPublication,
+    new_series: MarketStreamPublication,
+    recovered: MarketStreamPublication,
 }
 
 fn scripted_stream_publications() -> Result<ScriptedStreamPublications, ConformanceHarnessError> {
@@ -251,9 +273,6 @@ fn scripted_stream_publications() -> Result<ScriptedStreamPublications, Conforma
         .load_delta(1)
         .map_err(websocket_error)?
         .ok_or_else(|| websocket_error("missing scripted delta"))?;
-    let recovered = source
-        .load_snapshot(LoadEmbeddedReplay { bar_count: 3 })
-        .map_err(websocket_error)?;
     let mut streaming_model =
         MarketBarClientModel::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
     let baseline_publication = scripted_stream_publication(
@@ -284,24 +303,252 @@ fn scripted_stream_publications() -> Result<ScriptedStreamPublications, Conforma
     let mismatched_rejected = matches!(
         MarketStreamPublication::try_new(
             "scripted-market-stream".to_string(),
-            ReplayStreamUpdate::Snapshot(baseline),
+            ReplayStreamUpdate::Snapshot(baseline.clone()),
             delta_publication.generation().clone(),
         ),
         Err(MarketStreamPublicationError::UpdateGenerationMismatch(_))
     );
-    let mut recovered_model =
-        MarketBarClientModel::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-    let recovered_publication = scripted_stream_publication(
-        &mut recovered_model,
-        ReplayStreamUpdate::Snapshot(recovered),
-    )?;
+    let fallback = scripted_fallback_publications(&baseline, &mut streaming_model)?;
     Ok(ScriptedStreamPublications {
         baseline: baseline_publication,
         delta: delta_publication,
+        queued_tail_delta: fallback.queued_tail_delta,
         unrelated_delta,
-        recovered: recovered_publication,
+        fallback_delta: fallback.delta,
+        fallback_tail_delta: fallback.tail_delta,
+        fallback_partial: fallback.partial,
+        fallback_next_delta: fallback.next_delta,
+        fallback_stale: fallback.stale,
+        fallback_older: fallback.older,
+        fallback_new_epoch: fallback.new_epoch,
+        fallback_new_series: fallback.new_series,
+        recovered: fallback.recovered,
         mismatched_rejected,
     })
+}
+
+fn scripted_fallback_publications(
+    baseline: &ReplaySnapshot,
+    streaming_model: &mut MarketBarClientModel,
+) -> Result<ScriptedFallbackPublications, ConformanceHarnessError> {
+    let source = EmbeddedReplaySource;
+    let recovered = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 3 })
+        .map_err(websocket_error)?;
+    let recovered = replay_snapshot_with_generation(&recovered, 3)?;
+    let older = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+        .map_err(websocket_error)?;
+    let older = replay_snapshot_with_generation(&older, 2)?;
+    let partial = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 4 })
+        .map_err(websocket_error)?;
+    let partial = replay_snapshot_with_generation(&partial, 4)?;
+    let new_epoch = replay_snapshot_with_ownership_epoch(
+        baseline,
+        baseline.evidence().ownership_epoch.saturating_add(1),
+    )?;
+    let new_series = replay_snapshot_with_bar_definition_id(baseline, "fallback-series")?;
+    let queued_tail_delta = source
+        .load_delta(2)
+        .map_err(websocket_error)?
+        .ok_or_else(|| websocket_error("missing queued fallback tail delta"))?;
+    let delta = source
+        .load_delta(3)
+        .map_err(websocket_error)?
+        .ok_or_else(|| websocket_error("missing fallback delta"))?;
+    let tail_delta = source
+        .load_delta(4)
+        .map_err(websocket_error)?
+        .ok_or_else(|| websocket_error("missing fallback tail delta"))?;
+    let next_delta = source
+        .load_delta(5)
+        .map_err(websocket_error)?
+        .ok_or_else(|| websocket_error("missing fallback next delta"))?;
+    let model_capacity = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let mut stale_model = MarketBarClientModel::new(model_capacity);
+    let mut older_model = MarketBarClientModel::new(model_capacity);
+    let mut partial_model = MarketBarClientModel::new(model_capacity);
+    let mut new_epoch_model = MarketBarClientModel::new(model_capacity);
+    let mut new_series_model = MarketBarClientModel::new(model_capacity);
+    let stale = scripted_stream_publication(
+        &mut stale_model,
+        ReplayStreamUpdate::Snapshot(baseline.clone()),
+    )?;
+    let older = scripted_stream_publication(&mut older_model, ReplayStreamUpdate::Snapshot(older))?;
+    let partial =
+        scripted_stream_publication(&mut partial_model, ReplayStreamUpdate::Snapshot(partial))?;
+    let new_epoch = scripted_stream_publication(
+        &mut new_epoch_model,
+        ReplayStreamUpdate::Snapshot(new_epoch),
+    )?;
+    let new_series = scripted_stream_publication(
+        &mut new_series_model,
+        ReplayStreamUpdate::Snapshot(new_series),
+    )?;
+    let recovered_model = &mut MarketBarClientModel::new(model_capacity);
+    let recovered =
+        scripted_stream_publication(recovered_model, ReplayStreamUpdate::Snapshot(recovered))?;
+    let queued_tail_delta = scripted_stream_publication(
+        streaming_model,
+        ReplayStreamUpdate::Delta(queued_tail_delta),
+    )?;
+    let delta = scripted_stream_publication(streaming_model, ReplayStreamUpdate::Delta(delta))?;
+    let tail_delta =
+        scripted_stream_publication(streaming_model, ReplayStreamUpdate::Delta(tail_delta))?;
+    let next_delta =
+        scripted_stream_publication(streaming_model, ReplayStreamUpdate::Delta(next_delta))?;
+    Ok(ScriptedFallbackPublications {
+        queued_tail_delta,
+        delta,
+        tail_delta,
+        next_delta,
+        partial,
+        stale,
+        older,
+        new_epoch,
+        new_series,
+        recovered,
+    })
+}
+
+fn replay_snapshot_with_ownership_epoch(
+    snapshot: &ReplaySnapshot,
+    ownership_epoch: u64,
+) -> Result<ReplaySnapshot, ConformanceHarnessError> {
+    let bars = snapshot
+        .bars()
+        .iter()
+        .cloned()
+        .map(|item| {
+            let (bar, mut provenance) = item.into_parts();
+            provenance.ownership_epoch = ownership_epoch;
+            axiusflow_application::Provenanced::new(bar, provenance)
+        })
+        .collect::<Vec<_>>();
+    let mut evidence = snapshot.evidence().clone();
+    evidence.ownership_epoch = ownership_epoch;
+    evidence.checksum = axiusflow_protocols::compute_market_snapshot_checksum(
+        &evidence,
+        axiusflow_protocols::MarketSnapshotIdentityRef {
+            instrument_id: snapshot.instrument().instrument_id.as_str(),
+            instrument_revision: snapshot.instrument().revision,
+            bar_definition_id: &snapshot.bar_definition().definition_id,
+            bar_definition_version: snapshot.bar_definition().version,
+            bar_interval_seconds: snapshot.bar_definition().interval_seconds,
+        },
+        bars.iter().map(|item| {
+            let bar = item.value();
+            axiusflow_protocols::MarketValueChecksumRef {
+                source_sequence: bar.source_sequence,
+                exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                provenance: item.provenance(),
+            }
+        }),
+    );
+    ReplaySnapshot::try_new_provenanced(
+        snapshot.instrument().clone(),
+        snapshot.provenance(),
+        snapshot.bar_definition().clone(),
+        evidence,
+        bars,
+    )
+    .map_err(websocket_error)
+}
+
+fn replay_snapshot_with_bar_definition_id(
+    snapshot: &ReplaySnapshot,
+    definition_id: &str,
+) -> Result<ReplaySnapshot, ConformanceHarnessError> {
+    let mut bar_definition = snapshot.bar_definition().clone();
+    bar_definition.definition_id = definition_id.to_string();
+    let bars = snapshot.bars().to_vec();
+    let mut evidence = snapshot.evidence().clone();
+    evidence.checksum = axiusflow_protocols::compute_market_snapshot_checksum(
+        &evidence,
+        axiusflow_protocols::MarketSnapshotIdentityRef {
+            instrument_id: snapshot.instrument().instrument_id.as_str(),
+            instrument_revision: snapshot.instrument().revision,
+            bar_definition_id: &bar_definition.definition_id,
+            bar_definition_version: bar_definition.version,
+            bar_interval_seconds: bar_definition.interval_seconds,
+        },
+        bars.iter().map(|item| {
+            let bar = item.value();
+            axiusflow_protocols::MarketValueChecksumRef {
+                source_sequence: bar.source_sequence,
+                exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                provenance: item.provenance(),
+            }
+        }),
+    );
+    ReplaySnapshot::try_new_provenanced(
+        snapshot.instrument().clone(),
+        snapshot.provenance(),
+        bar_definition,
+        evidence,
+        bars,
+    )
+    .map_err(websocket_error)
+}
+
+fn replay_snapshot_with_schema_version(
+    snapshot: &ReplaySnapshot,
+    schema_version: u32,
+) -> Result<ReplaySnapshot, ConformanceHarnessError> {
+    let bars = snapshot
+        .bars()
+        .iter()
+        .cloned()
+        .map(|item| {
+            let (bar, mut provenance) = item.into_parts();
+            provenance.schema_version = schema_version;
+            axiusflow_application::Provenanced::new(bar, provenance)
+        })
+        .collect::<Vec<_>>();
+    let mut evidence = snapshot.evidence().clone();
+    evidence.schema_version = schema_version;
+    evidence.checksum = axiusflow_protocols::compute_market_snapshot_checksum(
+        &evidence,
+        axiusflow_protocols::MarketSnapshotIdentityRef {
+            instrument_id: snapshot.instrument().instrument_id.as_str(),
+            instrument_revision: snapshot.instrument().revision,
+            bar_definition_id: &snapshot.bar_definition().definition_id,
+            bar_definition_version: snapshot.bar_definition().version,
+            bar_interval_seconds: snapshot.bar_definition().interval_seconds,
+        },
+        bars.iter().map(|item| {
+            let bar = item.value();
+            axiusflow_protocols::MarketValueChecksumRef {
+                source_sequence: bar.source_sequence,
+                exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                provenance: item.provenance(),
+            }
+        }),
+    );
+    ReplaySnapshot::try_new_provenanced(
+        snapshot.instrument().clone(),
+        snapshot.provenance(),
+        snapshot.bar_definition().clone(),
+        evidence,
+        bars,
+    )
+    .map_err(websocket_error)
 }
 
 fn scripted_stream_publication(
@@ -325,6 +572,7 @@ fn scripted_stream_publication(
 
 fn neutral_coordinator_edge_conformance() -> Result<bool, ConformanceHarnessError> {
     let publications = scripted_stream_publications()?;
+    let fallback_rebaselines = coordinator_fallback_rebaseline_conformance()?;
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel(1);
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
     let port = ScriptedMarketStreamPort {
@@ -342,7 +590,7 @@ fn neutral_coordinator_edge_conformance() -> Result<bool, ConformanceHarnessErro
     ) && coordinator.bridge().is_none();
     event_tx
         .try_send(MarketStreamEvent::Publication(Box::new(
-            publications.baseline,
+            publications.baseline.clone(),
         )))
         .map_err(websocket_error)?;
     let baseline_installed = matches!(
@@ -367,9 +615,26 @@ fn neutral_coordinator_edge_conformance() -> Result<bool, ConformanceHarnessErro
         }
     );
     let discontinuity_did_not_mutate = coordinator.bridge().is_some_and(|bridge| {
-        bridge.queued_update_count() == 0 && bridge.expected_sequence() == Some(2)
+        let metrics = bridge.metrics();
+        bridge.queued_update_count() == 0
+            && bridge.requires_snapshot()
+            && metrics.recovery_pending
+            && metrics.resnapshot_requests == 1
     }) && coordinator.metrics().publication_generation
         == Some(1);
+    event_tx
+        .try_send(MarketStreamEvent::Publication(Box::new(
+            publications.recovered.clone(),
+        )))
+        .map_err(websocket_error)?;
+    let ordinary_snapshot_rejected = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery {
+            generation: 3,
+            last_sequence: 3,
+            ..
+        }
+    );
 
     let recovery_bounded = scripted_coordinator_recovery(
         &mut coordinator,
@@ -399,13 +664,805 @@ fn neutral_coordinator_edge_conformance() -> Result<bool, ConformanceHarnessErro
         && baseline_installed
         && generation_discontinuity_rejected
         && discontinuity_did_not_mutate
+        && ordinary_snapshot_rejected
+        && fallback_rebaselines
         && recovery_bounded
         && event_disconnected
         && command_disconnected
         && metrics.publications_accepted == 1
-        && metrics.publications_rejected == 2
+        && metrics.publications_rejected == 3
+        && metrics.stream_invalidations == 1
         && metrics.recovery_snapshots_installed == 1
-        && metrics.recovery_snapshots_rejected == 1)
+        && metrics.recovery_snapshots_rejected == 2)
+}
+
+fn coordinator_fallback_rebaseline_conformance() -> Result<bool, ConformanceHarnessError> {
+    Ok(coordinator_rebaseline_after_exhaustion()?
+        && coordinator_rebaseline_identity_change()?
+        && coordinator_accepts_unchanged_transport_snapshot()?
+        && coordinator_accepts_schema_version_transition()?
+        && coordinator_refreshes_pending_recovery_reason()?
+        && coordinator_reinvalidates_queued_fallback()?)
+}
+
+fn coordinator_accepts_unchanged_transport_snapshot() -> Result<bool, ConformanceHarnessError> {
+    let publications = scripted_stream_publications()?;
+    let capacity = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator = ChartStreamCoordinator::new(capacity);
+    let baseline = publications.baseline.clone();
+    let baseline_installed = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, baseline.clone())?,
+        ChartStreamPollOutcome::InitialSnapshot { .. }
+    );
+    let invalidated = coordinator.mark_stream_invalid(ResnapshotReason::TransportReset);
+    let request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| websocket_error("transport-reset fixture did not request recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(request_id),
+            attempts: 3,
+            reason: ResnapshotReason::TransportReset,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let unchanged_queued = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, baseline)?,
+        ChartStreamPollOutcome::PublicationQueued { generation: 1, .. }
+    );
+    let unchanged_installed = coordinator
+        .drain_merged()
+        .map_err(websocket_error)?
+        .is_some_and(|merged| merged.snapshot().is_some())
+        && coordinator
+            .bridge()
+            .is_some_and(|bridge| !bridge.requires_snapshot());
+    Ok(baseline_installed && invalidated && exhausted && unchanged_queued && unchanged_installed)
+}
+
+fn coordinator_accepts_schema_version_transition() -> Result<bool, ConformanceHarnessError> {
+    let source = EmbeddedReplaySource;
+    let baseline = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 1 })
+        .map_err(websocket_error)?;
+    let schema_version = baseline.evidence().schema_version.saturating_add(1);
+    let changed = replay_snapshot_with_schema_version(&baseline, schema_version)?;
+    let capacity = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let baseline = scripted_stream_publication(
+        &mut MarketBarClientModel::new(capacity),
+        ReplayStreamUpdate::Snapshot(baseline),
+    )?;
+    let changed = scripted_stream_publication(
+        &mut MarketBarClientModel::new(capacity),
+        ReplayStreamUpdate::Snapshot(changed),
+    )?;
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator = ChartStreamCoordinator::new(capacity);
+    let baseline_installed = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, baseline)?,
+        ChartStreamPollOutcome::InitialSnapshot { .. }
+    );
+    let invalidated = coordinator.mark_stream_invalid(ResnapshotReason::SchemaChanged);
+    let request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| websocket_error("schema-change fixture did not request recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(request_id),
+            attempts: 3,
+            reason: ResnapshotReason::SchemaChanged,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let changed_queued = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, changed)?,
+        ChartStreamPollOutcome::PublicationQueued { generation: 1, .. }
+    );
+    let changed_installed = coordinator
+        .drain_merged()
+        .map_err(websocket_error)?
+        .is_some_and(|merged| {
+            merged
+                .snapshot()
+                .is_some_and(|snapshot| snapshot.evidence().schema_version == schema_version)
+        })
+        && coordinator
+            .bridge()
+            .is_some_and(|bridge| !bridge.requires_snapshot());
+    Ok(baseline_installed && invalidated && exhausted && changed_queued && changed_installed)
+}
+
+fn coordinator_refreshes_pending_recovery_reason() -> Result<bool, ConformanceHarnessError> {
+    let publications = scripted_stream_publications()?;
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator =
+        ChartStreamCoordinator::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+    let baseline_installed = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, publications.baseline)?,
+        ChartStreamPollOutcome::InitialSnapshot { .. }
+    );
+    let first_invalidated = coordinator.mark_stream_invalid(ResnapshotReason::SequenceGap);
+    let first_request = coordinator
+        .bridge()
+        .and_then(ChartDataBridge::pending_resnapshot_request)
+        .ok_or_else(|| websocket_error("reason-refresh fixture did not request recovery"))?;
+    let refreshed = coordinator.mark_stream_invalid(ResnapshotReason::OwnershipHandoff);
+    let refreshed_request = coordinator
+        .bridge()
+        .and_then(ChartDataBridge::pending_resnapshot_request)
+        .ok_or_else(|| websocket_error("reason-refresh fixture did not replace recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(refreshed_request.request_id),
+            attempts: 3,
+            reason: ResnapshotReason::OwnershipHandoff,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let fallback_queued = matches!(
+        poll_scripted_publication(
+            &mut coordinator,
+            &port,
+            &event_tx,
+            publications.fallback_new_epoch,
+        )?,
+        ChartStreamPollOutcome::PublicationQueued { .. }
+    );
+    let fallback_installed = coordinator
+        .drain_merged()
+        .map_err(websocket_error)?
+        .is_some_and(|merged| merged.snapshot().is_some());
+    Ok(baseline_installed
+        && first_invalidated
+        && refreshed
+        && refreshed_request.request_id != first_request.request_id
+        && refreshed_request.reason == ResnapshotReason::OwnershipHandoff
+        && exhausted
+        && fallback_queued
+        && fallback_installed)
+}
+
+fn coordinator_reinvalidates_queued_fallback() -> Result<bool, ConformanceHarnessError> {
+    let publications = scripted_stream_publications()?;
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator =
+        ChartStreamCoordinator::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+    let baseline_installed = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, publications.baseline)?,
+        ChartStreamPollOutcome::InitialSnapshot { .. }
+    );
+    let first_invalidated = coordinator.mark_stream_invalid(ResnapshotReason::SequenceGap);
+    let _first_request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| {
+            websocket_error("first reinvalidation fixture recovery was not requested")
+        })?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: None,
+            attempts: 3,
+            reason: ResnapshotReason::SequenceGap,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let first_exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let fallback_queued = matches!(
+        poll_scripted_publication(
+            &mut coordinator,
+            &port,
+            &event_tx,
+            publications.fallback_older,
+        )?,
+        ChartStreamPollOutcome::PublicationQueued { .. }
+    );
+    let second_invalidated = coordinator.mark_stream_invalid(ResnapshotReason::SequenceGap);
+    let queued_fallback_cleared = coordinator
+        .bridge()
+        .is_some_and(|bridge| bridge.queued_update_count() == 0);
+    let second_request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| {
+            websocket_error("second reinvalidation fixture recovery was not requested")
+        })?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(second_request_id),
+            attempts: 3,
+            reason: ResnapshotReason::SequenceGap,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let second_exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let delta_remains_fenced = matches!(
+        poll_scripted_publication(
+            &mut coordinator,
+            &port,
+            &event_tx,
+            publications.fallback_delta,
+        )?,
+        ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery { .. }
+    );
+    Ok(baseline_installed
+        && first_invalidated
+        && first_exhausted
+        && fallback_queued
+        && second_invalidated
+        && queued_fallback_cleared
+        && second_exhausted
+        && delta_remains_fenced)
+}
+
+fn coordinator_rebaseline_after_exhaustion() -> Result<bool, ConformanceHarnessError> {
+    let publications = scripted_stream_publications()?;
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator =
+        ChartStreamCoordinator::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+    event_tx
+        .try_send(MarketStreamEvent::Publication(Box::new(
+            publications.baseline.clone(),
+        )))
+        .map_err(websocket_error)?;
+    let baseline_installed = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::InitialSnapshot {
+            last_sequence: 1,
+            ..
+        }
+    );
+    event_tx
+        .try_send(MarketStreamEvent::Publication(Box::new(
+            publications.delta.clone(),
+        )))
+        .map_err(websocket_error)?;
+    let queued_before_invalidation = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 2,
+            last_sequence: 2,
+            ..
+        }
+    ) && coordinator
+        .bridge()
+        .is_some_and(|bridge| bridge.queued_update_count() == 1);
+    event_tx
+        .try_send(MarketStreamEvent::Publication(Box::new(
+            publications.queued_tail_delta.clone(),
+        )))
+        .map_err(websocket_error)?;
+    let tail_queued_before_invalidation = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 3,
+            last_sequence: 3,
+            ..
+        }
+    ) && coordinator
+        .bridge()
+        .is_some_and(|bridge| bridge.queued_update_count() == 2);
+    let invalidated = coordinator.mark_stream_invalid(ResnapshotReason::SequenceGap);
+    let request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| websocket_error("exhaustion fixture did not request recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(request_id),
+            attempts: 3,
+            reason: ResnapshotReason::SequenceGap,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let canceled = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted {
+            request_id: Some(actual),
+            canceled: true,
+            ..
+        } if actual == request_id
+    );
+    let fallback_rebaseline =
+        rebaseline_canceled_coordinator(&mut coordinator, &port, &event_tx, publications)?;
+    let metrics = coordinator.metrics();
+    Ok(baseline_installed
+        && queued_before_invalidation
+        && tail_queued_before_invalidation
+        && invalidated
+        && canceled
+        && fallback_rebaseline
+        && metrics.publications_accepted == 8
+        && metrics.publications_rejected == 3
+        && metrics.stream_invalidations == 0
+        && metrics.recovery_exhaustions == 1)
+}
+
+fn coordinator_rebaseline_identity_change() -> Result<bool, ConformanceHarnessError> {
+    Ok(
+        rebaseline_discards_incompatible_tail(FallbackIdentityChange::OwnershipEpoch)?
+            && rebaseline_discards_incompatible_tail(FallbackIdentityChange::Series)?
+            && rebaseline_fences_stale_delta_after_snapshot()?
+            && rebaseline_rejects_series_ownership_rollback()?,
+    )
+}
+
+fn rebaseline_fences_stale_delta_after_snapshot() -> Result<bool, ConformanceHarnessError> {
+    let source = EmbeddedReplaySource;
+    let baseline = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 1 })
+        .map_err(websocket_error)?;
+    let stale_delta = source
+        .load_delta(1)
+        .map_err(websocket_error)?
+        .ok_or_else(|| websocket_error("missing stale rebaseline delta"))?;
+    let ownership_epoch = baseline.evidence().ownership_epoch.saturating_add(1);
+    let fallback = replay_snapshot_with_ownership_epoch(&baseline, ownership_epoch)?;
+    let valid_delta = {
+        let (bar, mut provenance) = stale_delta.item().clone().into_parts();
+        provenance.ownership_epoch = ownership_epoch;
+        axiusflow_application::StreamDelta::try_new(
+            stale_delta.previous_sequence(),
+            stale_delta.sequence(),
+            axiusflow_application::Provenanced::new(bar, provenance),
+        )
+        .map_err(websocket_error)?
+    };
+    let capacity = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let mut baseline_model = MarketBarClientModel::new(capacity);
+    let baseline_publication =
+        scripted_stream_publication(&mut baseline_model, ReplayStreamUpdate::Snapshot(baseline))?;
+    let stale_delta_publication =
+        scripted_stream_publication(&mut baseline_model, ReplayStreamUpdate::Delta(stale_delta))?;
+    let mut fallback_model = MarketBarClientModel::new(capacity);
+    let fallback_publication =
+        scripted_stream_publication(&mut fallback_model, ReplayStreamUpdate::Snapshot(fallback))?;
+    let valid_delta_publication =
+        scripted_stream_publication(&mut fallback_model, ReplayStreamUpdate::Delta(valid_delta))?;
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator = ChartStreamCoordinator::new(capacity);
+    let baseline_installed = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, baseline_publication,)?,
+        ChartStreamPollOutcome::InitialSnapshot { .. }
+    );
+    let invalidated = coordinator.mark_stream_invalid(ResnapshotReason::OwnershipHandoff);
+    let request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| websocket_error("stale-delta fixture did not request recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(request_id),
+            attempts: 3,
+            reason: ResnapshotReason::OwnershipHandoff,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let fallback_queued = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, fallback_publication,)?,
+        ChartStreamPollOutcome::PublicationQueued { generation: 1, .. }
+    );
+    let stale_delta_rejected = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, stale_delta_publication,)?,
+        ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery { generation: 2, .. }
+    );
+    let valid_delta_queued = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, valid_delta_publication,)?,
+        ChartStreamPollOutcome::PublicationQueued { generation: 2, .. }
+    );
+    let fallback_and_valid_delta_applied = coordinator
+        .drain_merged()
+        .map_err(websocket_error)?
+        .is_some_and(|merged| {
+            merged.accepted_deltas().len() == 1
+                && merged
+                    .snapshot()
+                    .is_some_and(|snapshot| snapshot.evidence().ownership_epoch == ownership_epoch)
+        })
+        && coordinator.bridge().is_some_and(|bridge| {
+            !bridge.requires_snapshot() && bridge.expected_sequence() == Some(3)
+        })
+        && coordinator.metrics().publication_generation == Some(2);
+    Ok(baseline_installed
+        && invalidated
+        && exhausted
+        && fallback_queued
+        && stale_delta_rejected
+        && valid_delta_queued
+        && fallback_and_valid_delta_applied)
+}
+
+fn rebaseline_rejects_series_ownership_rollback() -> Result<bool, ConformanceHarnessError> {
+    let source = EmbeddedReplaySource;
+    let baseline = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 1 })
+        .map_err(websocket_error)?;
+    let baseline = replay_snapshot_with_ownership_epoch(&baseline, 2)?;
+    let fallback = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+        .map_err(websocket_error)?;
+    let fallback = replay_snapshot_with_bar_definition_id(&fallback, "stale-fallback-series")?;
+    let capacity = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let baseline = scripted_stream_publication(
+        &mut MarketBarClientModel::new(capacity),
+        ReplayStreamUpdate::Snapshot(baseline),
+    )?;
+    let fallback = scripted_stream_publication(
+        &mut MarketBarClientModel::new(capacity),
+        ReplayStreamUpdate::Snapshot(fallback),
+    )?;
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator = ChartStreamCoordinator::new(capacity);
+    let baseline_installed = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, baseline)?,
+        ChartStreamPollOutcome::InitialSnapshot { .. }
+    );
+    let invalidated = coordinator.mark_stream_invalid(ResnapshotReason::OwnershipHandoff);
+    let request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| websocket_error("ownership rollback fixture did not request recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(request_id),
+            attempts: 3,
+            reason: ResnapshotReason::OwnershipHandoff,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let rollback_rejected = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, fallback)?,
+        ChartStreamPollOutcome::PublicationSnapshotSuperseded { .. }
+    );
+    Ok(baseline_installed
+        && invalidated
+        && exhausted
+        && rollback_rejected
+        && coordinator.bridge().is_some_and(|bridge| {
+            bridge.requires_snapshot()
+                && bridge.queued_update_count() == 0
+                && bridge.metrics().rejected_stale_snapshots == 1
+        }))
+}
+
+#[derive(Clone, Copy)]
+enum FallbackIdentityChange {
+    OwnershipEpoch,
+    Series,
+}
+
+fn rebaseline_discards_incompatible_tail(
+    identity_change: FallbackIdentityChange,
+) -> Result<bool, ConformanceHarnessError> {
+    let publications = scripted_stream_publications()?;
+    let (fallback, reason) = match identity_change {
+        FallbackIdentityChange::OwnershipEpoch => (
+            publications.fallback_new_epoch,
+            ResnapshotReason::OwnershipHandoff,
+        ),
+        FallbackIdentityChange::Series => (
+            publications.fallback_new_series,
+            ResnapshotReason::SchemaChanged,
+        ),
+    };
+    let expected_ownership_epoch = fallback.generation().ownership_epoch();
+    let expected_last_sequence = fallback.generation().sequence_range().1;
+    let expected_definition_id = match fallback.update() {
+        ReplayStreamUpdate::Snapshot(snapshot) => snapshot.bar_definition().definition_id.clone(),
+        ReplayStreamUpdate::Delta(_) => {
+            return Err(websocket_error(
+                "identity-change fallback was not a snapshot",
+            ));
+        }
+    };
+    let (command_tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1);
+    let port = ScriptedMarketStreamPort {
+        commands: command_tx,
+        events: event_rx,
+    };
+    let mut coordinator =
+        ChartStreamCoordinator::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+    let prefix_queued = queue_identity_change_prefix(
+        &mut coordinator,
+        &port,
+        &event_tx,
+        publications.baseline,
+        publications.delta,
+        publications.queued_tail_delta,
+    )?;
+    let invalidated = coordinator.mark_stream_invalid(reason);
+    let request_id = coordinator
+        .bridge()
+        .and_then(|bridge| bridge.metrics().recovery_request_id)
+        .ok_or_else(|| websocket_error("identity-change fixture did not request recovery"))?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoveryExhausted {
+            request_id: Some(request_id),
+            attempts: 3,
+            reason,
+            dropped_events: 0,
+        })
+        .map_err(websocket_error)?;
+    let exhausted = matches!(
+        coordinator.poll_once(&port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoveryExhausted { canceled: true, .. }
+    );
+    let intermediate_fallback_queued = drain_and_queue_intermediate_fallback(
+        &mut coordinator,
+        &port,
+        &event_tx,
+        publications.fallback_older,
+    )?;
+    let snapshot_queued = matches!(
+        poll_scripted_publication(&mut coordinator, &port, &event_tx, fallback)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            last_sequence,
+            ..
+        } if last_sequence == expected_last_sequence
+    );
+    let incompatible_tail_discarded = coordinator
+        .bridge()
+        .is_some_and(|bridge| bridge.queued_update_count() == 1);
+    let merged = coordinator.drain_merged().map_err(websocket_error)?;
+    let rebaselined_without_incompatible_tail = merged.is_some_and(|merged| {
+        merged.accepted_deltas().is_empty()
+            && merged.snapshot().is_some_and(|snapshot| {
+                snapshot.evidence().ownership_epoch == expected_ownership_epoch
+                    && snapshot.bar_definition().definition_id == expected_definition_id
+            })
+    });
+    Ok(prefix_queued
+        && invalidated
+        && exhausted
+        && intermediate_fallback_queued
+        && snapshot_queued
+        && incompatible_tail_discarded
+        && rebaselined_without_incompatible_tail)
+}
+
+fn queue_identity_change_prefix(
+    coordinator: &mut ChartStreamCoordinator,
+    port: &ScriptedMarketStreamPort,
+    event_tx: &std::sync::mpsc::SyncSender<MarketStreamEvent>,
+    baseline: MarketStreamPublication,
+    delta: MarketStreamPublication,
+    tail_delta: MarketStreamPublication,
+) -> Result<bool, ConformanceHarnessError> {
+    let baseline_installed = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, baseline)?,
+        ChartStreamPollOutcome::InitialSnapshot {
+            last_sequence: 1,
+            ..
+        }
+    );
+    let first_delta_queued = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, delta)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            last_sequence: 2,
+            ..
+        }
+    );
+    let tail_delta_queued = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, tail_delta)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            last_sequence: 3,
+            ..
+        }
+    );
+    Ok(baseline_installed && first_delta_queued && tail_delta_queued)
+}
+
+fn drain_and_queue_intermediate_fallback(
+    coordinator: &mut ChartStreamCoordinator,
+    port: &ScriptedMarketStreamPort,
+    event_tx: &std::sync::mpsc::SyncSender<MarketStreamEvent>,
+    fallback: MarketStreamPublication,
+) -> Result<bool, ConformanceHarnessError> {
+    let drained = coordinator
+        .drain_merged()
+        .map_err(websocket_error)?
+        .is_some();
+    let queued = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, fallback)?,
+        ChartStreamPollOutcome::PublicationQueued { .. }
+    );
+    Ok(drained && queued)
+}
+
+fn rebaseline_canceled_coordinator(
+    coordinator: &mut ChartStreamCoordinator,
+    port: &ScriptedMarketStreamPort,
+    event_tx: &std::sync::mpsc::SyncSender<MarketStreamEvent>,
+    publications: ScriptedStreamPublications,
+) -> Result<bool, ConformanceHarnessError> {
+    let cancellation_retains_snapshot_requirement = coordinator.bridge().is_some_and(|bridge| {
+        let metrics = bridge.metrics();
+        bridge.requires_snapshot() && !metrics.recovery_pending
+    });
+    let stale_snapshot_superseded = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, publications.fallback_stale,)?,
+        ChartStreamPollOutcome::PublicationSnapshotSuperseded {
+            generation: 1,
+            last_sequence: 1,
+            ..
+        }
+    );
+    let delta_remains_fenced = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, publications.unrelated_delta,)?,
+        ChartStreamPollOutcome::PublicationRejectedAwaitingRecovery {
+            generation: 99,
+            last_sequence: 2,
+            ..
+        }
+    ) && coordinator
+        .bridge()
+        .is_some_and(|bridge| bridge.requires_snapshot() && !bridge.metrics().recovery_pending);
+    let ordinary_snapshot_queued = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, publications.fallback_older)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 2,
+            last_sequence: 2,
+            ..
+        }
+    );
+    let delta_behind_snapshot_queued = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, publications.fallback_delta)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 4,
+            last_sequence: 4,
+            ..
+        }
+    );
+    let tail_delta_behind_snapshot_queued = matches!(
+        poll_scripted_publication(
+            coordinator,
+            port,
+            event_tx,
+            publications.fallback_tail_delta,
+        )?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 5,
+            last_sequence: 5,
+            ..
+        }
+    );
+    let partial_snapshot_preserved_tail = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, publications.fallback_partial,)?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 4,
+            last_sequence: 4,
+            ..
+        }
+    );
+    let next_delta_preserved_generation = matches!(
+        poll_scripted_publication(
+            coordinator,
+            port,
+            event_tx,
+            publications.fallback_next_delta,
+        )?,
+        ChartStreamPollOutcome::PublicationQueued {
+            generation: 6,
+            last_sequence: 6,
+            ..
+        }
+    );
+    let older_snapshot_superseded = matches!(
+        poll_scripted_publication(coordinator, port, event_tx, publications.recovered)?,
+        ChartStreamPollOutcome::PublicationSnapshotSuperseded {
+            generation: 3,
+            last_sequence: 3,
+            ..
+        }
+    );
+    let rebaselined = drain_preserved_rebaseline_tail(coordinator)?;
+    Ok(cancellation_retains_snapshot_requirement
+        && stale_snapshot_superseded
+        && delta_remains_fenced
+        && ordinary_snapshot_queued
+        && delta_behind_snapshot_queued
+        && tail_delta_behind_snapshot_queued
+        && partial_snapshot_preserved_tail
+        && next_delta_preserved_generation
+        && older_snapshot_superseded
+        && rebaselined)
+}
+
+fn drain_preserved_rebaseline_tail(
+    coordinator: &mut ChartStreamCoordinator,
+) -> Result<bool, ConformanceHarnessError> {
+    let queue_preserved = coordinator.bridge().is_some_and(|bridge| {
+        let metrics = bridge.metrics();
+        bridge.queued_update_count() == 3
+            && metrics.queue_overflows == 0
+            && !metrics.recovery_pending
+            && metrics.rejected_stale_snapshots == 2
+    });
+    let drained = coordinator
+        .drain_merged()
+        .map_err(websocket_error)?
+        .is_some();
+    Ok(queue_preserved
+        && drained
+        && coordinator.bridge().is_some_and(|bridge| {
+            !bridge.requires_snapshot() && bridge.expected_sequence() == Some(7)
+        }))
+}
+
+fn poll_scripted_publication(
+    coordinator: &mut ChartStreamCoordinator,
+    port: &ScriptedMarketStreamPort,
+    event_tx: &std::sync::mpsc::SyncSender<MarketStreamEvent>,
+    publication: MarketStreamPublication,
+) -> Result<ChartStreamPollOutcome, ConformanceHarnessError> {
+    event_tx
+        .try_send(MarketStreamEvent::Publication(Box::new(publication)))
+        .map_err(websocket_error)?;
+    coordinator.poll_once(port).map_err(websocket_error)
 }
 
 fn scripted_coordinator_recovery(
@@ -415,7 +1472,10 @@ fn scripted_coordinator_recovery(
     event_tx: &std::sync::mpsc::SyncSender<MarketStreamEvent>,
     recovered: MarketStreamPublication,
 ) -> Result<bool, ConformanceHarnessError> {
-    let invalidated = coordinator.mark_stream_invalid(ResnapshotReason::QueueOverflow);
+    let invalidated = coordinator.bridge().is_some_and(|bridge| {
+        let metrics = bridge.metrics();
+        bridge.requires_snapshot() && metrics.recovery_pending && metrics.resnapshot_requests == 1
+    });
     let request_id = coordinator
         .bridge()
         .and_then(|bridge| bridge.metrics().recovery_request_id)
@@ -443,7 +1503,7 @@ fn scripted_coordinator_recovery(
         command
             == MarketStreamCommand::Recover {
                 request_id,
-                reason: ResnapshotReason::QueueOverflow,
+                reason: ResnapshotReason::SequenceGap,
             }
     });
 
@@ -462,6 +1522,14 @@ fn scripted_coordinator_recovery(
     ) && coordinator
         .bridge()
         .is_some_and(ChartDataBridge::requires_snapshot);
+    let mismatched_retryable = reject_mismatched_recovery_and_retry(
+        coordinator,
+        port,
+        command_rx,
+        event_tx,
+        request_id,
+        &recovered,
+    )?;
     event_tx
         .try_send(MarketStreamEvent::RecoverySnapshot {
             request_id,
@@ -483,7 +1551,52 @@ fn scripted_coordinator_recovery(
         && retry_accepted
         && correlated_command
         && uncorrelated_rejected
+        && mismatched_retryable
         && correlated_installed)
+}
+
+fn reject_mismatched_recovery_and_retry(
+    coordinator: &mut ChartStreamCoordinator,
+    port: &ScriptedMarketStreamPort,
+    command_rx: &std::sync::mpsc::Receiver<MarketStreamCommand>,
+    event_tx: &std::sync::mpsc::SyncSender<MarketStreamEvent>,
+    request_id: u64,
+    recovered: &MarketStreamPublication,
+) -> Result<bool, ConformanceHarnessError> {
+    let mismatched = MarketStreamPublication::try_new(
+        "mismatched-scripted-market-stream".to_string(),
+        recovered.update().clone(),
+        recovered.generation().clone(),
+    )
+    .map_err(websocket_error)?;
+    event_tx
+        .try_send(MarketStreamEvent::RecoverySnapshot {
+            request_id,
+            publication: Box::new(mismatched),
+        })
+        .map_err(websocket_error)?;
+    let retryable = matches!(
+        coordinator.poll_once(port).map_err(websocket_error)?,
+        ChartStreamPollOutcome::RecoverySnapshot {
+            installed: false,
+            ..
+        }
+    ) && coordinator.bridge().is_some_and(|bridge| {
+        let metrics = bridge.metrics();
+        metrics.recovery_pending && !metrics.recovery_dispatched
+    });
+    let retry_accepted = coordinator
+        .try_dispatch_recovery(port)
+        .map_err(websocket_error)?
+        == ChartStreamRecoveryDispatch::Accepted;
+    let retry_command = command_rx.try_recv().is_ok_and(|command| {
+        command
+            == MarketStreamCommand::Recover {
+                request_id,
+                reason: ResnapshotReason::SequenceGap,
+            }
+    });
+    Ok(retryable && retry_accepted && retry_command)
 }
 
 fn runtime_neutral_coordinator(

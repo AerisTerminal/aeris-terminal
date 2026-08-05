@@ -5,9 +5,11 @@ You are an expert software engineering agent operating autonomously in this repo
 ## Git & Review Workflow (mandatory)
 
 - Work directly on **`main`**. There are no PRs and no side branches.
+- Treat a commit as a substantial, complete work unit. Drive work from the current stage in `docs/platform_creation_plan.md`, implement a large coherent batch with its regression coverage, and only then run the final validation/review/commit/push cycle. Do not create or push tiny checkpoint commits for individual edits.
+- Use the persisted 9router configuration for `cx/gpt-5.6` at medium reasoning for primary work and `cx/gpt-5.6-sol` at low reasoning for review. The primary implementation agent invokes the review gate explicitly as `codex exec review --uncommitted --ephemeral -m cx/gpt-5.6-sol -c 'model_reasoning_effort="low"'`; a review agent reports findings directly and never launches a nested review.
 - Before ANY commit, run the full validation gate, in order:
   1. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace --all-targets --all-features`, and the relevant tests — all must pass with zero warnings.
-  2. `codex exec review --uncommitted --ephemeral` — local Codex review of your uncommitted changes via 9router (no external rate limits or cooldowns).
+  2. The primary implementation agent runs the explicit local Codex review command above via 9router (no external rate limits or cooldowns).
 - The review is a required gate:
   - Reject non-zero exits, timeouts, and every reported finding.
   - Fix every finding it reports, then re-run `codex exec review --uncommitted --ephemeral` until it reports no findings.
@@ -40,7 +42,8 @@ You are an expert software engineering agent operating autonomously in this repo
 ## Verification
 
 - A task is not done when the code is written — it is done when it is verified.
-- After every change: build it (`cargo build`), lint it (`cargo clippy`), run the relevant tests. Fix every error and every warning you introduced before moving on.
+- Work continuously through the selected roadmap batch. While iterating, use focused builds and tests only where they provide useful feedback; do not interrupt implementation with the full workspace gate after every small change.
+- Run the full mandatory validation and review gate after the large work unit and its regression coverage are complete. If review reports findings, fix them as one batch, use focused checks while iterating, then repeat the full gate before committing.
 - If you can't run the verification, say so explicitly and state exactly what command the user should run.
 - When fixing a bug, first reproduce it or write a failing test that captures it; the fix is proven when that test passes.
 
