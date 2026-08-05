@@ -1,0 +1,101 @@
+use super::{PARTITION_ID, SCHEMA_VERSION, unix_nanos};
+use axiusflow_application::{
+    MarketEventProvenance, Provenanced, ProvenancedMarketBar, validate_provenanced_market_bar,
+};
+use axiusflow_coinbase_market_adapter::{CoinbaseAggregatedBar, ENTITLEMENT_CLASS};
+use axiusflow_desktop_provider_runtime::SessionGeneration;
+use axiusflow_market_data::MarketBar;
+
+pub(super) fn history_provenance(
+    bar: MarketBar,
+    generation: SessionGeneration,
+    received_unix_nanos: i64,
+) -> Result<ProvenancedMarketBar, String> {
+    let exchange = bar
+        .exchange_timestamp_seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase history timestamp overflow".to_string())?;
+    provenanced(
+        bar,
+        generation,
+        format!("coinbase_history_bar_{}_{exchange}", bar.source_sequence),
+        exchange,
+        received_unix_nanos,
+        received_unix_nanos,
+        "coinbase_https_history".to_string(),
+    )
+}
+
+pub(super) fn live_provenance(
+    completed: CoinbaseAggregatedBar,
+    generation: SessionGeneration,
+) -> Result<ProvenancedMarketBar, String> {
+    let provider_sequence_num = completed
+        .provider_sequence_num
+        .ok_or_else(|| "Coinbase completed bar has no live provider sequence".to_string())?;
+    let provider_timestamp_unix_nanos = completed
+        .provider_timestamp_unix_nanos
+        .ok_or_else(|| "Coinbase completed bar has no live provider timestamp".to_string())?;
+    let received = unix_nanos()?;
+    let exchange = completed
+        .bar
+        .exchange_timestamp_seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase live bar timestamp overflow".to_string())?;
+    provenanced(
+        completed.bar,
+        generation,
+        format!(
+            "coinbase_live_bar_{}_message_{}",
+            completed.bar.source_sequence, provider_sequence_num
+        ),
+        exchange,
+        provider_timestamp_unix_nanos,
+        received,
+        format!("coinbase_message_sequence_{provider_sequence_num}"),
+    )
+}
+
+fn provenanced(
+    bar: MarketBar,
+    generation: SessionGeneration,
+    event_id: String,
+    event_time_unix_nanos: i64,
+    provider_receive_timestamp_unix_nanos: i64,
+    received_unix_nanos: i64,
+    causation_id: String,
+) -> Result<ProvenancedMarketBar, String> {
+    let exchange_timestamp_unix_nanos =
+        bar.exchange_timestamp_seconds
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| "Coinbase bar timestamp overflow".to_string())?;
+    let item = Provenanced::new(
+        bar,
+        MarketEventProvenance {
+            event_id,
+            event_time_unix_nanos,
+            publication_time_unix_nanos: received_unix_nanos,
+            producer: "axiusflow_desktop_coinbase_worker".to_string(),
+            schema_version: SCHEMA_VERSION,
+            correlation_id: format!("coinbase_generation_{}", generation.get()),
+            causation_id,
+            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+            partition_id: PARTITION_ID,
+            ownership_epoch: generation.get().saturating_add(1),
+            source_id: "coinbase".to_string(),
+            source_sequence: bar.source_sequence,
+            exchange_timestamp_unix_nanos,
+            provider_receive_timestamp_unix_nanos,
+            nic_receive_timestamp_unix_nanos: None,
+            axiusflow_receive_timestamp_unix_nanos: received_unix_nanos,
+            normalized_timestamp_unix_nanos: received_unix_nanos,
+            fanout_enqueue_timestamp_unix_nanos: None,
+            correction_flags: 0,
+            quality_flags: 0,
+            nic_timestamp_source: 0,
+            semantic_class: 2,
+        },
+    );
+    validate_provenanced_market_bar(&item).map_err(|error| error.to_string())?;
+    Ok(item)
+}

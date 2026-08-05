@@ -2,20 +2,17 @@
 
 mod history;
 mod lifecycle;
+mod provenance;
+mod publication;
 
 use crate::market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerStartup,
 };
 use axiusflow_application::{
-    MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, MarketStreamPublication,
-    Provenanced, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
-    StreamDelta, validate_provenanced_market_bar,
+    MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
 };
 use axiusflow_chart_integration::ReplayRecoveryCommand;
-use axiusflow_coinbase_market_adapter::{
-    CoinbaseAggregatedBar, CoinbaseBarAggregatorConfig, CoinbaseConfig, ENTITLEMENT_CLASS,
-};
+use axiusflow_coinbase_market_adapter::{CoinbaseBarAggregatorConfig, CoinbaseConfig};
 use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
     CoinbaseProviderDriver, CoinbaseProviderEvents, DesktopMarketWorker, DesktopMarketWorkerConfig,
@@ -51,6 +48,8 @@ use lifecycle::{
     apply_initial_network, drain_worker_inbox, environment_events, forward_commands,
     wait_for_inbox,
 };
+use provenance::{history_provenance, live_provenance};
+use publication::{publish_ready_recovery, publish_update};
 
 const HISTORY_BARS: usize = 300;
 const MODEL_ITEM_CAPACITY: usize = 350;
@@ -521,216 +520,6 @@ fn request_recovery_if_required(
         }
     }
     Ok(())
-}
-
-fn publish_recovery_commands(
-    pending_recovery: &mut VecDeque<ReplayRecoveryCommand>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
-    instrument: &InstrumentRevision,
-    bar_definition: &BarDefinition,
-    retained: &VecDeque<ProvenancedMarketBar>,
-    model: &mut MarketBarClientModel,
-    worker_label: &str,
-) -> bool {
-    while let Some(command) = pending_recovery.pop_front() {
-        let result = recovery_snapshot(instrument, bar_definition, retained, model, worker_label);
-        if message_tx
-            .send(MarketWorkerMessage::Recovery {
-                request_id: command.request_id,
-                result,
-            })
-            .is_err()
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn publish_ready_recovery(
-    streaming_generation: Option<SessionGeneration>,
-    pending_recovery: &mut VecDeque<ReplayRecoveryCommand>,
-    message_tx: &SyncSender<MarketWorkerMessage>,
-    series: (&InstrumentRevision, &BarDefinition),
-    retained: &VecDeque<ProvenancedMarketBar>,
-    model: &mut MarketBarClientModel,
-    worker_label: &str,
-) -> bool {
-    streaming_generation.is_none()
-        || publish_recovery_commands(
-            pending_recovery,
-            message_tx,
-            series.0,
-            series.1,
-            retained,
-            model,
-            worker_label,
-        )
-}
-
-fn publish_update(
-    worker: &mut CoinbaseDesktopWorker,
-    provider_generation: SessionGeneration,
-    model: &mut MarketBarClientModel,
-    update: ReplayStreamUpdate,
-    worker_label: &str,
-    message_tx: &SyncSender<MarketWorkerMessage>,
-) -> Result<(), String> {
-    let generation = published_generation(model, update.clone())?;
-    let publication = MarketStreamPublication::try_new(
-        SUBSCRIPTION_ID.to_string(),
-        update.clone(),
-        generation.clone(),
-    )
-    .map_err(|error| error.to_string())?;
-    worker
-        .publish(provider_generation, publication)
-        .map_err(|error| error.to_string())?;
-    message_tx
-        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-            update,
-            generation,
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: worker_label.to_string(),
-        }))
-        .map_err(|_| "desktop market UI channel disconnected".to_string())
-}
-
-fn recovery_snapshot(
-    instrument: &InstrumentRevision,
-    bar_definition: &BarDefinition,
-    retained: &VecDeque<ProvenancedMarketBar>,
-    model: &mut MarketBarClientModel,
-    worker_label: &str,
-) -> Result<MarketWorkerBootstrap, String> {
-    let generation = model
-        .current_generation()
-        .map_or(1, |current| current.generation().saturating_add(1));
-    let snapshot = ReplaySnapshot::try_from_provenanced_values(
-        instrument.clone(),
-        ReplayProvenance::LiveProvider,
-        bar_definition.clone(),
-        generation,
-        retained.iter().cloned().collect(),
-    )
-    .map_err(|error| error.to_string())?;
-    let model_generation =
-        published_generation(model, ReplayStreamUpdate::Snapshot(snapshot.clone()))?;
-    Ok(MarketWorkerBootstrap {
-        snapshot,
-        subscription_id: SUBSCRIPTION_ID.to_string(),
-        generation: model_generation,
-        worker_label: worker_label.to_string(),
-    })
-}
-
-fn published_generation(
-    model: &mut MarketBarClientModel,
-    update: ReplayStreamUpdate,
-) -> Result<DesktopMarketGeneration, String> {
-    match model
-        .apply_update(update)
-        .map_err(|error| error.to_string())?
-    {
-        MarketBarModelOutcome::Published(generation) => Ok(generation),
-        outcome => Err(format!(
-            "desktop market update was not published: {outcome:?}"
-        )),
-    }
-}
-
-fn history_provenance(
-    bar: MarketBar,
-    generation: SessionGeneration,
-    received_unix_nanos: i64,
-) -> Result<ProvenancedMarketBar, String> {
-    let exchange = bar
-        .exchange_timestamp_seconds
-        .checked_mul(1_000_000_000)
-        .ok_or_else(|| "Coinbase history timestamp overflow".to_string())?;
-    provenanced(
-        bar,
-        generation,
-        format!("coinbase_history_bar_{}_{exchange}", bar.source_sequence),
-        exchange,
-        received_unix_nanos,
-        received_unix_nanos,
-        "coinbase_https_history".to_string(),
-    )
-}
-
-fn live_provenance(
-    completed: CoinbaseAggregatedBar,
-    generation: SessionGeneration,
-) -> Result<ProvenancedMarketBar, String> {
-    let provider_sequence_num = completed
-        .provider_sequence_num
-        .ok_or_else(|| "Coinbase completed bar has no live provider sequence".to_string())?;
-    let provider_timestamp_unix_nanos = completed
-        .provider_timestamp_unix_nanos
-        .ok_or_else(|| "Coinbase completed bar has no live provider timestamp".to_string())?;
-    let received = unix_nanos()?;
-    let exchange = completed
-        .bar
-        .exchange_timestamp_seconds
-        .checked_mul(1_000_000_000)
-        .ok_or_else(|| "Coinbase live bar timestamp overflow".to_string())?;
-    provenanced(
-        completed.bar,
-        generation,
-        format!(
-            "coinbase_live_bar_{}_message_{}",
-            completed.bar.source_sequence, provider_sequence_num
-        ),
-        exchange,
-        provider_timestamp_unix_nanos,
-        received,
-        format!("coinbase_message_sequence_{provider_sequence_num}"),
-    )
-}
-
-fn provenanced(
-    bar: MarketBar,
-    generation: SessionGeneration,
-    event_id: String,
-    event_time_unix_nanos: i64,
-    provider_receive_timestamp_unix_nanos: i64,
-    received_unix_nanos: i64,
-    causation_id: String,
-) -> Result<ProvenancedMarketBar, String> {
-    let exchange_timestamp_unix_nanos =
-        bar.exchange_timestamp_seconds
-            .checked_mul(1_000_000_000)
-            .ok_or_else(|| "Coinbase bar timestamp overflow".to_string())?;
-    let item = Provenanced::new(
-        bar,
-        MarketEventProvenance {
-            event_id,
-            event_time_unix_nanos,
-            publication_time_unix_nanos: received_unix_nanos,
-            producer: "axiusflow_desktop_coinbase_worker".to_string(),
-            schema_version: SCHEMA_VERSION,
-            correlation_id: format!("coinbase_generation_{}", generation.get()),
-            causation_id,
-            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
-            partition_id: PARTITION_ID,
-            ownership_epoch: generation.get().saturating_add(1),
-            source_id: "coinbase".to_string(),
-            source_sequence: bar.source_sequence,
-            exchange_timestamp_unix_nanos,
-            provider_receive_timestamp_unix_nanos,
-            nic_receive_timestamp_unix_nanos: None,
-            axiusflow_receive_timestamp_unix_nanos: received_unix_nanos,
-            normalized_timestamp_unix_nanos: received_unix_nanos,
-            fanout_enqueue_timestamp_unix_nanos: None,
-            correction_flags: 0,
-            quality_flags: 0,
-            nic_timestamp_source: 0,
-            semantic_class: 2,
-        },
-    );
-    validate_provenanced_market_bar(&item).map_err(|error| error.to_string())?;
-    Ok(item)
 }
 
 fn product_profile(product_id: String) -> Result<ProductProfile, String> {
