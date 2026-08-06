@@ -7,6 +7,7 @@ members = [
     "crates/adapters/market_protocol",
     "crates/adapters/portable_network",
     "crates/adapters/rithmic_fixture",
+    "crates/adapters/rithmic_protocol",
     "crates/adapters/stream_websocket",
     "crates/adapters/windows_network",
     "crates/application",

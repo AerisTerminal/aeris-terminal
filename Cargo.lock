@@ -952,6 +952,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiusflow_rithmic_protocol_adapter"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "zeroize",
+]
+
+[[package]]
 name = "axiusflow_security"
 version = "0.1.0"
 dependencies = [

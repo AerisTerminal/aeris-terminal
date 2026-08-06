@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 19
+**Revision:** 20
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -69,7 +69,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | kit [x]; adapter / evidence [ ] |
+| C — Rithmic read-only headless | `in_progress` | kit + bounded protocol codec [x]; session / evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
@@ -105,7 +105,7 @@ Full scope policy:
 | Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete.                                                                                                                                                              |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
-| Rithmic adapter            | `ready`       | Headless read-only R|Protocol implementation can proceed from the local kit; `verified` still requires deterministic + Test evidence.                                                                                                               |
+| Rithmic adapter            | `in_progress` | Kit-backed read-only request encoding and bounded control/trade/BBO/aggregate-book decoding are implemented; WSS lifecycle, history decoding, deterministic session fixtures, and authorized Test evidence remain.                                   |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `ready`       | Starts after Stages C and D deterministic headless gates.                                                                                                                                                                                           |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
@@ -348,10 +348,10 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 
 #### Build / encode path
 
-- [ ] Detect kit at `provider_kit/current/proto/`.
-- [ ] Generate Rust types from the installed `.proto` set into `OUT_DIR`.
-- [ ] Implement length-prefixed / documented RProtocol frame encode-decode using generated types (follow kit samples + Reference Guide; no raw escape hatch on the public app API).
-- [ ] Keep a `RithmicKitUnavailable` backend for kit-less CI.
+- [x] Detect kit at `provider_kit/current/proto/`.
+- [x] Generate Rust types from the installed `.proto` set into `OUT_DIR`.
+- [x] Implement documented R|Protocol v2 raw-protobuf-per-binary-WebSocket-message encode/decode using generated private types (no extra length prefix and no raw public send escape hatch).
+- [x] Keep a `RithmicKitUnavailable` backend for kit-less CI.
 
 
 
@@ -377,8 +377,8 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [ ] On a depth gap, discard candidate book state and require a new snapshot.
 - [ ] Recover trade/history continuity with bounded overlap, deduplication, and a covering snapshot.
 - [ ] Fail closed when the installed protocol cannot recover continuity.
-- [ ] Enforce an outbound-template allowlist containing read-only templates only.
-- [ ] Fail tests if any order or execution template can be emitted.
+- [x] Enforce an outbound-template allowlist containing read-only templates only.
+- [x] Fail tests if any order or execution template can be emitted.
 
 
 
