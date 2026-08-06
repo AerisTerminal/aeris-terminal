@@ -97,23 +97,24 @@ Rithmic licensed material is **local-only**. It must never be committed to git.
 **Canonical kit location (agents must use this path):**
 
 ```text
-.cache/provider_kits/rithmic/current/
+provider_kit/current/
 ```
 
 On this machine that symlink resolves to R|Protocol **0.89.0.0**:
 
 ```text
-.cache/provider_kits/rithmic/current/          → RProtocolAPI.0.89.0.0/0.89.0.0/
-.cache/provider_kits/rithmic/current/proto/    → *.proto schemas (codegen input)
-.cache/provider_kits/rithmic/current/doc/      → Reference_Guide.pdf
-.cache/provider_kits/rithmic/current/etc/
-.cache/provider_kits/rithmic/current/samples/
-.cache/provider_kits/rithmic/current/Release.Notes
+provider_kit/current/          → RProtocolAPI.0.89.0.0/0.89.0.0/
+provider_kit/current/proto/    → *.proto schemas (codegen input)
+provider_kit/current/doc/      → Reference_Guide.pdf
+provider_kit/current/etc/
+provider_kit/current/samples/
+provider_kit/current/Release.Notes
 ```
 
-Why `.cache/`: the directory is gitignored (`/.cache/` in `.gitignore`). The kit is
-Rithmic proprietary (protos, guide, samples). Putting it in the repo root or under
-`crates/` risks accidental commit. Ordinary CI and clones build without the kit.
+Why `provider_kit/`: dedicated local folder for licensed provider kits, gitignored
+as `/provider_kit/` in `.gitignore`. The kit is Rithmic proprietary (protos, guide,
+samples). Do not place it under `crates/` or commit it. Ordinary CI and clones
+build without the kit.
 
 **Codegen / adapter rules:**
 
@@ -238,15 +239,15 @@ R|Trader / R|Trader Pro and credentials loaded only through the vault.
 Agents building Stage C **must** read schemas from:
 
 ```text
-.cache/provider_kits/rithmic/current/proto/
+provider_kit/current/proto/
 ```
 
 | Fact | Value |
 |---|---|
 | Protocol product | R\|Protocol API (WSS + Protobuf) — **not** native R\|API+ |
 | Installed version | `0.89.0.0` |
-| Schema dir | `.cache/provider_kits/rithmic/current/proto/` (~155 `.proto` files) |
-| Reference guide | `.cache/provider_kits/rithmic/current/doc/Reference_Guide.pdf` |
+| Schema dir | `provider_kit/current/proto/` (~155 `.proto` files) |
+| Reference guide | `provider_kit/current/doc/Reference_Guide.pdf` |
 | Binding output | Generate into `OUT_DIR` via build.rs / prost; never commit generated code |
 | Missing kit | Emit `RithmicKitUnavailable` and keep default workspace builds green |
 
@@ -270,7 +271,7 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 
 #### Build / encode path
 
-1. Detect kit at `.cache/provider_kits/rithmic/current/proto/`.
+1. Detect kit at `provider_kit/current/proto/`.
 2. Generate Rust types from the installed `.proto` set into `OUT_DIR`.
 3. Implement length-prefixed / documented R\|Protocol frame encode-decode using
    generated types (follow kit samples + Reference Guide; no raw escape hatch
