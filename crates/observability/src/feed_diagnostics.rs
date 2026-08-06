@@ -203,17 +203,19 @@ pub enum LocalLatencyMetric {
     CanonicalAcceptToModelPublish,
     ModelPublishToUiEnqueue,
     UiEnqueueToFrameSubmit,
+    FrameSubmitToFrameCallback,
     FrameSubmitToPresent,
 }
 
 impl LocalLatencyMetric {
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
     pub const ALL: [Self; Self::COUNT] = [
         Self::SocketReadToDecode,
         Self::DecodeToCanonicalAccept,
         Self::CanonicalAcceptToModelPublish,
         Self::ModelPublishToUiEnqueue,
         Self::UiEnqueueToFrameSubmit,
+        Self::FrameSubmitToFrameCallback,
         Self::FrameSubmitToPresent,
     ];
 }

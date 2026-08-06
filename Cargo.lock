@@ -753,6 +753,7 @@ dependencies = [
  "axiusflow_instruments",
  "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
+ "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
  "axiusflow_terminal_ui",
@@ -798,6 +799,13 @@ dependencies = [
  "rusqlite",
  "sha2 0.10.9",
  "zeroize",
+]
+
+[[package]]
+name = "axiusflow_diagnostics_overhead"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_observability",
 ]
 
 [[package]]

@@ -9,7 +9,9 @@ use axiusflow_desktop_history::{
     HistoryWorkerConfig, HydrationOutcome, HydrationRequest, StartupCacheState, WorkerMetrics,
 };
 use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
-use axiusflow_observability::FeedDiagnosticsSnapshot;
+use axiusflow_observability::{
+    DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
+};
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use axiusflow_provider_history::{
     Completion, DataClass, HistoryItem, RequestInterest, SequencedHistory, VerifiedHistorySnapshot,
@@ -319,6 +321,61 @@ where
     ) -> Result<(), DesktopMarketWorkerError> {
         self.provider
             .record_heartbeat_diagnostics(generation)
+            .map_err(Into::into)
+    }
+
+    /// Observes one fixed-capacity queue in production diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or invalid queue evidence.
+    pub fn observe_diagnostics_queue(
+        &mut self,
+        queue: DiagnosticsQueue,
+        current_items: usize,
+        item_capacity: usize,
+        current_bytes: usize,
+        byte_capacity: usize,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.provider
+            .observe_diagnostics_queue(
+                queue,
+                current_items,
+                item_capacity,
+                current_bytes,
+                byte_capacity,
+            )
+            .map_err(Into::into)
+    }
+
+    /// Records one correctly labelled local processing interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or invalid timestamp evidence.
+    pub fn record_latency_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        metric: LocalLatencyMetric,
+        chain: &LatencyTimestampChain,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.provider
+            .record_latency_diagnostics(generation, metric, chain)
+            .map_err(Into::into)
+    }
+
+    /// Records one safely conflated UI update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or diagnostics failure.
+    pub fn record_coalesced_ui_update_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        count: u64,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.provider
+            .record_coalesced_ui_update_diagnostics(generation, count)
             .map_err(Into::into)
     }
 

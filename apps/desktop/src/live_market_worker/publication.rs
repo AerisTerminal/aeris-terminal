@@ -1,7 +1,7 @@
 use super::{CoinbaseDesktopWorker, SUBSCRIPTION_ID};
 use crate::market_worker::{
     DesktopMarketGeneration, MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication,
-    MarketWorkerSender,
+    MarketWorkerSender, PendingUiDiagnostics,
 };
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketStreamPublication, ProvenancedMarketBar,
@@ -73,15 +73,18 @@ pub(super) fn publish_update(
         generation.clone(),
     )
     .map_err(|error| error.to_string())?;
+    let mut ui_diagnostics = PendingUiDiagnostics::new(provider_generation);
     worker
         .publish(provider_generation, publication)
         .map_err(|error| error.to_string())?;
+    ui_diagnostics.mark_ui_enqueue();
     message_tx
         .send(MarketWorkerMessage::Update(MarketWorkerPublication {
             update,
             generation,
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: worker_label.to_string(),
+            ui_diagnostics: Some(ui_diagnostics),
         }))
         .map_err(|()| "desktop market UI channel disconnected".to_string())
 }

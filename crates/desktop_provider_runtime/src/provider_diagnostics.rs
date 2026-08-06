@@ -412,6 +412,22 @@ impl ProviderFeedDiagnostics {
         Ok(())
     }
 
+    /// Records one UI update that was safely conflated before presentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for local monotonic-clock regression.
+    pub fn record_coalesced_ui_update(
+        &mut self,
+        monotonic_nanos: u64,
+        count: u64,
+    ) -> Result<(), ProviderFeedDiagnosticsError> {
+        self.accept_monotonic_observation(monotonic_nanos)?;
+        self.diagnostics
+            .increment_by(FeedCounter::CoalescedUiUpdates, count);
+        Ok(())
+    }
+
     /// Observes approximate retained runtime memory against an immutable bound.
     ///
     /// # Errors

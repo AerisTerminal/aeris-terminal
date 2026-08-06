@@ -6,6 +6,7 @@ mod windowed_benchmark;
 
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
+use axiusflow_observability::{DiagnosticsQueue, FeedDiagnosticsSnapshot, LocalLatencyMetric};
 use gpui::{
     App, Bounds, Context, Entity, Hsla, Render, TitlebarOptions, Window, WindowBounds,
     WindowOptions, div, prelude::*, px, rgb, size,
@@ -18,7 +19,8 @@ use gpui_component::{
 use gpui_platform::application;
 use market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
+    UiDiagnosticsFeedback,
 };
 use std::{sync::mpsc::TrySendError, time::Duration};
 
@@ -78,6 +80,17 @@ struct TerminalApp {
     subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
+    diagnostics: Option<FeedDiagnosticsSnapshot>,
+    diagnostics_expanded: bool,
+    pending_ui_diagnostics: Option<PendingUiDiagnostics>,
+}
+
+struct HeaderState {
+    theme: AxiusflowTheme,
+    replay_label: String,
+    bridge_label: String,
+    chart_state: ChartState,
+    diagnostics_expanded: bool,
 }
 
 impl TerminalApp {
@@ -147,10 +160,18 @@ impl TerminalApp {
             subscription_id,
             bridge_label,
             market_worker,
+            diagnostics: None,
+            diagnostics_expanded: false,
+            pending_ui_diagnostics: None,
         }
     }
 
-    fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
+    fn apply_publication(
+        &mut self,
+        mut publication: MarketWorkerPublication,
+        cx: &mut Context<Self>,
+    ) {
+        let ui_diagnostics = publication.ui_diagnostics.take();
         self.worker_label = publication.worker_label;
         self.subscription_id = publication.subscription_id;
         self.replay_label = generation_status(
@@ -158,12 +179,12 @@ impl TerminalApp {
             &self.subscription_id,
             &publication.generation,
         );
-        let next_state = match (&self.chart, publication.update) {
+        let (next_state, accepted) = match (&self.chart, publication.update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
                 let theme = self.theme;
                 self.chart =
                     Some(cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot)));
-                ChartState::Ready
+                (ChartState::Ready, true)
             }
             (Some(chart), update) => {
                 let (accepted, recovery_pending) = chart.update(cx, |chart, chart_cx| {
@@ -174,9 +195,13 @@ impl TerminalApp {
                     chart_cx.notify();
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
                 });
-                publication_chart_state(accepted, recovery_pending)
+                (
+                    publication_chart_state(accepted, recovery_pending),
+                    accepted,
+                )
             }
             (None, axiusflow_application::ReplayStreamUpdate::Delta(_)) => {
+                self.finish_ui_diagnostics(ui_diagnostics, false);
                 self.set_chart_state(
                     ChartState::Error,
                     "market delta arrived before the initial covering snapshot".to_string(),
@@ -185,6 +210,7 @@ impl TerminalApp {
                 return;
             }
         };
+        self.finish_ui_diagnostics(ui_diagnostics, accepted);
         if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = "market snapshot is current".to_string();
@@ -196,6 +222,25 @@ impl TerminalApp {
             );
         }
         cx.notify();
+    }
+
+    fn finish_ui_diagnostics(&mut self, incoming: Option<PendingUiDiagnostics>, accepted: bool) {
+        let Some(incoming) = incoming else {
+            return;
+        };
+        if !accepted {
+            self.market_worker
+                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
+                    generation: incoming.generation(),
+                });
+            return;
+        }
+        if let Some(replaced) = self.pending_ui_diagnostics.replace(incoming) {
+            self.market_worker
+                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
+                    generation: replaced.generation(),
+                });
+        }
     }
 
     fn apply_recovery(
@@ -307,6 +352,10 @@ impl TerminalApp {
                 MarketWorkerMessage::Update(publication) => {
                     self.apply_publication(publication, cx);
                 }
+                MarketWorkerMessage::Diagnostics(snapshot) => {
+                    self.diagnostics = Some(*snapshot);
+                    cx.notify();
+                }
                 MarketWorkerMessage::Recovery { request_id, result } => {
                     self.apply_recovery(request_id, result, cx);
                 }
@@ -358,6 +407,22 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn toggle_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.diagnostics_expanded = !self.diagnostics_expanded;
+        cx.notify();
+    }
+
+    fn schedule_diagnostics_frame(&mut self, window: &mut Window) {
+        if let Some(mut diagnostics) = self.pending_ui_diagnostics.take()
+            && let Some(sender) = self.market_worker.ui_diagnostics_sender()
+        {
+            diagnostics.mark_frame_submit();
+            window.on_next_frame(move |_window, _cx| {
+                let _ = sender.send(diagnostics.into_presented());
+            });
+        }
+    }
+
     fn chart_state_label(&self) -> String {
         format!(
             "{} · {}",
@@ -368,69 +433,34 @@ impl TerminalApp {
 }
 
 impl Render for TerminalApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.schedule_diagnostics_frame(window);
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
         let button_radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-        let passive_button = ButtonCustomVariant::new(cx)
-            .color(gpui_color(colors.card))
-            .foreground(gpui_color(colors.muted_foreground))
-            .hover(gpui_color(colors.card))
-            .active(gpui_color(colors.card));
-        let active_button = ButtonCustomVariant::new(cx)
-            .color(gpui_color(colors.secondary))
-            .foreground(gpui_color(colors.secondary_foreground))
-            .hover(gpui_color(colors.accent))
-            .active(gpui_color(colors.muted));
-        let toggle_label = format!("Switch to {}", theme.mode.toggled().label());
-        let replay_label = self.replay_label.clone();
-        let bridge_label = self.bridge_label.clone();
         let chart_state_label = self.chart_state_label();
-        let market_state_label = format!("{} · {replay_label}", self.chart_state.label());
+        let diagnostics_panel = self
+            .diagnostics_expanded
+            .then(|| diagnostics_panel(self.diagnostics.as_ref(), &colors, button_radius));
+        let header = terminal_header(
+            cx,
+            app,
+            HeaderState {
+                theme,
+                replay_label: self.replay_label.clone(),
+                bridge_label: self.bridge_label.clone(),
+                chart_state: self.chart_state,
+                diagnostics_expanded: self.diagnostics_expanded,
+            },
+        );
 
         div()
             .v_flex()
             .size_full()
             .bg(gpui_color(colors.background))
             .text_color(gpui_color(colors.foreground))
-            .child(
-                div()
-                    .h(px(theme.dimensions.app_header_height.logical_pixels))
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .px_4()
-                    .border_b_1()
-                    .border_color(gpui_color(colors.border))
-                    .child("Axiusflow")
-                    .child(
-                        div()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Button::new("market_data_source")
-                                    .label(market_state_label)
-                                    .rounded(button_radius)
-                                    .custom(passive_button),
-                            )
-                            .child(
-                                Button::new("market_data_bridge")
-                                    .label(bridge_label)
-                                    .rounded(button_radius)
-                                    .custom(passive_button),
-                            )
-                            .child(
-                                Button::new("theme_toggle")
-                                    .label(toggle_label)
-                                    .rounded(button_radius)
-                                    .custom(active_button)
-                                    .on_click(move |_, window, cx| {
-                                        app.update(cx, |app, cx| app.toggle_theme(window, cx));
-                                    }),
-                            ),
-                    ),
-            )
+            .child(header)
             .child(
                 div()
                     .id("primary_chart")
@@ -452,7 +482,163 @@ impl Render for TerminalApp {
                             .child(chart_state_label)
                     })),
             )
+            .children(diagnostics_panel)
     }
+}
+
+fn terminal_header(
+    cx: &mut Context<TerminalApp>,
+    app: Entity<TerminalApp>,
+    state: HeaderState,
+) -> impl IntoElement {
+    let colors = state.theme.colors;
+    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+    let passive_button = ButtonCustomVariant::new(cx)
+        .color(gpui_color(colors.card))
+        .foreground(gpui_color(colors.muted_foreground))
+        .hover(gpui_color(colors.card))
+        .active(gpui_color(colors.card));
+    let active_button = ButtonCustomVariant::new(cx)
+        .color(gpui_color(colors.secondary))
+        .foreground(gpui_color(colors.secondary_foreground))
+        .hover(gpui_color(colors.accent))
+        .active(gpui_color(colors.muted));
+    let diagnostics_app = app.clone();
+    div()
+        .h(px(state.theme.dimensions.app_header_height.logical_pixels))
+        .flex_none()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .child("Axiusflow")
+        .child(
+            div()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new("market_data_source")
+                        .label(format!(
+                            "{} · {}",
+                            state.chart_state.label(),
+                            state.replay_label
+                        ))
+                        .rounded(radius)
+                        .custom(passive_button),
+                )
+                .child(
+                    Button::new("market_data_bridge")
+                        .label(state.bridge_label)
+                        .rounded(radius)
+                        .custom(passive_button),
+                )
+                .child(
+                    Button::new("feed_health_toggle")
+                        .label(if state.diagnostics_expanded {
+                            "Hide feed health"
+                        } else {
+                            "Feed health"
+                        })
+                        .rounded(radius)
+                        .custom(active_button)
+                        .on_click(move |_, _, cx| {
+                            diagnostics_app.update(cx, TerminalApp::toggle_diagnostics);
+                        }),
+                )
+                .child(
+                    Button::new("theme_toggle")
+                        .label(format!("Switch to {}", state.theme.mode.toggled().label()))
+                        .rounded(radius)
+                        .custom(active_button)
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |app, cx| app.toggle_theme(window, cx));
+                        }),
+                ),
+        )
+}
+
+fn diagnostics_panel(
+    snapshot: Option<&FeedDiagnosticsSnapshot>,
+    colors: &axiusflow_design_system::ThemeColors,
+    radius: gpui::Pixels,
+) -> impl IntoElement {
+    let lines = snapshot.map_or_else(
+        || vec!["Waiting for the first bounded feed-health snapshot".to_string()],
+        |snapshot| {
+            let ui_queue = snapshot.queues[DiagnosticsQueue::UiUpdate as usize];
+            let model_to_ui = latency_p99(snapshot, LocalLatencyMetric::ModelPublishToUiEnqueue);
+            let ui_to_frame = latency_p99(snapshot, LocalLatencyMetric::UiEnqueueToFrameSubmit);
+            let frame_to_present = latency_p99(snapshot, LocalLatencyMetric::FrameSubmitToPresent);
+            vec![
+                format!(
+                    "{} / {} / {} · {:?} · generation {}",
+                    snapshot.identity.provider(),
+                    snapshot.identity.system(),
+                    snapshot.identity.environment(),
+                    snapshot.connection_state,
+                    snapshot.session_generation.map_or(0, std::num::NonZeroU64::get),
+                ),
+                format!(
+                    "heartbeat {} · message {} · recovery {:?} · reconnects {}",
+                    format_age(snapshot.heartbeat_age_nanos),
+                    format_age(snapshot.last_message_age_nanos),
+                    snapshot.recovery_reason,
+                    snapshot.reconnect_count,
+                ),
+                format!(
+                    "trades {}/s · publications {}/s · gaps {} · malformed {} · stale {}",
+                    format_rate_milli(snapshot.rates.trades_per_second_milli),
+                    format_rate_milli(snapshot.rates.publications_per_second_milli),
+                    snapshot.counters.gaps,
+                    snapshot.counters.malformed_messages,
+                    snapshot.counters.stale_callbacks,
+                ),
+                format!(
+                    "UI queue {}/{} · high-water {} · conflated {} · memory {}/{} bytes",
+                    ui_queue.current_items,
+                    ui_queue.item_capacity,
+                    ui_queue.high_water_items,
+                    snapshot.counters.coalesced_ui_updates,
+                    snapshot.memory.current_bytes,
+                    snapshot.memory.configured_bound_bytes,
+                ),
+                format!(
+                    "p99 model→UI {model_to_ui} · UI→frame {ui_to_frame} · frame→present {frame_to_present}",
+                ),
+            ]
+        },
+    );
+    div()
+        .flex_none()
+        .mx(px(12.0))
+        .mb(px(12.0))
+        .p_3()
+        .rounded(radius)
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.card))
+        .text_xs()
+        .text_color(gpui_color(colors.muted_foreground))
+        .children(lines.into_iter().map(|line| div().child(line)))
+}
+
+fn latency_p99(snapshot: &FeedDiagnosticsSnapshot, metric: LocalLatencyMetric) -> String {
+    snapshot.detailed_latency[metric as usize].map_or_else(
+        || "disabled".to_string(),
+        |latency| format!("{} µs", latency.p99_upper_bound_nanos / 1_000),
+    )
+}
+
+fn format_age(age_nanos: Option<u64>) -> String {
+    age_nanos.map_or_else(
+        || "unknown".to_string(),
+        |age| format!("{} ms", age / 1_000_000),
+    )
+}
+
+fn format_rate_milli(rate: u64) -> String {
+    format!("{}.{:03}", rate / 1_000, rate % 1_000)
 }
 
 fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx: &mut App) {
@@ -541,19 +727,29 @@ fn main() {
         if argument == "--coinbase-live" {
             let product = arguments.next().unwrap_or_else(|| {
                 eprintln!(
-                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root>"
+                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root> [--detailed-diagnostics]"
                 );
                 std::process::exit(2);
             });
             let history_root = arguments.next().unwrap_or_else(|| {
                 eprintln!(
-                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root>"
+                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root> [--detailed-diagnostics]"
                 );
                 std::process::exit(2);
             });
+            let detailed_diagnostics = match arguments.next() {
+                Some(flag) if flag == "--detailed-diagnostics" => true,
+                Some(_) => {
+                    eprintln!(
+                        "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root> [--detailed-diagnostics]"
+                    );
+                    std::process::exit(2);
+                }
+                None => false,
+            };
             if arguments.next().is_some() {
                 eprintln!(
-                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root>"
+                    "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root> [--detailed-diagnostics]"
                 );
                 std::process::exit(2);
             }
@@ -561,6 +757,7 @@ fn main() {
                 product.to_string_lossy().into_owned(),
                 std::path::PathBuf::from(history_root),
                 std::thread::current().id(),
+                detailed_diagnostics,
             )
             .expect("the bounded direct Coinbase worker starts")
         } else {

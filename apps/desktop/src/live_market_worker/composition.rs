@@ -21,7 +21,7 @@ use axiusflow_instruments::{
 use axiusflow_market_data::{BarDefinition, MarketBar};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use std::{
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
@@ -119,6 +119,7 @@ pub(super) fn open_worker(
     ui_thread: ThreadId,
     inbox_tx: &SyncSender<WorkerInboxEvent>,
     provider_wake_pending: &Arc<AtomicBool>,
+    detailed_diagnostics: bool,
 ) -> Result<OpenedWorker, String> {
     let vault = NativeCredentialVault::new(VAULT_SERVICE).map_err(|error| error.to_string())?;
     let catalog_key = load_catalog_key(&vault)?;
@@ -152,7 +153,7 @@ pub(super) fn open_worker(
         history_root,
         catalog_key,
         ui_thread,
-        worker_config()?,
+        worker_config(detailed_diagnostics)?,
     )
     .map_err(|error| error.to_string())?;
     let aggregator = CoinbaseBarAggregator::new(
@@ -227,7 +228,7 @@ pub(super) fn bar_definition() -> BarDefinition {
     }
 }
 
-fn worker_config() -> Result<DesktopMarketWorkerConfig, String> {
+fn worker_config(detailed_diagnostics: bool) -> Result<DesktopMarketWorkerConfig, String> {
     Ok(DesktopMarketWorkerConfig {
         provider: DesktopProviderConfig::new(nonzero(32), nonzero(1))
             .with_diagnostics(
@@ -236,7 +237,8 @@ fn worker_config() -> Result<DesktopMarketWorkerConfig, String> {
                     system_id: "advanced_trade_public".to_string(),
                     environment: "production".to_string(),
                 },
-                None,
+                detailed_diagnostics
+                    .then_some(NonZeroU64::new(10_000_000_000).unwrap_or(NonZeroU64::MIN)),
             )
             .map_err(|error| error.to_string())?,
         history: HistoryWorkerConfig {

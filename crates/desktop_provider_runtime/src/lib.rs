@@ -7,7 +7,8 @@
 
 use axiusflow_application::MarketStreamPublication;
 use axiusflow_observability::{
-    DiagnosticsQueue, FeedDiagnosticsSnapshot, MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
+    DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
+    MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
 };
 pub use axiusflow_platform_runtime::NetworkEvent;
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
@@ -456,6 +457,7 @@ where
         &mut self,
     ) -> Result<Option<FeedDiagnosticsSnapshot>, DesktopProviderError> {
         self.ensure_owner()?;
+        self.diagnostics_observe_runtime_memory()?;
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(None);
         };
@@ -513,6 +515,84 @@ where
             .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
             .feed
             .record_runtime_heartbeat(generation, timestamp)
+            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+    }
+
+    /// Observes one fixed-capacity queue in production diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or invalid queue evidence.
+    pub fn observe_diagnostics_queue(
+        &mut self,
+        queue: DiagnosticsQueue,
+        current_items: usize,
+        item_capacity: usize,
+        current_bytes: usize,
+        byte_capacity: usize,
+    ) -> Result<(), DesktopProviderError> {
+        self.ensure_owner()?;
+        let Some(diagnostics) = &mut self.diagnostics else {
+            return Ok(());
+        };
+        diagnostics
+            .feed
+            .observe_queue(
+                queue,
+                current_items,
+                item_capacity,
+                current_bytes,
+                byte_capacity,
+            )
+            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+    }
+
+    /// Records one correctly labelled local processing interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or invalid timestamp evidence.
+    pub fn record_latency_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        metric: LocalLatencyMetric,
+        chain: &LatencyTimestampChain,
+    ) -> Result<(), DesktopProviderError> {
+        self.ensure_owner()?;
+        if self.active_generation() != Some(generation) {
+            return self.reject_stale();
+        }
+        let Some(diagnostics) = &mut self.diagnostics else {
+            return Ok(());
+        };
+        diagnostics
+            .feed
+            .record_latency_chain(metric, chain)
+            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+    }
+
+    /// Records one UI update safely conflated before a frame was submitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread access or diagnostics failure.
+    pub fn record_coalesced_ui_update_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        count: u64,
+    ) -> Result<(), DesktopProviderError> {
+        self.ensure_owner()?;
+        if self.active_generation() != Some(generation) {
+            return self.reject_stale();
+        }
+        let Some(timestamp) = self.diagnostics_now() else {
+            return Ok(());
+        };
+        self.diagnostics
+            .as_mut()
+            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .feed
+            .record_coalesced_ui_update(timestamp, count)
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 
@@ -1116,6 +1196,22 @@ where
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 
+    fn diagnostics_observe_runtime_memory(&mut self) -> Result<(), DesktopProviderError> {
+        let Some(diagnostics) = &mut self.diagnostics else {
+            return Ok(());
+        };
+        let fixed_bytes = size_of::<Self>();
+        let event_bytes = size_of::<DesktopProviderEvent>();
+        let current_bytes =
+            fixed_bytes.saturating_add(self.events.len().saturating_mul(event_bytes));
+        let bound_bytes = fixed_bytes
+            .saturating_add(self.config.event_capacity.get().saturating_mul(event_bytes));
+        diagnostics
+            .feed
+            .observe_runtime_memory(current_bytes, bound_bytes)
+            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+    }
+
     fn active_generation(&self) -> Option<SessionGeneration> {
         match self.state {
             DesktopProviderState::Connecting { generation, .. }
@@ -1239,7 +1335,10 @@ mod tests {
         EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
         MarketBarReplayPort, MarketStreamPublication, ReplayStreamUpdate,
     };
-    use axiusflow_observability::{DiagnosticsQueue, FeedConnectionState, FeedRecoveryReason};
+    use axiusflow_observability::{
+        DiagnosticsQueue, FeedConnectionState, FeedRecoveryReason, LatencyBoundary,
+        LatencyTimestampChain, LocalLatencyMetric,
+    };
     use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
@@ -1399,6 +1498,82 @@ mod tests {
         assert_eq!(
             snapshot.queues[DiagnosticsQueue::SemanticEvent as usize].current_items,
             3
+        );
+    }
+
+    #[test]
+    fn production_runtime_records_generation_fenced_ui_diagnostics() {
+        let mut runtime = DesktopProviderRuntime::try_new(
+            MemoryVault {
+                secret: Some(b"device-only-provider-token".to_vec()),
+                fail_load: false,
+            },
+            RecordingDriver::default(),
+            "provider-session",
+            config(8, 64)
+                .with_diagnostics(
+                    diagnostics_environment(),
+                    Some(NonZeroU64::new(100).unwrap_or(NonZeroU64::MIN)),
+                )
+                .expect("diagnostics environment validates"),
+        )
+        .expect("diagnostics runtime opens");
+        let generation = runtime
+            .connect(ConnectTrigger::Initial)
+            .expect("session starts");
+        runtime
+            .session_established(generation)
+            .expect("session streams");
+        runtime
+            .observe_diagnostics_queue(DiagnosticsQueue::UiUpdate, 2, 8, 128, 512)
+            .expect("bounded UI queue records");
+
+        let mut chain = LatencyTimestampChain::new();
+        chain.set(LatencyBoundary::ModelPublish, 10);
+        chain.set(LatencyBoundary::UiEnqueue, 20);
+        chain.set(LatencyBoundary::FrameSubmit, 30);
+        chain.set(LatencyBoundary::Present, 40);
+        for metric in [
+            LocalLatencyMetric::ModelPublishToUiEnqueue,
+            LocalLatencyMetric::UiEnqueueToFrameSubmit,
+            LocalLatencyMetric::FrameSubmitToPresent,
+        ] {
+            runtime
+                .record_latency_diagnostics(generation, metric, &chain)
+                .expect("UI latency records");
+        }
+        runtime
+            .record_coalesced_ui_update_diagnostics(generation, 3)
+            .expect("UI conflation records");
+
+        let snapshot = runtime
+            .try_diagnostics_snapshot()
+            .expect("snapshot succeeds")
+            .expect("first snapshot publishes");
+        assert_eq!(snapshot.counters.coalesced_ui_updates, 3);
+        assert!(snapshot.memory.current_bytes > 0);
+        assert!(snapshot.memory.configured_bound_bytes >= snapshot.memory.current_bytes);
+        assert_eq!(
+            snapshot.queues[DiagnosticsQueue::UiUpdate as usize].high_water_items,
+            2
+        );
+        for metric in [
+            LocalLatencyMetric::ModelPublishToUiEnqueue,
+            LocalLatencyMetric::UiEnqueueToFrameSubmit,
+            LocalLatencyMetric::FrameSubmitToPresent,
+        ] {
+            assert_eq!(
+                snapshot.detailed_latency[metric as usize]
+                    .expect("detailed histogram publishes")
+                    .sample_count,
+                1
+            );
+        }
+
+        runtime.stop().expect("session stops");
+        assert_eq!(
+            runtime.record_coalesced_ui_update_diagnostics(generation, 1),
+            Err(DesktopProviderError::StaleGeneration)
         );
     }
 

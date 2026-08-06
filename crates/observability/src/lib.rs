@@ -39,11 +39,12 @@ pub enum LatencyBoundary {
     ModelPublish,
     UiEnqueue,
     FrameSubmit,
+    FrameCallback,
     Present,
 }
 
 impl LatencyBoundary {
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Exchange,
         Self::ProviderReceive,
@@ -60,6 +61,7 @@ impl LatencyBoundary {
         Self::ModelPublish,
         Self::UiEnqueue,
         Self::FrameSubmit,
+        Self::FrameCallback,
         Self::Present,
     ];
 
@@ -81,6 +83,7 @@ impl LatencyBoundary {
             Self::ModelPublish => "model_publish_timestamp",
             Self::UiEnqueue => "ui_enqueue_timestamp",
             Self::FrameSubmit => "frame_submit_timestamp",
+            Self::FrameCallback => "post_render_frame_callback_timestamp",
             Self::Present => "present_timestamp_if_measurable",
         }
     }
@@ -216,6 +219,9 @@ impl LocalLatencyMetric {
             }
             Self::UiEnqueueToFrameSubmit => {
                 (LatencyBoundary::UiEnqueue, LatencyBoundary::FrameSubmit)
+            }
+            Self::FrameSubmitToFrameCallback => {
+                (LatencyBoundary::FrameSubmit, LatencyBoundary::FrameCallback)
             }
             Self::FrameSubmitToPresent => (LatencyBoundary::FrameSubmit, LatencyBoundary::Present),
         }

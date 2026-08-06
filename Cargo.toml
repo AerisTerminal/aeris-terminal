@@ -32,6 +32,7 @@ members = [
     "crates/ui/design_system",
     "crates/ui/terminal_ui",
     "services/authorization_service",
+    "tools/diagnostics_overhead",
     "tools/ingest_conformance",
     "tools/naming_check",
 ]

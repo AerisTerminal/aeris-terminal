@@ -1,6 +1,7 @@
 //! Explicit direct-device Coinbase desktop composition.
 
 mod composition;
+mod diagnostics;
 mod history;
 mod lifecycle;
 mod provenance;
@@ -8,7 +9,7 @@ mod publication;
 
 use crate::market_worker::{
     ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup,
-    market_worker_channel,
+    UiDiagnosticsReceiver, market_worker_channel, ui_diagnostics_channel,
 };
 use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
@@ -16,6 +17,9 @@ use axiusflow_application::{
 use axiusflow_chart_integration::ReplayRecoveryCommand;
 use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
 use axiusflow_desktop_provider_runtime::{DesktopProviderState, SessionGeneration};
+use axiusflow_desktop_storage::SegmentEncryptionKey;
+use axiusflow_instruments::InstrumentRevision;
+use axiusflow_market_data::BarDefinition;
 use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
 use std::{
     collections::VecDeque,
@@ -33,6 +37,7 @@ use composition::{
     CoinbaseDesktopWorker, OpenedWorker, ProductProfile, bar_definition, client_model, instrument,
     loading_startup, nonzero, open_worker, product_profile, unix_nanos, worker_label,
 };
+use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
     PreparedHistory, StreamingSeriesContext, install_ready_history, prepare_initial_history,
 };
@@ -54,6 +59,7 @@ const PARTITION_ID: u32 = 7;
 const SCHEMA_VERSION: u32 = 1;
 const INBOX_CAPACITY: usize = 64;
 const INBOX_BATCH: usize = 1_024;
+const UI_DIAGNOSTICS_CAPACITY: usize = 256;
 const SUBSCRIPTION_ID: &str = "desktop_coinbase_one_minute_bars";
 const VAULT_SERVICE: &str = "axiusflow-desktop-market-history";
 const CATALOG_KEY_ID: &str = "history-catalog-key-v1";
@@ -68,16 +74,47 @@ struct LiveLoopState {
     pending_recovery: VecDeque<ReplayRecoveryCommand>,
 }
 
+struct WorkerThreadInput {
+    profile: ProductProfile,
+    history_root: PathBuf,
+    ui_thread: ThreadId,
+    message_tx: MarketWorkerSender,
+    inbox_tx: SyncSender<WorkerInboxEvent>,
+    inbox_rx: Receiver<WorkerInboxEvent>,
+    provider_wake_pending: Arc<AtomicBool>,
+    ui_diagnostics_rx: UiDiagnosticsReceiver,
+    detailed_diagnostics: bool,
+}
+
+struct RunningWorker {
+    profile: ProductProfile,
+    worker: CoinbaseDesktopWorker,
+    events: CoinbaseProviderEvents,
+    segment_key: SegmentEncryptionKey,
+    instrument: InstrumentRevision,
+    bar_definition: BarDefinition,
+    worker_label: String,
+    model: MarketBarClientModel,
+    state: LiveLoopState,
+}
+
 pub(crate) fn start(
     product_id: String,
     history_root: PathBuf,
     ui_thread: ThreadId,
+    detailed_diagnostics: bool,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let profile = product_profile(product_id)?;
     let startup = loading_startup(&profile)?;
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (inbox_tx, inbox_rx) = mpsc::sync_channel(INBOX_CAPACITY);
+    let diagnostics_wake_tx = inbox_tx.clone();
+    let diagnostics_wake = Arc::new(move || {
+        let _ = diagnostics_wake_tx.try_send(WorkerInboxEvent::UiDiagnosticsReady);
+    });
+    let (ui_diagnostics_tx, ui_diagnostics_rx) =
+        ui_diagnostics_channel(nonzero(UI_DIAGNOSTICS_CAPACITY), diagnostics_wake);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let provider_wake_pending = Arc::new(AtomicBool::new(false));
     let command_inbox_tx = inbox_tx.clone();
@@ -88,16 +125,19 @@ pub(crate) fn start(
     thread::Builder::new()
         .name("axiusflow-coinbase-market-worker".to_string())
         .spawn(move || {
-            if let Err(error) = run_worker(
-                &profile,
+            let error_tx = message_tx.clone();
+            if let Err(error) = run_worker(WorkerThreadInput {
+                profile,
                 history_root,
                 ui_thread,
-                &message_tx,
-                &inbox_tx,
-                &inbox_rx,
-                &provider_wake_pending,
-            ) {
-                let _ = message_tx.send(MarketWorkerMessage::State {
+                message_tx,
+                inbox_tx,
+                inbox_rx,
+                provider_wake_pending,
+                ui_diagnostics_rx,
+                detailed_diagnostics,
+            }) {
+                let _ = error_tx.send(MarketWorkerMessage::State {
                     state: ChartState::Error,
                     message: error,
                 });
@@ -107,46 +147,76 @@ pub(crate) fn start(
         .map_err(|error| error.to_string())?;
     Ok((
         startup,
-        MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx),
+        MarketDataWorker::from_channels(
+            command_tx,
+            message_rx,
+            shutdown_rx,
+            Some(ui_diagnostics_tx),
+        ),
     ))
 }
 
-fn run_worker(
-    profile: &ProductProfile,
-    history_root: PathBuf,
-    ui_thread: ThreadId,
-    message_tx: &MarketWorkerSender,
-    inbox_tx: &SyncSender<WorkerInboxEvent>,
-    inbox_rx: &Receiver<WorkerInboxEvent>,
-    provider_wake_pending: &Arc<AtomicBool>,
-) -> Result<(), String> {
+fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
+    let WorkerThreadInput {
+        profile,
+        history_root,
+        ui_thread,
+        message_tx,
+        inbox_tx,
+        inbox_rx,
+        provider_wake_pending,
+        ui_diagnostics_rx,
+        detailed_diagnostics,
+    } = input;
     let OpenedWorker {
         mut worker,
         events,
         segment_key,
     } = open_worker(
-        profile,
+        &profile,
         history_root,
         ui_thread,
-        inbox_tx,
-        provider_wake_pending,
+        &inbox_tx,
+        &provider_wake_pending,
+        detailed_diagnostics,
     )?;
     let (initial_network, monitors_active) = environment_events(inbox_tx.clone());
     apply_initial_network(&mut worker, initial_network)?;
     let prepared = prepare_initial_history(&mut worker)?;
-
-    let instrument = instrument(profile)?;
-    let bar_definition = bar_definition();
-    let worker_label = worker_label(monitors_active);
-    let mut model = client_model();
-    let mut state = LiveLoopState {
-        prepared,
-        streaming_generation: None,
-        retained: VecDeque::new(),
-        reconnect_backoff: ReconnectBackoff::new(),
-        recovery_announced: false,
-        pending_recovery: VecDeque::with_capacity(COMMAND_CAPACITY),
+    let running = RunningWorker {
+        instrument: instrument(&profile)?,
+        bar_definition: bar_definition(),
+        worker_label: worker_label(monitors_active),
+        model: client_model(),
+        state: LiveLoopState {
+            prepared,
+            streaming_generation: None,
+            retained: VecDeque::new(),
+            reconnect_backoff: ReconnectBackoff::new(),
+            recovery_announced: false,
+            pending_recovery: VecDeque::with_capacity(COMMAND_CAPACITY),
+        },
+        profile,
+        worker,
+        events,
+        segment_key,
     };
+    run_worker_loop(
+        running,
+        &message_tx,
+        &inbox_rx,
+        &provider_wake_pending,
+        &ui_diagnostics_rx,
+    )
+}
+
+fn run_worker_loop(
+    mut running: RunningWorker,
+    message_tx: &MarketWorkerSender,
+    inbox_rx: &Receiver<WorkerInboxEvent>,
+    provider_wake_pending: &AtomicBool,
+    ui_diagnostics_rx: &UiDiagnosticsReceiver,
+) -> Result<(), String> {
     let mut ready_event = None;
 
     loop {
@@ -154,9 +224,9 @@ fn run_worker(
             inbox_rx,
             &mut ready_event,
             &mut InboxDrainContext {
-                worker: &mut worker,
-                events: &events,
-                state: &mut state,
+                worker: &mut running.worker,
+                events: &running.events,
+                state: &mut running.state,
                 message_tx,
                 provider_wake_pending,
             },
@@ -164,64 +234,77 @@ fn run_worker(
             return Ok(());
         }
 
-        reconcile_provider_recovery(&mut worker, &mut state, message_tx)?;
+        flush_diagnostics(&mut running.worker, ui_diagnostics_rx, message_tx)?;
 
-        establish_coinbase_stream_if_ready(&mut worker, &events, state.streaming_generation)?;
+        reconcile_provider_recovery(&mut running.worker, &mut running.state, message_tx)?;
+
+        establish_coinbase_stream_if_ready(
+            &mut running.worker,
+            &running.events,
+            running.state.streaming_generation,
+        )?;
 
         if install_ready_history(
-            &mut worker,
+            &mut running.worker,
             &StreamingSeriesContext {
-                profile,
-                segment_key: &segment_key,
-                instrument: &instrument,
-                bar_definition: &bar_definition,
-                worker_label: &worker_label,
+                profile: &running.profile,
+                segment_key: &running.segment_key,
+                instrument: &running.instrument,
+                bar_definition: &running.bar_definition,
+                worker_label: &running.worker_label,
             },
-            &mut state,
-            &mut model,
+            &mut running.state,
+            &mut running.model,
             message_tx,
         )? {
             continue;
         }
 
-        if state.streaming_generation.is_some() {
+        if running.state.streaming_generation.is_some() {
             drain_coinbase_callbacks(
-                &mut worker,
-                &events,
-                state.streaming_generation,
-                &mut state.retained,
-                &mut model,
-                &worker_label,
+                &mut running.worker,
+                &running.events,
+                running.state.streaming_generation,
+                &mut running.state.retained,
+                &mut running.model,
+                &running.worker_label,
                 message_tx,
             )?;
         }
 
-        reconcile_provider_recovery(&mut worker, &mut state, message_tx)?;
+        reconcile_provider_recovery(&mut running.worker, &mut running.state, message_tx)?;
 
         if !publish_ready_recovery(
-            state.streaming_generation,
-            &mut state.pending_recovery,
+            running.state.streaming_generation,
+            &mut running.state.pending_recovery,
             message_tx,
-            (&instrument, &bar_definition),
-            &state.retained,
-            &mut model,
-            &worker_label,
+            (&running.instrument, &running.bar_definition),
+            &running.state.retained,
+            &mut running.model,
+            &running.worker_label,
         ) {
             return Ok(());
         }
-        discard_provider_events(&mut worker)?;
-        if events.has_ready() {
+        discard_provider_events(&mut running.worker)?;
+        flush_diagnostics(&mut running.worker, ui_diagnostics_rx, message_tx)?;
+        if running.events.has_ready() {
             continue;
         }
         let recovery_required = matches!(
-            worker.provider_state().map_err(|error| error.to_string())?,
+            running
+                .worker
+                .provider_state()
+                .map_err(|error| error.to_string())?,
             DesktopProviderState::RecoveryRequired { .. }
         );
         ready_event = wait_for_inbox(
             inbox_rx,
-            state
-                .reconnect_backoff
-                .wait_duration(recovery_required, Instant::now()),
+            Some(diagnostics_wait_duration(
+                running
+                    .state
+                    .reconnect_backoff
+                    .wait_duration(recovery_required, Instant::now()),
+            )),
         )?;
     }
 }

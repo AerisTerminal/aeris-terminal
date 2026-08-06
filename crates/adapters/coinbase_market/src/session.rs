@@ -312,11 +312,11 @@ mod tests {
             let (_stream, _) = listener.accept().expect("accept silent peer");
             thread::sleep(Duration::from_millis(300));
         });
-        let started = Instant::now();
+        let connect_deadline = Instant::now() + Duration::from_secs(1);
         let stream = connect_coinbase_endpoint_cancellable(
             "127.0.0.1",
             address.port(),
-            started + Duration::from_secs(1),
+            connect_deadline,
             None,
         )
         .expect("connect silent peer");
@@ -325,6 +325,7 @@ mod tests {
             maximum_message_bytes: 1024,
             decoder: CoinbaseDecoder::new(),
         };
+        let started = Instant::now();
         let health = connection
             .collect_with_limits(
                 None,
@@ -356,11 +357,11 @@ mod tests {
                 thread::sleep(Duration::from_millis(25));
             }
         });
-        let started = Instant::now();
+        let connect_deadline = Instant::now() + Duration::from_secs(1);
         let stream = connect_coinbase_endpoint_cancellable(
             "127.0.0.1",
             address.port(),
-            started + Duration::from_secs(1),
+            connect_deadline,
             None,
         )
         .expect("connect control-frame peer");
@@ -369,6 +370,7 @@ mod tests {
             maximum_message_bytes: 1024,
             decoder: CoinbaseDecoder::new(),
         };
+        let started = Instant::now();
         let health = connection
             .collect_with_limits(
                 None,

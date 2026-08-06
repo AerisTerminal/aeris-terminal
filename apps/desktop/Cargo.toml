@@ -17,6 +17,7 @@ axiusflow_desktop_storage = { path = "../../crates/desktop_storage" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }
 axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
+axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
 axiusflow_provider_history = { path = "../../crates/provider_history" }
 getrandom.workspace = true

@@ -26,6 +26,7 @@ pub(super) enum EnvironmentalEvent {
 
 pub(super) enum WorkerInboxEvent {
     ProviderReady,
+    UiDiagnosticsReady,
     Environment(EnvironmentalEvent),
     Command(MarketWorkerCommand),
 }
@@ -123,6 +124,7 @@ pub(super) fn drain_worker_inbox(
                     .provider_wake_pending
                     .store(false, Ordering::Release);
             }
+            WorkerInboxEvent::UiDiagnosticsReady => {}
             WorkerInboxEvent::Environment(event) => {
                 context.state.recovery_announced |= apply_environment_event(
                     context.worker,

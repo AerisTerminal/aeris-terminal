@@ -35,7 +35,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | Stage C (`ready` — Rithmic Test unlocked), Stage A (`in_progress`), Stage D (`in_progress`), Stage 0 (`ready`) |
+| Current stage(s) | Stage C (`ready` — Rithmic Test unlocked), Stage A (`in_progress`), Stage 0 (`ready`) |
 | Blocked | None for kit/codegen. Live Test login still requires signed R\|Trader agreements and vault credentials on the developer machine. |
 | Next after current | Stage E (after C+D deterministic gates), then Stage F |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R\|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
@@ -45,7 +45,6 @@ Remaining work for current stages:
 
 - **Stage C (priority):** kit-backed protobuf codegen, read-only R\|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
 - **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
-- **Stage D:** capture and validate the named disabled/enabled diagnostics overhead benchmark against the p99 / p99.9 budgets.
 - **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane (see §5).
 
 ## 2. Product thesis
@@ -71,7 +70,7 @@ Full scope policy:
 | Provider-neutral runtime | `verified` | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance. |
 | Rithmic access | `ready` | Rithmic issued R\|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R\|Trader / R\|Trader Pro. |
 | Rithmic adapter | `ready` | Headless read-only R\|Protocol implementation can proceed from the local kit; `verified` still requires deterministic + Test evidence. |
-| Lightweight diagnostics | `in_progress` | Feed-health path ships; named disabled/enabled overhead evidence remains. |
+| Lightweight diagnostics | `verified` | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI | `ready` | Starts after Stages C and D deterministic headless gates. |
 | Readiness / endurance | `ready` | Stage F. |
 | Descope cleanup | `ready` | Stage 0 — remove retired keep-alives and quarantine deferred build surfaces. |
@@ -312,7 +311,7 @@ Authorized Rithmic Test traffic must repeat the gate before provider behavior is
 marked `verified`.
 ## 9. Stage D — Lightweight diagnostics
 
-**Status:** `in_progress`
+**Status:** `verified`
 
 Always-on instrumentation: allocation-free counters and current/high-water
 values. Bounded detailed histograms are opt-in. Publish an immutable snapshot no
@@ -337,8 +336,17 @@ than 5% or p99.9 by more than 10% under the same measured workload.
 
 ### Remaining work
 
-- Capture and validate the named disabled/enabled overhead benchmark against the
-  p99 and p99.9 budgets.
+None — gate met.
+
+### Evidence
+
+- `cargo test -p axiusflow_observability --all-targets`
+- `cargo test -p axiusflow_desktop_provider_runtime --all-targets`
+- `cargo test -p axiusflow_desktop --all-targets`
+- `bash tools/run_diagnostics_overhead_benchmark.sh`
+- Evidence artifact:
+  `.cache/evidence/stage_d_diagnostics_overhead_Linux.json` on the measured
+  host.
 
 ### Gate
 
