@@ -13,8 +13,31 @@ from pathlib import Path
 
 metadata = json.loads(Path(".cache/acceleration-retirement-metadata.json").read_text())
 members = {member.rsplit("#", 1)[-1].split("@", 1)[0] for member in metadata["workspace_members"]}
-retired = {"axiusflow_linux_af_xdp_adapter", "axiusflow_linux_dpdk_adapter"}
-assert members.isdisjoint(retired), f"retired workspace members found: {members & retired}"
+retired_packages = {
+    "axiusflow_linux_af_xdp_adapter",
+    "axiusflow_linux_dpdk_adapter",
+    "axiusflow_market_data_plane",
+}
+assert members.isdisjoint(retired_packages), (
+    f"retired or quarantined workspace members found: {members & retired_packages}"
+)
+
+retired_paths = (
+    "config/libxdp_patch_provenance.json",
+    "crates/adapters/linux_af_xdp",
+    "crates/adapters/linux_dpdk",
+    "fuzz",
+    "third_party/libxdp-sys",
+    "tools/af_xdp_conformance_container",
+    "tools/dpdk_conformance_container",
+    "tools/run_af_xdp_copy_conformance.sh",
+    "tools/run_af_xdp_copy_fuzz.sh",
+    "tools/run_af_xdp_safe_boundary_fuzz.sh",
+    "tools/run_dpdk_vdev_lifecycle.sh",
+    "tools/verify_libxdp_patch.py",
+)
+present = [path for path in retired_paths if Path(path).exists()]
+assert not present, f"retired acceleration paths remain: {present}"
 
 manifest = json.loads(Path("config/ingest_readiness.json").read_text())
 profiles = {profile["profile"] for profile in manifest["profiles"]}

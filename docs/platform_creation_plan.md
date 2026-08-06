@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 18
+**Revision:** 19
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -56,29 +56,29 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stage 0 only** (`ready` — hard prerequisite). Stages A/C are parked until Stage 0 is `verified`. |
-| Blocked | Stages A–F product execution blocked on Stage 0. Live Test login still requires signed R|Trader agreements and vault credentials on the developer machine. |
-| Next after Stage 0 | Resume Stage C (priority), then Stage A; after C+D deterministic gates → Stage E → Stage F |
-| Do not start | Any A–F delivery work before Stage 0 `verified`; OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
+| Current stage(s) | **Stage C** (`in_progress` — Rithmic read-only headless core). Stage A follows Stage C priority work. |
+| Blocked | Live Test login still requires signed R|Trader agreements and vault credentials on the developer machine. Deterministic Stage C work is unblocked. |
+| Next | Finish Stage C deterministic gate and authorized Test evidence, then Stage A; after C+D deterministic gates → Stage E → Stage F |
+| Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
 ### Progress snapshot
 
 | Stage | Status | Progress |
 |---|---|---|
-| 0 — Descope cleanup (kernel bypass out) | `ready` | **hard first gate** — decisions [x]; deletions / quarantine [ ] |
-| A — Stabilize Coinbase | `in_progress` | [ ] parked until Stage 0 `verified` |
-| B — Provider-neutral runtime | `verified` | [x] complete (no further expansion until Stage 0) |
-| C — Rithmic read-only headless | `ready` | kit [x]; adapter / evidence [ ] — parked until Stage 0 `verified` |
-| D — Lightweight diagnostics | `verified` | [x] complete (no further expansion until Stage 0) |
-| E — Main Rithmic UI | `ready` | [ ] blocked on Stage 0 then Stage C deterministic gate |
+| 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
+| A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
+| B — Provider-neutral runtime | `verified` | [x] complete |
+| C — Rithmic read-only headless | `in_progress` | kit [x]; adapter / evidence [ ] |
+| D — Lightweight diagnostics | `verified` | [x] complete |
+| E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
 
 ### Remaining focus (ordered)
 
-- [ ] **Stage 0 (must finish first):** completely remove AF_XDP/DPDK kernel-bypass architecture from `main`, quarantine cloud MD plane, update Linux docs (see §5).
-- [ ] **Stage C (after Stage 0):** kit-backed protobuf codegen, read-only R|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
-- [ ] **Stage A (after Stage 0):** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
+- [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
+- [ ] **Stage C:** kit-backed protobuf codegen, read-only R|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
+- [ ] **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
 
 
 
@@ -202,7 +202,7 @@ current workspace.
 
 ## 5. Stage 0 — Descope cleanup (hard first gate)
 
-**Status:** `ready`
+**Status:** `verified`
 
 **Mandatory before the rest of this plan.** Kernel-bypass architecture must be
 completely removed from `main` before executing Stages A–F. Do not treat Stage 0
@@ -221,30 +221,29 @@ New agents: if Stage 0 is not `verified`, do Stage 0 only.
 
 - [x] Retirement decision, store decision, provider-priority Stage 0 note, and archive banners (rev 7 / rev 14) landed with revision 15.
 
-### Remaining work
+### Completed work
 
-- [ ] Create tag `retired/af_xdp_dpdk_<shortsha>`; delete `crates/adapters/linux_af_xdp`, `crates/adapters/linux_dpdk`, and related fuzz / exclude entries; confirm `cargo build --workspace` stays green.
-- [ ] Quarantine `services/market_data_plane` via `workspace.exclude` (do not delete `crates/domain/market_data`).
-- [ ] Update `docs/linux_development.md` after the deletions so it no longer claims source is retained in-tree.
-- [ ] Confirm no AF_XDP/DPDK types, features, docs claims, or workspace members remain on the active product path.
+- [x] Created annotated tag `retired/af_xdp_dpdk_5c13262`; deleted the AF_XDP/DPDK adapters, vendored dependency, fuzz target, privileged harnesses, and related workspace exclusions.
+- [x] Quarantined `services/market_data_plane` via `workspace.exclude` without deleting `crates/domain/market_data`.
+- [x] Updated `docs/linux_development.md` to point historical investigation at the tag and git history.
+- [x] Added and passed `tools/run_acceleration_retirement_conformance.sh` checks for retired paths, workspace membership, readiness, installer, and CI absence.
 
 ### Gate
 
-- [ ] Stage 0 deletions and quarantine land with a green workspace build.
-- [ ] Workspace builds do not compile AF_XDP/DPDK adapters or the cloud MD plane.
-- [ ] Kernel-bypass architecture is fully gone from `main` (no product keep-alive).
-- [ ] §12 lists every deferred/retired disposition; none appear as Work in A–F.
-- [ ] `docs/linux_development.md` matches the delete-from-main policy.
-- [ ] Only after this gate is `verified` may Stages A/C (and later E/F) resume.
+- [x] Stage 0 deletions and quarantine pass the green workspace build.
+- [x] Workspace builds do not compile AF_XDP/DPDK adapters or the cloud MD plane.
+- [x] Kernel-bypass architecture is fully gone from `main` (no product keep-alive).
+- [x] §12 lists every deferred/retired disposition; none appear as Work in A–F.
+- [x] `docs/linux_development.md` matches the delete-from-main policy.
+- [x] Stage 0 is `verified`; Stages A/C (and later E/F) may resume in roadmap order.
 
 
 
 ## 6. Stage A — Stabilize and freeze Coinbase
 
-**Status:** `in_progress` (parked until Stage 0 is `verified`)
+**Status:** `in_progress` (queued after Stage C priority work)
 
-Do not continue Stage A delivery until Stage 0 removes kernel-bypass architecture
-from `main`.
+Stage 0 is verified. Stage A remains queued behind the Stage C priority batch.
 
 ### Remaining work
 
@@ -285,10 +284,9 @@ None — gate met.
 
 ## 8. Stage C — Rithmic read-only headless core
 
-**Status:** `ready` (parked until Stage 0 is `verified`)
+**Status:** `in_progress`
 
-Do not start Stage C delivery until Stage 0 removes kernel-bypass architecture
-from `main`.
+Stage 0 is verified. Stage C is the active priority batch.
 
 Rithmic has unlocked the R|Protocol path (kit download + Rithmic Test credentials).
 The local kit is installed. Implementation of encoding/decoding and the read-only
@@ -442,7 +440,7 @@ None — gate met.
 
 ## 10. Stage E — Main Rithmic UI vertical
 
-**Status:** `ready`
+**Status:** `ready` (after the Stage C deterministic gate)
 
 Begin only after Stage 0 is `verified` and Stages C and D pass their
 deterministic headless gates.
@@ -483,7 +481,7 @@ deterministic headless gates.
 
 ## 11. Stage F — Readiness and endurance
 
-**Status:** `ready` (after Stage 0, then the upstream product gates)
+**Status:** `ready` (after the upstream product gates)
 
 ### Remaining work
 
@@ -527,11 +525,11 @@ Stage 3 / 5B checklists.
 | AF_XDP and DPDK               | `retired`  | (a) delete from `main` in Stage 0 | acceleration_retirement; Stage 0          |
 
 
-Disposition checklist (policy accepted; Stage 0 execution still open for a/b):
+Disposition checklist:
 
 - [x] **(c)** defer-with-no-work accepted for Coinbase depth/timeframes, IQFeed, CQG, RAPI+, OMS/execution.
-- [ ] **(b)** quarantine cloud MD plane (`services/market_data_plane`) — Stage 0 remaining.
-- [ ] **(a)** delete AF_XDP/DPDK from `main` — Stage 0 remaining.
+- [x] **(b)** cloud MD plane (`services/market_data_plane`) quarantined via `workspace.exclude`.
+- [x] **(a)** AF_XDP/DPDK deleted from `main`; history retained by the annotated retirement tag.
 
 
 

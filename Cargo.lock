@@ -868,27 +868,6 @@ name = "axiusflow_market_data"
 version = "0.1.0"
 
 [[package]]
-name = "axiusflow_market_data_plane"
-version = "0.1.0"
-dependencies = [
- "axiusflow_application",
- "axiusflow_authorization",
- "axiusflow_coinbase_market_adapter",
- "axiusflow_instruments",
- "axiusflow_market_data",
- "axiusflow_market_protocol_adapter",
- "axiusflow_protocols",
- "axiusflow_realtime",
- "axiusflow_security",
- "axiusflow_streaming",
- "rustls",
- "serde",
- "serde_json",
- "tungstenite",
- "webpki-roots 1.0.5",
-]
-
-[[package]]
 name = "axiusflow_market_protocol_adapter"
 version = "0.1.0"
 dependencies = [

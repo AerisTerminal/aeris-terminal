@@ -24,7 +24,6 @@ members = [
     "crates/realtime",
     "crates/security",
     "services/auth_service",
-    "services/market_data_plane",
     "crates/streaming",
     "crates/testing",
     "crates/transport",
@@ -37,8 +36,7 @@ members = [
     "tools/naming_check",
 ]
 exclude = [
-    "crates/adapters/linux_af_xdp",
-    "crates/adapters/linux_dpdk",
+    "services/market_data_plane",
 ]
 resolver = "3"
 

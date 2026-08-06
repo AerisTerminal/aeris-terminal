@@ -41,6 +41,7 @@ The Linux conformance path validates the active portable and tuned socket contra
 cargo run --locked --package axiusflow_ingest_conformance
 ```
 
-AF_XDP and DPDK are retired from the consumer product, default workspace, installer, readiness
-manifest, and active CI. Their isolated adapter source and old harnesses remain only as historical
-engineering evidence; they are not supported development or release targets.
+AF_XDP and DPDK are retired and their adapters, vendored dependencies, fuzz targets, and
+privileged harnesses have been deleted from `main`. The annotated retirement tag and git history
+retain the historical engineering evidence; neither technology is a supported development or
+release target.
