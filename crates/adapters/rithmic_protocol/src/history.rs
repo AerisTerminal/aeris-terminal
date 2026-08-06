@@ -67,11 +67,27 @@ pub enum ReplayKind {
     Tick,
 }
 
+/// Whether a bar came from a live subscription or a replay response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistorySource {
+    Live,
+    Replay,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DecodedHistoryMessage {
-    TimeBar(DecodedTimeBar),
-    TickBar(DecodedTickBar),
-    ReplayComplete { kind: ReplayKind, accepted: bool },
+    TimeBar {
+        source: HistorySource,
+        bar: DecodedTimeBar,
+    },
+    TickBar {
+        source: HistorySource,
+        bar: DecodedTickBar,
+    },
+    ReplayComplete {
+        kind: ReplayKind,
+        accepted: bool,
+    },
 }
 
 #[cfg(rithmic_kit)]
@@ -113,7 +129,36 @@ fn decode_time_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
             kind: ReplayKind::Time,
             accepted,
         }),
-        CodeShape::Data => Ok(DecodedHistoryMessage::TimeBar(time_bar(
+        CodeShape::Data => Ok(DecodedHistoryMessage::TimeBar {
+            source: HistorySource::Replay,
+            bar: time_bar(
+                message.symbol,
+                message.exchange,
+                message.r#type,
+                message.period,
+                message.marker,
+                message.open_price,
+                message.high_price,
+                message.low_price,
+                message.close_price,
+                message.num_trades,
+                message.volume,
+                message.bid_volume,
+                message.ask_volume,
+            )?,
+        }),
+    }
+}
+
+#[cfg(rithmic_kit)]
+fn decode_live_time(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolError> {
+    use crate::generated::rti;
+    use prost::Message;
+
+    let message = rti::TimeBar::decode(frame).map_err(|_| ProtocolError::Decode)?;
+    Ok(DecodedHistoryMessage::TimeBar {
+        source: HistorySource::Live,
+        bar: time_bar(
             message.symbol,
             message.exchange,
             message.r#type,
@@ -127,31 +172,8 @@ fn decode_time_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
             message.volume,
             message.bid_volume,
             message.ask_volume,
-        )?)),
-    }
-}
-
-#[cfg(rithmic_kit)]
-fn decode_live_time(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolError> {
-    use crate::generated::rti;
-    use prost::Message;
-
-    let message = rti::TimeBar::decode(frame).map_err(|_| ProtocolError::Decode)?;
-    Ok(DecodedHistoryMessage::TimeBar(time_bar(
-        message.symbol,
-        message.exchange,
-        message.r#type,
-        message.period,
-        message.marker,
-        message.open_price,
-        message.high_price,
-        message.low_price,
-        message.close_price,
-        message.num_trades,
-        message.volume,
-        message.bid_volume,
-        message.ask_volume,
-    )?))
+        )?,
+    })
 }
 
 #[cfg(rithmic_kit)]
@@ -170,7 +192,39 @@ fn decode_tick_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
             kind: ReplayKind::Tick,
             accepted,
         }),
-        CodeShape::Data => Ok(DecodedHistoryMessage::TickBar(tick_bar(
+        CodeShape::Data => Ok(DecodedHistoryMessage::TickBar {
+            source: HistorySource::Replay,
+            bar: tick_bar(
+                message.symbol,
+                message.exchange,
+                message.r#type,
+                message.sub_type,
+                message.type_specifier,
+                message.data_bar_seq_num,
+                message.data_bar_ssboe,
+                message.data_bar_usecs,
+                message.open_price,
+                message.high_price,
+                message.low_price,
+                message.close_price,
+                message.num_trades,
+                message.volume,
+                message.bid_volume,
+                message.ask_volume,
+            )?,
+        }),
+    }
+}
+
+#[cfg(rithmic_kit)]
+fn decode_live_tick(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolError> {
+    use crate::generated::rti;
+    use prost::Message;
+
+    let message = rti::TickBar::decode(frame).map_err(|_| ProtocolError::Decode)?;
+    Ok(DecodedHistoryMessage::TickBar {
+        source: HistorySource::Live,
+        bar: tick_bar(
             message.symbol,
             message.exchange,
             message.r#type,
@@ -187,34 +241,8 @@ fn decode_tick_replay(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolErr
             message.volume,
             message.bid_volume,
             message.ask_volume,
-        )?)),
-    }
-}
-
-#[cfg(rithmic_kit)]
-fn decode_live_tick(frame: &[u8]) -> Result<DecodedHistoryMessage, ProtocolError> {
-    use crate::generated::rti;
-    use prost::Message;
-
-    let message = rti::TickBar::decode(frame).map_err(|_| ProtocolError::Decode)?;
-    Ok(DecodedHistoryMessage::TickBar(tick_bar(
-        message.symbol,
-        message.exchange,
-        message.r#type,
-        message.sub_type,
-        message.type_specifier,
-        message.data_bar_seq_num,
-        message.data_bar_ssboe,
-        message.data_bar_usecs,
-        message.open_price,
-        message.high_price,
-        message.low_price,
-        message.close_price,
-        message.num_trades,
-        message.volume,
-        message.bid_volume,
-        message.ask_volume,
-    )?))
+        )?,
+    })
 }
 
 #[cfg(rithmic_kit)]
@@ -368,19 +396,30 @@ fn validate_codes(
     handler: &[String],
     terminal: &[String],
 ) -> Result<(), ProtocolError> {
-    for (field, values) in [
-        ("user_msg", user_messages),
-        ("rq_handler_rp_code", handler),
-        ("rp_code", terminal),
-    ] {
-        if values.len() > 2 {
-            return Err(ProtocolError::RepeatedFieldLimitExceeded { field, maximum: 2 });
-        }
-        for value in values {
-            validate_string(field, value)?;
-        }
+    if user_messages.len() > 2 {
+        return Err(ProtocolError::RepeatedFieldLimitExceeded {
+            field: "user_msg",
+            maximum: 2,
+        });
     }
-    Ok(())
+    for value in user_messages {
+        validate_string("user_msg", value)?;
+    }
+    validate_code_field("rq_handler_rp_code", handler)?;
+    validate_code_field("rp_code", terminal)
+}
+
+#[cfg(rithmic_kit)]
+fn validate_code_field(field: &'static str, codes: &[String]) -> Result<(), ProtocolError> {
+    match codes {
+        [] => Ok(()),
+        [code] if code == "0" => Ok(()),
+        [code, detail] if code.parse::<u32>().is_ok_and(|value| value > 0) => {
+            validate_string(field, code)?;
+            validate_string(field, detail)
+        }
+        _ => Err(ProtocolError::ResponseCodeShape),
+    }
 }
 
 #[cfg(rithmic_kit)]
@@ -465,11 +504,14 @@ mod tests {
         .encode_to_vec();
         assert!(matches!(
             codec.decode_history(&time).expect("time bar decodes"),
-            DecodedHistoryMessage::TimeBar(DecodedTimeBar {
-                bar_type: DecodedTimeBarType::Minute,
-                marker_seconds: 1_800_000_000,
-                ..
-            })
+            DecodedHistoryMessage::TimeBar {
+                source: HistorySource::Live,
+                bar: DecodedTimeBar {
+                    bar_type: DecodedTimeBarType::Minute,
+                    marker_seconds: 1_800_000_000,
+                    ..
+                },
+            }
         ));
 
         let tick = rti::TickBar {
@@ -495,7 +537,10 @@ mod tests {
         .encode_to_vec();
         assert!(matches!(
             codec.decode_history(&tick).expect("tick bar decodes"),
-            DecodedHistoryMessage::TickBar(DecodedTickBar { keys, .. })
+            DecodedHistoryMessage::TickBar {
+                source: HistorySource::Live,
+                bar: DecodedTickBar { keys, .. },
+            }
                 if keys[0].sequence == "opaque-1"
         ));
 
@@ -557,5 +602,30 @@ mod tests {
             codec.decode_history(&mismatched),
             Err(ProtocolError::ParallelFieldLength("tick_bar.keys"))
         ));
+
+        let malformed_rejection = rti::ResponseTimeBarReplay {
+            template_id: 203,
+            rp_code: vec!["1".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_history(&malformed_rejection),
+            Err(ProtocolError::ResponseCodeShape)
+        ));
+
+        let rejection = rti::ResponseTimeBarReplay {
+            template_id: 203,
+            rp_code: vec!["1".to_string(), "rejected".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec.decode_history(&rejection).expect("rejection decodes"),
+            DecodedHistoryMessage::ReplayComplete {
+                kind: ReplayKind::Time,
+                accepted: false,
+            }
+        );
     }
 }

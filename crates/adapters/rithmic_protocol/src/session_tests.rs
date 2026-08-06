@@ -1,9 +1,11 @@
 #![cfg(rithmic_kit)]
 
 use crate::{
-    DecodedControlMessage, DecodedMarketMessage, RetryDisposition, RithmicApplication,
+    DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage, DecodedTimeBar,
+    DecodedTimeBarType, HistorySource, ReplayKind, RetryDisposition, RithmicApplication,
     RithmicCredentials, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
-    RithmicTestSession, endpoint::RithmicEndpoint, generated::rti,
+    RithmicTestSession, TimeBarReplayRequest, TimeBarType, endpoint::RithmicEndpoint,
+    generated::rti,
 };
 use prost::Message as _;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -99,6 +101,103 @@ fn discovery_closes_before_fresh_ticker_login_over_tls() {
         .expect("local Rithmic TLS server did not panic")
         .expect("local Rithmic TLS lifecycle completed");
     assert_ne!(discovery_peer, ticker_peer);
+}
+
+#[test]
+fn history_replay_uses_fresh_history_plant_connection_over_tls() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-history-plant-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)?;
+            drop(discovery);
+
+            let (mut history, _) = accept_websocket(&listener, &server_config)?;
+            assert_history_login_request(&read_binary(&mut history)?)?;
+            history
+                .send(Message::binary(login_response(true, &[])))
+                .map_err(|error| error.to_string())?;
+            assert_time_replay_request(&read_binary(&mut history)?);
+            history
+                .send(Message::binary(time_replay_bar()))
+                .map_err(|error| error.to_string())?;
+            history
+                .send(Message::binary(time_replay_complete()))
+                .map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut history)?);
+            history
+                .send(Message::binary(logout_response()))
+                .map_err(|error| error.to_string())?;
+            require_close(&mut history)?;
+            finish_server_close(&mut history)
+        })
+        .expect("spawn local history TLS server");
+
+    let mut connection = RithmicTestSession::connect_history_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        None,
+        client_config,
+    )
+    .expect("discover and log in to history plant");
+    connection
+        .replay_time_bars(TimeBarReplayRequest {
+            symbol: "ESM7",
+            exchange: "CME",
+            bar_type: TimeBarType::Minute,
+            period: 1,
+            start_seconds: 1_800_000_000,
+            finish_seconds: 1_800_000_060,
+            maximum_bars: 2,
+        })
+        .expect("send time replay request");
+    assert_eq!(
+        connection.replay_time_bars(TimeBarReplayRequest {
+            symbol: "ESM7",
+            exchange: "CME",
+            bar_type: TimeBarType::Minute,
+            period: 1,
+            start_seconds: 1_800_000_000,
+            finish_seconds: 1_800_000_060,
+            maximum_bars: 2,
+        }),
+        Err(RithmicSessionError::RequestInFlight)
+    );
+    assert!(matches!(
+        connection.read_next().expect("read replay bar"),
+        RithmicSessionMessage::History(DecodedHistoryMessage::TimeBar {
+            source: HistorySource::Replay,
+            bar: DecodedTimeBar {
+                bar_type: DecodedTimeBarType::Minute,
+                marker_seconds: 1_800_000_000,
+                ..
+            },
+        })
+    ));
+    assert_eq!(
+        connection.read_next().expect("read replay completion"),
+        RithmicSessionMessage::History(DecodedHistoryMessage::ReplayComplete {
+            kind: ReplayKind::Time,
+            accepted: true,
+        })
+    );
+    connection.close().expect("close history connection");
+    server
+        .join()
+        .expect("local history TLS server did not panic")
+        .expect("local history TLS lifecycle completed");
 }
 
 #[test]
@@ -317,6 +416,38 @@ fn assert_login_request(frame: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn assert_history_login_request(frame: &[u8]) -> Result<(), String> {
+    let request = rti::RequestLogin::decode(frame).map_err(|error| error.to_string())?;
+    if request.template_id != 10
+        || request.template_version.as_deref() != Some(env!("RITHMIC_TEMPLATE_VERSION"))
+        || request.user.as_deref() != Some(FIXTURE_USER)
+        || request.password.as_deref() != Some(FIXTURE_PASSWORD)
+        || request.app_name.as_deref() != Some("Axiusflow")
+        || request.app_version.as_deref() != Some("0.1.0")
+        || request.system_name.as_deref() != Some(TEST_SYSTEM)
+        || request.infra_type != Some(rti::request_login::SysInfraType::HistoryPlant.into())
+        || request.aggregated_quotes.is_some()
+    {
+        return Err("history login request did not match the bounded fixture".to_string());
+    }
+    Ok(())
+}
+
+fn assert_time_replay_request(frame: &[u8]) {
+    let request = rti::RequestTimeBarReplay::decode(frame).expect("decode time replay request");
+    assert_eq!(request.template_id, 202);
+    assert_eq!(request.symbol.as_deref(), Some("ESM7"));
+    assert_eq!(request.exchange.as_deref(), Some("CME"));
+    assert_eq!(
+        request.bar_type,
+        Some(rti::request_time_bar_replay::BarType::MinuteBar.into())
+    );
+    assert_eq!(request.bar_type_period, Some(1));
+    assert_eq!(request.start_index, Some(1_800_000_000));
+    assert_eq!(request.finish_index, Some(1_800_000_060));
+    assert_eq!(request.user_max_count, Some(2));
+}
+
 fn assert_logout_request(frame: &[u8]) {
     let request = rti::RequestLogout::decode(frame).expect("decode logout request");
     assert_eq!(request.template_id, 12);
@@ -353,7 +484,11 @@ fn login_response(accepted: bool, user_messages: &[&str]) -> Vec<u8> {
             .iter()
             .map(|message| (*message).to_string())
             .collect(),
-        rp_code: vec![if accepted { "0" } else { "1" }.to_string()],
+        rp_code: if accepted {
+            vec!["0".to_string()]
+        } else {
+            vec!["1".to_string(), "rejected".to_string()]
+        },
         fcm_id: None,
         ib_id: None,
         country_code: None,
@@ -409,6 +544,37 @@ fn trade_update() -> Vec<u8> {
         source_nsecs: None,
         jop_ssboe: None,
         jop_nsecs: None,
+    }
+    .encode_to_vec()
+}
+
+fn time_replay_bar() -> Vec<u8> {
+    rti::ResponseTimeBarReplay {
+        template_id: 203,
+        rq_handler_rp_code: vec!["0".to_string()],
+        symbol: Some("ESM7".to_string()),
+        exchange: Some("CME".to_string()),
+        r#type: Some(rti::response_time_bar_replay::BarType::MinuteBar.into()),
+        period: Some("1".to_string()),
+        marker: Some(1_800_000_000),
+        num_trades: Some(10),
+        volume: Some(20),
+        bid_volume: Some(8),
+        ask_volume: Some(12),
+        open_price: Some(5_100.0),
+        close_price: Some(5_101.0),
+        high_price: Some(5_102.0),
+        low_price: Some(5_099.0),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn time_replay_complete() -> Vec<u8> {
+    rti::ResponseTimeBarReplay {
+        template_id: 203,
+        rp_code: vec!["0".to_string()],
+        ..Default::default()
     }
     .encode_to_vec()
 }

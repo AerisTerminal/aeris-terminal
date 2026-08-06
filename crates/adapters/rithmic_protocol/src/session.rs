@@ -1,7 +1,7 @@
 use crate::{
     DecodedCatalogMessage, DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage,
     InstrumentReferenceRequest, LoginRequest, MarketDataSubscription, OutboundRequest,
-    ProtocolError, ReadOnlyPlant, RithmicProtocolBackend, RithmicProtocolCodec,
+    ProtocolError, ReadOnlyPlant, ReplayKind, RithmicProtocolBackend, RithmicProtocolCodec,
     RithmicSessionError, RithmicSessionLimits, SymbolSearchRequest, TickBarReplayRequest,
     TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
     endpoint::RithmicEndpoint,
@@ -80,6 +80,31 @@ impl RithmicTestSession {
         )
     }
 
+    /// Performs system discovery, then logs in to the history plant on a fresh
+    /// WSS connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted terminal or transient session failure.
+    pub fn discover_and_login_history(
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Option<Arc<AtomicBool>>,
+    ) -> Result<RithmicHistoryConnection, RithmicSessionError> {
+        let tls_config = default_tls_config()?;
+        Self::connect_plant_with(
+            RithmicEndpoint::TEST,
+            credentials,
+            application,
+            limits,
+            stop,
+            tls_config,
+            ReadOnlyPlant::History,
+        )
+        .map(RithmicHistoryConnection::new)
+    }
+
     pub(crate) fn connect_with(
         endpoint: RithmicEndpoint,
         credentials: RithmicCredentials<'_>,
@@ -88,6 +113,48 @@ impl RithmicTestSession {
         stop: Option<Arc<AtomicBool>>,
         tls_config: ClientConfig,
     ) -> Result<RithmicTickerConnection, RithmicSessionError> {
+        Self::connect_plant_with(
+            endpoint,
+            credentials,
+            application,
+            limits,
+            stop,
+            tls_config,
+            ReadOnlyPlant::Ticker,
+        )
+        .map(RithmicTickerConnection::new)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connect_history_with(
+        endpoint: RithmicEndpoint,
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Option<Arc<AtomicBool>>,
+        tls_config: ClientConfig,
+    ) -> Result<RithmicHistoryConnection, RithmicSessionError> {
+        Self::connect_plant_with(
+            endpoint,
+            credentials,
+            application,
+            limits,
+            stop,
+            tls_config,
+            ReadOnlyPlant::History,
+        )
+        .map(RithmicHistoryConnection::new)
+    }
+
+    fn connect_plant_with(
+        endpoint: RithmicEndpoint,
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Option<Arc<AtomicBool>>,
+        tls_config: ClientConfig,
+        plant: ReadOnlyPlant,
+    ) -> Result<AuthenticatedConnection, RithmicSessionError> {
         let endpoint = endpoint.validate()?;
         let limits = limits.validate()?;
         let backend = RithmicProtocolBackend::detected();
@@ -116,10 +183,10 @@ impl RithmicTestSession {
         finish_discovery_close(&mut discovery, limits.close_timeout)?;
         drop(discovery);
 
-        let mut ticker = connect_websocket(endpoint, limits, stop, tls_config)?;
-        set_deadline(&mut ticker, Instant::now() + limits.response_timeout);
+        let mut socket = connect_websocket(endpoint, limits, stop, tls_config)?;
+        set_deadline(&mut socket, Instant::now() + limits.response_timeout);
         send_request(
-            &mut ticker,
+            &mut socket,
             &backend,
             OutboundRequest::Login(LoginRequest {
                 user: credentials.user,
@@ -127,11 +194,11 @@ impl RithmicTestSession {
                 app_name: application.name,
                 app_version: application.version,
                 system_name: TEST_SYSTEM,
-                plant: ReadOnlyPlant::Ticker,
+                plant,
             }),
         )?;
-        set_deadline(&mut ticker, Instant::now() + limits.response_timeout);
-        let login = read_control(&mut ticker, &backend)?;
+        set_deadline(&mut socket, Instant::now() + limits.response_timeout);
+        let login = read_control(&mut socket, &backend)?;
         match login {
             DecodedControlMessage::Login {
                 accepted: true,
@@ -141,8 +208,8 @@ impl RithmicTestSession {
                 if heartbeat_interval.is_zero() {
                     return Err(RithmicSessionError::Protocol);
                 }
-                Ok(RithmicTickerConnection {
-                    socket: ticker,
+                Ok(AuthenticatedConnection {
+                    socket,
                     heartbeat_interval,
                     limits,
                 })
@@ -155,128 +222,30 @@ impl RithmicTestSession {
     }
 }
 
-/// Authenticated read-only ticker-plant connection.
-pub struct RithmicTickerConnection {
+struct AuthenticatedConnection {
     socket: RithmicWebSocket,
     heartbeat_interval: Duration,
     limits: RithmicSessionLimits,
 }
 
-impl fmt::Debug for RithmicTickerConnection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RithmicTickerConnection")
-            .field("heartbeat_interval", &self.heartbeat_interval)
-            .field("limits", &self.limits)
-            .finish_non_exhaustive()
-    }
-}
-
-impl RithmicTickerConnection {
-    #[must_use]
-    pub const fn heartbeat_interval(&self) -> Duration {
+impl AuthenticatedConnection {
+    const fn heartbeat_interval(&self) -> Duration {
         self.heartbeat_interval
     }
 
-    /// Sends a provider heartbeat request.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn send_heartbeat(&mut self) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::Heartbeat)
+    fn send(&mut self, request: OutboundRequest<'_>) -> Result<(), RithmicSessionError> {
+        set_deadline(
+            &mut self.socket,
+            Instant::now() + self.limits.response_timeout,
+        );
+        send_request(
+            &mut self.socket,
+            &RithmicProtocolBackend::detected(),
+            request,
+        )
     }
 
-    /// Starts one bounded symbol search.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn search_symbols(
-        &mut self,
-        request: SymbolSearchRequest<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::SearchSymbols(request))
-    }
-
-    /// Requests exact metadata for one provider instrument.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn request_instrument_reference(
-        &mut self,
-        request: InstrumentReferenceRequest<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::InstrumentReference(request))
-    }
-
-    /// Updates one read-only trade/quote/aggregate-book subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn update_market_data(
-        &mut self,
-        request: MarketDataSubscription<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::MarketData(request))
-    }
-
-    /// Updates one live time-bar subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn update_time_bars(
-        &mut self,
-        request: TimeBarSubscription<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::TimeBarUpdate(request))
-    }
-
-    /// Requests bounded time-bar history.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn replay_time_bars(
-        &mut self,
-        request: TimeBarReplayRequest<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::TimeBarReplay(request))
-    }
-
-    /// Updates one live regular tick-bar subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn update_tick_bars(
-        &mut self,
-        request: TickBarSubscription<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::TickBarUpdate(request))
-    }
-
-    /// Requests bounded regular tick-bar history.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn replay_tick_bars(
-        &mut self,
-        request: TickBarReplayRequest<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.send(OutboundRequest::TickBarReplay(request))
-    }
-
-    /// Reads and decodes one bounded provider message.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted deadline, transport, or protocol failure.
-    pub fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
+    fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
         set_deadline(
             &mut self.socket,
             Instant::now() + self.limits.response_timeout,
@@ -285,12 +254,7 @@ impl RithmicTickerConnection {
         decode_session_message(&frame)
     }
 
-    /// Closes the authenticated WebSocket within the configured close deadline.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted transport failure if the close frame cannot be sent.
-    pub fn close(mut self) -> Result<(), RithmicSessionError> {
+    fn close(mut self) -> Result<(), RithmicSessionError> {
         begin_shutdown(&mut self.socket, Instant::now() + self.limits.close_timeout);
         let backend = RithmicProtocolBackend::detected();
         send_request(&mut self.socket, &backend, OutboundRequest::Logout)?;
@@ -322,17 +286,242 @@ impl RithmicTickerConnection {
             .close(None)
             .map_err(|_| RithmicSessionError::Transport)
     }
+}
+
+/// Authenticated read-only ticker-plant connection.
+pub struct RithmicTickerConnection {
+    connection: AuthenticatedConnection,
+    search_in_flight: bool,
+}
+
+impl fmt::Debug for RithmicTickerConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RithmicTickerConnection")
+            .field("heartbeat_interval", &self.connection.heartbeat_interval)
+            .field("limits", &self.connection.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RithmicTickerConnection {
+    const fn new(connection: AuthenticatedConnection) -> Self {
+        Self {
+            connection,
+            search_in_flight: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn heartbeat_interval(&self) -> Duration {
+        self.connection.heartbeat_interval()
+    }
+
+    /// Sends a provider heartbeat request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn send_heartbeat(&mut self) -> Result<(), RithmicSessionError> {
+        self.send(OutboundRequest::Heartbeat)
+    }
+
+    /// Starts one bounded symbol search.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn search_symbols(
+        &mut self,
+        request: SymbolSearchRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        if self.search_in_flight {
+            return Err(RithmicSessionError::RequestInFlight);
+        }
+        self.send(OutboundRequest::SearchSymbols(request))?;
+        self.search_in_flight = true;
+        Ok(())
+    }
+
+    /// Requests exact metadata for one provider instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn request_instrument_reference(
+        &mut self,
+        request: InstrumentReferenceRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.send(OutboundRequest::InstrumentReference(request))
+    }
+
+    /// Updates one read-only trade/quote/aggregate-book subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn update_market_data(
+        &mut self,
+        request: MarketDataSubscription<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.send(OutboundRequest::MarketData(request))
+    }
+
+    /// Reads and decodes one bounded provider message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted deadline, transport, or protocol failure.
+    pub fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
+        let message = self.connection.read_next()?;
+        if matches!(
+            &message,
+            RithmicSessionMessage::Catalog(DecodedCatalogMessage::SearchComplete { .. })
+        ) {
+            self.search_in_flight = false;
+        }
+        Ok(message)
+    }
+
+    /// Closes the authenticated WebSocket within the configured close deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted transport failure if the close frame cannot be sent.
+    pub fn close(self) -> Result<(), RithmicSessionError> {
+        self.connection.close()
+    }
 
     fn send(&mut self, request: OutboundRequest<'_>) -> Result<(), RithmicSessionError> {
-        set_deadline(
-            &mut self.socket,
-            Instant::now() + self.limits.response_timeout,
-        );
-        send_request(
-            &mut self.socket,
-            &RithmicProtocolBackend::detected(),
-            request,
-        )
+        self.connection.send(request)
+    }
+}
+
+/// Authenticated read-only history-plant connection.
+pub struct RithmicHistoryConnection {
+    connection: AuthenticatedConnection,
+    replay_in_flight: Option<ReplayKind>,
+}
+
+impl fmt::Debug for RithmicHistoryConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RithmicHistoryConnection")
+            .field("heartbeat_interval", &self.connection.heartbeat_interval)
+            .field("limits", &self.connection.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RithmicHistoryConnection {
+    const fn new(connection: AuthenticatedConnection) -> Self {
+        Self {
+            connection,
+            replay_in_flight: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn heartbeat_interval(&self) -> Duration {
+        self.connection.heartbeat_interval()
+    }
+
+    /// Sends a provider heartbeat request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn send_heartbeat(&mut self) -> Result<(), RithmicSessionError> {
+        self.connection.send(OutboundRequest::Heartbeat)
+    }
+
+    /// Updates one live time-bar subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn update_time_bars(
+        &mut self,
+        request: TimeBarSubscription<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.connection
+            .send(OutboundRequest::TimeBarUpdate(request))
+    }
+
+    /// Starts one bounded time-bar replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn replay_time_bars(
+        &mut self,
+        request: TimeBarReplayRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.start_replay(ReplayKind::Time, OutboundRequest::TimeBarReplay(request))
+    }
+
+    /// Updates one live tick-bar subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn update_tick_bars(
+        &mut self,
+        request: TickBarSubscription<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.connection
+            .send(OutboundRequest::TickBarUpdate(request))
+    }
+
+    /// Starts one bounded tick-bar replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn replay_tick_bars(
+        &mut self,
+        request: TickBarReplayRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.start_replay(ReplayKind::Tick, OutboundRequest::TickBarReplay(request))
+    }
+
+    /// Reads and decodes one bounded provider message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted deadline, transport, or protocol failure.
+    pub fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
+        let message = self.connection.read_next()?;
+        if let RithmicSessionMessage::History(DecodedHistoryMessage::ReplayComplete {
+            kind, ..
+        }) = &message
+            && self.replay_in_flight.as_ref() == Some(kind)
+        {
+            self.replay_in_flight = None;
+        }
+        Ok(message)
+    }
+
+    /// Logs out and closes within the configured close deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn close(self) -> Result<(), RithmicSessionError> {
+        self.connection.close()
+    }
+
+    fn start_replay(
+        &mut self,
+        kind: ReplayKind,
+        request: OutboundRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        if self.replay_in_flight.is_some() {
+            return Err(RithmicSessionError::RequestInFlight);
+        }
+        self.connection.send(request)?;
+        self.replay_in_flight = Some(kind);
+        Ok(())
     }
 }
 

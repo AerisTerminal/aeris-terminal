@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 22
+**Revision:** 23
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage C** (`in_progress` — Rithmic read-only headless core). Stage A follows Stage C priority work. |
 | Blocked | Live Test login still requires signed R|Trader agreements and vault credentials on the developer machine. Deterministic Stage C work is unblocked. |
-| Next | Finish Stage C deterministic gate and authorized Test evidence, then Stage A; after C+D deterministic gates → Stage E → Stage F |
+| Next | Integrate the Rithmic session with vault-backed, generation-fenced runtime callbacks and deterministic reconnect/recovery fixtures; then authorized Test evidence |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -69,7 +69,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | kit + bounded codec + deterministic WSS discovery/login [x]; collectors / recovery / authorized evidence [ ] |
+| C — Rithmic read-only headless | `in_progress` | kit, bounded codec/WSS, collectors, history plant, and depth image assembly [x]; runtime/canonical recovery and authorized evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
@@ -105,7 +105,7 @@ Full scope policy:
 | Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete.                                                                                                                                                              |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
-| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs and deterministic TLS WSS discovery/close/fresh-login/heartbeat/trade/logout are implemented; vault/runtime integration, collectors/recovery, subscription installation, and authorized Test evidence remain.            |
+| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, and bounded complete-depth-image assembly are implemented; vault/runtime integration, canonical mapping/recovery, subscription installation, and authorized Test evidence remain. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `ready`       | Starts after Stages C and D deterministic headless gates.                                                                                                                                                                                           |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
@@ -374,7 +374,7 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [ ] Detect heartbeat/message silence and stop cleanly with generation fencing.
 - [ ] Retry transient failures from 250 ms to 8 seconds with bounded backoff.
 - [ ] Do not retry rejected credentials, unsigned agreements, unsupported systems, or schema/template mismatches.
-- [ ] On a depth gap, discard candidate book state and require a new snapshot.
+- [x] On malformed/missing depth chunks, discard candidate book state and require a new snapshot; never synthesize provider deltas or sequences absent from template 156.
 - [ ] Recover trade/history continuity with bounded overlap, deduplication, and a covering snapshot.
 - [ ] Fail closed when the installed protocol cannot recover continuity.
 - [x] Enforce an outbound-template allowlist containing read-only templates only.

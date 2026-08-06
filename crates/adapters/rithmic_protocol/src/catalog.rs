@@ -108,6 +108,9 @@ fn decode_reference(frame: &[u8]) -> Result<DecodedCatalogMessage, ProtocolError
 
     let message = rti::ResponseReferenceData::decode(frame).map_err(|_| ProtocolError::Decode)?;
     validate_codes(&message.user_msg, &[], &message.rp_code)?;
+    if message.rp_code.is_empty() {
+        return Err(ProtocolError::ResponseCodeShape);
+    }
     if !accepted(&message.rp_code) {
         return Ok(DecodedCatalogMessage::InstrumentReference(None));
     }
@@ -162,19 +165,30 @@ fn validate_codes(
     handler_codes: &[String],
     terminal_codes: &[String],
 ) -> Result<(), ProtocolError> {
-    for (field, values) in [
-        ("user_msg", user_messages),
-        ("rq_handler_rp_code", handler_codes),
-        ("rp_code", terminal_codes),
-    ] {
-        if values.len() > 2 {
-            return Err(ProtocolError::RepeatedFieldLimitExceeded { field, maximum: 2 });
-        }
-        for value in values {
-            validate_string(field, value)?;
-        }
+    if user_messages.len() > 2 {
+        return Err(ProtocolError::RepeatedFieldLimitExceeded {
+            field: "user_msg",
+            maximum: 2,
+        });
     }
-    Ok(())
+    for value in user_messages {
+        validate_string("user_msg", value)?;
+    }
+    validate_code_field("rq_handler_rp_code", handler_codes)?;
+    validate_code_field("rp_code", terminal_codes)
+}
+
+#[cfg(rithmic_kit)]
+fn validate_code_field(field: &'static str, codes: &[String]) -> Result<(), ProtocolError> {
+    match codes {
+        [] => Ok(()),
+        [code] if code == "0" => Ok(()),
+        [code, detail] if code.parse::<u32>().is_ok_and(|value| value > 0) => {
+            validate_string(field, code)?;
+            validate_string(field, detail)
+        }
+        _ => Err(ProtocolError::ResponseCodeShape),
+    }
 }
 
 #[cfg(rithmic_kit)]
@@ -319,6 +333,17 @@ mod tests {
         .encode_to_vec();
         assert!(matches!(
             codec.decode_catalog(&mixed),
+            Err(ProtocolError::ResponseCodeShape)
+        ));
+
+        let malformed_rejection = rti::ResponseSearchSymbols {
+            template_id: 110,
+            rp_code: vec!["1".to_string()],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_catalog(&malformed_rejection),
             Err(ProtocolError::ResponseCodeShape)
         ));
 

@@ -923,16 +923,16 @@ mod kit {
         codes: &[String],
     ) -> Result<(), ProtocolError> {
         bound_repeated("user_msg", user_messages.len(), 2)?;
-        if codes.len() != 1 {
-            return Err(ProtocolError::ResponseCodeShape);
-        }
         for message in user_messages {
             validate_field("user_msg", message)?;
         }
-        for code in codes {
-            validate_field("rp_code", code)?;
-            code.parse::<u32>()
-                .map_err(|_| ProtocolError::ResponseCodeShape)?;
+        match codes {
+            [code] if code == "0" => {}
+            [code, detail] if code.parse::<u32>().is_ok_and(|value| value > 0) => {
+                validate_field("rp_code", code)?;
+                validate_field("rp_code_detail", detail)?;
+            }
+            _ => return Err(ProtocolError::ResponseCodeShape),
         }
         Ok(())
     }
@@ -1099,7 +1099,7 @@ mod tests {
         let reject = rti::Reject {
             template_id: 75,
             user_msg: vec!["provider detail".to_string()],
-            rp_code: vec!["1".to_string()],
+            rp_code: vec!["1".to_string(), "rejected".to_string()],
         }
         .encode_to_vec();
         assert_eq!(

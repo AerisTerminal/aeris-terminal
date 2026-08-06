@@ -78,11 +78,19 @@ pub struct OrderBookLevel {
     pub implied_size: Option<u32>,
 }
 
+/// Sides explicitly present in one aggregate-book chunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderBookSides {
+    pub bids: bool,
+    pub asks: bool,
+}
+
 /// One bounded aggregate order-book chunk.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrderBookUpdate {
     pub identity: MarketIdentity,
     pub kind: OrderBookUpdateKind,
+    pub present_sides: OrderBookSides,
     pub bids: Vec<OrderBookLevel>,
     pub asks: Vec<OrderBookLevel>,
     pub timestamp: ProviderTimestamp,
@@ -200,8 +208,17 @@ fn decode_order_book(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError
         Some(rti::order_book::UpdateType::Solo) => OrderBookUpdateKind::Solo,
         None => return Err(ProtocolError::UnknownEnum("order_book.update_type")),
     };
+    let presence = message.presence_bits.unwrap_or(0);
+    if presence & !0b11 != 0 {
+        return Err(ProtocolError::InvalidPresenceBits);
+    }
+    let present_sides = OrderBookSides {
+        bids: presence & 1 != 0,
+        asks: presence & 2 != 0,
+    };
     let bids = depth_levels(
         "order_book.bid",
+        present_sides.bids,
         message.bid_price,
         &message.bid_size,
         &message.bid_orders,
@@ -209,6 +226,7 @@ fn decode_order_book(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError
     )?;
     let asks = depth_levels(
         "order_book.ask",
+        present_sides.asks,
         message.ask_price,
         &message.ask_size,
         &message.ask_orders,
@@ -217,6 +235,7 @@ fn decode_order_book(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError
     Ok(DecodedMarketMessage::OrderBook(OrderBookUpdate {
         identity: identity(message.symbol, message.exchange)?,
         kind,
+        present_sides,
         bids,
         asks,
         timestamp: timestamp(message.ssboe, message.usecs)?,
@@ -334,11 +353,20 @@ fn quote_level(
 #[cfg(rithmic_kit)]
 fn depth_levels(
     field: &'static str,
+    present: bool,
     prices: Vec<f64>,
     sizes: &[i32],
     orders: &[i32],
     implied_sizes: &[i32],
 ) -> Result<Vec<OrderBookLevel>, ProtocolError> {
+    if !present
+        && (!prices.is_empty()
+            || !sizes.is_empty()
+            || !orders.is_empty()
+            || !implied_sizes.is_empty())
+    {
+        return Err(ProtocolError::InconsistentFields(field));
+    }
     if prices.len() > MAX_DEPTH_LEVELS_PER_SIDE {
         return Err(ProtocolError::RepeatedFieldLimitExceeded {
             field,
@@ -479,9 +507,27 @@ mod tests {
             codec.decode_market(&nonfinite),
             Err(ProtocolError::InvalidNumber("order_book.bid"))
         ));
+
+        let mut absent_side = order_book_message(vec![5_100.0], vec![10]);
+        absent_side.presence_bits = Some(0);
+        assert!(matches!(
+            codec.decode_market(&absent_side.encode_to_vec()),
+            Err(ProtocolError::InconsistentFields("order_book.bid"))
+        ));
+
+        let mut unknown_presence = order_book_message(Vec::new(), Vec::new());
+        unknown_presence.presence_bits = Some(4);
+        assert!(matches!(
+            codec.decode_market(&unknown_presence.encode_to_vec()),
+            Err(ProtocolError::InvalidPresenceBits)
+        ));
     }
 
     fn order_book(bid_price: Vec<f64>, bid_size: Vec<i32>) -> Vec<u8> {
+        order_book_message(bid_price, bid_size).encode_to_vec()
+    }
+
+    fn order_book_message(bid_price: Vec<f64>, bid_size: Vec<i32>) -> rti::OrderBook {
         rti::OrderBook {
             template_id: 156,
             symbol: Some("ESM7".to_string()),
@@ -499,6 +545,5 @@ mod tests {
             ssboe: Some(1_800_000_000),
             usecs: Some(123_458),
         }
-        .encode_to_vec()
     }
 }

@@ -117,6 +117,7 @@ pub enum RithmicSessionError {
     Handshake,
     Deadline,
     Transport,
+    RequestInFlight,
     UnexpectedMessage,
     Protocol,
     TestSystemUnavailable,
@@ -136,6 +137,7 @@ impl RithmicSessionError {
             | Self::InvalidLimits
             | Self::Tls
             | Self::Handshake
+            | Self::RequestInFlight
             | Self::UnexpectedMessage
             | Self::Protocol
             | Self::TestSystemUnavailable
@@ -164,6 +166,7 @@ impl fmt::Display for RithmicSessionError {
             Self::Handshake => "Rithmic WebSocket handshake failed",
             Self::Deadline => "Rithmic session deadline expired",
             Self::Transport => "Rithmic transport failed",
+            Self::RequestInFlight => "a Rithmic request of this kind is already in flight",
             Self::UnexpectedMessage => "Rithmic returned an unexpected message",
             Self::Protocol => "Rithmic protocol validation failed",
             Self::TestSystemUnavailable => "Rithmic Test is unavailable",
