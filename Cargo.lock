@@ -960,6 +960,7 @@ dependencies = [
  "axiusflow_desktop_storage",
  "axiusflow_market_data",
  "axiusflow_platform_runtime",
+ "axiusflow_provider_history",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

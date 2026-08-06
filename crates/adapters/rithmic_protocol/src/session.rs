@@ -509,7 +509,14 @@ impl RithmicHistoryConnection {
     ///
     /// Returns a redacted deadline, transport, or protocol failure.
     pub fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
-        let message = self.connection.read_next()?;
+        self.read_next_until(Instant::now() + self.connection.limits.response_timeout)
+    }
+
+    pub(crate) fn read_next_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<RithmicSessionMessage, RithmicSessionError> {
+        let message = self.connection.read_next_until(deadline)?;
         if let RithmicSessionMessage::History(DecodedHistoryMessage::ReplayComplete {
             kind, ..
         }) = &message

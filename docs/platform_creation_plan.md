@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage C** (`in_progress` — Rithmic read-only headless core). Stage A follows Stage C priority work. |
 | Blocked | Live Test login still requires signed R|Trader agreements and vault credentials on the developer machine. Deterministic Stage C work is unblocked. |
-| Next | Complete generation-fenced trade/history continuity recovery and covering resnapshot fixtures; then provision the native vault and run authorized Test evidence after agreements are signed |
+| Next | Provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed; keep Stage C deterministic recovery fixtures green while that external gate opens |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -69,7 +69,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | kit, bounded codec/WSS, collectors, history plant, depth assembly, vault/runtime callbacks, canonical mapping, and retry fencing [x]; continuity recovery and authorized evidence [ ] |
+| C — Rithmic read-only headless | `in_progress` | kit, bounded codec/WSS, collectors, history plant, depth assembly, vault/runtime callbacks, canonical mapping, retry fencing, and generation-fenced covering history continuity [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
@@ -105,7 +105,7 @@ Full scope policy:
 | Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete.                                                                                                                                                              |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
-| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, and retry fencing are implemented; continuity recovery and authorized Test evidence remain. |
+| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized Test evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `ready`       | Starts after Stages C and D deterministic headless gates.                                                                                                                                                                                           |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
@@ -378,8 +378,8 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [x] Retry transient failures from 250 ms to 8 seconds with bounded backoff.
 - [x] Do not retry rejected login, unsupported systems, or schema/template mismatches; unsigned agreements surface through the terminal login-rejection path.
 - [x] On malformed/missing depth chunks, discard candidate book state and require a new snapshot; never synthesize provider deltas or sequences absent from template 156.
-- [ ] Recover trade/history continuity with bounded overlap, deduplication, and a covering snapshot.
-- [ ] Fail closed when the installed protocol cannot recover continuity.
+- [x] Recover trade/history continuity with bounded overlap, deduplication, and a covering snapshot.
+- [x] Fail closed when the installed protocol cannot recover continuity.
 - [x] Enforce an outbound-template allowlist containing read-only templates only.
 - [x] Fail tests if any order or execution template can be emitted.
 

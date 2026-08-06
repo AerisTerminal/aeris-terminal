@@ -529,10 +529,22 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             generation,
             callbacks: Arc::clone(&self.callbacks),
         };
+        let panic_emitter = emitter.clone();
         let task_stop = Arc::clone(&stop);
         let handle = thread::Builder::new()
             .name(format!("rithmic-session-{}", generation.get()))
-            .spawn(move || task(config, generation, credentials, task_stop, emitter))
+            .spawn(move || {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    task(config, generation, credentials, task_stop, emitter);
+                }))
+                .is_err()
+                {
+                    panic_emitter.invalid(
+                        ProviderInvalidationReason::MalformedMessage,
+                        RetryDisposition::Terminal,
+                    );
+                }
+            })
             .map_err(|_| RithmicProviderDriverError::ThreadUnavailable)?;
         self.active = Some(ActiveSession {
             generation,
@@ -1805,6 +1817,33 @@ mod tests {
         driver
             .stop_session(generation(1))
             .expect("owning generation stops");
+    }
+
+    #[test]
+    fn panicked_session_task_latches_terminal_invalidation() {
+        let task: Arc<SessionTask> = Arc::new(|_, _, _, _, _| {
+            panic!("controlled session task panic");
+        });
+        let (mut driver, events) =
+            RithmicProviderDriver::with_task(config(), callback_limits(2, 4_096), task);
+        let credentials = credentials();
+        driver
+            .start_session(generation(3), credentials.as_bytes())
+            .expect("session starts");
+
+        let terminal = wait_event(&events);
+        assert_eq!(terminal.generation, generation(3));
+        assert_eq!(
+            terminal.event,
+            ProviderSessionEvent::Invalidated {
+                generation: Some(generation(3)),
+                reason: ProviderInvalidationReason::MalformedMessage,
+            }
+        );
+        assert_eq!(terminal.retry, Some(RetryDisposition::Terminal));
+        driver
+            .stop_session(generation(3))
+            .expect("panicked task is joined after invalidation");
     }
 
     #[test]

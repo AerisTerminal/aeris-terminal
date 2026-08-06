@@ -13,6 +13,7 @@ mod credentials;
 mod desktop_driver;
 mod endpoint;
 mod history;
+mod history_adapter;
 mod market;
 mod network;
 mod protocol;
@@ -45,6 +46,12 @@ pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};
 pub use history::{
     BarIdentity, DecodedHistoryMessage, DecodedTickBar, DecodedTimeBar, DecodedTimeBarType,
     HistorySource, Ohlc, ReplayKind, TickBarKey,
+};
+pub use history_adapter::{
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicBarContinuity, RithmicHistoryAdapterError,
+    RithmicHistoryCapabilityAdapter, RithmicHistoryLimits, RithmicHistorySessionTransport,
+    RithmicHistoryTransport, RithmicTimeBarResolution, canonical_rithmic_time_bar,
+    covering_snapshot_from_page, decode_rithmic_history_bar,
 };
 pub use market::{
     DecodedMarketMessage, MarketIdentity, OrderBookLevel, OrderBookSides, OrderBookUpdate,

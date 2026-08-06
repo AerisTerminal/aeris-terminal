@@ -10,6 +10,7 @@ publish.workspace = true
 axiusflow_desktop_provider_runtime = { path = "../../desktop_provider_runtime" }
 axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_platform_runtime = { path = "../../platform_runtime" }
+axiusflow_provider_history = { path = "../../provider_history" }
 prost.workspace = true
 rustls.workspace = true
 rpassword.workspace = true
