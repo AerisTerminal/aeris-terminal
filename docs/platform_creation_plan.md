@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 16
+**Revision:** 17
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -24,6 +24,12 @@ Allowed status values:
 - `verified`: the declared gate has evidence and passes.
 - `retired`: removed from active product scope.
 
+Checkbox convention:
+
+- `[x]` done (landed and accepted for that item)
+- `[ ]` not done
+- Stage header status is authoritative; checkboxes track work items under that stage.
+
 A contract, fixture, or passing unit test does not by itself justify `verified`
 for provider or product behavior. Open **§1 Active now**, finish that stage's
 gate, then advance. Do not mine §12, archives, or decision history for work.
@@ -41,11 +47,23 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R\|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
-Remaining work for current stages:
+### Progress snapshot
 
-- **Stage C (priority):** kit-backed protobuf codegen, read-only R\|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
-- **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
-- **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane (see §5).
+| Stage | Status | Progress |
+|---|---|---|
+| 0 — Descope cleanup | `ready` | partial — decisions [x]; deletions / quarantine [ ] |
+| A — Stabilize Coinbase | `in_progress` | [ ] gate not met |
+| B — Provider-neutral runtime | `verified` | [x] complete |
+| C — Rithmic read-only headless | `ready` | kit [x]; adapter / evidence [ ] |
+| D — Lightweight diagnostics | `verified` | [x] complete |
+| E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
+| F — Readiness / endurance | `ready` | [ ] not started |
+
+### Remaining focus for current stages
+
+- [ ] **Stage C (priority):** kit-backed protobuf codegen, read-only R\|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
+- [ ] **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
+- [ ] **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane (see §5).
 
 ## 2. Product thesis
 
@@ -160,25 +178,22 @@ build without the kit.
 Prefer completing Stage 0 before expanding Stages E/F. It may run in parallel
 with Stages A and D. New agents pick Stage 0 when it is not `verified`.
 
+### Done
+
+- [x] Retirement decision, store decision, provider-priority Stage 0 note, and archive banners (rev 7 / rev 14) landed with revision 15.
+
 ### Remaining work
 
-1. Create tag `retired/af_xdp_dpdk_<shortsha>`; delete
-   `crates/adapters/linux_af_xdp`, `crates/adapters/linux_dpdk`, and related fuzz
-   / exclude entries; confirm `cargo build --workspace` stays green.
-2. Quarantine `services/market_data_plane` via `workspace.exclude` (do not delete
-   `crates/domain/market_data`).
-3. Update `docs/linux_development.md` after the deletions so it no longer claims
-   source is retained in-tree.
-
-Retirement decision, store decision, provider-priority Stage 0 note, and archive
-banners (rev 7 / rev 14) already landed with revision 15.
+- [ ] Create tag `retired/af_xdp_dpdk_<shortsha>`; delete `crates/adapters/linux_af_xdp`, `crates/adapters/linux_dpdk`, and related fuzz / exclude entries; confirm `cargo build --workspace` stays green.
+- [ ] Quarantine `services/market_data_plane` via `workspace.exclude` (do not delete `crates/domain/market_data`).
+- [ ] Update `docs/linux_development.md` after the deletions so it no longer claims source is retained in-tree.
 
 ### Gate
 
-- Stage 0 deletions and quarantine land with a green workspace build.
-- Workspace builds do not compile AF_XDP/DPDK adapters or the cloud MD plane.
-- §12 lists every deferred/retired disposition; none appear as Work in A–F.
-- `docs/linux_development.md` matches the delete-from-main policy.
+- [ ] Stage 0 deletions and quarantine land with a green workspace build.
+- [ ] Workspace builds do not compile AF_XDP/DPDK adapters or the cloud MD plane.
+- [ ] §12 lists every deferred/retired disposition; none appear as Work in A–F.
+- [ ] `docs/linux_development.md` matches the delete-from-main policy.
 
 ## 6. Stage A — Stabilize and freeze Coinbase
 
@@ -186,43 +201,34 @@ banners (rev 7 / rev 14) already landed with revision 15.
 
 ### Remaining work
 
-- Replace the synthetic placeholder bar with explicit chart states:
-  `Loading`, `Ready`, `Stale`, `Recovering`, and `Error`.
-- Split the oversized desktop live worker by composition, history,
-  lifecycle/recovery, publication/provenance, and tests.
-- Make one coordinator fence provider recovery and chart resnapshot, reject stale
-  generations/callbacks/recovery IDs, and wait for a new covering snapshot.
-- Replace 10 ms polling with one bounded event-driven inbox covering provider,
-  environment, UI recovery, and shutdown; drain a bounded batch per wakeup.
-- Replace front-removal vectors with fixed-capacity `VecDeque` storage.
-- Coalesce state and forming-bar UI updates where safe.
-- Deliver completed bars in order or fence and request one recovery snapshot.
-- Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache
-  recovery, diagnostics redaction, and history-to-live continuity.
-- Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
+- [ ] Replace the synthetic placeholder bar with explicit chart states: `Loading`, `Ready`, `Stale`, `Recovering`, and `Error`.
+- [ ] Split the oversized desktop live worker by composition, history, lifecycle/recovery, publication/provenance, and tests.
+- [ ] Make one coordinator fence provider recovery and chart resnapshot, reject stale generations/callbacks/recovery IDs, and wait for a new covering snapshot.
+- [ ] Replace 10 ms polling with one bounded event-driven inbox covering provider, environment, UI recovery, and shutdown; drain a bounded batch per wakeup.
+- [ ] Replace front-removal vectors with fixed-capacity `VecDeque` storage.
+- [ ] Coalesce state and forming-bar UI updates where safe.
+- [ ] Deliver completed bars in order or fence and request one recovery snapshot.
+- [ ] Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity.
+- [ ] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
 
 ### Gate
 
-Coinbase is frozen when the shipping desktop path passes deterministic and live
-smoke coverage with explicit state, bounded event-driven behavior, one recovery
-owner, nonblocking publication, and no unreviewed warnings. After this gate,
-Coinbase receives correctness fixes only—no symbols, timeframes, depth,
-analytics, or cloud routes.
+- [ ] Coinbase shipping desktop path passes deterministic and live smoke coverage with explicit state, bounded event-driven behavior, one recovery owner, nonblocking publication, and no unreviewed warnings.
+- [ ] After this gate, Coinbase receives correctness fixes only—no symbols, timeframes, depth, analytics, or cloud routes.
 
 ## 7. Stage B — Provider-neutral contracts and runtime
 
 **Status:** `verified`
 
+### Done
+
+- [x] Contracts live in `crates/domain/market_data` and `crates/desktop_provider_runtime`.
+- [x] Coinbase adapter and deterministic Rithmic fixture adapter pass the same lifecycle, generation-fencing, bar, book, recovery, and publication conformance suites without provider-specific types in shared runtime modules.
+- [x] Shared runtime conformance gate passed (Coinbase + deterministic Rithmic fixture).
+
 ### Remaining work
 
-None — gate met. Contracts live in `crates/domain/market_data` and
-`crates/desktop_provider_runtime`.
-
-### Gate
-
-Coinbase adapter and deterministic Rithmic fixture adapter pass the same
-lifecycle, generation-fencing, bar, book, recovery, and publication conformance
-suites without provider-specific types in shared runtime modules.
+None — gate met.
 
 ## 8. Stage C — Rithmic read-only headless core
 
@@ -266,49 +272,51 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 | Credentials | OS vault via TTY — never store in repo, plan, or env files |
 | Agreements | Sign in R\|Trader or R\|Trader Pro on Rithmic Test before API login |
 
+### Prerequisites
+
+- [x] R|Protocol kit access issued by Rithmic.
+- [x] Rithmic Test credentials issued.
+- [x] Local kit installed at `provider_kit/current/` (`0.89.0.0`).
+- [ ] R|Trader / R|Trader Pro Test agreements signed on the developer machine.
+- [ ] Credentials loaded only through vault (TTY → `NativeCredentialVault`) for live evidence.
+
 ### Remaining work
 
 #### Build / encode path
 
-1. Detect kit at `provider_kit/current/proto/`.
-2. Generate Rust types from the installed `.proto` set into `OUT_DIR`.
-3. Implement length-prefixed / documented R\|Protocol frame encode-decode using
-   generated types (follow kit samples + Reference Guide; no raw escape hatch
-   on the public app API).
-4. Keep a `RithmicKitUnavailable` backend for kit-less CI.
+- [ ] Detect kit at `provider_kit/current/proto/`.
+- [ ] Generate Rust types from the installed `.proto` set into `OUT_DIR`.
+- [ ] Implement length-prefixed / documented R\|Protocol frame encode-decode using generated types (follow kit samples + Reference Guide; no raw escape hatch on the public app API).
+- [ ] Keep a `RithmicKitUnavailable` backend for kit-less CI.
 
 #### Protocol lifecycle (Rithmic-specified)
 
-1. Open validated WSS to `wss://rituz00100.rithmic.com:443`.
-2. Send `RequestRithmicSystemInfo`; parse and bound the available system names.
-3. Close that discovery connection.
-4. Open a **new** validated WSS connection to the same URL.
-5. Send `RequestLogin` with `system_name = Rithmic Test` and vault credentials.
-6. Establish heartbeat, instruments, and **read-only** market-data subscriptions.
+- [ ] Open validated WSS to `wss://rituz00100.rithmic.com:443`.
+- [ ] Send `RequestRithmicSystemInfo`; parse and bound the available system names.
+- [ ] Close that discovery connection.
+- [ ] Open a **new** validated WSS connection to the same URL.
+- [ ] Send `RequestLogin` with `system_name = Rithmic Test` and vault credentials.
+- [ ] Establish heartbeat, instruments, and **read-only** market-data subscriptions.
 
 #### Required behavior
 
-- Bound TLS, handshake, frame, protobuf, repeated-field, symbol, depth, queue,
-  and deadline sizes.
-- Map provider instruments to stable internal identities with metadata.
-- Decode trades, quotes, depth snapshots/deltas, and supported history.
-- Detect heartbeat/message silence and stop cleanly with generation fencing.
-- Retry transient failures from 250 ms to 8 seconds with bounded backoff.
-- Do not retry rejected credentials, unsigned agreements, unsupported systems,
-  or schema/template mismatches.
-- On a depth gap, discard candidate book state and require a new snapshot.
-- Recover trade/history continuity with bounded overlap, deduplication, and a
-  covering snapshot.
-- Fail closed when the installed protocol cannot recover continuity.
-- Enforce an outbound-template allowlist containing read-only templates only.
-- Fail tests if any order or execution template can be emitted.
+- [ ] Bound TLS, handshake, frame, protobuf, repeated-field, symbol, depth, queue, and deadline sizes.
+- [ ] Map provider instruments to stable internal identities with metadata.
+- [ ] Decode trades, quotes, depth snapshots/deltas, and supported history.
+- [ ] Detect heartbeat/message silence and stop cleanly with generation fencing.
+- [ ] Retry transient failures from 250 ms to 8 seconds with bounded backoff.
+- [ ] Do not retry rejected credentials, unsigned agreements, unsupported systems, or schema/template mismatches.
+- [ ] On a depth gap, discard candidate book state and require a new snapshot.
+- [ ] Recover trade/history continuity with bounded overlap, deduplication, and a covering snapshot.
+- [ ] Fail closed when the installed protocol cannot recover continuity.
+- [ ] Enforce an outbound-template allowlist containing read-only templates only.
+- [ ] Fail tests if any order or execution template can be emitted.
 
 ### Gate
 
-Deterministic fixtures prove discovery, login, trades, quotes, depth, heartbeat,
-disconnect/reconnect, recovery, clean stop, bounds, allowlisting, and redaction.
-Authorized Rithmic Test traffic must repeat the gate before provider behavior is
-marked `verified`.
+- [ ] Deterministic fixtures prove discovery, login, trades, quotes, depth, heartbeat, disconnect/reconnect, recovery, clean stop, bounds, allowlisting, and redaction.
+- [ ] Authorized Rithmic Test traffic repeats the gate before provider behavior is marked `verified`.
+
 ## 9. Stage D — Lightweight diagnostics
 
 **Status:** `verified`
@@ -334,24 +342,25 @@ Diagnostics exclude credentials, raw payloads, account data, and licensed
 subscription inventories. Detailed diagnostics must not regress p99 by more
 than 5% or p99.9 by more than 10% under the same measured workload.
 
+### Done
+
+- [x] Feed-health path ships through the live desktop worker and UI.
+- [x] Deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots.
+- [x] Named disabled/enabled overhead evidence passes the p99 / p99.9 budgets.
+- [x] Evidence commands:
+  - `cargo test -p axiusflow_observability --all-targets`
+  - `cargo test -p axiusflow_desktop_provider_runtime --all-targets`
+  - `cargo test -p axiusflow_desktop --all-targets`
+  - `bash tools/run_diagnostics_overhead_benchmark.sh`
+- [x] Evidence artifact: `.cache/evidence/stage_d_diagnostics_overhead_Linux.json` on the measured host.
+
 ### Remaining work
 
 None — gate met.
 
-### Evidence
-
-- `cargo test -p axiusflow_observability --all-targets`
-- `cargo test -p axiusflow_desktop_provider_runtime --all-targets`
-- `cargo test -p axiusflow_desktop --all-targets`
-- `bash tools/run_diagnostics_overhead_benchmark.sh`
-- Evidence artifact:
-  `.cache/evidence/stage_d_diagnostics_overhead_Linux.json` on the measured
-  host.
-
 ### Gate
 
-Snapshot cadence, memory bounds, redaction, counter accuracy, latency labels,
-and disabled/enabled overhead pass deterministic tests and a named benchmark.
+- [x] Snapshot cadence, memory bounds, redaction, counter accuracy, latency labels, and disabled/enabled overhead pass deterministic tests and a named benchmark.
 
 ## 10. Stage E — Main Rithmic UI vertical
 
@@ -359,26 +368,33 @@ and disabled/enabled overhead pass deterministic tests and a named benchmark.
 
 Begin only after Stages C and D pass their deterministic headless gates.
 
+### Prerequisites
+
+- [x] Stage D deterministic headless gate met.
+- [ ] Stage C deterministic headless gate met.
+
 ### Remaining work
 
-- Launch a reliable local shell before login or history completion.
-- Show provider profile, Test environment, and connection state.
-- Search and select discovered symbols.
-- Select tick, 1m, 5m, 15m, 1h, and daily series.
-- Hydrate visible-range-first history into the Origin chart.
-- Replace forming candles and append completed candles deterministically.
-- Build a read-only DOM from one snapshot plus ordered deltas.
-- Display loading, offline, reconnecting, stale, delayed, test, and live states.
-- Add an optional collapsible feed-health and latency panel.
-- Conflate chart and depth updates on frame boundaries.
-- Fence symbol/timeframe replacement by selection generation.
-- Bound hidden-window work and retained state.
+- [ ] Launch a reliable local shell before login or history completion.
+- [ ] Show provider profile, Test environment, and connection state.
+- [ ] Search and select discovered symbols.
+- [ ] Select tick, 1m, 5m, 15m, 1h, and daily series.
+- [ ] Hydrate visible-range-first history into the Origin chart.
+- [ ] Replace forming candles and append completed candles deterministically.
+- [ ] Build a read-only DOM from one snapshot plus ordered deltas.
+- [ ] Display loading, offline, reconnecting, stale, delayed, test, and live states.
+- [ ] Add an optional collapsible feed-health and latency panel.
+- [ ] Conflate chart and depth updates on frame boundaries.
+- [ ] Fence symbol/timeframe replacement by selection generation.
+- [ ] Bound hidden-window work and retained state.
 
 ### Gate
 
-No GPUI-thread network, storage, protobuf, or aggregation work; correct DOM gap
-recovery; responsive symbol/timeframe replacement; and measured 60/120/144 Hz
-frame pacing on named hardware. Test and live states must be visually explicit.
+- [ ] No GPUI-thread network, storage, protobuf, or aggregation work.
+- [ ] Correct DOM gap recovery.
+- [ ] Responsive symbol/timeframe replacement.
+- [ ] Measured 60/120/144 Hz frame pacing on named hardware.
+- [ ] Test and live states are visually explicit.
 
 ## 11. Stage F — Readiness and endurance
 
@@ -388,22 +404,22 @@ frame pacing on named hardware. Test and live states must be visually explicit.
 
 Capture evidence for:
 
-- slow consumers and publication overflow;
-- heartbeat and message-silence loss;
-- trade, history, and depth gaps;
-- disconnect, bounded reconnect, and terminal failures;
-- suspend/resume and offline startup;
-- burst traffic and frame-aligned conflation;
-- cache corruption and covering resnapshot;
-- current and high-water memory;
-- eight-hour headless and desktop endurance.
+- [ ] Slow consumers and publication overflow.
+- [ ] Heartbeat and message-silence loss.
+- [ ] Trade, history, and depth gaps.
+- [ ] Disconnect, bounded reconnect, and terminal failures.
+- [ ] Suspend/resume and offline startup.
+- [ ] Burst traffic and frame-aligned conflation.
+- [ ] Cache corruption and covering resnapshot.
+- [ ] Current and high-water memory.
+- [ ] Eight-hour headless and desktop endurance.
 
 ### Gate
 
-All failure cases recover or fail closed as specified; memory and queues remain
-within declared bounds; no stale generation reaches the model or UI; and the
-eight-hour run records no unexplained gap, deadlock, secret exposure, or
-unbounded growth.
+- [ ] All failure cases recover or fail closed as specified.
+- [ ] Memory and queues remain within declared bounds.
+- [ ] No stale generation reaches the model or UI.
+- [ ] Eight-hour run records no unexplained gap, deadlock, secret exposure, or unbounded growth.
 
 ## 12. Deferred / retired
 
@@ -420,8 +436,11 @@ Stage 3 / 5B checklists.
 | Cloud market data | `deferred` | (b) quarantine crate in Stage 0 | provider_priority; Stage 0 |
 | AF_XDP and DPDK | `retired` | (a) delete from `main` in Stage 0 | acceleration_retirement; Stage 0 |
 
-Disposition classes: **(a)** delete from `main`, **(b)** quarantine + pointer,
-**(c)** defer-with-no-work.
+Disposition checklist (policy accepted; Stage 0 execution still open for a/b):
+
+- [x] **(c)** defer-with-no-work accepted for Coinbase depth/timeframes, IQFeed, CQG, R\|API+, OMS/execution.
+- [ ] **(b)** quarantine cloud MD plane (`services/market_data_plane`) — Stage 0 remaining.
+- [ ] **(a)** delete AF_XDP/DPDK from `main` — Stage 0 remaining.
 
 ## 13. Performance targets
 
@@ -448,7 +467,20 @@ authenticate to Rithmic Test, discover and switch supported instruments, view
 tick and supported time-based charts, inspect a recovering read-only DOM, and
 understand feed health without exposing credentials or licensed data.
 
-Completion additionally requires deterministic replay, authorized Test evidence,
-bounded queues and memory, generation-fenced recovery, clean shutdown, responsive
-frame pacing, the endurance gate, a finding-free local review, and a pushed
-`main` commit. Production trading is not part of this completion definition.
+### Roadmap completion checklist
+
+- [ ] Launch native shell and authenticate securely to Rithmic Test.
+- [ ] Discover and switch supported instruments.
+- [ ] View tick and supported time-based charts.
+- [ ] Inspect a recovering read-only DOM.
+- [ ] Understand feed health without exposing credentials or licensed data.
+- [ ] Deterministic replay evidence.
+- [ ] Authorized Test evidence.
+- [ ] Bounded queues and memory.
+- [ ] Generation-fenced recovery.
+- [ ] Clean shutdown.
+- [ ] Responsive frame pacing.
+- [ ] Endurance gate.
+- [ ] Finding-free local review and pushed `main` commit.
+
+Production trading is not part of this completion definition.
