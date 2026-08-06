@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 17
+**Revision:** 18
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -14,6 +14,21 @@ Frozen history lives at
 and
 [`archive/platform_creation_plan_revision_7_2026_08_04.md`](archive/platform_creation_plan_revision_7_2026_08_04.md).
 Those files are not backlogs.
+
+### Hard sequencing rule (do not skip)
+
+**Stage 0 must reach `verified` before any further product-plan execution.**
+
+Kernel-bypass architecture (Linux AF_XDP and DPDK adapters, keep-alives, fuzz
+targets, and related workspace membership) must be **completely removed from
+`main`** first. Until Stage 0's gate passes:
+
+- Do **not** start or continue Stages A, C, E, or F as active delivery work.
+- Do **not** expand Stage B/D surfaces that already shipped.
+- Stage 0 is not optional cleanup and is not parallelizable with A–F.
+
+Decision:
+[`decisions/2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md).
 
 Allowed status values:
 
@@ -41,29 +56,31 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | Stage C (`ready` — Rithmic Test unlocked), Stage A (`in_progress`), Stage 0 (`ready`) |
-| Blocked | None for kit/codegen. Live Test login still requires signed R\|Trader agreements and vault credentials on the developer machine. |
-| Next after current | Stage E (after C+D deterministic gates), then Stage F |
-| Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R\|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
+| Current stage(s) | **Stage 0 only** (`ready` — hard prerequisite). Stages A/C are parked until Stage 0 is `verified`. |
+| Blocked | Stages A–F product execution blocked on Stage 0. Live Test login still requires signed R|Trader agreements and vault credentials on the developer machine. |
+| Next after Stage 0 | Resume Stage C (priority), then Stage A; after C+D deterministic gates → Stage E → Stage F |
+| Do not start | Any A–F delivery work before Stage 0 `verified`; OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
 ### Progress snapshot
 
 | Stage | Status | Progress |
 |---|---|---|
-| 0 — Descope cleanup | `ready` | partial — decisions [x]; deletions / quarantine [ ] |
-| A — Stabilize Coinbase | `in_progress` | [ ] gate not met |
-| B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `ready` | kit [x]; adapter / evidence [ ] |
-| D — Lightweight diagnostics | `verified` | [x] complete |
-| E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
+| 0 — Descope cleanup (kernel bypass out) | `ready` | **hard first gate** — decisions [x]; deletions / quarantine [ ] |
+| A — Stabilize Coinbase | `in_progress` | [ ] parked until Stage 0 `verified` |
+| B — Provider-neutral runtime | `verified` | [x] complete (no further expansion until Stage 0) |
+| C — Rithmic read-only headless | `ready` | kit [x]; adapter / evidence [ ] — parked until Stage 0 `verified` |
+| D — Lightweight diagnostics | `verified` | [x] complete (no further expansion until Stage 0) |
+| E — Main Rithmic UI | `ready` | [ ] blocked on Stage 0 then Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
 
-### Remaining focus for current stages
+### Remaining focus (ordered)
 
-- [ ] **Stage C (priority):** kit-backed protobuf codegen, read-only R\|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
-- [ ] **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
-- [ ] **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane (see §5).
+- [ ] **Stage 0 (must finish first):** completely remove AF_XDP/DPDK kernel-bypass architecture from `main`, quarantine cloud MD plane, update Linux docs (see §5).
+- [ ] **Stage C (after Stage 0):** kit-backed protobuf codegen, read-only R|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
+- [ ] **Stage A (after Stage 0):** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
+
+
 
 ## 2. Product thesis
 
@@ -82,30 +99,36 @@ Full scope policy:
 
 ## 3. Active truth
 
-| Area | Status | Current reality |
-|---|---|---|
-| Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete. |
-| Provider-neutral runtime | `verified` | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance. |
-| Rithmic access | `ready` | Rithmic issued R\|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R\|Trader / R\|Trader Pro. |
-| Rithmic adapter | `ready` | Headless read-only R\|Protocol implementation can proceed from the local kit; `verified` still requires deterministic + Test evidence. |
-| Lightweight diagnostics | `verified` | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
-| Main Rithmic UI | `ready` | Starts after Stages C and D deterministic headless gates. |
-| Readiness / endurance | `ready` | Stage F. |
-| Descope cleanup | `ready` | Stage 0 — remove retired keep-alives and quarantine deferred build surfaces. |
+
+| Area                       | Status        | Current reality                                                                                                                                                                                                                                     |
+| -------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete.                                                                                                                                                              |
+| Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
+| Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
+| Rithmic adapter            | `ready`       | Headless read-only R|Protocol implementation can proceed from the local kit; `verified` still requires deterministic + Test evidence.                                                                                                               |
+| Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
+| Main Rithmic UI            | `ready`       | Starts after Stages C and D deterministic headless gates.                                                                                                                                                                                           |
+| Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
+| Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
+
 
 Deferred and retired items are listed only in §12.
 
 ## 4. Guardrails
 
+
+
 ### 4.1 Product scope
 
 - Rithmic Test through R|Protocol is the primary provider target; first milestone
-  is read-only market data.
+is read-only market data.
 - Coinbase is a correctness and regression reference only.
 - Main UI follows the bounded headless Rithmic gate.
 - Unsupported symbols, periods, systems, or history semantics fail explicitly.
 - No raw protobuf-send escape hatch in the application API.
 - Native R|API+ remains deferred; do not build a C++ R|API+ path from this kit.
+
+
 
 ### 4.2 Provider and licensed material
 
@@ -136,47 +159,63 @@ build without the kit.
 **Codegen / adapter rules:**
 
 - When `current/proto` is present, generate Rust protobuf bindings into `OUT_DIR`
-  (prost / build.rs). Do not check generated bindings into git.
+(prost / build.rs). Do not check generated bindings into git.
 - When the kit is absent, build an explicit `RithmicKitUnavailable` backend so
-  workspace validation stays green.
+workspace validation stays green.
 - Ignore ZIPs, guides, `.proto` files, generated bindings, credentials, captures,
-  licensed inventories, and payload fixtures in version control unless a license
-  review explicitly permits tracking them.
+licensed inventories, and payload fixtures in version control unless a license
+review explicitly permits tracking them.
 - Manual agreement acceptance occurs through R|Trader or R|Trader Pro on
-  **Rithmic Test** before API login can succeed.
+**Rithmic Test** before API login can succeed.
+
+
 
 ### 4.3 Credential handling
 
 - Provision Rithmic Test credentials through a TTY prompt into
-  `NativeCredentialVault`. Never write them into this plan, source, env files,
-  or git.
+`NativeCredentialVault`. Never write them into this plan, source, env files,
+or git.
 - Never accept passwords in argv, environment, config, logs, fixtures, debug
-  output, or panic messages.
+output, or panic messages.
 - Load credential bytes only for the connection attempt, bound size, and zeroize
-  temporary buffers immediately afterward.
+temporary buffers immediately afterward.
 - Diagnostics expose coarse classes only—never provider text that may echo
-  secrets or account information.
+secrets or account information.
 - Credentials are valid for **Rithmic Test only**, not Rithmic Paper Trading,
-  Rithmic 01, or other systems. Fence `system_name` accordingly and fail closed.
+Rithmic 01, or other systems. Fence `system_name` accordingly and fail closed.
+
+
 
 ### 4.4 Runtime and UI boundaries
 
 - One provider-neutral coordinator owns session and chart-recovery fencing.
 - Adapters own transport and wire decoding; provider-neutral workers own
-  lifecycle, bars, books, recovery, diagnostics, and immutable publication.
+lifecycle, bars, books, recovery, diagnostics, and immutable publication.
 - GPUI is presentation-only: no network, storage, protobuf, or aggregation.
 - All queues are bounded with explicit overflow behavior.
 - State and forming updates may coalesce; ordered completed bars and book deltas
-  must not silently drop.
+must not silently drop.
 - Old generations, callbacks, recovery IDs, and UI selections never mutate the
-  current workspace.
+current workspace.
 
-## 5. Stage 0 — Descope cleanup
+
+
+## 5. Stage 0 — Descope cleanup (hard first gate)
 
 **Status:** `ready`
 
-Prefer completing Stage 0 before expanding Stages E/F. It may run in parallel
-with Stages A and D. New agents pick Stage 0 when it is not `verified`.
+**Mandatory before the rest of this plan.** Kernel-bypass architecture must be
+completely removed from `main` before executing Stages A–F. Do not treat Stage 0
+as optional, deferred, or parallel with Coinbase/Rithmic/UI/endurance work.
+
+This stage deletes the retired AF_XDP and DPDK paths entirely and quarantines
+the deferred cloud market-data plane so the active product path is a normal
+userspace terminal stack only.
+
+Decision:
+[`decisions/2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md).
+
+New agents: if Stage 0 is not `verified`, do Stage 0 only.
 
 ### Done
 
@@ -187,17 +226,25 @@ with Stages A and D. New agents pick Stage 0 when it is not `verified`.
 - [ ] Create tag `retired/af_xdp_dpdk_<shortsha>`; delete `crates/adapters/linux_af_xdp`, `crates/adapters/linux_dpdk`, and related fuzz / exclude entries; confirm `cargo build --workspace` stays green.
 - [ ] Quarantine `services/market_data_plane` via `workspace.exclude` (do not delete `crates/domain/market_data`).
 - [ ] Update `docs/linux_development.md` after the deletions so it no longer claims source is retained in-tree.
+- [ ] Confirm no AF_XDP/DPDK types, features, docs claims, or workspace members remain on the active product path.
 
 ### Gate
 
 - [ ] Stage 0 deletions and quarantine land with a green workspace build.
 - [ ] Workspace builds do not compile AF_XDP/DPDK adapters or the cloud MD plane.
+- [ ] Kernel-bypass architecture is fully gone from `main` (no product keep-alive).
 - [ ] §12 lists every deferred/retired disposition; none appear as Work in A–F.
 - [ ] `docs/linux_development.md` matches the delete-from-main policy.
+- [ ] Only after this gate is `verified` may Stages A/C (and later E/F) resume.
+
+
 
 ## 6. Stage A — Stabilize and freeze Coinbase
 
-**Status:** `in_progress`
+**Status:** `in_progress` (parked until Stage 0 is `verified`)
+
+Do not continue Stage A delivery until Stage 0 removes kernel-bypass architecture
+from `main`.
 
 ### Remaining work
 
@@ -211,10 +258,14 @@ with Stages A and D. New agents pick Stage 0 when it is not `verified`.
 - [ ] Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity.
 - [ ] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
 
+
+
 ### Gate
 
 - [ ] Coinbase shipping desktop path passes deterministic and live smoke coverage with explicit state, bounded event-driven behavior, one recovery owner, nonblocking publication, and no unreviewed warnings.
 - [ ] After this gate, Coinbase receives correctness fixes only—no symbols, timeframes, depth, analytics, or cloud routes.
+
+
 
 ## 7. Stage B — Provider-neutral contracts and runtime
 
@@ -226,17 +277,22 @@ with Stages A and D. New agents pick Stage 0 when it is not `verified`.
 - [x] Coinbase adapter and deterministic Rithmic fixture adapter pass the same lifecycle, generation-fencing, bar, book, recovery, and publication conformance suites without provider-specific types in shared runtime modules.
 - [x] Shared runtime conformance gate passed (Coinbase + deterministic Rithmic fixture).
 
+
+
 ### Remaining work
 
 None — gate met.
 
 ## 8. Stage C — Rithmic read-only headless core
 
-**Status:** `ready`
+**Status:** `ready` (parked until Stage 0 is `verified`)
+
+Do not start Stage C delivery until Stage 0 removes kernel-bypass architecture
+from `main`.
 
 Rithmic has unlocked the R|Protocol path (kit download + Rithmic Test credentials).
 The local kit is installed. Implementation of encoding/decoding and the read-only
-session is unblocked. Live Test evidence still requires signed agreements in
+session is unblocked after Stage 0. Live Test evidence still requires signed agreements in
 R|Trader / R|Trader Pro and credentials loaded only through the vault.
 
 ### Local kit (codegen input)
@@ -247,14 +303,16 @@ Agents building Stage C **must** read schemas from:
 provider_kit/current/proto/
 ```
 
-| Fact | Value |
-|---|---|
-| Protocol product | R\|Protocol API (WSS + Protobuf) — **not** native R\|API+ |
-| Installed version | `0.89.0.0` |
-| Schema dir | `provider_kit/current/proto/` (~155 `.proto` files) |
-| Reference guide | `provider_kit/current/doc/Reference_Guide.pdf` |
-| Binding output | Generate into `OUT_DIR` via build.rs / prost; never commit generated code |
-| Missing kit | Emit `RithmicKitUnavailable` and keep default workspace builds green |
+
+| Fact              | Value                                                                     |
+| ----------------- | ------------------------------------------------------------------------- |
+| Protocol product  | R|Protocol API (WSS + Protobuf) — **not** native R|API+                   |
+| Installed version | `0.89.0.0`                                                                |
+| Schema dir        | `provider_kit/current/proto/` (~155 `.proto` files)                       |
+| Reference guide   | `provider_kit/current/doc/Reference_Guide.pdf`                            |
+| Binding output    | Generate into `OUT_DIR` via build.rs / prost; never commit generated code |
+| Missing kit       | Emit `RithmicKitUnavailable` and keep default workspace builds green      |
+
 
 Key proto families for the first read-only milestone include system info, login,
 heartbeat, symbol search / instrument metadata, last trade, best bid/offer,
@@ -264,13 +322,17 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 
 ### Authorized Test endpoint
 
-| Fact | Value |
-|---|---|
-| WebSocket URL | `wss://rituz00100.rithmic.com:443` (SSL / `wss` only) |
-| `system_name` | `Rithmic Test` only |
-| Out of scope systems | Rithmic Paper Trading, Rithmic 01, and any other non-Test system |
-| Credentials | OS vault via TTY — never store in repo, plan, or env files |
-| Agreements | Sign in R\|Trader or R\|Trader Pro on Rithmic Test before API login |
+
+| Fact                 | Value                                                             |
+| -------------------- | ----------------------------------------------------------------- |
+| WebSocket URL        | `wss://rituz00100.rithmic.com:443` (SSL / `wss` only)             |
+| `system_name`        | `Rithmic Test` only                                               |
+| Out of scope systems | Rithmic Paper Trading, Rithmic 01, and any other non-Test system  |
+| Credentials          | OS vault via TTY — never store in repo, plan, or env files        |
+| Agreements           | Sign in R|Trader or R|Trader Pro on Rithmic Test before API login |
+
+
+
 
 ### Prerequisites
 
@@ -280,14 +342,20 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [ ] R|Trader / R|Trader Pro Test agreements signed on the developer machine.
 - [ ] Credentials loaded only through vault (TTY → `NativeCredentialVault`) for live evidence.
 
+
+
 ### Remaining work
+
+
 
 #### Build / encode path
 
 - [ ] Detect kit at `provider_kit/current/proto/`.
 - [ ] Generate Rust types from the installed `.proto` set into `OUT_DIR`.
-- [ ] Implement length-prefixed / documented R\|Protocol frame encode-decode using generated types (follow kit samples + Reference Guide; no raw escape hatch on the public app API).
+- [ ] Implement length-prefixed / documented RProtocol frame encode-decode using generated types (follow kit samples + Reference Guide; no raw escape hatch on the public app API).
 - [ ] Keep a `RithmicKitUnavailable` backend for kit-less CI.
+
+
 
 #### Protocol lifecycle (Rithmic-specified)
 
@@ -297,6 +365,8 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [ ] Open a **new** validated WSS connection to the same URL.
 - [ ] Send `RequestLogin` with `system_name = Rithmic Test` and vault credentials.
 - [ ] Establish heartbeat, instruments, and **read-only** market-data subscriptions.
+
+
 
 #### Required behavior
 
@@ -312,10 +382,14 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [ ] Enforce an outbound-template allowlist containing read-only templates only.
 - [ ] Fail tests if any order or execution template can be emitted.
 
+
+
 ### Gate
 
 - [ ] Deterministic fixtures prove discovery, login, trades, quotes, depth, heartbeat, disconnect/reconnect, recovery, clean stop, bounds, allowlisting, and redaction.
 - [ ] Authorized Rithmic Test traffic repeats the gate before provider behavior is marked `verified`.
+
+
 
 ## 9. Stage D — Lightweight diagnostics
 
@@ -330,11 +404,11 @@ faster than 4 Hz containing:
 - heartbeat age and last-message age;
 - trade, quote, depth, and publication rates;
 - gaps, duplicates, malformed messages, stale callbacks, overflows, and
-  coalesced UI updates;
+coalesced UI updates;
 - current and high-water queue occupancy;
 - history/handoff and order-book recovery state;
 - local socket-read, decode, canonical-accept, model-publish, UI-enqueue, frame
-  submit, and presentation latency where measurable;
+submit, and presentation latency where measurable;
 - provider timestamp age labelled as clock-relative age, never network latency;
 - approximate bounded runtime memory.
 
@@ -354,6 +428,8 @@ than 5% or p99.9 by more than 10% under the same measured workload.
   - `bash tools/run_diagnostics_overhead_benchmark.sh`
 - [x] Evidence artifact: `.cache/evidence/stage_d_diagnostics_overhead_Linux.json` on the measured host.
 
+
+
 ### Remaining work
 
 None — gate met.
@@ -362,16 +438,21 @@ None — gate met.
 
 - [x] Snapshot cadence, memory bounds, redaction, counter accuracy, latency labels, and disabled/enabled overhead pass deterministic tests and a named benchmark.
 
+
+
 ## 10. Stage E — Main Rithmic UI vertical
 
 **Status:** `ready`
 
-Begin only after Stages C and D pass their deterministic headless gates.
+Begin only after Stage 0 is `verified` and Stages C and D pass their
+deterministic headless gates.
 
 ### Prerequisites
 
 - [x] Stage D deterministic headless gate met.
 - [ ] Stage C deterministic headless gate met.
+
+
 
 ### Remaining work
 
@@ -388,6 +469,8 @@ Begin only after Stages C and D pass their deterministic headless gates.
 - [ ] Fence symbol/timeframe replacement by selection generation.
 - [ ] Bound hidden-window work and retained state.
 
+
+
 ### Gate
 
 - [ ] No GPUI-thread network, storage, protobuf, or aggregation work.
@@ -396,9 +479,11 @@ Begin only after Stages C and D pass their deterministic headless gates.
 - [ ] Measured 60/120/144 Hz frame pacing on named hardware.
 - [ ] Test and live states are visually explicit.
 
+
+
 ## 11. Stage F — Readiness and endurance
 
-**Status:** `ready`
+**Status:** `ready` (after Stage 0, then the upstream product gates)
 
 ### Remaining work
 
@@ -414,6 +499,8 @@ Capture evidence for:
 - [ ] Current and high-water memory.
 - [ ] Eight-hour headless and desktop endurance.
 
+
+
 ### Gate
 
 - [ ] All failure cases recover or fail closed as specified.
@@ -421,40 +508,48 @@ Capture evidence for:
 - [ ] No stale generation reaches the model or UI.
 - [ ] Eight-hour run records no unexplained gap, deadlock, secret exposure, or unbounded growth.
 
+
+
 ## 12. Deferred / retired
 
 Reopening any row requires a new accepted decision. Do not reopen via archive
 Stage 3 / 5B checklists.
 
-| Item | Status | Disposition | Pointer |
-|---|---|---|---|
-| Coinbase depth and timeframes | `deferred` | (c) freeze — no work | Stage A gate; provider_priority decision |
-| IQFeed | `deferred` | (c) no work | provider_priority decision |
-| CQG | `deferred` | (c) no work | provider_priority decision |
-| R\|API+ | `deferred` | (c) no work | provider_priority decision |
-| Orders / OMS / execution | `deferred` | (c) no work | provider_priority; amended store decision |
-| Cloud market data | `deferred` | (b) quarantine crate in Stage 0 | provider_priority; Stage 0 |
-| AF_XDP and DPDK | `retired` | (a) delete from `main` in Stage 0 | acceleration_retirement; Stage 0 |
+
+| Item                          | Status     | Disposition                       | Pointer                                   |
+| ----------------------------- | ---------- | --------------------------------- | ----------------------------------------- |
+| Coinbase depth and timeframes | `deferred` | (c) freeze — no work              | Stage A gate; provider_priority decision  |
+| IQFeed                        | `deferred` | (c) no work                       | provider_priority decision                |
+| CQG                           | `deferred` | (c) no work                       | provider_priority decision                |
+| R|API+                        | `deferred` | (c) no work                       | provider_priority decision                |
+| Orders / OMS / execution      | `deferred` | (c) no work                       | provider_priority; amended store decision |
+| Cloud market data             | `deferred` | (b) quarantine crate in Stage 0   | provider_priority; Stage 0                |
+| AF_XDP and DPDK               | `retired`  | (a) delete from `main` in Stage 0 | acceleration_retirement; Stage 0          |
+
 
 Disposition checklist (policy accepted; Stage 0 execution still open for a/b):
 
-- [x] **(c)** defer-with-no-work accepted for Coinbase depth/timeframes, IQFeed, CQG, R\|API+, OMS/execution.
+- [x] **(c)** defer-with-no-work accepted for Coinbase depth/timeframes, IQFeed, CQG, RAPI+, OMS/execution.
 - [ ] **(b)** quarantine cloud MD plane (`services/market_data_plane`) — Stage 0 remaining.
 - [ ] **(a)** delete AF_XDP/DPDK from `main` — Stage 0 remaining.
+
+
 
 ## 13. Performance targets
 
 Targets guide measurement; they are not current claims.
 
-| Boundary | Target |
-|---|---|
-| Diagnostics publication | At most 4 Hz |
-| Transient reconnect backoff | 250 ms minimum, 8 s maximum |
-| UI update scheduling | Frame-aligned, never one render per wire delta |
-| Queue and history storage | Fixed capacity with visible current/high-water use |
-| Detailed diagnostics overhead | p99 <= 5%; p99.9 <= 10% regression |
-| Frame pacing | Measured at 60, 120, and 144 Hz |
-| Endurance | Eight continuous hours before readiness claims |
+
+| Boundary                      | Target                                             |
+| ----------------------------- | -------------------------------------------------- |
+| Diagnostics publication       | At most 4 Hz                                       |
+| Transient reconnect backoff   | 250 ms minimum, 8 s maximum                        |
+| UI update scheduling          | Frame-aligned, never one render per wire delta     |
+| Queue and history storage     | Fixed capacity with visible current/high-water use |
+| Detailed diagnostics overhead | p99 <= 5%; p99.9 <= 10% regression                 |
+| Frame pacing                  | Measured at 60, 120, and 144 Hz                    |
+| Endurance                     | Eight continuous hours before readiness claims     |
+
 
 Latency reporting must separate provider clock-relative timestamp age from local
 socket-to-present processing. Every percentile report includes p50, p95, p99,
