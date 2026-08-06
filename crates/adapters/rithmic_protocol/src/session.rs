@@ -246,10 +246,14 @@ impl AuthenticatedConnection {
     }
 
     fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
-        set_deadline(
-            &mut self.socket,
-            Instant::now() + self.limits.response_timeout,
-        );
+        self.read_next_until(Instant::now() + self.limits.response_timeout)
+    }
+
+    fn read_next_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<RithmicSessionMessage, RithmicSessionError> {
+        set_deadline(&mut self.socket, deadline);
         let frame = read_binary(&mut self.socket)?;
         decode_session_message(&frame)
     }
@@ -374,6 +378,20 @@ impl RithmicTickerConnection {
     /// Returns a redacted deadline, transport, or protocol failure.
     pub fn read_next(&mut self) -> Result<RithmicSessionMessage, RithmicSessionError> {
         let message = self.connection.read_next()?;
+        if matches!(
+            &message,
+            RithmicSessionMessage::Catalog(DecodedCatalogMessage::SearchComplete { .. })
+        ) {
+            self.search_in_flight = false;
+        }
+        Ok(message)
+    }
+
+    pub(crate) fn read_next_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<RithmicSessionMessage, RithmicSessionError> {
+        let message = self.connection.read_next_until(deadline)?;
         if matches!(
             &message,
             RithmicSessionMessage::Catalog(DecodedCatalogMessage::SearchComplete { .. })

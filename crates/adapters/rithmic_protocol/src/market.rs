@@ -47,12 +47,20 @@ pub struct QuoteLevel {
     pub orders: Option<u32>,
 }
 
-/// Bounded best-bid/offer update. A `None` side is explicitly absent or cleared.
+/// Exact mutation carried for one quote side.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum QuoteSideUpdate {
+    Unchanged,
+    Cleared,
+    Value(QuoteLevel),
+}
+
+/// Bounded best-bid/offer mutation preserving absent versus cleared sides.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuoteUpdate {
     pub identity: MarketIdentity,
-    pub bid: Option<QuoteLevel>,
-    pub ask: Option<QuoteLevel>,
+    pub bid: QuoteSideUpdate,
+    pub ask: QuoteSideUpdate,
     pub is_snapshot: bool,
     pub timestamp: ProviderTimestamp,
 }
@@ -330,20 +338,20 @@ fn quote_level(
     price: Option<f64>,
     size: Option<i32>,
     orders: Option<i32>,
-) -> Result<Option<QuoteLevel>, ProtocolError> {
+) -> Result<QuoteSideUpdate, ProtocolError> {
     if cleared {
         if price.is_some() || size.is_some() || orders.is_some() {
             return Err(ProtocolError::InconsistentFields(field));
         }
-        return Ok(None);
+        return Ok(QuoteSideUpdate::Cleared);
     }
     if !present {
         if price.is_some() || size.is_some() || orders.is_some() {
             return Err(ProtocolError::InconsistentFields(field));
         }
-        return Ok(None);
+        return Ok(QuoteSideUpdate::Unchanged);
     }
-    Ok(Some(QuoteLevel {
+    Ok(QuoteSideUpdate::Value(QuoteLevel {
         price: finite_required(field, price)?,
         size: nonnegative_required(field, size)?,
         orders: optional_nonnegative(field, orders)?,
@@ -476,8 +484,8 @@ mod tests {
         assert!(matches!(
             codec.decode_market(&quote).expect("quote decodes"),
             DecodedMarketMessage::Quote(QuoteUpdate {
-                bid: Some(QuoteLevel { size: 10, .. }),
-                ask: Some(QuoteLevel { size: 12, .. }),
+                bid: QuoteSideUpdate::Value(QuoteLevel { size: 10, .. }),
+                ask: QuoteSideUpdate::Value(QuoteLevel { size: 12, .. }),
                 ..
             })
         ));

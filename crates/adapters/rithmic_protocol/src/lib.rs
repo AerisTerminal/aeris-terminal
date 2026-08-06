@@ -9,6 +9,8 @@ mod generated {
 mod book;
 mod catalog;
 mod collectors;
+mod credentials;
+mod desktop_driver;
 mod endpoint;
 mod history;
 mod market;
@@ -28,6 +30,17 @@ pub use collectors::{
     HistoryCollectionRequest, HistoryCollector, HistorySeries, ObservedHistoryRange,
     SymbolSearchCollectionRequest, SymbolSearchCollector,
 };
+pub use credentials::{
+    MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES,
+    RithmicCredentialBytes, RithmicCredentialError,
+};
+pub use desktop_driver::{
+    AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
+    RithmicDesktopEventError, RithmicProviderCallback, RithmicProviderConfig,
+    RithmicProviderConfigError, RithmicProviderDriver, RithmicProviderDriverError,
+    RithmicProviderEvents, RithmicProviderInstrument, RithmicRetryScheduler, RithmicRetryTicket,
+    try_recv_rithmic_event,
+};
 pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};
 pub use history::{
     BarIdentity, DecodedHistoryMessage, DecodedTickBar, DecodedTimeBar, DecodedTimeBarType,
@@ -35,7 +48,8 @@ pub use history::{
 };
 pub use market::{
     DecodedMarketMessage, MarketIdentity, OrderBookLevel, OrderBookSides, OrderBookUpdate,
-    OrderBookUpdateKind, ProviderTimestamp, QuoteLevel, QuoteUpdate, TradeAggressor, TradeUpdate,
+    OrderBookUpdateKind, ProviderTimestamp, QuoteLevel, QuoteSideUpdate, QuoteUpdate,
+    TradeAggressor, TradeUpdate,
 };
 pub use protocol::{
     DecodedControlMessage, InstrumentReferenceRequest, InstrumentType, LoginRequest,
