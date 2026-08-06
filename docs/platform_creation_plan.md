@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 15
+**Revision:** 16
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -35,17 +35,18 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | Stage 0 (`ready`), Stage A (`in_progress`), Stage D (`in_progress`) |
-| Blocked | Stage C — Rithmic package, agreements, Test login, schema, entitlements |
+| Current stage(s) | Stage C (`ready` — Rithmic Test unlocked), Stage A (`in_progress`), Stage D (`in_progress`), Stage 0 (`ready`) |
+| Blocked | None for kit/codegen. Live Test login still requires signed R\|Trader agreements and vault credentials on the developer machine. |
 | Next after current | Stage E (after C+D deterministic gates), then Stage F |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R\|API+, Coinbase depth/timeframes, AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
-Remaining work for current `in_progress` / cleanup stages:
+Remaining work for current stages:
 
-- **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane, align companion decisions (see §5).
+- **Stage C (priority):** kit-backed protobuf codegen, read-only R\|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
 - **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
 - **Stage D:** capture and validate the named disabled/enabled diagnostics overhead benchmark against the p99 / p99.9 budgets.
+- **Stage 0:** delete AF_XDP/DPDK from `main`, quarantine cloud MD plane (see §5).
 
 ## 2. Product thesis
 
@@ -68,8 +69,8 @@ Full scope policy:
 |---|---|---|
 | Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete. |
 | Provider-neutral runtime | `verified` | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance. |
-| Rithmic access | `blocked_external` | Package, agreements, Test login, schema, entitlements, and certification unverified. |
-| Rithmic adapter (kit-optional) | `ready` | Read-only kit-optional work can proceed; live validation stays blocked. |
+| Rithmic access | `ready` | Rithmic issued R\|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `.cache/provider_kits/rithmic/` (see §4.2 and §8). Live login still needs signed Test agreements in R\|Trader / R\|Trader Pro. |
+| Rithmic adapter | `ready` | Headless read-only R\|Protocol implementation can proceed from the local kit; `verified` still requires deterministic + Test evidence. |
 | Lightweight diagnostics | `in_progress` | Feed-health path ships; named disabled/enabled overhead evidence remains. |
 | Main Rithmic UI | `ready` | Starts after Stages C and D deterministic headless gates. |
 | Readiness / endurance | `ready` | Stage F. |
@@ -87,26 +88,58 @@ Deferred and retired items are listed only in §12.
 - Main UI follows the bounded headless Rithmic gate.
 - Unsupported symbols, periods, systems, or history semantics fail explicitly.
 - No raw protobuf-send escape hatch in the application API.
+- Native R|API+ remains deferred; do not build a C++ R|API+ path from this kit.
 
 ### 4.2 Provider and licensed material
 
-- Accepted local kit only under `.cache/provider_kits/rithmic/current/`.
+Rithmic licensed material is **local-only**. It must never be committed to git.
+
+**Canonical kit location (agents must use this path):**
+
+```text
+.cache/provider_kits/rithmic/current/
+```
+
+On this machine that symlink resolves to R|Protocol **0.89.0.0**:
+
+```text
+.cache/provider_kits/rithmic/current/          → RProtocolAPI.0.89.0.0/0.89.0.0/
+.cache/provider_kits/rithmic/current/proto/    → *.proto schemas (codegen input)
+.cache/provider_kits/rithmic/current/doc/      → Reference_Guide.pdf
+.cache/provider_kits/rithmic/current/etc/
+.cache/provider_kits/rithmic/current/samples/
+.cache/provider_kits/rithmic/current/Release.Notes
+```
+
+Why `.cache/`: the directory is gitignored (`/.cache/` in `.gitignore`). The kit is
+Rithmic proprietary (protos, guide, samples). Putting it in the repo root or under
+`crates/` risks accidental commit. Ordinary CI and clones build without the kit.
+
+**Codegen / adapter rules:**
+
+- When `current/proto` is present, generate Rust protobuf bindings into `OUT_DIR`
+  (prost / build.rs). Do not check generated bindings into git.
+- When the kit is absent, build an explicit `RithmicKitUnavailable` backend so
+  workspace validation stays green.
 - Ignore ZIPs, guides, `.proto` files, generated bindings, credentials, captures,
-  licensed inventories, and payload fixtures unless license review permits.
-- Generate bindings into `OUT_DIR` when the kit is present; otherwise build an
-  explicit `RithmicKitUnavailable` backend.
-- Ordinary validation stays green without proprietary files.
-- Manual agreement acceptance occurs through R|Trader or R|Trader Pro.
+  licensed inventories, and payload fixtures in version control unless a license
+  review explicitly permits tracking them.
+- Manual agreement acceptance occurs through R|Trader or R|Trader Pro on
+  **Rithmic Test** before API login can succeed.
 
 ### 4.3 Credential handling
 
-- Provision credentials through a TTY prompt into `NativeCredentialVault`.
+- Provision Rithmic Test credentials through a TTY prompt into
+  `NativeCredentialVault`. Never write them into this plan, source, env files,
+  or git.
 - Never accept passwords in argv, environment, config, logs, fixtures, debug
   output, or panic messages.
 - Load credential bytes only for the connection attempt, bound size, and zeroize
   temporary buffers immediately afterward.
 - Diagnostics expose coarse classes only—never provider text that may echo
   secrets or account information.
+- Credentials are valid for **Rithmic Test only**, not Rithmic Paper Trading,
+  Rithmic 01, or other systems. Fence `system_name` accordingly and fail closed.
 
 ### 4.4 Runtime and UI boundaries
 
@@ -193,21 +226,65 @@ suites without provider-specific types in shared runtime modules.
 
 ## 8. Stage C — Rithmic read-only headless core
 
-**Status:** `blocked_external`
+**Status:** `ready`
 
-Kit-optional implementation is `ready`; authorized Test and schema validation
-remain `blocked_external` until package and account access are verified.
+Rithmic has unlocked the R|Protocol path (kit download + Rithmic Test credentials).
+The local kit is installed. Implementation of encoding/decoding and the read-only
+session is unblocked. Live Test evidence still requires signed agreements in
+R|Trader / R|Trader Pro and credentials loaded only through the vault.
+
+### Local kit (codegen input)
+
+Agents building Stage C **must** read schemas from:
+
+```text
+.cache/provider_kits/rithmic/current/proto/
+```
+
+| Fact | Value |
+|---|---|
+| Protocol product | R\|Protocol API (WSS + Protobuf) — **not** native R\|API+ |
+| Installed version | `0.89.0.0` |
+| Schema dir | `.cache/provider_kits/rithmic/current/proto/` (~155 `.proto` files) |
+| Reference guide | `.cache/provider_kits/rithmic/current/doc/Reference_Guide.pdf` |
+| Binding output | Generate into `OUT_DIR` via build.rs / prost; never commit generated code |
+| Missing kit | Emit `RithmicKitUnavailable` and keep default workspace builds green |
+
+Key proto families for the first read-only milestone include system info, login,
+heartbeat, symbol search / instrument metadata, last trade, best bid/offer,
+order book / depth, and market-data subscribe updates. Use the Reference Guide
+for template IDs. **Outbound allowlist must exclude all order and execution
+templates** (cancel, modify, bracket, etc. remain decode-only or unused).
+
+### Authorized Test endpoint
+
+| Fact | Value |
+|---|---|
+| WebSocket URL | `wss://rituz00100.rithmic.com:443` (SSL / `wss` only) |
+| `system_name` | `Rithmic Test` only |
+| Out of scope systems | Rithmic Paper Trading, Rithmic 01, and any other non-Test system |
+| Credentials | OS vault via TTY — never store in repo, plan, or env files |
+| Agreements | Sign in R\|Trader or R\|Trader Pro on Rithmic Test before API login |
 
 ### Remaining work
 
-#### Protocol lifecycle
+#### Build / encode path
 
-1. Open validated WSS for system discovery.
-2. Request and bound system information.
-3. Validate and retain available systems, then close that connection.
-4. Open a fresh validated WSS connection.
-5. Authenticate specifically to the Test system.
-6. Establish heartbeat, instruments, and read-only subscriptions.
+1. Detect kit at `.cache/provider_kits/rithmic/current/proto/`.
+2. Generate Rust types from the installed `.proto` set into `OUT_DIR`.
+3. Implement length-prefixed / documented R\|Protocol frame encode-decode using
+   generated types (follow kit samples + Reference Guide; no raw escape hatch
+   on the public app API).
+4. Keep a `RithmicKitUnavailable` backend for kit-less CI.
+
+#### Protocol lifecycle (Rithmic-specified)
+
+1. Open validated WSS to `wss://rituz00100.rithmic.com:443`.
+2. Send `RequestRithmicSystemInfo`; parse and bound the available system names.
+3. Close that discovery connection.
+4. Open a **new** validated WSS connection to the same URL.
+5. Send `RequestLogin` with `system_name = Rithmic Test` and vault credentials.
+6. Establish heartbeat, instruments, and **read-only** market-data subscriptions.
 
 #### Required behavior
 
@@ -232,7 +309,6 @@ Deterministic fixtures prove discovery, login, trades, quotes, depth, heartbeat,
 disconnect/reconnect, recovery, clean stop, bounds, allowlisting, and redaction.
 Authorized Rithmic Test traffic must repeat the gate before provider behavior is
 marked `verified`.
-
 ## 9. Stage D — Lightweight diagnostics
 
 **Status:** `in_progress`
