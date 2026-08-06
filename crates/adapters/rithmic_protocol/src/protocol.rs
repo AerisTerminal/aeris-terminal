@@ -249,7 +249,7 @@ pub enum OutboundRequest<'a> {
     DiscoverSystems,
     Login(LoginRequest<'a>),
     Logout,
-    Heartbeat { seconds: i32, microseconds: i32 },
+    Heartbeat,
     MarketData(MarketDataSubscription<'a>),
     SearchSymbols(SymbolSearchRequest<'a>),
     InstrumentReference(InstrumentReferenceRequest<'a>),
@@ -265,7 +265,7 @@ impl fmt::Debug for OutboundRequest<'_> {
             Self::DiscoverSystems => formatter.write_str("DiscoverSystems"),
             Self::Login(request) => request.fmt(formatter),
             Self::Logout => formatter.write_str("Logout"),
-            Self::Heartbeat { .. } => formatter.write_str("Heartbeat"),
+            Self::Heartbeat => formatter.write_str("Heartbeat"),
             Self::MarketData(_) => formatter.write_str("MarketData"),
             Self::SearchSymbols(_) => formatter.write_str("SearchSymbols"),
             Self::InstrumentReference(_) => formatter.write_str("InstrumentReference"),
@@ -287,6 +287,12 @@ impl SensitiveFrame {
     }
 }
 
+impl AsRef<[u8]> for SensitiveFrame {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 impl fmt::Debug for SensitiveFrame {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -305,6 +311,8 @@ impl Drop for SensitiveFrame {
 /// Sanitized control-plane message decoded from one provider WebSocket message.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DecodedControlMessage {
+    Reject,
+    ForcedLogout,
     Systems {
         accepted: bool,
         names: Vec<String>,
@@ -384,7 +392,7 @@ impl RithmicProtocolCodec {
 }
 
 /// Bounded protocol or kit-availability failure.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProtocolError {
     KitUnavailable,
     EmptyField(&'static str),
@@ -474,6 +482,8 @@ mod kit {
     const TIME_BAR_REPLAY_REQUEST: i32 = 202;
     const TICK_BAR_UPDATE_REQUEST: i32 = 204;
     const TICK_BAR_REPLAY_REQUEST: i32 = 206;
+    const REJECT: i32 = 75;
+    const FORCED_LOGOUT: i32 = 77;
     pub(super) const READ_ONLY_OUTBOUND_TEMPLATES: &[i32] = &[
         LOGIN_REQUEST,
         LOGOUT_REQUEST,
@@ -503,21 +513,13 @@ mod kit {
                 user_msg: Vec::new(),
             }
             .encode_to_vec(),
-            OutboundRequest::Heartbeat {
-                seconds,
-                microseconds,
-            } => {
-                if seconds < 0 || !(0..1_000_000).contains(&microseconds) {
-                    return Err(ProtocolError::InvalidHeartbeat);
-                }
-                rti::RequestHeartbeat {
-                    template_id: HEARTBEAT_REQUEST,
-                    user_msg: Vec::new(),
-                    ssboe: Some(seconds),
-                    usecs: Some(microseconds),
-                }
-                .encode_to_vec()
+            OutboundRequest::Heartbeat => rti::RequestHeartbeat {
+                template_id: HEARTBEAT_REQUEST,
+                user_msg: Vec::new(),
+                ssboe: None,
+                usecs: None,
             }
+            .encode_to_vec(),
             OutboundRequest::MarketData(request) => encode_market_data(request)?,
             OutboundRequest::SearchSymbols(request) => encode_symbol_search(request)?,
             OutboundRequest::InstrumentReference(request) => encode_instrument_reference(request)?,
@@ -829,6 +831,15 @@ mod kit {
         }
         let message_type = rti::MessageType::decode(frame).map_err(|_| ProtocolError::Decode)?;
         match message_type.template_id {
+            REJECT => {
+                let response = rti::Reject::decode(frame).map_err(|_| ProtocolError::Decode)?;
+                validate_response_fields(&response.user_msg, &response.rp_code)?;
+                Ok(DecodedControlMessage::Reject)
+            }
+            FORCED_LOGOUT => {
+                rti::ForcedLogout::decode(frame).map_err(|_| ProtocolError::Decode)?;
+                Ok(DecodedControlMessage::ForcedLogout)
+            }
             SYSTEM_INFO_RESPONSE => decode_systems(frame),
             LOGIN_RESPONSE => decode_login(frame),
             LOGOUT_RESPONSE => {
@@ -912,12 +923,16 @@ mod kit {
         codes: &[String],
     ) -> Result<(), ProtocolError> {
         bound_repeated("user_msg", user_messages.len(), 2)?;
-        bound_repeated("rp_code", codes.len(), 2)?;
+        if codes.len() != 1 {
+            return Err(ProtocolError::ResponseCodeShape);
+        }
         for message in user_messages {
             validate_field("user_msg", message)?;
         }
         for code in codes {
             validate_field("rp_code", code)?;
+            code.parse::<u32>()
+                .map_err(|_| ProtocolError::ResponseCodeShape)?;
         }
         Ok(())
     }
@@ -993,10 +1008,7 @@ mod tests {
                 plant: ReadOnlyPlant::Ticker,
             }),
             OutboundRequest::Logout,
-            OutboundRequest::Heartbeat {
-                seconds: 1_800_000_000,
-                microseconds: 123_456,
-            },
+            OutboundRequest::Heartbeat,
             OutboundRequest::MarketData(MarketDataSubscription {
                 symbol: "ESM7",
                 exchange: "CME",
@@ -1083,6 +1095,38 @@ mod tests {
                 names: vec!["Rithmic Test".to_string()],
             }
         );
+
+        let reject = rti::Reject {
+            template_id: 75,
+            user_msg: vec!["provider detail".to_string()],
+            rp_code: vec!["1".to_string()],
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec.decode_control(&reject).expect("reject decodes"),
+            DecodedControlMessage::Reject
+        );
+
+        let forced_logout = rti::ForcedLogout { template_id: 77 }.encode_to_vec();
+        assert_eq!(
+            codec
+                .decode_control(&forced_logout)
+                .expect("forced logout decodes"),
+            DecodedControlMessage::ForcedLogout
+        );
+
+        let malformed_codes = rti::ResponseRithmicSystemInfo {
+            template_id: 17,
+            user_msg: Vec::new(),
+            rp_code: Vec::new(),
+            system_name: Vec::new(),
+            has_aggregated_quotes: Vec::new(),
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            codec.decode_control(&malformed_codes),
+            Err(ProtocolError::ResponseCodeShape)
+        ));
 
         let login = rti::ResponseLogin {
             template_id: 11,

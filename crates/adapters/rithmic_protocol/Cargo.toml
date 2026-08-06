@@ -8,7 +8,14 @@ publish.workspace = true
 
 [dependencies]
 prost.workspace = true
+rustls.workspace = true
+socket2 = { version = "=0.6.5", default-features = false }
+tungstenite.workspace = true
+webpki-roots.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
+
+[dev-dependencies]
+rcgen.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

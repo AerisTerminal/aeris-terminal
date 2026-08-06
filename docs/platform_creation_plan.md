@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 21
+**Revision:** 22
 **Last updated:** 2026-08-06
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -69,7 +69,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | kit + bounded protocol/catalog/market/bar codec [x]; session / recovery / evidence [ ] |
+| C — Rithmic read-only headless | `in_progress` | kit + bounded codec + deterministic WSS discovery/login [x]; collectors / recovery / authorized evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
@@ -105,7 +105,7 @@ Full scope policy:
 | Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete.                                                                                                                                                              |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
-| Rithmic adapter            | `in_progress` | Kit-backed read-only request encoding and bounded control/catalog/trade/BBO/aggregate-book/time-bar/tick-bar decoding are implemented; WSS lifecycle, collectors/recovery, deterministic session fixtures, and authorized Test evidence remain.       |
+| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs and deterministic TLS WSS discovery/close/fresh-login/heartbeat/trade/logout are implemented; vault/runtime integration, collectors/recovery, subscription installation, and authorized Test evidence remain.            |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `ready`       | Starts after Stages C and D deterministic headless gates.                                                                                                                                                                                           |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
@@ -357,10 +357,10 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 
 #### Protocol lifecycle (Rithmic-specified)
 
-- [ ] Open validated WSS to `wss://rituz00100.rithmic.com:443`.
-- [ ] Send `RequestRithmicSystemInfo`; parse and bound the available system names.
-- [ ] Close that discovery connection.
-- [ ] Open a **new** validated WSS connection to the same URL.
+- [x] Open validated WSS to `wss://rituz00100.rithmic.com:443`.
+- [x] Send `RequestRithmicSystemInfo`; parse and bound the available system names.
+- [x] Close that discovery connection.
+- [x] Open a **new** validated WSS connection to the same URL.
 - [ ] Send `RequestLogin` with `system_name = Rithmic Test` and vault credentials.
 - [ ] Establish heartbeat, instruments, and **read-only** market-data subscriptions.
 

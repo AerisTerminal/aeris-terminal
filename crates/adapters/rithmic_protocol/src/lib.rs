@@ -7,11 +7,17 @@ mod generated {
 }
 
 mod catalog;
+mod endpoint;
 mod history;
 mod market;
+mod network;
 mod protocol;
+mod session;
+#[cfg(test)]
+mod session_tests;
 
 pub use catalog::{DecodedCatalogMessage, InstrumentReference, SymbolSearchResult};
+pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};
 pub use history::{
     BarIdentity, DecodedHistoryMessage, DecodedTickBar, DecodedTimeBar, DecodedTimeBarType, Ohlc,
     ReplayKind, TickBarKey,
@@ -26,4 +32,8 @@ pub use protocol::{
     RithmicProtocolBackend, RithmicProtocolCodec, SearchPattern, SensitiveFrame,
     SubscriptionAction, SymbolSearchRequest, TickBarReplayRequest, TickBarSubscription,
     TimeBarReplayRequest, TimeBarSubscription, TimeBarType,
+};
+pub use session::{
+    RithmicApplication, RithmicCredentials, RithmicSessionMessage, RithmicTestSession,
+    RithmicTickerConnection,
 };

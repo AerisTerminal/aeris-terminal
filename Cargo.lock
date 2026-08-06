@@ -958,6 +958,11 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rcgen",
+ "rustls",
+ "socket2",
+ "tungstenite",
+ "webpki-roots 1.0.5",
  "zeroize",
 ]
 
