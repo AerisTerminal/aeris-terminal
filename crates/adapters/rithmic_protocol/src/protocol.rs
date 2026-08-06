@@ -71,6 +71,36 @@ impl RithmicProtocolBackend {
             Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
         }
     }
+
+    /// Decodes one bounded symbol-search or instrument-reference response.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded protocol error or [`ProtocolError::KitUnavailable`].
+    pub fn decode_catalog(
+        &self,
+        frame: &[u8],
+    ) -> Result<crate::DecodedCatalogMessage, ProtocolError> {
+        match self {
+            Self::Kit(codec) => codec.decode_catalog(frame),
+            Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
+        }
+    }
+
+    /// Decodes one bounded live or replay bar response.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded protocol error or [`ProtocolError::KitUnavailable`].
+    pub fn decode_history(
+        &self,
+        frame: &[u8],
+    ) -> Result<crate::DecodedHistoryMessage, ProtocolError> {
+        match self {
+            Self::Kit(codec) => codec.decode_history(frame),
+            Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
+        }
+    }
 }
 
 /// Credentials and identity required for one read-only plant login.
@@ -327,6 +357,30 @@ impl RithmicProtocolCodec {
     pub fn decode_market(self, frame: &[u8]) -> Result<crate::DecodedMarketMessage, ProtocolError> {
         crate::market::decode(frame)
     }
+
+    /// Decodes one bounded symbol-search or instrument-reference message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, unsupported, or unbounded input.
+    pub fn decode_catalog(
+        self,
+        frame: &[u8],
+    ) -> Result<crate::DecodedCatalogMessage, ProtocolError> {
+        crate::catalog::decode(frame)
+    }
+
+    /// Decodes one bounded live or replay bar message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, unsupported, or unbounded input.
+    pub fn decode_history(
+        self,
+        frame: &[u8],
+    ) -> Result<crate::DecodedHistoryMessage, ProtocolError> {
+        crate::history::decode(frame)
+    }
 }
 
 /// Bounded protocol or kit-availability failure.
@@ -351,6 +405,8 @@ pub enum ProtocolError {
     InconsistentFields(&'static str),
     ParallelFieldLength(&'static str),
     UnknownEnum(&'static str),
+    ResponseCodeShape,
+    RejectedDataFrame,
     ForbiddenOutboundTemplate(i32),
     UnsupportedTemplate(i32),
     RepeatedFieldLimitExceeded { field: &'static str, maximum: usize },
