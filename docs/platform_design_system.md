@@ -25,11 +25,13 @@ accessors.
 The canonical identifier is stored once. An optional web exporter prefixes that
 identifier with `--` without changing its spelling:
 
+
 | Canonical identifier | Generated CSS custom property |
-|---|---|
-| `chart_candle_up` | `--chart_candle_up` |
-| `app_header_height` | `--app_header_height` |
-| `radius_default` | `--radius_default` |
+| -------------------- | ----------------------------- |
+| `chart_candle_up`    | `--chart_candle_up`           |
+| `app_header_height`  | `--app_header_height`         |
+| `radius_default`     | `--radius_default`            |
+
 
 CSS custom properties permit underscores. No name transformation or separately
 maintained export spelling is allowed.
@@ -61,71 +63,81 @@ components consume only the typed resolved value.
 
 ## 4. Color system
 
+
+
 ### 4.1 Core colors
 
-| Identifier | Light | Dark |
-|---|---|---|
-| `background` | `oklch(1 0 0)` | `oklch(0.145 0 0)` |
-| `foreground` | `oklch(0.145 0 0)` | `oklch(0.985 0 0)` |
-| `card` | `oklch(1 0 0)` | `#070a0f` |
-| `card_foreground` | `oklch(0.145 0 0)` | `oklch(0.985 0 0)` |
-| `popover` | `oklch(1 0 0)` | `#070a0f` |
-| `popover_foreground` | `oklch(0.145 0 0)` | `oklch(0.985 0 0)` |
-| `primary` | `#3e63dd` | `#3e63dd` |
-| `primary_foreground` | `oklch(0.97 0.014 254.604)` | same |
-| `secondary` | `oklch(0.967 0.001 286.375)` | `oklch(0.274 0.006 286.033)` |
-| `secondary_foreground` | `oklch(0.21 0.006 285.885)` | `oklch(0.985 0 0)` |
-| `muted` | `oklch(0.97 0 0)` | `oklch(0.269 0 0)` |
-| `muted_foreground` | `oklch(0.556 0 0)` | `oklch(0.708 0 0)` |
-| `accent` | `oklch(0.97 0 0)` | `oklch(0.269 0 0)` |
-| `accent_foreground` | `oklch(0.205 0 0)` | `oklch(0.985 0 0)` |
-| `destructive` | `oklch(0.577 0.245 27.325)` | `oklch(0.704 0.191 22.216)` |
-| `destructive_foreground` | `oklch(0.985 0 0)` | same |
-| `border` | `#f5f5f5` | `#16191f` |
-| `input` | `#f5f5f5` | `#16191f` |
-| `ring` | `oklch(0.708 0 0)` | `oklch(0.556 0 0)` |
+
+| Identifier               | Light                        | Dark                         |
+| ------------------------ | ---------------------------- | ---------------------------- |
+| `background`             | `oklch(1 0 0)`               | `oklch(0.145 0 0)`           |
+| `foreground`             | `oklch(0.145 0 0)`           | `oklch(0.985 0 0)`           |
+| `card`                   | `oklch(1 0 0)`               | `#070a0f`                    |
+| `card_foreground`        | `oklch(0.145 0 0)`           | `oklch(0.985 0 0)`           |
+| `popover`                | `oklch(1 0 0)`               | `#070a0f`                    |
+| `popover_foreground`     | `oklch(0.145 0 0)`           | `oklch(0.985 0 0)`           |
+| `primary`                | `#3e63dd`                    | `#3e63dd`                    |
+| `primary_foreground`     | `oklch(0.97 0.014 254.604)`  | same                         |
+| `secondary`              | `oklch(0.967 0.001 286.375)` | `oklch(0.274 0.006 286.033)` |
+| `secondary_foreground`   | `oklch(0.21 0.006 285.885)`  | `oklch(0.985 0 0)`           |
+| `muted`                  | `oklch(0.97 0 0)`            | `oklch(0.269 0 0)`           |
+| `muted_foreground`       | `oklch(0.556 0 0)`           | `oklch(0.708 0 0)`           |
+| `accent`                 | `oklch(0.97 0 0)`            | `oklch(0.269 0 0)`           |
+| `accent_foreground`      | `oklch(0.205 0 0)`           | `oklch(0.985 0 0)`           |
+| `destructive`            | `oklch(0.577 0.245 27.325)`  | `oklch(0.704 0.191 22.216)`  |
+| `destructive_foreground` | `oklch(0.985 0 0)`           | same                         |
+| `border`                 | `#f5f5f5`                    | `#16191f`                    |
+| `input`                  | `#f5f5f5`                    | `#16191f`                    |
+| `ring`                   | `oklch(0.708 0 0)`           | `oklch(0.556 0 0)`           |
+
 
 `primary` is the sole product accent. Components may derive interaction states
 from it, but may not create another product-accent family.
 
 ### 4.2 Trading and chart colors
 
-| Identifier | Light | Dark |
-|---|---|---|
-| `profit` | `oklch(0.683 0.151 160.997)` | same |
-| `loss` | `oklch(0.674 0.215 18.124)` | same |
-| `warning` | `oklch(0.769 0.165 70.08)` | same |
-| `info` | `oklch(0.555 0.245 266.681)` | same |
-| `feature` | `oklch(0.541 0.247 293.009)` | same |
-| `chart_candle_up` | `profit` | `profit` |
-| `chart_candle_down` | `loss` | `loss` |
-| `chart_volume_up` | `profit` at 34% alpha | `profit` at 32% alpha |
-| `chart_volume_down` | `loss` at 30% alpha | `loss` at 28% alpha |
-| `chart_axis_text` | `#0a0a0a` | `#ffffff` |
+
+| Identifier          | Light                        | Dark                  |
+| ------------------- | ---------------------------- | --------------------- |
+| `profit`            | `oklch(0.683 0.151 160.997)` | same                  |
+| `loss`              | `oklch(0.674 0.215 18.124)`  | same                  |
+| `warning`           | `oklch(0.769 0.165 70.08)`   | same                  |
+| `info`              | `oklch(0.555 0.245 266.681)` | same                  |
+| `feature`           | `oklch(0.541 0.247 293.009)` | same                  |
+| `chart_candle_up`   | `profit`                     | `profit`              |
+| `chart_candle_down` | `loss`                       | `loss`                |
+| `chart_volume_up`   | `profit` at 34% alpha        | `profit` at 32% alpha |
+| `chart_volume_down` | `loss` at 30% alpha          | `loss` at 28% alpha   |
+| `chart_axis_text`   | `#0a0a0a`                    | `#ffffff`             |
+
 
 The neutral chart palette is:
 
-| Identifier | Value |
-|---|---|
-| `chart_1` | `oklch(0.87 0 0)` |
-| `chart_2` | `oklch(0.556 0 0)` |
-| `chart_3` | `oklch(0.439 0 0)` |
-| `chart_4` | `oklch(0.371 0 0)` |
-| `chart_5` | `oklch(0.269 0 0)` |
+
+| Identifier | Value              |
+| ---------- | ------------------ |
+| `chart_1`  | `oklch(0.87 0 0)`  |
+| `chart_2`  | `oklch(0.556 0 0)` |
+| `chart_3`  | `oklch(0.439 0 0)` |
+| `chart_4`  | `oklch(0.371 0 0)` |
+| `chart_5`  | `oklch(0.269 0 0)` |
+
 
 Origin Charts receives resolved values from the active `AxiusflowTheme`:
 
-| Origin role | Theme field |
-|---|---|
-| background | `background` or the component's declared surface |
-| axis text | `chart_axis_text` |
-| grid and border | `border` |
-| candle up/down | `chart_candle_up`, `chart_candle_down` |
-| volume up/down | `chart_volume_up`, `chart_volume_down` |
-| positive/negative annotation | `profit`, `loss` |
-| informational/warning annotation | `info`, `warning` |
-| strategy or feature annotation | `feature` |
-| additional series | `chart_1` through `chart_5` |
+
+| Origin role                      | Theme field                                      |
+| -------------------------------- | ------------------------------------------------ |
+| background                       | `background` or the component's declared surface |
+| axis text                        | `chart_axis_text`                                |
+| grid and border                  | `border`                                         |
+| candle up/down                   | `chart_candle_up`, `chart_candle_down`           |
+| volume up/down                   | `chart_volume_up`, `chart_volume_down`           |
+| positive/negative annotation     | `profit`, `loss`                                 |
+| informational/warning annotation | `info`, `warning`                                |
+| strategy or feature annotation   | `feature`                                        |
+| additional series                | `chart_1` through `chart_5`                      |
+
 
 Origin renderers do not maintain an independent color theme.
 
@@ -137,15 +149,19 @@ Origin renderers do not maintain an independent color theme.
 - Components do not embed approximate replacements for canonical colors.
 - Literal colors are allowed only in the theme definition and its tests.
 
+
+
 ## 5. Radius system
 
 The platform exposes exactly three radii:
 
-| Identifier | Logical pixels | Use |
-|---|---:|---|
-| `radius_sm` | 4 | Explicitly dense or small controls |
-| `radius_default` | 6 | Normal controls, panels, and surfaces |
-| `radius_full` | 999 | Pills, circles, avatars, and fully rounded elements |
+
+| Identifier       | Logical pixels | Use                                                 |
+| ---------------- | -------------- | --------------------------------------------------- |
+| `radius_sm`      | 4              | Explicitly dense or small controls                  |
+| `radius_default` | 8              | Normal controls, panels, and surfaces               |
+| `radius_full`    | 999            | Pills, circles, avatars, and fully rounded elements |
+
 
 No radius alias, component-local radius token, semantic synonym, or additional
 radius is valid. Components use `radius_default` unless the element clearly
@@ -158,10 +174,12 @@ The application uses Inter Variable for interface text and numeric data.
 - Bundle and register the variable font before the first application frame.
 - Support weights 100 through 900 in normal style.
 - Use tabular numerals for prices, quantities, percentages, timestamps, and
-  other aligned numeric values.
+other aligned numeric values.
 - Use the platform-native sans fallback only if font registration fails.
 - Components own their text hierarchy; the shared theme has one interface font
-  family.
+family.
+
+
 
 ## 7. Shared dimensions
 
@@ -177,10 +195,10 @@ measurements remain with the owning component. They are not global tokens.
 - Start standard native controls and layout primitives from GPUI Component.
 - Use typed theme fields instead of copying literal colors or measurements.
 - Keep component state, focus behavior, keyboard interaction, animation, and
-  responsive layout inside the component implementation.
+responsive layout inside the component implementation.
 - Use `background` and `foreground` for the application root.
 - Use `card`/`card_foreground` or `popover`/`popover_foreground` for their named
-  surfaces.
+surfaces.
 - Use `border`, `input`, and `ring` for their semantic roles.
 - Disabled controls must not respond to activation.
 - Financial charts use Origin Charts and the mapping in section 4.2.
