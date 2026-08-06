@@ -69,7 +69,7 @@ Full scope policy:
 |---|---|---|
 | Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete. |
 | Provider-neutral runtime | `verified` | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance. |
-| Rithmic access | `ready` | Rithmic issued R\|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `.cache/provider_kits/rithmic/` (see §4.2 and §8). Live login still needs signed Test agreements in R\|Trader / R\|Trader Pro. |
+| Rithmic access | `ready` | Rithmic issued R\|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R\|Trader / R\|Trader Pro. |
 | Rithmic adapter | `ready` | Headless read-only R\|Protocol implementation can proceed from the local kit; `verified` still requires deterministic + Test evidence. |
 | Lightweight diagnostics | `in_progress` | Feed-health path ships; named disabled/enabled overhead evidence remains. |
 | Main Rithmic UI | `ready` | Starts after Stages C and D deterministic headless gates. |
