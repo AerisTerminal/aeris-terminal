@@ -205,6 +205,7 @@ impl HeaderControls {
     const DOM: u8 = 4;
     const HEALTH: u8 = 8;
     const FIT: u8 = 16;
+    const LATEST: u8 = 32;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -224,9 +225,9 @@ impl HeaderControls {
         Self(controls)
     }
 
-    const fn with_fit(mut self, chart_ready: bool) -> Self {
+    const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::FIT;
+            self.0 |= Self::FIT | Self::LATEST;
         }
         self
     }
@@ -1023,6 +1024,15 @@ impl TerminalApp {
             });
         }
     }
+
+    fn scroll_chart_to_latest(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.scroll_to_latest();
+                chart_cx.notify();
+            });
+        }
+    }
 }
 
 impl Render for TerminalApp {
@@ -1059,7 +1069,7 @@ impl Render for TerminalApp {
                     self.symbol_browser.selected().is_some(),
                     self.feed_diagnostics.is_some(),
                 )
-                .with_fit(self.chart_state == ChartState::Ready),
+                .with_chart_controls(self.chart_state == ChartState::Ready),
                 dom_visible: self.side_panel == Some(SidePanel::Dom),
                 health_visible: self.side_panel == Some(SidePanel::Health),
                 connection_state: self
@@ -1189,6 +1199,14 @@ fn terminal_header(
         app.clone(),
         TerminalApp::reset_chart_view,
     );
+    let latest_chart = panel_toggle(
+        "latest_chart",
+        "Latest",
+        active_button,
+        state.controls.enabled(HeaderControls::LATEST),
+        app.clone(),
+        TerminalApp::scroll_chart_to_latest,
+    );
     let series_selector = series_selector(
         app.clone(),
         state.series_label,
@@ -1225,6 +1243,7 @@ fn terminal_header(
                     .gap_2()
                     .child(instrument_selector)
                     .child(series_selector)
+                    .child(latest_chart)
                     .child(fit_chart)
                     .child(dom_toggle)
                     .child(health_toggle)
@@ -2088,11 +2107,12 @@ mod tests {
         assert_eq!(duration_label(850_000), "850 µs");
         assert_eq!(duration_label(42_000_000), "42 ms");
         assert_eq!(duration_label(1_500_000_000), "1.5 s");
-        let controls = HeaderControls::from_state(true, true, false).with_fit(true);
+        let controls = HeaderControls::from_state(true, true, false).with_chart_controls(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
         assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
+        assert!(controls.enabled(HeaderControls::LATEST));
     }
 }

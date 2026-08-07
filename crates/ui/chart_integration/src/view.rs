@@ -172,6 +172,12 @@ impl OriginChartView {
         self.fitted = true;
     }
 
+    /// Returns the time scale to the newest bar without changing its zoom.
+    pub fn scroll_to_latest(&mut self) {
+        self.engine.scroll_to_real_time();
+        self.invalidate_series_frame();
+    }
+
     /// Enqueues one replay update for the next chart frame.
     ///
     /// # Errors
@@ -790,6 +796,19 @@ mod tests {
             Some(true)
         );
         assert!(chart.fitted);
+    }
+
+    #[test]
+    fn scroll_to_latest_preserves_zoom_and_returns_to_real_time_edge() {
+        let mut chart = interactive_chart();
+        chart.engine.time_scale.zoom(300.0, 0.5);
+        chart.engine.scroll_to_position(-12.0);
+        let spacing = chart.engine.bar_spacing();
+
+        chart.scroll_to_latest();
+
+        assert!(chart.engine.scroll_position().abs() < f64::EPSILON);
+        assert!((chart.engine.bar_spacing() - spacing).abs() < f64::EPSILON);
     }
 
     #[test]
