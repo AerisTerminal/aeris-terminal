@@ -11,7 +11,7 @@ mod windowed_benchmark;
 use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
-use axiusflow_observability::FeedConnectionState;
+use axiusflow_observability::{FeedConnectionState, FeedDiagnosticsSnapshot};
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
     RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
@@ -99,7 +99,9 @@ fn default_rithmic_contract_index(
 struct TerminalApp {
     chart: Option<Entity<OriginChartView>>,
     dom: Entity<ReadOnlyDomView>,
-    dom_visible: bool,
+    side_panel: Option<SidePanel>,
+    window_active: bool,
+    feed_diagnostics: Option<Box<FeedDiagnosticsSnapshot>>,
     chart_state: ChartState,
     chart_state_message: String,
     theme: AxiusflowTheme,
@@ -124,13 +126,44 @@ struct HeaderState {
     series_label: String,
     controls: HeaderControls,
     dom_visible: bool,
+    health_visible: bool,
+    connection_state: FeedConnectionState,
+    chart_state: ChartState,
+    delayed: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SidePanel {
+    Dom,
+    Health,
 }
 
 #[derive(Clone, Copy)]
-struct HeaderControls {
-    instrument: bool,
-    series: bool,
-    dom: bool,
+struct HeaderControls(u8);
+
+impl HeaderControls {
+    const INSTRUMENT: u8 = 1;
+    const SERIES: u8 = 2;
+    const DOM: u8 = 4;
+    const HEALTH: u8 = 8;
+
+    const fn enabled(self, control: u8) -> bool {
+        self.0 & control != 0
+    }
+
+    fn from_state(instrument: bool, selection: bool, health: bool) -> Self {
+        let mut controls = 0;
+        if instrument {
+            controls |= Self::INSTRUMENT;
+        }
+        if selection {
+            controls |= Self::SERIES | Self::DOM;
+        }
+        if health {
+            controls |= Self::HEALTH;
+        }
+        Self(controls)
+    }
 }
 
 impl TerminalApp {
@@ -213,7 +246,9 @@ impl TerminalApp {
         Self {
             chart,
             dom,
-            dom_visible: false,
+            side_panel: None,
+            window_active: true,
+            feed_diagnostics: None,
             chart_state,
             chart_state_message,
             theme,
@@ -431,13 +466,19 @@ impl TerminalApp {
     }
 
     fn poll_market_worker(&mut self, cx: &mut Context<Self>) {
+        if !self.window_active {
+            return;
+        }
         let (messages, disconnected) = self.market_worker.drain_messages();
         for message in messages {
             match message {
                 MarketWorkerMessage::Update(publication) => {
                     self.apply_publication(publication, cx);
                 }
-                MarketWorkerMessage::Diagnostics(_) => {}
+                MarketWorkerMessage::Diagnostics(snapshot) => {
+                    self.feed_diagnostics = Some(snapshot);
+                    cx.notify();
+                }
                 MarketWorkerMessage::Recovery { request_id, result } => {
                     self.apply_recovery(request_id, result, cx);
                 }
@@ -815,7 +856,15 @@ impl TerminalApp {
 
     fn toggle_dom(&mut self, cx: &mut Context<Self>) {
         if self.symbol_browser.selected().is_some() {
-            self.dom_visible = !self.dom_visible;
+            self.side_panel = (self.side_panel != Some(SidePanel::Dom)).then_some(SidePanel::Dom);
+            cx.notify();
+        }
+    }
+
+    fn toggle_health(&mut self, cx: &mut Context<Self>) {
+        if self.feed_diagnostics.is_some() {
+            self.side_panel =
+                (self.side_panel != Some(SidePanel::Health)).then_some(SidePanel::Health);
             cx.notify();
         }
     }
@@ -858,6 +907,7 @@ impl TerminalApp {
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_diagnostics_frame(window);
+        self.window_active = window.is_window_active();
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
@@ -872,12 +922,22 @@ impl Render for TerminalApp {
                     .selected()
                     .map_or("1m", |request| request.series.label())
                     .to_string(),
-                controls: HeaderControls {
-                    instrument: !self.symbol_browser.results().is_empty(),
-                    series: self.symbol_browser.selected().is_some(),
-                    dom: self.symbol_browser.selected().is_some(),
-                },
-                dom_visible: self.dom_visible,
+                controls: HeaderControls::from_state(
+                    !self.symbol_browser.results().is_empty(),
+                    self.symbol_browser.selected().is_some(),
+                    self.feed_diagnostics.is_some(),
+                ),
+                dom_visible: self.side_panel == Some(SidePanel::Dom),
+                health_visible: self.side_panel == Some(SidePanel::Health),
+                connection_state: self
+                    .connection_state
+                    .unwrap_or(FeedConnectionState::Disconnected),
+                chart_state: self.chart_state,
+                delayed: self
+                    .feed_diagnostics
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.provider_timestamp_age)
+                    .is_some_and(|age| age.nanos > 60_000_000_000),
             },
         );
 
@@ -919,14 +979,18 @@ impl Render for TerminalApp {
                     .overflow_hidden()
                     .bg(gpui_color(colors.background))
                     .child(chart)
-                    .children(self.dom_visible.then(|| {
+                    .children((self.side_panel == Some(SidePanel::Dom)).then(|| {
                         div()
                             .id("depth_panel")
                             .w(px(320.0))
                             .h_full()
                             .flex_none()
                             .child(self.dom.clone())
-                    })),
+                    }))
+                    .children(
+                        (self.side_panel == Some(SidePanel::Health))
+                            .then(|| feed_health_panel(self.feed_diagnostics.as_deref(), &theme)),
+                    ),
             )
     }
 }
@@ -955,6 +1019,8 @@ fn terminal_header(
         .foreground(gpui_color(colors.secondary_foreground))
         .hover(gpui_color(colors.accent))
         .active(gpui_color(colors.muted));
+    let (connection_label, connection_color) =
+        connection_presentation(state.connection_state, state.chart_state, state.delayed);
     TitleBar::new().child(
         div()
             .h_full()
@@ -965,6 +1031,21 @@ fn terminal_header(
             .child(div().text_sm().child("Axiusflow"))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(gpui_color(colors.muted_foreground))
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(gpui_color(connection_color(&state.theme))),
+                    )
+                    .child(connection_label),
+            )
+            .child(
+                div()
                     .h_full()
                     .flex()
                     .items_center()
@@ -973,7 +1054,7 @@ fn terminal_header(
                         Button::new("instrument_selector")
                             .label(state.market_label)
                             .custom(active_button)
-                            .disabled(!state.controls.instrument)
+                            .disabled(!state.controls.enabled(HeaderControls::INSTRUMENT))
                             .on_click({
                                 let app = app.clone();
                                 move |_, _, cx| {
@@ -985,7 +1066,7 @@ fn terminal_header(
                         Button::new("series_selector")
                             .label(state.series_label)
                             .custom(active_button)
-                            .disabled(!state.controls.series)
+                            .disabled(!state.controls.enabled(HeaderControls::SERIES))
                             .on_click({
                                 let app = app.clone();
                                 move |_, _, cx| {
@@ -997,11 +1078,27 @@ fn terminal_header(
                         Button::new("dom_toggle")
                             .label(if state.dom_visible { "Chart" } else { "DOM" })
                             .custom(active_button)
-                            .disabled(!state.controls.dom)
+                            .disabled(!state.controls.enabled(HeaderControls::DOM))
                             .on_click({
                                 let app = app.clone();
                                 move |_, _, cx| {
                                     app.update(cx, TerminalApp::toggle_dom);
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("health_toggle")
+                            .label(if state.health_visible {
+                                "Chart"
+                            } else {
+                                "Health"
+                            })
+                            .custom(active_button)
+                            .disabled(!state.controls.enabled(HeaderControls::HEALTH))
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, TerminalApp::toggle_health);
                                 }
                             }),
                     )
@@ -1015,6 +1112,202 @@ fn terminal_header(
                     ),
             ),
     )
+}
+
+type ConnectionColor = fn(&AxiusflowTheme) -> ThemeColor;
+
+fn connection_presentation(
+    state: FeedConnectionState,
+    chart_state: ChartState,
+    delayed: bool,
+) -> (&'static str, ConnectionColor) {
+    if chart_state == ChartState::Stale {
+        return ("Test · Stale", |theme| theme.colors.warning);
+    }
+    if chart_state == ChartState::Recovering {
+        return ("Test · Reconnecting", |theme| theme.colors.warning);
+    }
+    if chart_state == ChartState::Error && state == FeedConnectionState::Streaming {
+        return ("Test · Data error", |theme| theme.colors.loss);
+    }
+    if state == FeedConnectionState::Streaming && delayed {
+        return ("Test · Delayed", |theme| theme.colors.warning);
+    }
+    match state {
+        FeedConnectionState::Disconnected => ("Offline", |theme| theme.colors.loss),
+        FeedConnectionState::Discovering => ("Test · Discovering", |theme| theme.colors.info),
+        FeedConnectionState::Authenticating => {
+            ("Test · Authenticating", |theme| theme.colors.info)
+        }
+        FeedConnectionState::Streaming => ("Test · Live", |theme| theme.colors.profit),
+        FeedConnectionState::Recovering => ("Test · Reconnecting", |theme| theme.colors.warning),
+        FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.loss),
+    }
+}
+
+fn feed_health_panel(
+    snapshot: Option<&FeedDiagnosticsSnapshot>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let rows = health_rows(snapshot);
+    div()
+        .id("feed_health_panel")
+        .w(px(320.0))
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_l_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.background))
+        .child(
+            div()
+                .h(px(30.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .px_2()
+                .border_b_1()
+                .border_color(gpui_color(colors.border))
+                .text_xs()
+                .text_color(gpui_color(colors.muted_foreground))
+                .child("FEED HEALTH"),
+        )
+        .children(rows.into_iter().map(move |(label, value)| {
+            div()
+                .h(px(28.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .px_2()
+                .border_b_1()
+                .border_color(gpui_color(colors.border.with_alpha(0.55)))
+                .text_xs()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(gpui_color(colors.muted_foreground))
+                        .child(label),
+                )
+                .child(value)
+        }))
+}
+
+fn health_rows(snapshot: Option<&FeedDiagnosticsSnapshot>) -> Vec<(String, String)> {
+    snapshot.map_or_else(
+        || vec![("State".to_string(), "Awaiting diagnostics".to_string())],
+        |snapshot| {
+            let queue_high_water = snapshot
+                .queues
+                .iter()
+                .map(|queue| queue.high_water_items)
+                .max()
+                .unwrap_or(0);
+            let local_p99 = snapshot
+                .detailed_latency
+                .iter()
+                .flatten()
+                .map(|latency| latency.p99_upper_bound_nanos)
+                .max();
+            vec![
+                (
+                    "Feed".to_string(),
+                    format!(
+                        "{} · {}",
+                        snapshot.identity.system(),
+                        snapshot.identity.environment()
+                    ),
+                ),
+                (
+                    "Session".to_string(),
+                    snapshot
+                        .session_generation
+                        .map_or_else(|| "—".to_string(), |generation| generation.to_string()),
+                ),
+                (
+                    "Messages".to_string(),
+                    format!(
+                        "{} trades · {} quotes · {} depth",
+                        snapshot.counters.trades,
+                        snapshot.counters.quotes,
+                        snapshot.counters.depth_snapshots
+                    ),
+                ),
+                (
+                    "Rates".to_string(),
+                    format!(
+                        "{} t/s · {} q/s · {} d/s",
+                        milli_rate(snapshot.rates.trades_per_second_milli),
+                        milli_rate(snapshot.rates.quotes_per_second_milli),
+                        milli_rate(snapshot.rates.depth_updates_per_second_milli)
+                    ),
+                ),
+                (
+                    "Last message".to_string(),
+                    snapshot
+                        .last_message_age_nanos
+                        .map_or_else(|| "—".to_string(), duration_label),
+                ),
+                (
+                    "Heartbeat".to_string(),
+                    snapshot
+                        .heartbeat_age_nanos
+                        .map_or_else(|| "—".to_string(), duration_label),
+                ),
+                (
+                    "Local processing p99".to_string(),
+                    local_p99.map_or_else(|| "Disabled".to_string(), duration_label),
+                ),
+                (
+                    "Provider clock age".to_string(),
+                    snapshot.provider_timestamp_age.map_or_else(
+                        || "—".to_string(),
+                        |age| format!("{} · clock-relative", signed_duration_label(age.nanos)),
+                    ),
+                ),
+                (
+                    "Reconnects".to_string(),
+                    snapshot.reconnect_count.to_string(),
+                ),
+                ("Queue high water".to_string(), queue_high_water.to_string()),
+                (
+                    "Memory".to_string(),
+                    format!(
+                        "{} / {} KiB",
+                        snapshot.memory.current_bytes / 1024,
+                        snapshot.memory.configured_bound_bytes / 1024
+                    ),
+                ),
+            ]
+        },
+    )
+}
+
+fn milli_rate(value: u64) -> String {
+    format!("{}.{:03}", value / 1_000, value % 1_000)
+}
+
+fn duration_label(nanos: u64) -> String {
+    if nanos < 1_000_000 {
+        format!("{} µs", nanos / 1_000)
+    } else if nanos < 1_000_000_000 {
+        format!("{} ms", nanos / 1_000_000)
+    } else {
+        format!(
+            "{}.{:01} s",
+            nanos / 1_000_000_000,
+            nanos / 100_000_000 % 10
+        )
+    }
+}
+
+fn signed_duration_label(nanos: i64) -> String {
+    if nanos < 0 {
+        format!("-{}", duration_label(nanos.unsigned_abs()))
+    } else {
+        duration_label(nanos.unsigned_abs())
+    }
 }
 
 fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx: &mut App) {
@@ -1291,10 +1584,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, default_rithmic_contract_index, gpui_color, parse_rithmic_test_arguments,
+        ChartState, HeaderControls, connection_presentation, default_rithmic_contract_index,
+        duration_label, gpui_color, milli_rate, parse_rithmic_test_arguments,
         publication_chart_state, reconciled_bridge_state,
     };
     use axiusflow_design_system::ThemeColor;
+    use axiusflow_observability::FeedConnectionState;
     use axiusflow_rithmic_protocol_adapter::SymbolSearchResult;
     use std::ffi::OsString;
 
@@ -1367,5 +1662,43 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn header_lifecycle_and_health_values_are_truthfully_labeled() {
+        assert_eq!(
+            connection_presentation(
+                FeedConnectionState::Disconnected,
+                ChartState::Loading,
+                false,
+            )
+            .0,
+            "Offline"
+        );
+        assert_eq!(
+            connection_presentation(FeedConnectionState::Recovering, ChartState::Loading, false).0,
+            "Test · Reconnecting"
+        );
+        assert_eq!(
+            connection_presentation(FeedConnectionState::Streaming, ChartState::Ready, false).0,
+            "Test · Live"
+        );
+        assert_eq!(
+            connection_presentation(FeedConnectionState::Streaming, ChartState::Stale, false).0,
+            "Test · Stale"
+        );
+        assert_eq!(
+            connection_presentation(FeedConnectionState::Streaming, ChartState::Ready, true).0,
+            "Test · Delayed"
+        );
+        assert_eq!(milli_rate(12_345), "12.345");
+        assert_eq!(duration_label(850_000), "850 µs");
+        assert_eq!(duration_label(42_000_000), "42 ms");
+        assert_eq!(duration_label(1_500_000_000), "1.5 s");
+        let controls = HeaderControls::from_state(true, true, false);
+        assert!(controls.enabled(HeaderControls::INSTRUMENT));
+        assert!(controls.enabled(HeaderControls::SERIES));
+        assert!(controls.enabled(HeaderControls::DOM));
+        assert!(!controls.enabled(HeaderControls::HEALTH));
     }
 }
