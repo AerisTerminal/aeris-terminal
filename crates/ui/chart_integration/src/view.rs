@@ -151,6 +151,20 @@ impl OriginChartView {
         Ok(())
     }
 
+    /// Restores the complete visible time range and automatic price scales.
+    pub fn reset_view(&mut self) {
+        self.engine.reset_time_scale();
+        self.engine.fit_content();
+        for pane in 0..self.engine.panes.len() {
+            self.engine
+                .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Left, true);
+            self.engine
+                .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Right, true);
+        }
+        self.invalidate_series_frame();
+        self.fitted = true;
+    }
+
     /// Enqueues one replay update for the next chart frame.
     ///
     /// # Errors
@@ -678,5 +692,34 @@ mod tests {
         chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 2);
         assert!(chart.engine.right_offset().abs() < offset.abs());
         assert!(chart.drag.is_none());
+    }
+
+    #[test]
+    fn reset_view_fits_time_and_restores_automatic_price_scaling() {
+        let mut chart = interactive_chart();
+        chart.engine.time_scale.start_scroll(0.0);
+        chart.engine.time_scale.scroll_to(80.0);
+        chart.engine.time_scale.end_scroll();
+        chart
+            .engine
+            .set_price_scale_auto_scale_for(0, PriceScaleTarget::Right, false);
+        assert!(chart.engine.right_offset().abs() > f64::EPSILON);
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(false)
+        );
+
+        chart.reset_view();
+
+        assert!(chart.engine.right_offset().abs() < f64::EPSILON);
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(true)
+        );
+        assert!(chart.fitted);
     }
 }

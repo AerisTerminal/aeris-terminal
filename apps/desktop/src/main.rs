@@ -204,6 +204,7 @@ impl HeaderControls {
     const SERIES: u8 = 2;
     const DOM: u8 = 4;
     const HEALTH: u8 = 8;
+    const FIT: u8 = 16;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -221,6 +222,13 @@ impl HeaderControls {
             controls |= Self::HEALTH;
         }
         Self(controls)
+    }
+
+    const fn with_fit(mut self, chart_ready: bool) -> Self {
+        if chart_ready {
+            self.0 |= Self::FIT;
+        }
+        self
     }
 }
 
@@ -1006,6 +1014,15 @@ impl TerminalApp {
             cx.notify();
         }
     }
+
+    fn reset_chart_view(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.reset_view();
+                chart_cx.notify();
+            });
+        }
+    }
 }
 
 impl Render for TerminalApp {
@@ -1041,7 +1058,8 @@ impl Render for TerminalApp {
                     self.symbol_input.is_some() || !self.symbol_browser.results().is_empty(),
                     self.symbol_browser.selected().is_some(),
                     self.feed_diagnostics.is_some(),
-                ),
+                )
+                .with_fit(self.chart_state == ChartState::Ready),
                 dom_visible: self.side_panel == Some(SidePanel::Dom),
                 health_visible: self.side_panel == Some(SidePanel::Health),
                 connection_state: self
@@ -1163,6 +1181,14 @@ fn terminal_header(
         TerminalApp::toggle_health,
     );
     let theme_toggle = theme_toggle(app.clone(), &state.theme, active_button);
+    let fit_chart = panel_toggle(
+        "fit_chart",
+        "Fit",
+        active_button,
+        state.controls.enabled(HeaderControls::FIT),
+        app.clone(),
+        TerminalApp::reset_chart_view,
+    );
     let series_selector = series_selector(
         app.clone(),
         state.series_label,
@@ -1199,6 +1225,7 @@ fn terminal_header(
                     .gap_2()
                     .child(instrument_selector)
                     .child(series_selector)
+                    .child(fit_chart)
                     .child(dom_toggle)
                     .child(health_toggle)
                     .child(theme_toggle),
@@ -2061,10 +2088,11 @@ mod tests {
         assert_eq!(duration_label(850_000), "850 µs");
         assert_eq!(duration_label(42_000_000), "42 ms");
         assert_eq!(duration_label(1_500_000_000), "1.5 s");
-        let controls = HeaderControls::from_state(true, true, false);
+        let controls = HeaderControls::from_state(true, true, false).with_fit(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
         assert!(!controls.enabled(HeaderControls::HEALTH));
+        assert!(controls.enabled(HeaderControls::FIT));
     }
 }
