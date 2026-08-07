@@ -561,6 +561,15 @@ burst, and 1,699,840 bytes sampled growth against a declared 67,108,864-byte
 limit. This is bounded burst evidence; the eight-hour row remains open for a
 continuous plateau measurement.
 
+The headless `--desktop-endurance <report> <seconds>` runner is now available
+for the continuous gate. It paces frame cycles at 16 ms, injects a 1,000-update
+burst every 60 cycles, verifies the exact newest generation after every drain,
+tracks mailbox and working-set high water, and writes a clean-stop JSON result.
+A two-second Windows qualification run completed 124 frame cycles and 2,122
+updates with one retained mailbox item, zero stale/gapped publications, and a
+14,442,496-byte sampled working-set high water. This qualifies the runner but
+does not replace the required eight-hour execution.
+
 
 
 ### Gate

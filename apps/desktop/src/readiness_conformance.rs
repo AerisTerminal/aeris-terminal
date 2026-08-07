@@ -2,11 +2,21 @@
 
 use crate::market_worker::{FixtureMarketWorker, MarketWorkerMessage, market_worker_channel};
 use serde::Serialize;
-use std::{error::Error, fs, num::NonZeroUsize, path::Path};
+use std::{
+    error::Error,
+    fs,
+    num::NonZeroUsize,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const BURST_UPDATES: usize = 10_000;
 const MAXIMUM_WORKING_SET_GROWTH_BYTES: u64 = 64 * 1_024 * 1_024;
+const ENDURANCE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const ENDURANCE_BURST_UPDATES: usize = 1_000;
+const ENDURANCE_BURST_EVERY_FRAMES: u64 = 60;
 
 #[derive(Default)]
 pub(crate) struct FramePollGate {
@@ -55,6 +65,27 @@ struct ProcessMemoryProbe {
     baseline_bytes: u64,
     current_bytes: u64,
     high_water_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct DesktopEnduranceEvidence {
+    schema_version: u32,
+    evidence_scope: &'static str,
+    requested_duration_seconds: u64,
+    elapsed_milliseconds: u128,
+    frame_cycles: u64,
+    updates_published: u64,
+    periodic_burst_updates: usize,
+    mailbox_capacity: usize,
+    mailbox_high_water_items: usize,
+    last_generation: usize,
+    stale_or_gapped_publications: u64,
+    working_set_baseline_bytes: u64,
+    working_set_current_bytes: u64,
+    working_set_sampled_high_water_bytes: u64,
+    maximum_working_set_growth_bytes: u64,
+    working_set_within_bound: bool,
+    clean_stop: bool,
 }
 
 impl ProcessMemoryProbe {
@@ -181,6 +212,127 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn collect_endurance(duration: Duration) -> Result<DesktopEnduranceEvidence, Box<dyn Error>> {
+    if duration.is_zero() || duration > Duration::from_hours(8) {
+        return Err(
+            "desktop endurance duration must be between one nanosecond and eight hours".into(),
+        );
+    }
+    let mut fixture = FixtureMarketWorker::try_new()?;
+    let snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
+    let (sender, receiver) = market_worker_channel(capacity);
+    let mut memory = ProcessMemoryProbe::new()?;
+    let started = Instant::now();
+    let deadline = started + duration;
+    let mut next_memory_sample = started + Duration::from_secs(1);
+    let mut frame_cycles = 0_u64;
+    let mut updates_published = 0_u64;
+    let mut last_generation = 0_usize;
+    let mut mailbox_high_water_items = 0_usize;
+    let mut stale_or_gapped_publications = 0_u64;
+    let mut gate = FramePollGate::default();
+
+    while Instant::now() < deadline {
+        let frame_started = Instant::now();
+        frame_cycles = frame_cycles.saturating_add(1);
+        let updates = if frame_cycles.is_multiple_of(ENDURANCE_BURST_EVERY_FRAMES) {
+            ENDURANCE_BURST_UPDATES
+        } else {
+            1
+        };
+        for _ in 0..updates {
+            last_generation = last_generation
+                .checked_add(1)
+                .ok_or("desktop endurance generation overflowed")?;
+            let generation = NonZeroUsize::new(last_generation).unwrap_or(NonZeroUsize::MIN);
+            sender
+                .send(MarketWorkerMessage::RithmicLive {
+                    selection_generation: NonZeroUsize::MIN,
+                    series_generation: generation,
+                    snapshot: snapshot.clone(),
+                })
+                .map_err(|()| "desktop endurance mailbox disconnected")?;
+            updates_published = updates_published.saturating_add(1);
+        }
+        let (current_items, _) = sender.occupancy();
+        mailbox_high_water_items = mailbox_high_water_items.max(current_items);
+        if !gate.try_schedule(true) {
+            return Err("desktop endurance frame gate rejected an idle frame".into());
+        }
+        let (messages, disconnected) = receiver.drain();
+        gate.complete();
+        match messages.as_slice() {
+            [
+                MarketWorkerMessage::RithmicLive {
+                    selection_generation,
+                    series_generation,
+                    ..
+                },
+            ] if !disconnected
+                && selection_generation.get() == 1
+                && series_generation.get() == last_generation => {}
+            _ => stale_or_gapped_publications = stale_or_gapped_publications.saturating_add(1),
+        }
+
+        let now = Instant::now();
+        if now >= next_memory_sample {
+            memory.sample()?;
+            next_memory_sample = now + Duration::from_secs(1);
+        }
+        if let Some(remaining) = ENDURANCE_FRAME_INTERVAL.checked_sub(frame_started.elapsed()) {
+            thread::sleep(remaining.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+    memory.sample()?;
+    let working_set_within_bound = memory
+        .high_water_bytes
+        .saturating_sub(memory.baseline_bytes)
+        <= MAXIMUM_WORKING_SET_GROWTH_BYTES;
+    let clean_stop = stale_or_gapped_publications == 0
+        && mailbox_high_water_items <= capacity.get()
+        && sender.occupancy().0 == 0;
+    if !working_set_within_bound || !clean_stop {
+        return Err("desktop endurance bounds or continuity failed".into());
+    }
+
+    Ok(DesktopEnduranceEvidence {
+        schema_version: 1,
+        evidence_scope: "headless_desktop_continuous_endurance",
+        requested_duration_seconds: duration.as_secs(),
+        elapsed_milliseconds: started.elapsed().as_millis(),
+        frame_cycles,
+        updates_published,
+        periodic_burst_updates: ENDURANCE_BURST_UPDATES,
+        mailbox_capacity: capacity.get(),
+        mailbox_high_water_items,
+        last_generation,
+        stale_or_gapped_publications,
+        working_set_baseline_bytes: memory.baseline_bytes,
+        working_set_current_bytes: memory.current_bytes,
+        working_set_sampled_high_water_bytes: memory.high_water_bytes,
+        maximum_working_set_growth_bytes: MAXIMUM_WORKING_SET_GROWTH_BYTES,
+        working_set_within_bound,
+        clean_stop,
+    })
+}
+
+pub(crate) fn run_endurance(report_path: &Path, duration: Duration) -> Result<(), Box<dyn Error>> {
+    let report = collect_endurance(duration)?;
+    let mut encoded = serde_json::to_vec_pretty(&report)?;
+    encoded.push(b'\n');
+    fs::write(report_path, encoded)?;
+    println!(
+        "desktop_endurance=passed seconds={} frames={} updates={} memory_high_water={} report={}",
+        report.requested_duration_seconds,
+        report.frame_cycles,
+        report.updates_published,
+        report.working_set_sampled_high_water_bytes,
+        report_path.display()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BURST_UPDATES, FramePollGate, collect_evidence};
@@ -203,5 +355,16 @@ mod tests {
         assert!(evidence.bounded_latest_state_conflation);
         assert!(evidence.single_frame_drain_gate);
         assert!(evidence.working_set_within_bound);
+    }
+
+    #[test]
+    fn short_endurance_preserves_continuity_and_bounds() {
+        let evidence = super::collect_endurance(std::time::Duration::from_millis(80))
+            .expect("short endurance evidence passes");
+        assert!(evidence.frame_cycles > 1);
+        assert_eq!(evidence.stale_or_gapped_publications, 0);
+        assert_eq!(evidence.mailbox_high_water_items, 1);
+        assert!(evidence.working_set_within_bound);
+        assert!(evidence.clean_stop);
     }
 }

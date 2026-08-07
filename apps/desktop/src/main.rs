@@ -1599,6 +1599,27 @@ fn run_desktop_readiness_command(
         .map_err(|error| error.to_string())
 }
 
+fn run_desktop_endurance_command(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), String> {
+    let usage = "usage: axiusflow_desktop --desktop-endurance <report-path> <duration-seconds>";
+    let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
+    let duration_seconds = arguments
+        .next()
+        .ok_or_else(|| usage.to_string())?
+        .to_string_lossy()
+        .parse::<u64>()
+        .map_err(|_| usage.to_string())?;
+    if arguments.next().is_some() {
+        return Err(usage.to_string());
+    }
+    readiness_conformance::run_endurance(
+        std::path::Path::new(&report_path),
+        std::time::Duration::from_secs(duration_seconds),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -1612,6 +1633,10 @@ fn main() {
         }
         if argument == "--desktop-readiness" {
             run_desktop_readiness_command(arguments).expect("desktop readiness conformance passes");
+            return;
+        }
+        if argument == "--desktop-endurance" {
+            run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
             return;
         }
         if argument == "--coinbase-live-smoke" {
