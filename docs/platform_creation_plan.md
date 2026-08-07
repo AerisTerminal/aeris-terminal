@@ -489,6 +489,7 @@ deterministic headless gates.
 - [x] Forward native pointer crosshair, pane/axis dragging, wheel zoom/scroll, and axis reset into Origin.
 - [x] Expose an exact GPUI header control that restores Origin's fitted time and automatic price scales.
 - [x] Scope keyboard bar navigation, zoom, reset, and gesture cancellation to the focused chart surface.
+- [x] Render exact crosshair, pan, time-scale, and price-scale cursors for native chart gestures.
 - [x] Bound hidden-window work and retained state.
 
 The native header now uses GPUI Component dropdown menus for exact contract and

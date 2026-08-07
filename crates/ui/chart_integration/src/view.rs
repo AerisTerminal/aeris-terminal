@@ -12,9 +12,9 @@ use axiusflow_application::{
 };
 use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div, prelude::*, px,
-    rgb,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
+    prelude::*, px, rgb,
 };
 use num_traits::ToPrimitive;
 use origin_engine::{ChartEngine, ChartFrame, PriceScaleTarget};
@@ -50,6 +50,7 @@ pub struct OriginChartView {
     viewport_origin: (f32, f32),
     drag: Option<ChartDrag>,
     focus_handle: Option<FocusHandle>,
+    cursor_style: CursorStyle,
 }
 
 impl OriginChartView {
@@ -76,6 +77,7 @@ impl OriginChartView {
             viewport_origin: (0.0, 0.0),
             drag: None,
             focus_handle: None,
+            cursor_style: CursorStyle::Crosshair,
         }
     }
 
@@ -130,6 +132,7 @@ impl OriginChartView {
             viewport_origin: (0.0, 0.0),
             drag: None,
             focus_handle: None,
+            cursor_style: CursorStyle::Crosshair,
         }
     }
 
@@ -347,6 +350,17 @@ impl OriginChartView {
         self.invalidate_series_frame();
     }
 
+    fn update_cursor(&mut self, pane_x: f64, y: f64) {
+        self.cursor_style = match self.drag {
+            Some(ChartDrag::Pane) => CursorStyle::ClosedHand,
+            Some(ChartDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
+            Some(ChartDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
+            None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
+            None if pane_x < 0.0 || pane_x > self.engine.pane_w => CursorStyle::ResizeUpDown,
+            None => CursorStyle::Crosshair,
+        };
+    }
+
     fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize) {
         self.end_drag(pane_x, y);
         let pane = self.engine.pane_index_at_y(y);
@@ -394,6 +408,7 @@ impl OriginChartView {
         } else {
             None
         };
+        self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
 
@@ -406,6 +421,7 @@ impl OriginChartView {
             }
             None => {}
         }
+        self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
 
@@ -418,6 +434,7 @@ impl OriginChartView {
             }
             None => {}
         }
+        self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
 
@@ -442,12 +459,14 @@ impl OriginChartView {
                 .scroll_to(origin_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
             self.engine.time_scale.end_scroll();
         }
+        self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
 
     fn clear_pointer(&mut self, cx: &mut Context<Self>) {
         self.end_drag(-1.0, -1.0);
         self.engine.crosshair = None;
+        self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
         cx.notify();
     }
@@ -511,6 +530,7 @@ impl OriginChartView {
         if self.drag.is_some() && event.dragging() {
             self.drag_to(pane_x, y);
         } else {
+            self.update_cursor(pane_x, y);
             self.update_crosshair(pane_x, y);
         }
         cx.notify();
@@ -614,6 +634,7 @@ impl Render for OriginChartView {
             .id("origin_chart_surface")
             .size_full()
             .bg(rgb(self.theme.colors.background.rgb_u32()))
+            .cursor(self.cursor_style)
             .track_focus(&focus_handle)
             .key_context("OriginChart")
             .on_hover(move |hovered, _, cx| {
@@ -790,5 +811,21 @@ mod tests {
         assert!(chart.apply_key("home", false));
         assert!(chart.engine.scroll_position().abs() < f64::EPSILON);
         assert!(!chart.apply_key("a", false));
+    }
+
+    #[test]
+    fn pointer_cursor_truthfully_tracks_chart_and_axis_gestures() {
+        let mut chart = interactive_chart();
+        chart.update_cursor(300.0, 200.0);
+        assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+        chart.update_cursor(300.0, chart.engine.pane_h + 1.0);
+        assert_eq!(chart.cursor_style, CursorStyle::ResizeLeftRight);
+        chart.update_cursor(chart.engine.pane_w + 1.0, 200.0);
+        assert_eq!(chart.cursor_style, CursorStyle::ResizeUpDown);
+
+        chart.begin_drag(300.0, 200.0, 1);
+        assert_eq!(chart.cursor_style, CursorStyle::ClosedHand);
+        chart.end_drag(300.0, 200.0);
+        assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
     }
 }
