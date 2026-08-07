@@ -448,6 +448,8 @@ fn assert_message_redacted(message: &MarketWorkerMessage) {
             Ok(bootstrap) => format!("{} {}", bootstrap.subscription_id, bootstrap.worker_label),
             Err(error) => error.clone(),
         },
+        MarketWorkerMessage::RithmicLive { .. } => "Rithmic live snapshot".to_string(),
+        MarketWorkerMessage::RithmicDom(_) => "Rithmic depth frame".to_string(),
         MarketWorkerMessage::Update(publication) => format!(
             "{} {} {}",
             publication.subscription_id,

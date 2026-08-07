@@ -53,7 +53,7 @@ pub struct AggregateBookImage {
     pub identity: MarketIdentity,
     pub bids: Vec<OrderBookLevel>,
     pub asks: Vec<OrderBookLevel>,
-    pub timestamp: ProviderTimestamp,
+    pub timestamp: Option<ProviderTimestamp>,
     /// Connection-local reception order, not a provider sequence number.
     pub source_ordinal: u64,
 }
@@ -90,7 +90,7 @@ pub enum AggregateBookOutcome {
 }
 
 struct CandidateImage {
-    timestamp: ProviderTimestamp,
+    timestamp: Option<ProviderTimestamp>,
     bids: Vec<OrderBookLevel>,
     asks: Vec<OrderBookLevel>,
     chunks: usize,
@@ -269,7 +269,7 @@ impl AggregateBookAssembler {
         &mut self,
         mut bids: Vec<OrderBookLevel>,
         mut asks: Vec<OrderBookLevel>,
-        timestamp: ProviderTimestamp,
+        timestamp: Option<ProviderTimestamp>,
         observed_ordinal: u64,
     ) -> AggregateBookOutcome {
         bids.sort_by(|left, right| right.price.total_cmp(&left.price));
@@ -514,7 +514,7 @@ mod tests {
             },
             bids: bids.iter().copied().map(level).collect(),
             asks: asks.iter().copied().map(level).collect(),
-            timestamp,
+            timestamp: Some(timestamp),
         }
     }
 

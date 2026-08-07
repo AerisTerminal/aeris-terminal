@@ -56,9 +56,9 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stage E** (`in_progress` — bounded Rithmic shell, automatic entitled-contract selection, and visible Origin history landed). **Stage C** is `blocked_external` after deterministic conformance. |
-| Blocked | Stage C authorized Test evidence requires manual TTY provisioning into the native credential vault and an accepted provider login. The R\|Trader agreement screen was checked on 2026-08-07 and showed no agreement requiring signature. |
-| Next | Add deterministic forming/completed candle updates and integrated instrument/timeframe controls, then the read-only DOM; record the authorized Rithmic Test run in the Stage C evidence gate |
+| Current stage(s) | **Stage E** (`in_progress` — interactive title-bar controls, deterministic live candles, and a recovering read-only DOM are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
+| Blocked | None. The remaining Stage C work is authorized resilience evidence, not credential or agreement access. |
+| Next | Finish explicit lifecycle/feed-health UI, frame-boundary visibility throttling, tick-series semantics, and named 60/120/144 Hz evidence; extend the authorized Test run through heartbeat-loss/reconnect/recovery |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -69,16 +69,16 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `verified` | encrypted history retention/discovery [x]; deterministic shipping recovery [x]; BTC/ETH shipping live smoke [x]; frozen [x] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized Test evidence [ ] |
+| C — Rithmic read-only headless | `in_progress` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; resilience evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
-| E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; bounded symbol search/selection [x]; series selection [x]; authorized visible history [x] |
+| E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; bounded symbol/timeframe controls [x]; authorized visible history [x]; live candles [x]; recovering read-only DOM [x] |
 | F — Readiness / endurance | `ready` | [ ] not started |
 
 ### Remaining focus (ordered)
 
 - [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
 - [x] **Stage A:** deterministic shipping conformance [x]; BTC/ETH shipping live smoke [x]; frozen after verification (see §6).
-- [ ] **Stage C:** deterministic headless conformance [x]; authorized Rithmic Test evidence [ ] (see §8).
+- [ ] **Stage C:** deterministic headless conformance [x]; authorized core-path evidence [x]; resilience/recovery evidence [ ] (see §8).
 - [ ] **Stage E:** build the main Rithmic UI vertical from the verified deterministic Stage C/D contracts (see §10).
 
 
@@ -105,10 +105,10 @@ Full scope policy:
 | -------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Coinbase reference + chart | `verified`    | BTC-USD / ETH-USD 1m cache-first startup, corrupt-cache refetch, reconnect fencing, redaction, history/live continuity, bounded shutdown, and public shipping smoke pass; scope is frozen.                                                           |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
-| Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Test credentials. The kit is installed locally under `provider_kit/` (see §4.2 and §8); the R\|Trader agreement screen was checked on 2026-08-07 with no agreement shown. Live evidence still needs manual native-vault provisioning. |
-| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized Test evidence remains. |
+| Rithmic access             | `verified`    | The kit is installed locally under `provider_kit/`; native-vault credentials, Test login, search/reference, trades, quotes, depth, and history were exercised successfully on 2026-08-07. |
+| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized resilience/recovery evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
-| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with an integrated title bar and Origin chart while discovery/login/search/selection/subscription/history/retry remain off the UI thread. The entitled MNQ contract and 1m series hydrate automatically from a bounded, vault-only Rithmic Test replay; forming candles, integrated controls, and DOM remain. |
+| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/theme controls. The entitled MNQ contract hydrates automatically; bounded history seeds Origin, canonical trades replace the forming candle and append completed candles off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. Lifecycle/feed-health visibility, tick-series semantics, visibility throttling, and pacing evidence remain. |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
 | Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
 
@@ -300,10 +300,10 @@ None — gate met.
 
 ## 8. Stage C — Rithmic read-only headless core
 
-**Status:** `blocked_external`
+**Status:** `in_progress`
 
 Stage 0 and Stage C deterministic conformance are verified. Authorized Test
-evidence remains blocked on manual native-vault provisioning and an accepted login.
+core-path evidence is complete; authorized resilience/recovery evidence remains.
 
 Rithmic has unlocked the R|Protocol path (kit download + Rithmic Test credentials).
 The local kit is installed. Implementation of encoding/decoding and the read-only
@@ -356,7 +356,7 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 - [x] Rithmic Test credentials issued.
 - [x] Local kit installed at `provider_kit/current/` (`0.89.0.0`).
 - [x] R|Trader / R|Trader Pro Test agreement screen checked; no agreement was presented.
-- [ ] Credentials loaded only through vault (TTY → `NativeCredentialVault`) for live evidence.
+- [x] Credentials loaded only through vault (TTY → `NativeCredentialVault`) for live evidence.
 
 
 
@@ -403,7 +403,7 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 ### Gate
 
 - [x] `tools/run_rithmic_protocol_conformance.sh` proves discovery, login, trades, quotes, depth, heartbeat, disconnect/reconnect, recovery, clean stop, bounds, allowlisting, redaction, and the kit-unavailable build.
-- [ ] Authorized Rithmic Test traffic repeats the gate before provider behavior is marked `verified`.
+- [ ] Authorized Rithmic Test traffic repeats heartbeat-loss, disconnect/reconnect, and recovery evidence before provider behavior is marked `verified`; login, search/reference, trades, quotes, depth, history, and clean close already pass.
 
 
 
@@ -458,7 +458,7 @@ None — gate met.
 
 ## 10. Stage E — Main Rithmic UI vertical
 
-**Status:** `in_progress` (bounded shell, automatic entitled-contract selection, and authorized visible Origin history landed)
+**Status:** `in_progress` (interactive controls, live candles, and read-only DOM landed)
 
 Begin only after Stage 0 is `verified` and Stages C and D pass their
 deterministic headless gates.
@@ -475,16 +475,17 @@ deterministic headless gates.
 - [x] Launch a reliable local shell before login or history completion.
 - [x] Show provider profile, Test environment, and connection state.
 - [x] Search and select discovered symbols.
-- [x] Select tick, 1m, 5m, 15m, 1h, and daily series.
+- [x] Select 1m, 5m, 15m, 1h, and daily series.
+- [ ] Define and implement truthful tick-series aggregation and continuity.
 - [x] Keep the Origin chart mounted before provider data arrives; never substitute fixture candles.
 - [x] Run a native-vault-only headless Test smoke for login, discovery, selection, history, and streaming.
 - [x] Hydrate visible-range-first history into the Origin chart.
-- [ ] Replace forming candles and append completed candles deterministically.
-- [ ] Build a read-only DOM from one snapshot plus ordered deltas.
+- [x] Replace forming candles and append completed candles deterministically.
+- [x] Build a read-only DOM from complete provider images plus ordered canonical deltas.
 - [ ] Display loading, offline, reconnecting, stale, delayed, test, and live states.
 - [ ] Add an optional collapsible feed-health and latency panel.
 - [ ] Conflate chart and depth updates on frame boundaries.
-- [ ] Fence symbol/timeframe replacement by selection generation.
+- [x] Fence symbol/timeframe replacement by selection generation.
 - [ ] Bound hidden-window work and retained state.
 
 
@@ -492,15 +493,17 @@ deterministic headless gates.
 ### Gate
 
 Provider evidence on 2026-08-07: Test login, a 16-result `MNQ` search, CME
-instrument reference, live market data, and a one-minute history replay all
-passed headlessly from the native vault. The successful run received a live
-market frame and 259 historical bars for `MNQU6` on `CME`. Catalog venues ending
+instrument reference, trades, quotes, complete depth, and a one-minute history
+replay all passed headlessly from the native vault. The successful combined run
+received all three live market classes and 264 historical bars for `MNQU6` on
+`CME`. Rithmic depth images may omit `ssboe`; the adapter preserves that absence
+and uses the qualified local receive time instead of rejecting the frame. Catalog venues ending
 in `-Delayed` must use the base entitled exchange for reference, subscription,
 and history requests.
 
-- [ ] No GPUI-thread network, storage, protobuf, or aggregation work.
+- [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [ ] Correct DOM gap recovery.
-- [ ] Responsive symbol/timeframe replacement.
+- [x] Responsive symbol/timeframe replacement.
 - [ ] Measured 60/120/144 Hz frame pacing on named hardware.
 - [ ] Test and live states are visually explicit.
 

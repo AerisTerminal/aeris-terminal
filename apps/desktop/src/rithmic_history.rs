@@ -153,7 +153,6 @@ impl RithmicSeriesBrowser {
         self.selected = None;
     }
 
-    #[cfg(test)]
     pub(crate) const fn selected(&self) -> Option<RithmicSeriesRequest> {
         self.selected
     }

@@ -101,7 +101,7 @@ pub struct OrderBookUpdate {
     pub present_sides: OrderBookSides,
     pub bids: Vec<OrderBookLevel>,
     pub asks: Vec<OrderBookLevel>,
-    pub timestamp: ProviderTimestamp,
+    pub timestamp: Option<ProviderTimestamp>,
 }
 
 /// Sanitized market-data message decoded from one binary WebSocket message.
@@ -246,7 +246,7 @@ fn decode_order_book(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError
         present_sides,
         bids,
         asks,
-        timestamp: timestamp(message.ssboe, message.usecs)?,
+        timestamp: optional_timestamp(message.ssboe, message.usecs)?,
     }))
 }
 
@@ -303,6 +303,18 @@ fn timestamp(
         seconds,
         microseconds,
     })
+}
+
+#[cfg(rithmic_kit)]
+fn optional_timestamp(
+    seconds: Option<i32>,
+    microseconds: Option<i32>,
+) -> Result<Option<ProviderTimestamp>, ProtocolError> {
+    match (seconds, microseconds) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(ProtocolError::MissingField("ssboe")),
+        (Some(seconds), microseconds) => timestamp(Some(seconds), microseconds).map(Some),
+    }
 }
 
 #[cfg(rithmic_kit)]
@@ -539,6 +551,20 @@ mod tests {
         assert!(matches!(
             codec.decode_market(&unknown_presence.encode_to_vec()),
             Err(ProtocolError::InvalidPresenceBits)
+        ));
+    }
+
+    #[test]
+    fn aggregate_book_accepts_provider_frames_without_exchange_timestamp() {
+        let mut book = order_book_message(vec![5_100.0], vec![10]);
+        book.ssboe = None;
+        book.usecs = None;
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&book.encode_to_vec()),
+            Ok(DecodedMarketMessage::OrderBook(OrderBookUpdate {
+                timestamp: None,
+                ..
+            }))
         ));
     }
 

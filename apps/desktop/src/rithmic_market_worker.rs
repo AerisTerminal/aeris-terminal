@@ -4,6 +4,7 @@ use crate::{
         market_worker_channel,
     },
     rithmic_history::{InstalledRithmicInstrument, RithmicHistoryTask, history_message},
+    rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart},
     rithmic_shell::RithmicShellState,
 };
 use axiusflow_application::ProvenancedMarketBar;
@@ -13,6 +14,8 @@ use axiusflow_desktop_provider_runtime::{
     ProviderInvalidationReason, ProviderSessionEvent,
 };
 use axiusflow_desktop_storage::CatalogKey;
+use axiusflow_instruments::InstrumentPrecision;
+use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_rithmic_protocol_adapter::{
@@ -20,6 +23,7 @@ use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicProviderConfig,
     RithmicProviderDriver, RithmicRetryScheduler, RithmicSessionLimits, try_recv_rithmic_event,
 };
+use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
@@ -44,6 +48,26 @@ const CATALOG_KEY_ID: &str = "rithmic-test-history-catalog-key-v1";
 type RithmicWorker =
     DesktopMarketWorker<ProvenancedMarketBar, NativeCredentialVault, RithmicProviderDriver>;
 type RithmicEvents = axiusflow_rithmic_protocol_adapter::RithmicProviderEvents;
+
+struct RithmicRuntimeState {
+    selection_installed: bool,
+    installed_instrument: Option<InstalledRithmicInstrument>,
+    history: Option<RithmicHistoryTask>,
+    live_chart: Option<RithmicLiveChart>,
+    dom: ReadOnlyDom,
+}
+
+impl RithmicRuntimeState {
+    fn new() -> Self {
+        Self {
+            selection_installed: false,
+            installed_instrument: None,
+            history: RithmicHistoryTask::start().ok(),
+            live_chart: None,
+            dom: ReadOnlyDom::new(nonzero(20)),
+        }
+    }
+}
 
 pub(crate) fn start(
     history_root: PathBuf,
@@ -97,7 +121,7 @@ fn run(
         let _ = wake_tx.try_send(());
     });
     let opened = open_worker(history_root, ui_thread, detailed_diagnostics, wake);
-    let Ok((mut worker, events)) = opened else {
+    let Ok((worker, events)) = opened else {
         send_connection(
             messages,
             FeedConnectionState::Recovering,
@@ -106,6 +130,16 @@ fn run(
         wait_for_shutdown(commands);
         return;
     };
+    run_connected(messages, commands, worker, &events, &wake_rx);
+}
+
+fn run_connected(
+    messages: &crate::market_worker::MarketWorkerSender,
+    commands: &Receiver<MarketWorkerCommand>,
+    mut worker: RithmicWorker,
+    events: &RithmicEvents,
+    wake_rx: &Receiver<()>,
+) {
     send_connection(
         messages,
         FeedConnectionState::Discovering,
@@ -120,39 +154,36 @@ fn run(
     }
 
     let mut retries = RithmicRetryScheduler::default();
-    let mut selection_installed = false;
-    let mut installed_instrument = None;
-    let mut history = RithmicHistoryTask::start().ok();
+    let mut state = RithmicRuntimeState::new();
     loop {
-        if process_command(
-            commands,
-            &worker,
-            &events,
-            messages,
-            selection_installed,
-            installed_instrument.as_ref(),
-            history.as_mut(),
-        ) {
+        if process_command(commands, &worker, events, messages, &mut state) {
             break;
         }
-        drain_events(
-            &mut worker,
-            &events,
-            &mut retries,
-            messages,
-            &mut selection_installed,
-            &mut installed_instrument,
-            history.as_mut(),
-        );
-        if let Some(result) = history.as_mut().and_then(RithmicHistoryTask::try_recv) {
+        drain_events(&mut worker, events, &mut retries, messages, &mut state);
+        if let Some(result) = state
+            .history
+            .as_mut()
+            .and_then(RithmicHistoryTask::try_recv)
+        {
+            state.live_chart = result.result.as_ref().ok().and_then(|bootstrap| {
+                RithmicLiveChart::from_history(
+                    RithmicChartGeneration {
+                        selection: result.selection_generation,
+                        series: result.series_generation,
+                    },
+                    &bootstrap.snapshot,
+                )
+                .ok()
+            });
             let _ = messages.send(history_message(result));
         }
         if retries
             .retry_due(&mut worker, Instant::now())
             .is_ok_and(|generation| generation.is_some())
         {
-            selection_installed = false;
-            installed_instrument = None;
+            state.selection_installed = false;
+            state.installed_instrument = None;
+            state.live_chart = None;
             send_connection(
                 messages,
                 FeedConnectionState::Discovering,
@@ -194,9 +225,7 @@ fn process_command(
     worker: &RithmicWorker,
     events: &RithmicEvents,
     messages: &crate::market_worker::MarketWorkerSender,
-    selection_installed: bool,
-    installed_instrument: Option<&InstalledRithmicInstrument>,
-    history: Option<&mut RithmicHistoryTask>,
+    state: &mut RithmicRuntimeState,
 ) -> bool {
     let (dispatch, failure_message) = match commands.try_recv() {
         Ok(MarketWorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => return true,
@@ -206,27 +235,34 @@ fn process_command(
             }),
             "Rithmic symbol search could not be scheduled",
         ),
-        Ok(MarketWorkerCommand::RithmicSelect(selection)) => (
-            dispatch_catalog_command(worker, events, |events, generation| {
-                events.select_instrument(generation, selection)
-            }),
-            "Rithmic symbol selection could not be scheduled",
-        ),
-        Ok(MarketWorkerCommand::RithmicHistory(request)) => (
-            history.ok_or(()).and_then(|history| {
-                installed_instrument
-                    .cloned()
-                    .ok_or(())
-                    .and_then(|instrument| history.request(request, instrument).map_err(|_| ()))
-            }),
-            "Rithmic visible history could not be scheduled",
-        ),
+        Ok(MarketWorkerCommand::RithmicSelect(selection)) => {
+            state.live_chart = None;
+            (
+                dispatch_catalog_command(worker, events, |events, generation| {
+                    events.select_instrument(generation, selection)
+                }),
+                "Rithmic symbol selection could not be scheduled",
+            )
+        }
+        Ok(MarketWorkerCommand::RithmicHistory(request)) => {
+            state.live_chart = None;
+            (
+                state.history.as_mut().ok_or(()).and_then(|history| {
+                    state
+                        .installed_instrument
+                        .clone()
+                        .ok_or(())
+                        .and_then(|instrument| history.request(request, instrument).map_err(|_| ()))
+                }),
+                "Rithmic visible history could not be scheduled",
+            )
+        }
         Ok(MarketWorkerCommand::Recovery(_)) | Err(TryRecvError::Empty) => return false,
     };
     if dispatch.is_err() {
         send_connection(
             messages,
-            catalog_connection_state(selection_installed),
+            catalog_connection_state(state.selection_installed),
             failure_message,
         );
     }
@@ -238,9 +274,7 @@ fn drain_events(
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
     messages: &crate::market_worker::MarketWorkerSender,
-    selection_installed: &mut bool,
-    installed_instrument: &mut Option<InstalledRithmicInstrument>,
-    mut history: Option<&mut RithmicHistoryTask>,
+    state: &mut RithmicRuntimeState,
 ) {
     while events.has_ready() {
         while let Some(callback) = events.try_recv_catalog() {
@@ -253,11 +287,12 @@ fn drain_events(
                 ..
             } = &callback.event
             {
-                if let Some(history) = history.as_mut() {
+                if let Some(history) = state.history.as_mut() {
                     history.cancel();
                 }
-                *selection_installed = true;
-                *installed_instrument = Some(InstalledRithmicInstrument {
+                state.live_chart = None;
+                state.selection_installed = true;
+                state.installed_instrument = Some(InstalledRithmicInstrument {
                     selection_generation: *selection_generation,
                     descriptor: instrument.clone(),
                     entitlement_id: format!(
@@ -265,6 +300,25 @@ fn drain_events(
                         instrument.venue_id, instrument.provider_symbol
                     ),
                 });
+                if let Ok(precision) =
+                    InstrumentPrecision::try_new(instrument.price_scale, instrument.quantity_scale)
+                {
+                    state.dom.select(DomSelection {
+                        provider_id: "rithmic".to_string(),
+                        instrument_id: instrument.instrument_id.clone(),
+                        entitlement_id: format!(
+                            "rithmic-test:{}:{}",
+                            instrument.venue_id, instrument.provider_symbol
+                        ),
+                        session_generation: callback.generation.get(),
+                        selection_generation: u64::try_from(selection_generation.get())
+                            .unwrap_or(u64::MAX),
+                        precision,
+                    });
+                    if let Some(frame) = state.dom.frame() {
+                        let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+                    }
+                }
             }
             let _ = messages.send(MarketWorkerMessage::RithmicCatalog(callback.event));
         }
@@ -276,13 +330,19 @@ fn drain_events(
                         | AppliedRithmicEvent::TerminalFailure { .. }
                         | AppliedRithmicEvent::Semantic(ProviderSessionEvent::Invalidated { .. })
                 ) {
-                    if let Some(history) = history.as_mut() {
+                    if let Some(history) = state.history.as_mut() {
                         history.cancel();
                     }
-                    *selection_installed = false;
-                    *installed_instrument = None;
+                    state.selection_installed = false;
+                    state.installed_instrument = None;
+                    state.live_chart = None;
+                    if let Some(frame) = state.dom.mark_stale() {
+                        let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+                    }
                 }
-                publish_event(messages, &event, selection_installed);
+                publish_live_chart(messages, &event, &mut state.live_chart);
+                publish_dom(messages, &event, &mut state.dom);
+                publish_event(messages, &event, &mut state.selection_installed);
             }
             Ok(None) => break,
             Err(_) => {
@@ -293,6 +353,65 @@ fn drain_events(
                 );
                 break;
             }
+        }
+    }
+}
+
+fn publish_dom(
+    messages: &crate::market_worker::MarketWorkerSender,
+    event: &AppliedRithmicEvent,
+    dom: &mut ReadOnlyDom,
+) {
+    let AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market { event, .. }) = event else {
+        return;
+    };
+    match dom.apply_event(event) {
+        Ok(DomUpdateOutcome::Published(frame) | DomUpdateOutcome::RecoveryRequired(frame, _)) => {
+            let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+        }
+        Ok(DomUpdateOutcome::Ignored) => {}
+        Err(_) => {
+            if let Some(frame) = dom.frame() {
+                let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+            }
+        }
+    }
+}
+
+fn publish_live_chart(
+    messages: &crate::market_worker::MarketWorkerSender,
+    event: &AppliedRithmicEvent,
+    live_chart: &mut Option<RithmicLiveChart>,
+) {
+    let AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market {
+        event: MarketEvent::Trade(trade),
+        ..
+    }) = event
+    else {
+        return;
+    };
+    let Some(chart) = live_chart.as_mut() else {
+        return;
+    };
+    let generation = chart.generation();
+    match chart.apply_trade(generation, trade) {
+        Ok(publication) => {
+            let _ = messages.send(MarketWorkerMessage::RithmicLive {
+                selection_generation: publication.generation.selection,
+                series_generation: publication.generation.series,
+                snapshot: publication.snapshot,
+            });
+        }
+        Err(
+            crate::rithmic_live_chart::RithmicLiveChartError::OutOfOrderTrade
+            | crate::rithmic_live_chart::RithmicLiveChartError::StaleGeneration,
+        ) => {}
+        Err(_) => {
+            *live_chart = None;
+            let _ = messages.send(MarketWorkerMessage::State {
+                state: crate::market_worker::ChartState::Recovering,
+                message: "Rithmic live candles require a covering history snapshot".to_string(),
+            });
         }
     }
 }

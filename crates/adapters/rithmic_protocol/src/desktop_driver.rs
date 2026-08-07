@@ -1975,7 +1975,7 @@ impl CanonicalSessionState {
                         instrument,
                         self.generation,
                         source_ordinal,
-                        trade.timestamp,
+                        Some(trade.timestamp),
                         received_unix_nanos,
                     )?,
                     trade_id: format!("rithmic-local-{}-{source_ordinal}", self.generation.get()),
@@ -2008,7 +2008,7 @@ impl CanonicalSessionState {
                         &instrument,
                         self.generation,
                         source_ordinal,
-                        quote.timestamp,
+                        Some(quote.timestamp),
                         received_unix_nanos,
                     )?,
                     bid_price: fixed_price(bid.price, instrument.descriptor.price_scale)?,
@@ -2112,7 +2112,7 @@ fn metadata(
     instrument: &RithmicProviderInstrument,
     generation: SessionGeneration,
     source_sequence: u64,
-    timestamp: ProviderTimestamp,
+    timestamp: Option<ProviderTimestamp>,
     received_unix_nanos: i64,
 ) -> Result<EventMetadata, (ProviderInvalidationReason, RetryDisposition)> {
     Ok(EventMetadata {
@@ -2122,7 +2122,7 @@ fn metadata(
         source_sequence,
         session_generation: generation.get(),
         timestamps: QualifiedTimestamp {
-            exchange_unix_nanos: Some(provider_timestamp_nanos(timestamp)?),
+            exchange_unix_nanos: timestamp.map(provider_timestamp_nanos).transpose()?,
             provider_unix_nanos: None,
             received_unix_nanos,
         },
@@ -2792,7 +2792,7 @@ mod tests {
                     },
                     bids: vec![bid],
                     asks: Vec::new(),
-                    timestamp: timestamp(),
+                    timestamp: None,
                 }),
                 1,
                 1,
@@ -2810,7 +2810,7 @@ mod tests {
                     },
                     bids: Vec::new(),
                     asks: vec![ask],
-                    timestamp: timestamp(),
+                    timestamp: None,
                 }),
                 2,
                 2,
@@ -2821,6 +2821,7 @@ mod tests {
             panic!("complete aggregate image must produce a depth snapshot");
         };
         assert_eq!(depth.metadata.source_sequence, 2);
+        assert_eq!(depth.metadata.timestamps.exchange_unix_nanos, None);
         assert_eq!(depth.bids[0].price, 510_025);
         assert_eq!(depth.bids[0].quantity, 200);
         assert_eq!(depth.asks[0].price, 510_050);
@@ -2837,7 +2838,7 @@ mod tests {
                     },
                     bids: Vec::new(),
                     asks: Vec::new(),
-                    timestamp: timestamp(),
+                    timestamp: Some(timestamp()),
                 }),
                 3,
                 3,

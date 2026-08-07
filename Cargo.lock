@@ -1012,6 +1012,12 @@ dependencies = [
 [[package]]
 name = "axiusflow_terminal_ui"
 version = "0.1.0"
+dependencies = [
+ "axiusflow_design_system",
+ "axiusflow_instruments",
+ "axiusflow_market_data",
+ "gpui",
+]
 
 [[package]]
 name = "axiusflow_testing"

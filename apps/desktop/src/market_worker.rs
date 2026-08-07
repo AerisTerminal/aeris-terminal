@@ -22,6 +22,7 @@ use axiusflow_observability::FeedDiagnosticsSnapshot;
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicInstrumentSelection, RithmicSymbolSearch,
 };
+use axiusflow_terminal_ui::DomFrame;
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
@@ -117,6 +118,12 @@ pub(crate) enum MarketWorkerMessage {
         series_generation: NonZeroUsize,
         result: Result<Box<MarketWorkerBootstrap>, String>,
     },
+    RithmicLive {
+        selection_generation: NonZeroUsize,
+        series_generation: NonZeroUsize,
+        snapshot: ReplaySnapshot,
+    },
+    RithmicDom(DomFrame),
 }
 
 struct MarketWorkerMailbox {
@@ -270,6 +277,14 @@ impl MarketWorkerSender {
                 self.send_rithmic_history(queue, message);
                 None
             }
+            message @ MarketWorkerMessage::RithmicLive { .. } => {
+                self.send_rithmic_live(queue, message);
+                None
+            }
+            message @ MarketWorkerMessage::RithmicDom(_) => {
+                self.send_rithmic_dom(queue, message);
+                None
+            }
             message => Some(message),
         }
     }
@@ -336,11 +351,85 @@ impl MarketWorkerSender {
         queue: &mut VecDeque<MarketWorkerMessage>,
         message: MarketWorkerMessage,
     ) {
+        let incoming_generation = rithmic_message_generation(&message);
         if let Some(index) = queue
             .iter()
             .position(|queued| matches!(queued, MarketWorkerMessage::RithmicHistory { .. }))
         {
+            if rithmic_message_generation(&queue[index]) > incoming_generation {
+                return;
+            }
             queue[index] = message;
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        }
+    }
+
+    fn send_rithmic_live(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        let incoming_generation = rithmic_message_generation(&message);
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicLive { .. }))
+        {
+            if rithmic_message_generation(&queue[index]) > incoming_generation {
+                return;
+            }
+            queue[index] = message;
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        }
+    }
+
+    fn send_rithmic_dom(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicDom(_)))
+        {
+            let replace = match (&queue[index], &message) {
+                (
+                    MarketWorkerMessage::RithmicDom(current),
+                    MarketWorkerMessage::RithmicDom(next),
+                ) => {
+                    (next.selection_generation, next.revision)
+                        >= (current.selection_generation, current.revision)
+                }
+                _ => false,
+            };
+            if replace {
+                queue[index] = message;
+            }
             return;
         }
         if queue.len() >= self.mailbox.capacity
@@ -486,6 +575,22 @@ impl MarketWorkerSender {
     }
 }
 
+fn rithmic_message_generation(message: &MarketWorkerMessage) -> Option<(usize, usize)> {
+    match message {
+        MarketWorkerMessage::RithmicHistory {
+            selection_generation,
+            series_generation,
+            ..
+        }
+        | MarketWorkerMessage::RithmicLive {
+            selection_generation,
+            series_generation,
+            ..
+        } => Some((selection_generation.get(), series_generation.get())),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CoalescedUiUpdates {
     pub(crate) generation: SessionGeneration,
@@ -536,7 +641,9 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         | MarketWorkerMessage::State { .. }
         | MarketWorkerMessage::Connection { .. }
         | MarketWorkerMessage::RithmicCatalog(_)
-        | MarketWorkerMessage::RithmicHistory { .. } => None,
+        | MarketWorkerMessage::RithmicHistory { .. }
+        | MarketWorkerMessage::RithmicLive { .. }
+        | MarketWorkerMessage::RithmicDom(_) => None,
     }
 }
 
@@ -1247,11 +1354,13 @@ mod tests {
     };
     use axiusflow_application::ReplayStreamUpdate;
     use axiusflow_desktop_provider_runtime::SessionGeneration;
+    use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
     use axiusflow_rithmic_protocol_adapter::{
         RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
         RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
     };
+    use axiusflow_terminal_ui::DomFrame;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
@@ -1888,6 +1997,80 @@ mod tests {
                 result: Err(error),
                 ..
             }] if *series_generation == latest && error == "latest failed"
+        ));
+    }
+
+    #[test]
+    fn stale_live_snapshot_cannot_replace_a_newer_generation() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let snapshot = fixture
+            .publish_snapshot(2)
+            .expect("snapshot publishes")
+            .snapshot;
+        let first = NonZeroUsize::MIN;
+        let latest = NonZeroUsize::new(2).expect("generation is nonzero");
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicLive {
+                    selection_generation: first,
+                    series_generation: latest,
+                    snapshot: snapshot.clone(),
+                })
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicLive {
+                    selection_generation: first,
+                    series_generation: first,
+                    snapshot,
+                })
+                .is_ok()
+        );
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RithmicLive { series_generation, .. }]
+                if *series_generation == latest
+        ));
+    }
+
+    #[test]
+    fn dom_mailbox_retains_latest_complete_frame() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let frame = |revision, state| DomFrame {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "rithmic:CME:MNQ".to_string(),
+            entitlement_id: "test".to_string(),
+            session_generation: 1,
+            selection_generation: 2,
+            revision,
+            source_watermark: revision,
+            state,
+            rows: Vec::new(),
+        };
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicDom(frame(
+                    3,
+                    OrderBookState::Ready,
+                )))
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicDom(frame(
+                    2,
+                    OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap),
+                )))
+                .is_ok()
+        );
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RithmicDom(frame)]
+                if frame.revision == 3 && frame.state == OrderBookState::Ready
         ));
     }
 

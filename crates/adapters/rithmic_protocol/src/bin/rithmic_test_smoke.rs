@@ -1,7 +1,7 @@
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_rithmic_protocol_adapter::{
-    CollectionProgress, DecodedCatalogMessage, DecodedControlMessage, DecodedTimeBarType,
-    HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
+    CollectionProgress, DecodedCatalogMessage, DecodedControlMessage, DecodedMarketMessage,
+    DecodedTimeBarType, HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
     InstrumentReferenceRequest, MarketDataSubscription, RITHMIC_TEST_VAULT_KEY,
     RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes, RithmicSessionLimits,
     RithmicSessionMessage, RithmicTestSession, SearchPattern, SubscriptionAction,
@@ -158,13 +158,15 @@ fn test_subscription(
             exchange: &selected.exchange,
             action: SubscriptionAction::Subscribe,
             trades: true,
-            quotes: false,
-            order_book: false,
+            quotes: true,
+            order_book: true,
         })
         .map_err(|error| format!("subscription_send_failed={error}"))?;
     let mut subscription_rejected = false;
-    let mut market_messages = 0usize;
-    while market_messages < 1 && !subscription_rejected {
+    let mut trade_observed = false;
+    let mut quote_observed = false;
+    let mut depth_observed = false;
+    while !(subscription_rejected || trade_observed && quote_observed && depth_observed) {
         match ticker
             .read_next()
             .map_err(|error| format!("stream_read_failed={error}"))?
@@ -176,14 +178,24 @@ fn test_subscription(
                     subscription_rejected = true;
                 }
             }
-            RithmicSessionMessage::Market(_) => market_messages += 1,
+            RithmicSessionMessage::Market(DecodedMarketMessage::Trade(_)) => {
+                trade_observed = true;
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::Quote(_)) => {
+                quote_observed = true;
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::OrderBook(_)) => {
+                depth_observed = true;
+            }
             _ => {}
         }
     }
     if subscription_rejected {
         println!("rithmic_live_stream=rejected_by_provider");
     } else {
-        println!("rithmic_live_stream=passed messages={market_messages}");
+        println!(
+            "rithmic_live_stream=passed trades={trade_observed} quotes={quote_observed} depth={depth_observed}"
+        );
     }
     Ok(subscription_rejected)
 }

@@ -6,6 +6,12 @@
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 
+mod dom;
+mod dom_view;
+
+pub use dom::{DomColumnLevel, DomFrame, DomRow, DomSelection, DomUpdateOutcome, ReadOnlyDom};
+pub use dom_view::ReadOnlyDomView;
+
 /// A bounded queue that prevents background producers from growing UI work.
 #[derive(Debug)]
 pub struct BoundedUiQueue<Message> {

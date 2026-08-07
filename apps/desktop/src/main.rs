@@ -3,6 +3,7 @@
 mod live_market_worker;
 mod market_worker;
 mod rithmic_history;
+mod rithmic_live_chart;
 mod rithmic_market_worker;
 mod rithmic_shell;
 mod windowed_benchmark;
@@ -15,12 +16,13 @@ use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
     RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
 };
+use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     App, Bounds, Context, Entity, Hsla, Render, Window, WindowBounds, WindowOptions, div,
     prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Root, StyledExt, TitleBar,
+    Disableable, Root, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
@@ -96,6 +98,8 @@ fn default_rithmic_contract_index(
 
 struct TerminalApp {
     chart: Option<Entity<OriginChartView>>,
+    dom: Entity<ReadOnlyDomView>,
+    dom_visible: bool,
     chart_state: ChartState,
     chart_state_message: String,
     theme: AxiusflowTheme,
@@ -117,6 +121,16 @@ struct TerminalApp {
 struct HeaderState {
     theme: AxiusflowTheme,
     market_label: String,
+    series_label: String,
+    controls: HeaderControls,
+    dom_visible: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HeaderControls {
+    instrument: bool,
+    series: bool,
+    dom: bool,
 }
 
 impl TerminalApp {
@@ -194,9 +208,12 @@ impl TerminalApp {
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
         );
+        let dom = cx.new(move |_| ReadOnlyDomView::new(theme));
         Self::start_market_poll(cx);
         Self {
             chart,
+            dom,
+            dom_visible: false,
             chart_state,
             chart_state_message,
             theme,
@@ -449,6 +466,16 @@ impl TerminalApp {
                 } => {
                     self.apply_rithmic_history(selection_generation, series_generation, result, cx);
                 }
+                MarketWorkerMessage::RithmicLive {
+                    selection_generation,
+                    series_generation,
+                    snapshot,
+                } => {
+                    self.apply_rithmic_live(selection_generation, series_generation, &snapshot, cx);
+                }
+                MarketWorkerMessage::RithmicDom(frame) => {
+                    self.apply_rithmic_dom(frame, cx);
+                }
             }
         }
         if disconnected && self.connection_state.is_some() {
@@ -494,6 +521,9 @@ impl TerminalApp {
                 chart_cx.notify();
             });
         }
+        self.dom.update(cx, |dom, dom_cx| {
+            dom.set_theme(theme, dom_cx);
+        });
         self.theme = theme;
         cx.notify();
     }
@@ -552,7 +582,7 @@ impl TerminalApp {
             selection.instrument.exchange, selection.instrument.symbol
         );
         let request =
-            RithmicReadOnlySubscription::try_new(true, false, false).and_then(|subscription| {
+            RithmicReadOnlySubscription::try_new(true, false, true).and_then(|subscription| {
                 RithmicInstrumentSelection::try_new(
                     selection.generation,
                     selection.search_generation,
@@ -728,6 +758,101 @@ impl TerminalApp {
             cx,
         );
     }
+
+    fn apply_rithmic_live(
+        &mut self,
+        selection_generation: std::num::NonZeroUsize,
+        series_generation: std::num::NonZeroUsize,
+        snapshot: &axiusflow_application::ReplaySnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.series_browser.selected() else {
+            return;
+        };
+        if selected.selection_generation != selection_generation
+            || selected.series_generation != series_generation
+        {
+            return;
+        }
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart
+            .update(cx, |chart, chart_cx| {
+                let result = chart.load_replay(snapshot);
+                if result.is_ok() {
+                    chart_cx.notify();
+                }
+                result
+            })
+            .is_err()
+        {
+            self.set_chart_state(
+                ChartState::Recovering,
+                "Rithmic live chart requires a covering snapshot".to_string(),
+                cx,
+            );
+            return;
+        }
+        self.series_message = "Live candle is current".to_string();
+        self.chart_state = ChartState::Ready;
+        self.chart_state_message = "Rithmic live candle is current".to_string();
+        cx.notify();
+    }
+
+    fn apply_rithmic_dom(&mut self, frame: DomFrame, cx: &mut Context<Self>) {
+        let selected_generation = self
+            .symbol_browser
+            .selected()
+            .and_then(|selection| u64::try_from(selection.generation.get()).ok());
+        if selected_generation != Some(frame.selection_generation) {
+            return;
+        }
+        self.dom.update(cx, |dom, dom_cx| {
+            dom.replace_frame(frame, dom_cx);
+        });
+    }
+
+    fn toggle_dom(&mut self, cx: &mut Context<Self>) {
+        if self.symbol_browser.selected().is_some() {
+            self.dom_visible = !self.dom_visible;
+            cx.notify();
+        }
+    }
+
+    fn select_next_rithmic_symbol(&mut self, cx: &mut Context<Self>) {
+        let results = self.symbol_browser.results();
+        if results.is_empty() {
+            self.search_rithmic_query("MNQ", cx);
+            return;
+        }
+        let selected_symbol = self
+            .symbol_browser
+            .selected()
+            .map(|selection| selection.instrument.symbol.as_str());
+        let next = selected_symbol
+            .and_then(|symbol| results.iter().position(|result| result.symbol == symbol))
+            .map_or(0, |index| (index + 1) % results.len());
+        self.select_rithmic_symbol(next, cx);
+    }
+
+    fn select_next_rithmic_series(&mut self, cx: &mut Context<Self>) {
+        if self.symbol_browser.selected().is_none() {
+            return;
+        }
+        let current = self
+            .series_browser
+            .selected()
+            .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
+                request.series
+            });
+        let supported = &rithmic_history::RithmicSeries::ALL[1..];
+        let next = supported
+            .iter()
+            .position(|series| *series == current)
+            .map_or(0, |index| (index + 1) % supported.len());
+        self.select_rithmic_series(supported[next], cx);
+    }
 }
 
 impl Render for TerminalApp {
@@ -742,8 +867,43 @@ impl Render for TerminalApp {
             HeaderState {
                 theme,
                 market_label: self.subscription_id.clone(),
+                series_label: self
+                    .series_browser
+                    .selected()
+                    .map_or("1m", |request| request.series.label())
+                    .to_string(),
+                controls: HeaderControls {
+                    instrument: !self.symbol_browser.results().is_empty(),
+                    series: self.symbol_browser.selected().is_some(),
+                    dom: self.symbol_browser.selected().is_some(),
+                },
+                dom_visible: self.dom_visible,
             },
         );
+
+        let chart = div()
+            .id("primary_chart")
+            .v_flex()
+            .flex_1()
+            .overflow_hidden()
+            .border_1()
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.background))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .children(self.chart.clone())
+                    .children(self.chart.is_none().then(|| {
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(gpui_color(colors.muted_foreground))
+                            .child(self.chart_state.label())
+                    })),
+            );
 
         div()
             .v_flex()
@@ -753,28 +913,20 @@ impl Render for TerminalApp {
             .child(header)
             .child(
                 div()
-                    .id("primary_chart")
-                    .v_flex()
+                    .id("market_workspace")
+                    .flex()
                     .flex_1()
                     .overflow_hidden()
-                    .border_1()
-                    .border_color(gpui_color(colors.border))
                     .bg(gpui_color(colors.background))
-                    .child(
+                    .child(chart)
+                    .children(self.dom_visible.then(|| {
                         div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .children(self.chart.clone())
-                            .children(self.chart.is_none().then(|| {
-                                div()
-                                    .size_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(gpui_color(colors.muted_foreground))
-                                    .child(self.chart_state.label())
-                            })),
-                    ),
+                            .id("depth_panel")
+                            .w(px(320.0))
+                            .h_full()
+                            .flex_none()
+                            .child(self.dom.clone())
+                    })),
             )
     }
 }
@@ -818,10 +970,40 @@ fn terminal_header(
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(gpui_color(colors.muted_foreground))
-                            .child(state.market_label),
+                        Button::new("instrument_selector")
+                            .label(state.market_label)
+                            .custom(active_button)
+                            .disabled(!state.controls.instrument)
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, TerminalApp::select_next_rithmic_symbol);
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("series_selector")
+                            .label(state.series_label)
+                            .custom(active_button)
+                            .disabled(!state.controls.series)
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, TerminalApp::select_next_rithmic_series);
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("dom_toggle")
+                            .label(if state.dom_visible { "Chart" } else { "DOM" })
+                            .custom(active_button)
+                            .disabled(!state.controls.dom)
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, TerminalApp::toggle_dom);
+                                }
+                            }),
                     )
                     .child(
                         Button::new("theme_toggle")
