@@ -111,6 +111,14 @@ impl RithmicSymbolBrowser {
     pub(crate) fn selected(&self) -> Option<&RithmicSymbolSelection> {
         self.selected.as_ref()
     }
+
+    pub(crate) fn invalidate_session(&mut self) {
+        self.pending_search_id = None;
+        self.completed_search_id = None;
+        self.results.clear();
+        self.pending_selection = None;
+        self.selected = None;
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -235,5 +243,22 @@ mod tests {
         ));
         assert!(browser.select(0).is_none());
         assert_eq!(browser.pending_search_id(), Some(request.request_id));
+    }
+
+    #[test]
+    fn session_invalidation_fences_catalog_and_selection_state() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let search = browser.begin_search("ES").expect("query validates");
+        assert!(browser.apply_results(search.request_id, vec![result("ESM7")]));
+        let selection = browser.select(0).expect("result can be selected");
+        assert!(browser.confirm_selection(selection.generation));
+
+        browser.invalidate_session();
+
+        assert!(browser.results().is_empty());
+        assert!(browser.selected().is_none());
+        assert!(!browser.apply_results(search.request_id, vec![result("ESM7")]));
+        let next = browser.begin_search("ES").expect("new session can search");
+        assert!(next.request_id > search.request_id);
     }
 }

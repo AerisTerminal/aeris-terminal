@@ -94,6 +94,15 @@ fn default_rithmic_contract_index(
         .map(|(index, _)| index)
 }
 
+fn reconnect_contract_index(
+    results: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
+    target: &RithmicReconnectTarget,
+) -> Option<usize> {
+    results
+        .iter()
+        .position(|result| result.symbol == target.symbol && result.exchange == target.exchange)
+}
+
 struct TerminalApp {
     chart: Option<Entity<OriginChartView>>,
     dom: Entity<ReadOnlyDomView>,
@@ -117,6 +126,31 @@ struct TerminalApp {
     series_browser: rithmic_history::RithmicSeriesBrowser,
     series_message: String,
     rithmic_autoload_started: bool,
+    rithmic_reconnect: RithmicReconnectState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RithmicReconnectTarget {
+    symbol: String,
+    exchange: String,
+    series: rithmic_history::RithmicSeries,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum RithmicReconnectState {
+    #[default]
+    Idle,
+    AwaitingSearch(RithmicReconnectTarget),
+    SearchInFlight(RithmicReconnectTarget),
+}
+
+impl RithmicReconnectState {
+    fn target(&self) -> Option<&RithmicReconnectTarget> {
+        match self {
+            Self::AwaitingSearch(target) | Self::SearchInFlight(target) => Some(target),
+            Self::Idle => None,
+        }
+    }
 }
 
 struct HeaderState {
@@ -264,6 +298,7 @@ impl TerminalApp {
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
             rithmic_autoload_started: false,
+            rithmic_reconnect: RithmicReconnectState::Idle,
         }
     }
 
@@ -472,16 +507,7 @@ impl TerminalApp {
                     self.set_chart_state(state, message, cx);
                 }
                 MarketWorkerMessage::Connection { state, message } => {
-                    self.connection_state = Some(state);
-                    let should_autoload = !self.rithmic_autoload_started
-                        && state == FeedConnectionState::Authenticating
-                        && message.contains("ready for instrument search");
-                    self.connection_message = Some(message);
-                    if should_autoload {
-                        self.rithmic_autoload_started = true;
-                        self.search_rithmic_query("MNQ", cx);
-                    }
-                    cx.notify();
+                    self.apply_connection_state(state, message, cx);
                 }
                 MarketWorkerMessage::RithmicCatalog(event) => {
                     self.apply_rithmic_catalog(event, cx);
@@ -539,6 +565,45 @@ impl TerminalApp {
         }
     }
 
+    fn apply_connection_state(
+        &mut self,
+        state: FeedConnectionState,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        if state == FeedConnectionState::Recovering {
+            self.begin_rithmic_reconnect();
+        }
+        self.connection_state = Some(state);
+        let ready_for_search = state == FeedConnectionState::Authenticating
+            && message.contains("ready for instrument search");
+        let should_reconnect = ready_for_search
+            && matches!(
+                self.rithmic_reconnect,
+                RithmicReconnectState::AwaitingSearch(_)
+            );
+        let should_autoload = ready_for_search
+            && self.rithmic_reconnect == RithmicReconnectState::Idle
+            && !self.rithmic_autoload_started;
+        self.connection_message = Some(message);
+        if should_reconnect {
+            let symbol = self
+                .rithmic_reconnect
+                .target()
+                .map(|target| target.symbol.clone())
+                .unwrap_or_default();
+            if self.search_rithmic_query(&symbol, cx)
+                && let RithmicReconnectState::AwaitingSearch(target) = &self.rithmic_reconnect
+            {
+                self.rithmic_reconnect = RithmicReconnectState::SearchInFlight(target.clone());
+            }
+        } else if should_autoload {
+            self.rithmic_autoload_started = true;
+            let _ = self.search_rithmic_query("MNQ", cx);
+        }
+        cx.notify();
+    }
+
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let theme = self.theme.toggled();
         sync_component_theme(&theme, Some(window), cx);
@@ -581,13 +646,13 @@ impl TerminalApp {
         });
     }
 
-    fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) {
+    fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
         let request = match self.symbol_browser.begin_search(query) {
             Ok(request) => request,
             Err(message) => {
                 self.symbol_message = message.to_string();
                 cx.notify();
-                return;
+                return false;
             }
         };
         let search = RithmicSymbolSearch::try_new(
@@ -604,15 +669,40 @@ impl TerminalApp {
             self.symbol_browser.reject_command(request.request_id);
             self.symbol_message = "Symbol search request is invalid".to_string();
             cx.notify();
-            return;
+            return false;
         };
-        if self.market_worker.try_search_rithmic(search).is_ok() {
+        let dispatched = if self.market_worker.try_search_rithmic(search).is_ok() {
             self.symbol_message = "Searching Rithmic Test symbols".to_string();
+            true
         } else {
             self.symbol_browser.reject_command(request.request_id);
             self.symbol_message = "Symbol search is busy; try again".to_string();
-        }
+            false
+        };
         cx.notify();
+        dispatched
+    }
+
+    fn begin_rithmic_reconnect(&mut self) {
+        if self.rithmic_reconnect != RithmicReconnectState::Idle {
+            return;
+        }
+        let Some(selection) = self.symbol_browser.selected().cloned() else {
+            return;
+        };
+        let series = self
+            .series_browser
+            .selected()
+            .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
+                request.series
+            });
+        self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
+            symbol: selection.instrument.symbol,
+            exchange: selection.instrument.exchange,
+            series,
+        });
+        self.symbol_browser.invalidate_session();
+        self.series_browser.reset();
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -666,7 +756,19 @@ impl TerminalApp {
                 if applied {
                     self.symbol_message = format!("{result_count} matching symbols");
                 }
-                if applied
+                if applied && self.rithmic_reconnect != RithmicReconnectState::Idle {
+                    let index = self.rithmic_reconnect.target().and_then(|target| {
+                        reconnect_contract_index(self.symbol_browser.results(), target)
+                    });
+                    if let Some(index) = index {
+                        self.select_rithmic_symbol(index, cx);
+                    } else {
+                        self.rithmic_reconnect = RithmicReconnectState::Idle;
+                        self.symbol_message =
+                            "The previous Rithmic contract is unavailable after reconnect"
+                                .to_string();
+                    }
+                } else if applied
                     && self.rithmic_autoload_started
                     && self.symbol_browser.selected().is_none()
                 {
@@ -682,6 +784,13 @@ impl TerminalApp {
                 ..
             } => {
                 if self.symbol_browser.confirm_selection(selection_generation) {
+                    let recovered_series = self
+                        .rithmic_reconnect
+                        .target()
+                        .map_or(rithmic_history::RithmicSeries::Minute1, |target| {
+                            target.series
+                        });
+                    self.rithmic_reconnect = RithmicReconnectState::Idle;
                     self.series_browser.reset();
                     self.reset_chart_surface(cx);
                     self.bridge_label = "bridge awaiting series selection".to_string();
@@ -693,7 +802,7 @@ impl TerminalApp {
                     self.connection_state = Some(FeedConnectionState::Streaming);
                     self.connection_message =
                         Some("Rithmic Test market subscription active".to_string());
-                    self.select_rithmic_series(rithmic_history::RithmicSeries::ALL[1], cx);
+                    self.select_rithmic_series(recovered_series, cx);
                 }
             }
             RithmicCatalogEvent::CommandRejected {
@@ -703,6 +812,10 @@ impl TerminalApp {
             } => {
                 if self.symbol_browser.reject_command(command_generation) {
                     self.symbol_message = catalog_rejection_message(reason).to_string();
+                    if let Some(target) = self.rithmic_reconnect.target().cloned() {
+                        self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
+                        self.symbol_browser.invalidate_session();
+                    }
                 }
             }
         }
@@ -873,7 +986,7 @@ impl TerminalApp {
     fn select_next_rithmic_symbol(&mut self, cx: &mut Context<Self>) {
         let results = self.symbol_browser.results();
         if results.is_empty() {
-            self.search_rithmic_query("MNQ", cx);
+            let _ = self.search_rithmic_query("MNQ", cx);
             return;
         }
         let selected_symbol = self
@@ -1586,9 +1699,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, HeaderControls, connection_presentation, default_rithmic_contract_index,
-        duration_label, gpui_color, milli_rate, parse_rithmic_test_arguments,
-        publication_chart_state, reconciled_bridge_state,
+        ChartState, HeaderControls, RithmicReconnectTarget, connection_presentation,
+        default_rithmic_contract_index, duration_label, gpui_color, milli_rate,
+        parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -1639,6 +1753,30 @@ mod tests {
             },
         ];
         assert_eq!(default_rithmic_contract_index(&results), Some(3));
+    }
+
+    #[test]
+    fn reconnect_contract_requires_the_exact_symbol_and_exchange() {
+        let result = |exchange: &str| SymbolSearchResult {
+            symbol: "MNQU6".to_string(),
+            exchange: exchange.to_string(),
+            name: None,
+            product_code: Some("MNQ".to_string()),
+            instrument_type: Some("FUTURE".to_string()),
+            expiration_date: Some("20260918".to_string()),
+        };
+        let results = vec![result("CME-Delayed"), result("CME")];
+        let target = RithmicReconnectTarget {
+            symbol: "MNQU6".to_string(),
+            exchange: "CME".to_string(),
+            series: crate::rithmic_history::RithmicSeries::Minute5,
+        };
+        assert_eq!(reconnect_contract_index(&results, &target), Some(1));
+        let missing = RithmicReconnectTarget {
+            exchange: "CBOT".to_string(),
+            ..target
+        };
+        assert_eq!(reconnect_contract_index(&results, &missing), None);
     }
 
     #[test]
