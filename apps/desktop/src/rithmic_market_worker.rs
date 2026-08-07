@@ -38,7 +38,7 @@ const CALLBACK_CAPACITY: usize = 256;
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const MAXIMUM_DEPTH: usize = 256;
 const IDLE_WAIT: Duration = Duration::from_millis(50);
-const MESSAGE_SILENCE: Duration = Duration::from_secs(30);
+const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const CATALOG_KEY_ID: &str = "rithmic-test-history-catalog-key-v1";
 
 type RithmicWorker =

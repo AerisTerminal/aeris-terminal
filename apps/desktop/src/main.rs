@@ -11,19 +11,17 @@ use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_observability::FeedConnectionState;
-use axiusflow_observability::{DiagnosticsQueue, FeedDiagnosticsSnapshot, LocalLatencyMetric};
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
     RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
 };
 use gpui::{
-    App, Bounds, Context, Entity, Hsla, Render, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Bounds, Context, Entity, Hsla, Render, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Root, StyledExt,
+    Root, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
-    input::{Input, InputState},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
@@ -80,6 +78,22 @@ fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> Chart
     }
 }
 
+fn default_rithmic_contract_index(
+    results: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
+) -> Option<usize> {
+    results
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| {
+            result.symbol.starts_with("MNQ")
+                && result.symbol != "MNQ"
+                && !result.symbol.contains('-')
+                && result.expiration_date.is_some()
+        })
+        .min_by_key(|(_, result)| result.expiration_date.as_deref())
+        .map(|(index, _)| index)
+}
+
 struct TerminalApp {
     chart: Option<Entity<OriginChartView>>,
     chart_state: ChartState,
@@ -90,25 +104,19 @@ struct TerminalApp {
     subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
-    diagnostics: Option<FeedDiagnosticsSnapshot>,
-    diagnostics_expanded: bool,
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
-    symbol_input: Option<Entity<InputState>>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
     series_browser: rithmic_history::RithmicSeriesBrowser,
     series_message: String,
+    rithmic_autoload_started: bool,
 }
 
 struct HeaderState {
     theme: AxiusflowTheme,
-    replay_label: String,
-    bridge_label: String,
-    chart_state: ChartState,
-    diagnostics_expanded: bool,
-    connection_state: Option<FeedConnectionState>,
+    market_label: String,
 }
 
 impl TerminalApp {
@@ -116,7 +124,6 @@ impl TerminalApp {
         cx: &mut Context<Self>,
         startup: MarketWorkerStartup,
         market_worker: MarketDataWorker,
-        symbol_input: Option<Entity<InputState>>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
         let (
@@ -140,7 +147,7 @@ impl TerminalApp {
                     message.clone(),
                     profile.clone(),
                     "Rithmic market worker".to_string(),
-                    "instrument selection pending".to_string(),
+                    "Loading chart".to_string(),
                     Some(connection),
                     Some(message),
                 )
@@ -187,16 +194,7 @@ impl TerminalApp {
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
         );
-        let poll_executor = cx.background_executor().clone();
-        cx.spawn(async move |app, cx| {
-            loop {
-                poll_executor.timer(MARKET_POLL_INTERVAL).await;
-                if app.update(cx, TerminalApp::poll_market_worker).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
+        Self::start_market_poll(cx);
         Self {
             chart,
             chart_state,
@@ -207,17 +205,28 @@ impl TerminalApp {
             subscription_id,
             bridge_label,
             market_worker,
-            diagnostics: None,
-            diagnostics_expanded: false,
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
-            symbol_input,
             symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
             symbol_message: "Search for an entitled Rithmic Test symbol".to_string(),
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
+            rithmic_autoload_started: false,
         }
+    }
+
+    fn start_market_poll(cx: &mut Context<Self>) {
+        let poll_executor = cx.background_executor().clone();
+        cx.spawn(async move |app, cx| {
+            loop {
+                poll_executor.timer(MARKET_POLL_INTERVAL).await;
+                if app.update(cx, TerminalApp::poll_market_worker).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn apply_publication(
@@ -411,10 +420,7 @@ impl TerminalApp {
                 MarketWorkerMessage::Update(publication) => {
                     self.apply_publication(publication, cx);
                 }
-                MarketWorkerMessage::Diagnostics(snapshot) => {
-                    self.diagnostics = Some(*snapshot);
-                    cx.notify();
-                }
+                MarketWorkerMessage::Diagnostics(_) => {}
                 MarketWorkerMessage::Recovery { request_id, result } => {
                     self.apply_recovery(request_id, result, cx);
                 }
@@ -423,7 +429,14 @@ impl TerminalApp {
                 }
                 MarketWorkerMessage::Connection { state, message } => {
                     self.connection_state = Some(state);
+                    let should_autoload = !self.rithmic_autoload_started
+                        && state == FeedConnectionState::Authenticating
+                        && message.contains("ready for instrument search");
                     self.connection_message = Some(message);
+                    if should_autoload {
+                        self.rithmic_autoload_started = true;
+                        self.search_rithmic_query("MNQ", cx);
+                    }
                     cx.notify();
                 }
                 MarketWorkerMessage::RithmicCatalog(event) => {
@@ -485,11 +498,6 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn toggle_diagnostics(&mut self, cx: &mut Context<Self>) {
-        self.diagnostics_expanded = !self.diagnostics_expanded;
-        cx.notify();
-    }
-
     fn schedule_diagnostics_frame(&mut self, window: &mut Window) {
         if let Some(mut diagnostics) = self.pending_ui_diagnostics.take()
             && let Some(sender) = self.market_worker.ui_diagnostics_sender()
@@ -501,12 +509,8 @@ impl TerminalApp {
         }
     }
 
-    fn search_rithmic_symbols(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = &self.symbol_input else {
-            return;
-        };
-        let query = input.read(cx).value().to_string();
-        let request = match self.symbol_browser.begin_search(&query) {
+    fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        let request = match self.symbol_browser.begin_search(query) {
             Ok(request) => request,
             Err(message) => {
                 self.symbol_message = message.to_string();
@@ -520,7 +524,7 @@ impl TerminalApp {
             None,
             None,
             None,
-            SearchPattern::Contains,
+            SearchPattern::Equals,
             std::num::NonZeroUsize::new(rithmic_shell::MAXIMUM_SYMBOL_RESULTS)
                 .unwrap_or(std::num::NonZeroUsize::MIN),
         );
@@ -548,7 +552,7 @@ impl TerminalApp {
             selection.instrument.exchange, selection.instrument.symbol
         );
         let request =
-            RithmicReadOnlySubscription::try_new(true, true, false).and_then(|subscription| {
+            RithmicReadOnlySubscription::try_new(true, false, false).and_then(|subscription| {
                 RithmicInstrumentSelection::try_new(
                     selection.generation,
                     selection.search_generation,
@@ -584,11 +588,20 @@ impl TerminalApp {
                 ..
             } => {
                 let result_count = symbols.results.len();
-                if self
+                let applied = self
                     .symbol_browser
-                    .apply_results(search_generation, symbols.results)
-                {
+                    .apply_results(search_generation, symbols.results);
+                if applied {
                     self.symbol_message = format!("{result_count} matching symbols");
+                }
+                if applied
+                    && self.rithmic_autoload_started
+                    && self.symbol_browser.selected().is_none()
+                {
+                    let index = default_rithmic_contract_index(self.symbol_browser.results());
+                    if let Some(index) = index {
+                        self.select_rithmic_symbol(index, cx);
+                    }
                 }
             }
             RithmicCatalogEvent::SelectionInstalled {
@@ -608,6 +621,7 @@ impl TerminalApp {
                     self.connection_state = Some(FeedConnectionState::Streaming);
                     self.connection_message =
                         Some("Rithmic Test market subscription active".to_string());
+                    self.select_rithmic_series(rithmic_history::RithmicSeries::ALL[1], cx);
                 }
             }
             RithmicCatalogEvent::CommandRejected {
@@ -714,17 +728,6 @@ impl TerminalApp {
             cx,
         );
     }
-
-    fn chart_state_label(&self) -> String {
-        if let (Some(state), Some(message)) = (self.connection_state, &self.connection_message) {
-            return format!("{} · {message}", rithmic_shell::connection_label(state));
-        }
-        format!(
-            "{} · {}",
-            self.chart_state.label(),
-            self.chart_state_message
-        )
-    }
 }
 
 impl Render for TerminalApp {
@@ -733,43 +736,12 @@ impl Render for TerminalApp {
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
-        let button_radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-        let chart_state_label = self.chart_state_label();
-        let diagnostics_panel = self
-            .diagnostics_expanded
-            .then(|| diagnostics_panel(self.diagnostics.as_ref(), &colors, button_radius));
-        let symbol_panel = self.symbol_input.clone().map(|input| {
-            symbol_browser_panel(
-                cx,
-                &app,
-                &input,
-                SymbolBrowserPanelState {
-                    results: self.symbol_browser.results().to_vec(),
-                    selected: self
-                        .symbol_browser
-                        .selected()
-                        .map(|selection| selection.instrument.clone()),
-                    message: self.symbol_message.clone(),
-                    selected_series: self
-                        .series_browser
-                        .selected()
-                        .map(|selection| selection.series),
-                    series_message: self.series_message.clone(),
-                    colors,
-                    radius: button_radius,
-                },
-            )
-        });
         let header = terminal_header(
             cx,
             app,
             HeaderState {
                 theme,
-                replay_label: self.replay_label.clone(),
-                bridge_label: self.bridge_label.clone(),
-                chart_state: self.chart_state,
-                diagnostics_expanded: self.diagnostics_expanded,
-                connection_state: self.connection_state,
+                market_label: self.subscription_id.clone(),
             },
         );
 
@@ -779,7 +751,6 @@ impl Render for TerminalApp {
             .bg(gpui_color(colors.background))
             .text_color(gpui_color(colors.foreground))
             .child(header)
-            .children(symbol_panel)
             .child(
                 div()
                     .id("primary_chart")
@@ -788,18 +759,7 @@ impl Render for TerminalApp {
                     .overflow_hidden()
                     .border_1()
                     .border_color(gpui_color(colors.border))
-                    .bg(gpui_color(colors.card))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_3()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(gpui_color(colors.border))
-                            .text_xs()
-                            .text_color(gpui_color(colors.muted_foreground))
-                            .child(chart_state_label.clone()),
-                    )
+                    .bg(gpui_color(colors.background))
                     .child(
                         div()
                             .flex_1()
@@ -812,11 +772,10 @@ impl Render for TerminalApp {
                                     .items_center()
                                     .justify_center()
                                     .text_color(gpui_color(colors.muted_foreground))
-                                    .child(chart_state_label)
+                                    .child(self.chart_state.label())
                             })),
                     ),
             )
-            .children(diagnostics_panel)
     }
 }
 
@@ -833,276 +792,47 @@ fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
     }
 }
 
-struct SymbolBrowserPanelState {
-    results: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
-    selected: Option<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
-    message: String,
-    selected_series: Option<rithmic_history::RithmicSeries>,
-    series_message: String,
-    colors: axiusflow_design_system::ThemeColors,
-    radius: gpui::Pixels,
-}
-
-fn symbol_browser_panel(
-    cx: &mut Context<TerminalApp>,
-    app: &Entity<TerminalApp>,
-    input: &Entity<InputState>,
-    state: SymbolBrowserPanelState,
-) -> impl IntoElement + use<> {
-    let colors = state.colors;
-    let radius = state.radius;
-    let button_variant = ButtonCustomVariant::new(cx)
-        .color(gpui_color(colors.secondary))
-        .foreground(gpui_color(colors.secondary_foreground))
-        .hover(gpui_color(colors.accent))
-        .active(gpui_color(colors.muted));
-    let search_app = app.clone();
-    let result_buttons = state
-        .results
-        .into_iter()
-        .enumerate()
-        .map(|(index, result)| {
-            let select_app = app.clone();
-            let is_selected = state.selected.as_ref().is_some_and(|selected| {
-                selected.symbol == result.symbol && selected.exchange == result.exchange
-            });
-            Button::new(format!("rithmic_symbol_{index}"))
-                .label(format!(
-                    "{} · {}{}",
-                    result.symbol,
-                    result.exchange,
-                    if is_selected { " · selected" } else { "" }
-                ))
-                .rounded(radius)
-                .custom(button_variant)
-                .on_click(move |_, _, cx| {
-                    select_app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
-                })
-        });
-    let series_buttons = state.selected.as_ref().map(|_| {
-        rithmic_history::RithmicSeries::ALL
-            .into_iter()
-            .map(|series| {
-                let series_app = app.clone();
-                let label = if state.selected_series == Some(series) {
-                    format!("{} · selected", series.label())
-                } else {
-                    series.label().to_string()
-                };
-                Button::new(format!("rithmic_series_{}", series.label()))
-                    .label(label)
-                    .rounded(radius)
-                    .custom(button_variant)
-                    .on_click(move |_, _, cx| {
-                        series_app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
-                    })
-            })
-            .collect::<Vec<_>>()
-    });
-    div()
-        .flex_none()
-        .v_flex()
-        .gap_2()
-        .mx(px(12.0))
-        .mt(px(12.0))
-        .p_3()
-        .rounded(radius)
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.card))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(Input::new(input).w(px(320.0)))
-                .child(
-                    Button::new("rithmic_symbol_search")
-                        .label("Search")
-                        .rounded(radius)
-                        .custom(button_variant)
-                        .on_click(move |_, _, cx| {
-                            search_app.update(cx, TerminalApp::search_rithmic_symbols);
-                        }),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.muted_foreground))
-                        .child(state.message),
-                ),
-        )
-        .child(div().flex().flex_wrap().gap_2().children(result_buttons))
-        .children(series_buttons.map(|buttons| {
-            div()
-                .v_flex()
-                .gap_2()
-                .child(div().flex().flex_wrap().gap_2().children(buttons))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.muted_foreground))
-                        .child(state.series_message),
-                )
-        }))
-}
-
 fn terminal_header(
     cx: &mut Context<TerminalApp>,
     app: Entity<TerminalApp>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let colors = state.theme.colors;
-    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-    let passive_button = ButtonCustomVariant::new(cx)
-        .color(gpui_color(colors.background))
-        .foreground(gpui_color(colors.muted_foreground))
-        .hover(gpui_color(colors.card))
-        .active(gpui_color(colors.card));
     let active_button = ButtonCustomVariant::new(cx)
         .color(gpui_color(colors.secondary))
         .foreground(gpui_color(colors.secondary_foreground))
         .hover(gpui_color(colors.accent))
         .active(gpui_color(colors.muted));
-    let diagnostics_app = app.clone();
-    div()
-        .h(px(state.theme.dimensions.app_header_height.logical_pixels))
-        .flex_none()
-        .items_center()
-        .justify_between()
-        .px_4()
-        .border_b_1()
-        .border_color(gpui_color(colors.border))
-        .child("Axiusflow")
-        .child(
-            div()
-                .items_center()
-                .gap_2()
-                .child(
-                    Button::new("market_data_source")
-                        .label(format!(
-                            "{} · {}",
-                            state.connection_state.map_or_else(
-                                || state.chart_state.label(),
-                                rithmic_shell::connection_label,
-                            ),
-                            state.replay_label
-                        ))
-                        .rounded(radius)
-                        .custom(passive_button),
-                )
-                .child(
-                    Button::new("market_data_bridge")
-                        .label(state.bridge_label)
-                        .rounded(radius)
-                        .custom(passive_button),
-                )
-                .child(
-                    Button::new("feed_health_toggle")
-                        .label(if state.diagnostics_expanded {
-                            "Hide feed health"
-                        } else {
-                            "Feed health"
-                        })
-                        .rounded(radius)
-                        .custom(active_button)
-                        .on_click(move |_, _, cx| {
-                            diagnostics_app.update(cx, TerminalApp::toggle_diagnostics);
-                        }),
-                )
-                .child(
-                    Button::new("theme_toggle")
-                        .label(format!("Switch to {}", state.theme.mode.toggled().label()))
-                        .rounded(radius)
-                        .custom(active_button)
-                        .on_click(move |_, window, cx| {
-                            app.update(cx, |app, cx| app.toggle_theme(window, cx));
-                        }),
-                ),
-        )
-}
-
-fn diagnostics_panel(
-    snapshot: Option<&FeedDiagnosticsSnapshot>,
-    colors: &axiusflow_design_system::ThemeColors,
-    radius: gpui::Pixels,
-) -> impl IntoElement {
-    let lines = snapshot.map_or_else(
-        || vec!["Waiting for the first bounded feed-health snapshot".to_string()],
-        |snapshot| {
-            let ui_queue = snapshot.queues[DiagnosticsQueue::UiUpdate as usize];
-            let model_to_ui = latency_p99(snapshot, LocalLatencyMetric::ModelPublishToUiEnqueue);
-            let ui_to_frame = latency_p99(snapshot, LocalLatencyMetric::UiEnqueueToFrameSubmit);
-            let frame_to_present = latency_p99(snapshot, LocalLatencyMetric::FrameSubmitToPresent);
-            vec![
-                format!(
-                    "{} / {} / {} · {:?} · generation {}",
-                    snapshot.identity.provider(),
-                    snapshot.identity.system(),
-                    snapshot.identity.environment(),
-                    snapshot.connection_state,
-                    snapshot.session_generation.map_or(0, std::num::NonZeroU64::get),
-                ),
-                format!(
-                    "heartbeat {} · message {} · recovery {:?} · reconnects {}",
-                    format_age(snapshot.heartbeat_age_nanos),
-                    format_age(snapshot.last_message_age_nanos),
-                    snapshot.recovery_reason,
-                    snapshot.reconnect_count,
-                ),
-                format!(
-                    "trades {}/s · publications {}/s · gaps {} · malformed {} · stale {}",
-                    format_rate_milli(snapshot.rates.trades_per_second_milli),
-                    format_rate_milli(snapshot.rates.publications_per_second_milli),
-                    snapshot.counters.gaps,
-                    snapshot.counters.malformed_messages,
-                    snapshot.counters.stale_callbacks,
-                ),
-                format!(
-                    "UI queue {}/{} · high-water {} · conflated {} · memory {}/{} bytes",
-                    ui_queue.current_items,
-                    ui_queue.item_capacity,
-                    ui_queue.high_water_items,
-                    snapshot.counters.coalesced_ui_updates,
-                    snapshot.memory.current_bytes,
-                    snapshot.memory.configured_bound_bytes,
-                ),
-                format!(
-                    "p99 model→UI {model_to_ui} · UI→frame {ui_to_frame} · frame→present {frame_to_present}",
-                ),
-            ]
-        },
-    );
-    div()
-        .flex_none()
-        .mx(px(12.0))
-        .mb(px(12.0))
-        .p_3()
-        .rounded(radius)
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.card))
-        .text_xs()
-        .text_color(gpui_color(colors.muted_foreground))
-        .children(lines.into_iter().map(|line| div().child(line)))
-}
-
-fn latency_p99(snapshot: &FeedDiagnosticsSnapshot, metric: LocalLatencyMetric) -> String {
-    snapshot.detailed_latency[metric as usize].map_or_else(
-        || "disabled".to_string(),
-        |latency| format!("{} µs", latency.p99_upper_bound_nanos / 1_000),
+    TitleBar::new().child(
+        div()
+            .h_full()
+            .flex()
+            .flex_1()
+            .gap_4()
+            .items_center()
+            .child(div().text_sm().child("Axiusflow"))
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(gpui_color(colors.muted_foreground))
+                            .child(state.market_label),
+                    )
+                    .child(
+                        Button::new("theme_toggle")
+                            .label(state.theme.mode.toggled().label())
+                            .custom(active_button)
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |app, cx| app.toggle_theme(window, cx));
+                            }),
+                    ),
+            ),
     )
-}
-
-fn format_age(age_nanos: Option<u64>) -> String {
-    age_nanos.map_or_else(
-        || "unknown".to_string(),
-        |age| format!("{} ms", age / 1_000_000),
-    )
-}
-
-fn format_rate_milli(rate: u64) -> String {
-    format!("{}.{:03}", rate / 1_000, rate % 1_000)
 }
 
 fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx: &mut App) {
@@ -1174,7 +904,9 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
 }
 
 fn gpui_color(color: ThemeColor) -> Hsla {
-    rgb(color.rgb_u32()).into()
+    let mut resolved: Hsla = rgb(color.rgb_u32()).into();
+    resolved.a = color.alpha();
+    resolved
 }
 
 fn run_coinbase_live_smoke(
@@ -1361,18 +1093,11 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Axiusflow".into()),
-                    ..Default::default()
-                }),
+                titlebar: Some(TitleBar::title_bar_options()),
                 ..Default::default()
             },
             move |window, cx| {
-                let symbol_input = matches!(&bootstrap, MarketWorkerStartup::Shell(_)).then(|| {
-                    cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
-                });
-                let terminal =
-                    cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker, symbol_input));
+                let terminal = cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker));
                 cx.new(|cx| Root::new(terminal, window, cx))
             },
         )
@@ -1384,8 +1109,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
+        ChartState, default_rithmic_contract_index, gpui_color, parse_rithmic_test_arguments,
+        publication_chart_state, reconciled_bridge_state,
     };
+    use axiusflow_design_system::ThemeColor;
+    use axiusflow_rithmic_protocol_adapter::SymbolSearchResult;
     use std::ffi::OsString;
 
     #[test]
@@ -1405,6 +1133,39 @@ mod tests {
             reconciled_bridge_state(ChartState::Stale, true),
             ChartState::Stale
         );
+    }
+
+    #[test]
+    fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
+        let result = |symbol: &str, expiration: &str| SymbolSearchResult {
+            symbol: symbol.to_string(),
+            exchange: "CME-Delayed".to_string(),
+            name: None,
+            product_code: Some("MNQ".to_string()),
+            instrument_type: Some("FUTURE".to_string()),
+            expiration_date: Some(expiration.to_string()),
+        };
+        let results = vec![
+            result("MNQ", "20260918"),
+            result("MNQU6-MNQZ6", "20260918"),
+            result("MNQZ6", "20261218"),
+            result("MNQU6", "20260918"),
+            SymbolSearchResult {
+                symbol: "NQ".to_string(),
+                exchange: "CME-Delayed".to_string(),
+                name: None,
+                product_code: Some("NQ".to_string()),
+                instrument_type: Some("FUTURE".to_string()),
+                expiration_date: None,
+            },
+        ];
+        assert_eq!(default_rithmic_contract_index(&results), Some(3));
+    }
+
+    #[test]
+    fn gpui_theme_attachment_preserves_alpha() {
+        let attached = gpui_color(ThemeColor::from_rgb8(240, 240, 240).with_alpha(19.0 / 255.0));
+        assert!((attached.a - 19.0 / 255.0).abs() < f32::EPSILON);
     }
 
     #[test]

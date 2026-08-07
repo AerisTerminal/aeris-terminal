@@ -153,6 +153,7 @@ impl RithmicShellState {
     }
 }
 
+#[cfg(test)]
 pub(crate) const fn connection_label(connection: FeedConnectionState) -> &'static str {
     match connection {
         FeedConnectionState::Disconnected => "Not connected",

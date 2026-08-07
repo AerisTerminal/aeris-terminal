@@ -1693,7 +1693,7 @@ fn handle_catalog_message(
     session_generation: SessionGeneration,
     emitter: &SessionEmitter,
     state: &mut CatalogCommandState,
-    canonical: &CanonicalSessionState,
+    canonical: &mut CanonicalSessionState,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let Some(pending) = state.pending_catalog.as_mut() else {
         return Err(malformed());
@@ -1759,12 +1759,7 @@ fn handle_catalog_message(
             let instrument = selected_instrument(&selection, reference)?;
             let previous = canonical.instruments.clone();
             let phase = if previous.is_empty() {
-                connection
-                    .update_market_data(subscription_request(
-                        &instrument,
-                        SubscriptionAction::Subscribe,
-                    ))
-                    .map_err(session_failure)?;
+                begin_subscription(connection, &instrument, canonical)?;
                 SubscriptionPhase::Subscribe
             } else {
                 connection
@@ -1784,6 +1779,20 @@ fn handle_catalog_message(
             Ok(())
         }
     }
+}
+
+fn begin_subscription(
+    connection: &mut crate::RithmicTickerConnection,
+    instrument: &RithmicProviderInstrument,
+    canonical: &mut CanonicalSessionState,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    canonical.replace_instrument(instrument.clone())?;
+    connection
+        .update_market_data(subscription_request(
+            instrument,
+            SubscriptionAction::Subscribe,
+        ))
+        .map_err(session_failure)
 }
 
 fn advance_subscription(
@@ -1821,19 +1830,13 @@ fn advance_subscription(
                     .map_err(session_failure)?;
                 plan.phase = SubscriptionPhase::Unsubscribe(next);
             } else {
-                connection
-                    .update_market_data(subscription_request(
-                        &plan.instrument,
-                        SubscriptionAction::Subscribe,
-                    ))
-                    .map_err(session_failure)?;
+                begin_subscription(connection, &plan.instrument, canonical)?;
                 plan.phase = SubscriptionPhase::Subscribe;
             }
             Ok(())
         }
         SubscriptionPhase::Subscribe => {
             let plan = pending.take().ok_or_else(malformed)?;
-            canonical.replace_instrument(plan.instrument.clone())?;
             if !emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
                 session_generation,
                 selection_generation: plan.selection.selection_generation,
@@ -2656,6 +2659,40 @@ mod tests {
             ),
             Err(malformed())
         );
+    }
+
+    #[test]
+    fn pending_subscription_accepts_market_data_before_provider_acknowledgement() {
+        let empty = RithmicProviderConfig::try_new(
+            "AxiusFlow",
+            "0.1.0",
+            RithmicSessionLimits::default(),
+            Duration::from_secs(30),
+            Vec::new(),
+        )
+        .expect("empty dynamic catalog config validates");
+        let mut canonical =
+            CanonicalSessionState::try_new(&empty, generation(9)).expect("state initializes");
+        canonical
+            .replace_instrument(instrument())
+            .expect("pending instrument installs before subscribe");
+
+        let event = canonical
+            .convert(
+                DecodedMarketMessage::Trade(TradeUpdate {
+                    identity: identity(),
+                    price: 5_100.25,
+                    size: 1,
+                    aggressor: None,
+                    is_snapshot: false,
+                    timestamp: timestamp(),
+                }),
+                1,
+                1_700_000_000_999_000_000,
+            )
+            .expect("market-before-ack converts")
+            .expect("trade produces an event");
+        assert!(matches!(event, MarketEvent::Trade(_)));
     }
 
     #[test]

@@ -235,26 +235,29 @@ impl RithmicHistoryTransport for RithmicHistorySessionTransport {
                 .read_next_until(deadline)
                 .map_err(|_| RithmicHistoryAdapterError::Transport.to_string())?
             {
-                RithmicSessionMessage::History(message) => match collector
-                    .accept(message)
-                    .map_err(|_| RithmicHistoryAdapterError::MalformedHistory.to_string())?
-                {
-                    CollectionProgress::Pending => {}
-                    CollectionProgress::Complete(history) => return Ok(history),
-                    CollectionProgress::Unhandled(_) => {
-                        return Err(RithmicHistoryAdapterError::MalformedHistory.to_string());
+                RithmicSessionMessage::History(message) => {
+                    match collector
+                        .accept(message)
+                        .map_err(|_| RithmicHistoryAdapterError::MalformedHistory.to_string())?
+                    {
+                        CollectionProgress::Pending => {}
+                        CollectionProgress::Complete(history) => return Ok(history),
+                        CollectionProgress::Unhandled(_) => {
+                            return Err(RithmicHistoryAdapterError::MalformedHistory.to_string());
+                        }
                     }
-                },
-                RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
-                    accepted: true,
-                    ..
-                }) => {
+                }
+                RithmicSessionMessage::Control(
+                    DecodedControlMessage::ForcedLogout | DecodedControlMessage::Reject,
+                ) => return Err(RithmicHistoryAdapterError::Transport.to_string()),
+                RithmicSessionMessage::Control(_)
+                | RithmicSessionMessage::Catalog(_)
+                | RithmicSessionMessage::Market(_) => {
                     control_messages = control_messages.saturating_add(1);
                     if control_messages > self.maximum_control_messages.get() {
                         return Err(RithmicHistoryAdapterError::Transport.to_string());
                     }
                 }
-                _ => return Err(RithmicHistoryAdapterError::MalformedHistory.to_string()),
             }
         }
     }
@@ -527,10 +530,18 @@ pub fn canonical_rithmic_time_bar(
     resolution: &RithmicTimeBarResolution,
     bar: &DecodedTimeBar,
 ) -> Result<SequencedHistory<MarketBar>, RithmicHistoryAdapterError> {
+    let expected_period = match resolution.decoded_type() {
+        DecodedTimeBarType::Minute => u32::from(resolution.period.get())
+            .checked_mul(60)
+            .ok_or(RithmicHistoryAdapterError::MalformedHistory)?,
+        DecodedTimeBarType::Second | DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => {
+            u32::from(resolution.period.get())
+        }
+    };
     if bar.identity.symbol != instrument.descriptor.provider_symbol
         || bar.identity.exchange != instrument.descriptor.venue_id
         || bar.bar_type != resolution.decoded_type()
-        || bar.period != resolution.period.get().to_string()
+        || bar.period != expected_period.to_string()
         || bar.marker_seconds < 0
     {
         return Err(RithmicHistoryAdapterError::MalformedHistory);
@@ -896,7 +907,7 @@ mod tests {
                 exchange: "CME".to_string(),
             },
             bar_type: DecodedTimeBarType::Minute,
-            period: "1".to_string(),
+            period: "60".to_string(),
             marker_seconds,
             ohlc: Ohlc {
                 open: close,

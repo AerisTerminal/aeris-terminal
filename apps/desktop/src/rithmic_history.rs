@@ -10,18 +10,16 @@ use axiusflow_instruments::{
 };
 use axiusflow_market_data::{BarDefinition, MarketBar};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
-use axiusflow_provider_history::{
-    DataClass, HistoryPageRequest, HistoryRange, ProviderHistoryAdapter,
-};
+use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicApplication, RithmicCredentialBytes, RithmicHistoryCapabilityAdapter,
-    RithmicHistoryLimits, RithmicHistorySessionTransport, RithmicProviderInstrument,
+    HistoryBars, HistoryCollectionRequest, HistorySeries, RITHMIC_TEST_VAULT_KEY,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
+    RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicProviderInstrument,
     RithmicSessionLimits, RithmicTestSession, RithmicTimeBarResolution, TimeBarType,
-    decode_rithmic_history_bar,
+    canonical_rithmic_time_bar,
 };
 use std::{
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -155,6 +153,7 @@ impl RithmicSeriesBrowser {
         self.selected = None;
     }
 
+    #[cfg(test)]
     pub(crate) const fn selected(&self) -> Option<RithmicSeriesRequest> {
         self.selected
     }
@@ -309,39 +308,63 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
         quotes: true,
         order_book: false,
     };
-    let interval_nanos = request
-        .series
-        .interval_seconds()
-        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
-        .ok_or_else(|| "Historical tick continuity is unavailable".to_string())?;
-    let mut adapter = RithmicHistoryCapabilityAdapter::try_with_transport(
-        transport,
-        vec![provider_instrument],
-        vec![resolution],
-        RithmicHistoryLimits::try_new(
-            NonZeroU64::new(10 * 366 * 86_400 * 1_000_000_000).unwrap_or(NonZeroU64::MIN),
-            NonZeroU64::new(interval_nanos.saturating_mul(MAXIMUM_VISIBLE_BARS as u64))
-                .unwrap_or(NonZeroU64::MIN),
-            NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
-        )
-        .map_err(|_| "Rithmic history limits are invalid".to_string())?,
+    let start_seconds = i32::try_from(range.start_unix_nanos / NANOS_PER_SECOND)
+        .map_err(|_| "Rithmic history range is invalid".to_string())?;
+    let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND)
+        .map_err(|_| "Rithmic history range is invalid".to_string())?;
+    let interval_seconds = i32::try_from(
+        request
+            .series
+            .interval_seconds()
+            .ok_or_else(|| "Rithmic history series is invalid".to_string())?,
     )
     .map_err(|_| "Rithmic history series is invalid".to_string())?;
-    let page = adapter.fetch_page(&HistoryPageRequest {
-        provider_id: "rithmic".to_string(),
-        account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
-        entitlement_revision: request.instrument.entitlement_id.clone(),
-        instrument_id: request.instrument.descriptor.instrument_id.clone(),
-        data_class: DataClass::Bars,
-        resolution: request.series.label().to_string(),
-        range,
-        maximum_items: NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
-        continuation: None,
+    let collection_start = start_seconds
+        .checked_sub(interval_seconds)
+        .ok_or_else(|| "Rithmic history range is invalid".to_string())?;
+    let collection_finish = finish_seconds
+        .checked_add(interval_seconds)
+        .ok_or_else(|| "Rithmic history range is invalid".to_string())?;
+    let mut transport = transport;
+    let collected = transport.collect_history(HistoryCollectionRequest {
+        symbol: provider_instrument.descriptor.provider_symbol.clone(),
+        exchange: provider_instrument.descriptor.venue_id.clone(),
+        series: HistorySeries::Time {
+            bar_type: match resolution.bar_type {
+                TimeBarType::Second => {
+                    axiusflow_rithmic_protocol_adapter::DecodedTimeBarType::Second
+                }
+                TimeBarType::Minute => {
+                    axiusflow_rithmic_protocol_adapter::DecodedTimeBarType::Minute
+                }
+                TimeBarType::Daily => axiusflow_rithmic_protocol_adapter::DecodedTimeBarType::Daily,
+                TimeBarType::Weekly => {
+                    return Err("Rithmic history series is invalid".to_string());
+                }
+            },
+            period: i32::from(resolution.period.get()),
+        },
+        start_seconds: collection_start,
+        finish_seconds: collection_finish,
+        maximum_bars: NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
     })?;
-    let bars = page
-        .items
+    let HistoryBars::Time(decoded) = collected.bars else {
+        return Err("Rithmic history returned the wrong series".to_string());
+    };
+    let bars = decoded
         .iter()
-        .map(decode_rithmic_history_bar)
+        .filter(|bar| bar.marker_seconds >= start_seconds && bar.marker_seconds <= finish_seconds)
+        .enumerate()
+        .map(|(index, bar)| {
+            canonical_rithmic_time_bar(&provider_instrument, &resolution, bar)
+                .map(|sequenced| {
+                    let mut bar = sequenced.value;
+                    bar.source_sequence =
+                        u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+                    bar
+                })
+                .map_err(|error| error.to_string())
+        })
         .collect::<Result<Vec<_>, _>>()?;
     bootstrap_from_bars(request, bars, unix_nanos_now()?)
 }
@@ -464,8 +487,8 @@ fn bootstrap_from_bars(
     Ok(MarketWorkerBootstrap {
         snapshot,
         subscription_id: format!(
-            "rithmic:{}:{}",
-            descriptor.instrument_id,
+            "{}  ·  {}",
+            descriptor.provider_symbol,
             request.series.label()
         ),
         generation,
@@ -486,7 +509,7 @@ fn history_provenance(
         event_id: format!(
             "rithmic_history_{}_{}",
             request.series.label(),
-            bar.source_sequence
+            bar.exchange_timestamp_seconds
         ),
         event_time_unix_nanos: exchange,
         publication_time_unix_nanos: received_unix_nanos,
