@@ -2,6 +2,7 @@
 
 mod live_market_worker;
 mod market_worker;
+mod rithmic_history;
 mod rithmic_market_worker;
 mod rithmic_shell;
 mod windowed_benchmark;
@@ -97,6 +98,8 @@ struct TerminalApp {
     symbol_input: Option<Entity<InputState>>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
+    series_browser: rithmic_history::RithmicSeriesBrowser,
+    series_message: String,
 }
 
 struct HeaderState {
@@ -211,6 +214,8 @@ impl TerminalApp {
             symbol_input,
             symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
             symbol_message: "Search for an entitled Rithmic Test symbol".to_string(),
+            series_browser: rithmic_history::RithmicSeriesBrowser::default(),
+            series_message: "Select a symbol before choosing a series".to_string(),
         }
     }
 
@@ -418,6 +423,13 @@ impl TerminalApp {
                 MarketWorkerMessage::RithmicCatalog(event) => {
                     self.apply_rithmic_catalog(event, cx);
                 }
+                MarketWorkerMessage::RithmicHistory {
+                    selection_generation,
+                    series_generation,
+                    result,
+                } => {
+                    self.apply_rithmic_history(selection_generation, series_generation, result, cx);
+                }
             }
         }
         if disconnected && self.connection_state.is_some() {
@@ -579,9 +591,14 @@ impl TerminalApp {
                 ..
             } => {
                 if self.symbol_browser.confirm_selection(selection_generation) {
+                    self.series_browser.reset();
+                    self.chart = None;
+                    self.bridge_label = "bridge awaiting series selection".to_string();
+                    self.replay_label = "Selected instrument · choose a series".to_string();
                     self.subscription_id =
                         format!("{} · {}", instrument.display_symbol, instrument.venue_id);
                     self.symbol_message = format!("Selected {}", instrument.display_symbol);
+                    self.series_message = "Choose a chart series".to_string();
                     self.connection_state = Some(FeedConnectionState::Streaming);
                     self.connection_message =
                         Some("Rithmic Test market subscription active".to_string());
@@ -598,6 +615,98 @@ impl TerminalApp {
             }
         }
         cx.notify();
+    }
+
+    fn select_rithmic_series(
+        &mut self,
+        series: rithmic_history::RithmicSeries,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.symbol_browser.selected() else {
+            self.series_message = "Select a symbol before choosing a series".to_string();
+            cx.notify();
+            return;
+        };
+        let request = self.series_browser.select(selection.generation, series);
+        if series == rithmic_history::RithmicSeries::Tick {
+            self.series_browser
+                .accept(request.selection_generation, request.series_generation);
+            self.chart = None;
+            self.bridge_label = "bridge awaiting tick-series support".to_string();
+            self.replay_label = "Tick series · historical continuity unavailable".to_string();
+            self.series_message =
+                "Tick series selected; historical tick continuity is not available yet".to_string();
+            self.set_chart_state(
+                ChartState::Error,
+                "historical tick continuity is not available yet".to_string(),
+                cx,
+            );
+        } else if self
+            .market_worker
+            .try_request_rithmic_history(request)
+            .is_ok()
+        {
+            self.chart = None;
+            self.bridge_label = "bridge awaiting visible history".to_string();
+            self.series_message = format!("Loading {} visible history", series.label());
+            self.set_chart_state(
+                ChartState::Loading,
+                format!("loading {} visible history", series.label()),
+                cx,
+            );
+        } else {
+            self.series_browser.reject(request.series_generation);
+            self.series_message = "Rithmic history worker is busy; try again".to_string();
+        }
+        cx.notify();
+    }
+
+    fn apply_rithmic_history(
+        &mut self,
+        selection_generation: std::num::NonZeroUsize,
+        series_generation: std::num::NonZeroUsize,
+        result: Result<Box<MarketWorkerBootstrap>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(bootstrap) = result else {
+            if self.series_browser.reject(series_generation) {
+                self.series_message = "Rithmic visible history is unavailable".to_string();
+                self.set_chart_state(
+                    ChartState::Error,
+                    "Rithmic visible history could not be loaded".to_string(),
+                    cx,
+                );
+            }
+            return;
+        };
+        if !self
+            .series_browser
+            .accept(selection_generation, series_generation)
+        {
+            return;
+        }
+        let replay_label = generation_status(
+            &bootstrap.worker_label,
+            &bootstrap.subscription_id,
+            &bootstrap.generation,
+        );
+        let snapshot = bootstrap.snapshot;
+        let theme = self.theme;
+        self.chart =
+            Some(cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot)));
+        self.worker_label = bootstrap.worker_label;
+        self.subscription_id = bootstrap.subscription_id;
+        self.replay_label = replay_label;
+        self.bridge_label = self.chart.as_ref().map_or_else(
+            || "bridge awaiting snapshot".to_string(),
+            |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
+        );
+        self.series_message = "Visible history is current".to_string();
+        self.set_chart_state(
+            ChartState::Ready,
+            "Rithmic visible history is current".to_string(),
+            cx,
+        );
     }
 
     fn chart_state_label(&self) -> String {
@@ -635,6 +744,11 @@ impl Render for TerminalApp {
                         .selected()
                         .map(|selection| selection.instrument.clone()),
                     message: self.symbol_message.clone(),
+                    selected_series: self
+                        .series_browser
+                        .selected()
+                        .map(|selection| selection.series),
+                    series_message: self.series_message.clone(),
                     colors,
                     radius: button_radius,
                 },
@@ -702,6 +816,8 @@ struct SymbolBrowserPanelState {
     results: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
     selected: Option<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
     message: String,
+    selected_series: Option<rithmic_history::RithmicSeries>,
+    series_message: String,
     colors: axiusflow_design_system::ThemeColors,
     radius: gpui::Pixels,
 }
@@ -742,6 +858,26 @@ fn symbol_browser_panel(
                     select_app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
                 })
         });
+    let series_buttons = state.selected.as_ref().map(|_| {
+        rithmic_history::RithmicSeries::ALL
+            .into_iter()
+            .map(|series| {
+                let series_app = app.clone();
+                let label = if state.selected_series == Some(series) {
+                    format!("{} · selected", series.label())
+                } else {
+                    series.label().to_string()
+                };
+                Button::new(format!("rithmic_series_{}", series.label()))
+                    .label(label)
+                    .rounded(radius)
+                    .custom(button_variant)
+                    .on_click(move |_, _, cx| {
+                        series_app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
+                    })
+            })
+            .collect::<Vec<_>>()
+    });
     div()
         .flex_none()
         .v_flex()
@@ -776,6 +912,18 @@ fn symbol_browser_panel(
                 ),
         )
         .child(div().flex().flex_wrap().gap_2().children(result_buttons))
+        .children(series_buttons.map(|buttons| {
+            div()
+                .v_flex()
+                .gap_2()
+                .child(div().flex().flex_wrap().gap_2().children(buttons))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.muted_foreground))
+                        .child(state.series_message),
+                )
+        }))
 }
 
 fn terminal_header(

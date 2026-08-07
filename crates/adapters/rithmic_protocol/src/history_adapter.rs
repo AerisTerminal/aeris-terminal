@@ -59,11 +59,11 @@ pub struct RithmicTimeBarResolution {
 }
 
 impl RithmicTimeBarResolution {
-    /// Creates a second- or minute-based resolution with a stable public name.
+    /// Creates a second-, minute-, or daily-based resolution with a stable public name.
     ///
     /// # Errors
     ///
-    /// Returns an error for an unsafe identity or a calendar-based bar type.
+    /// Returns an error for an unsafe identity or an unsupported weekly bar type.
     pub fn try_new(
         resolution: impl Into<String>,
         bar_type: TimeBarType,
@@ -71,7 +71,10 @@ impl RithmicTimeBarResolution {
     ) -> Result<Self, RithmicHistoryAdapterError> {
         let resolution = resolution.into();
         if !valid_identity(&resolution)
-            || !matches!(bar_type, TimeBarType::Second | TimeBarType::Minute)
+            || !matches!(
+                bar_type,
+                TimeBarType::Second | TimeBarType::Minute | TimeBarType::Daily
+            )
         {
             return Err(RithmicHistoryAdapterError::InvalidConfiguration);
         }
@@ -97,7 +100,8 @@ impl RithmicTimeBarResolution {
         let unit = match self.bar_type {
             TimeBarType::Second => 1,
             TimeBarType::Minute => 60,
-            TimeBarType::Daily | TimeBarType::Weekly => {
+            TimeBarType::Daily => 86_400,
+            TimeBarType::Weekly => {
                 return Err(RithmicHistoryAdapterError::InvalidConfiguration);
             }
         };
@@ -838,6 +842,26 @@ mod tests {
     fn resolution() -> RithmicTimeBarResolution {
         RithmicTimeBarResolution::try_new("1m", TimeBarType::Minute, NonZeroU16::new(1).unwrap())
             .expect("resolution validates")
+    }
+
+    #[test]
+    fn resolutions_include_daily_bars_but_keep_weekly_out_of_scope() {
+        let daily = RithmicTimeBarResolution::try_new(
+            "1d",
+            TimeBarType::Daily,
+            NonZeroU16::new(1).unwrap(),
+        )
+        .expect("daily resolution validates");
+        assert_eq!(daily.interval_seconds(), Ok(86_400));
+        assert_eq!(daily.decoded_type(), DecodedTimeBarType::Daily);
+        assert_eq!(
+            RithmicTimeBarResolution::try_new(
+                "1w",
+                TimeBarType::Weekly,
+                NonZeroU16::new(1).unwrap(),
+            ),
+            Err(RithmicHistoryAdapterError::InvalidConfiguration)
+        );
     }
 
     fn limits() -> RithmicHistoryLimits {

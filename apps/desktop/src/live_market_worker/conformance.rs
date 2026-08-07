@@ -444,6 +444,10 @@ fn assert_message_redacted(message: &MarketWorkerMessage) {
         },
         MarketWorkerMessage::Diagnostics(snapshot) => format!("{snapshot:?}"),
         MarketWorkerMessage::RithmicCatalog(event) => format!("{event:?}"),
+        MarketWorkerMessage::RithmicHistory { result, .. } => match result {
+            Ok(bootstrap) => format!("{} {}", bootstrap.subscription_id, bootstrap.worker_label),
+            Err(error) => error.clone(),
+        },
         MarketWorkerMessage::Update(publication) => format!(
             "{} {} {}",
             publication.subscription_id,

@@ -3,6 +3,7 @@ use crate::{
         MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
         market_worker_channel,
     },
+    rithmic_history::{InstalledRithmicInstrument, RithmicHistoryTask, history_message},
     rithmic_shell::RithmicShellState,
 };
 use axiusflow_application::ProvenancedMarketBar;
@@ -120,8 +121,18 @@ fn run(
 
     let mut retries = RithmicRetryScheduler::default();
     let mut selection_installed = false;
+    let mut installed_instrument = None;
+    let mut history = RithmicHistoryTask::start().ok();
     loop {
-        if process_command(commands, &worker, &events, messages, selection_installed) {
+        if process_command(
+            commands,
+            &worker,
+            &events,
+            messages,
+            selection_installed,
+            installed_instrument.as_ref(),
+            history.as_mut(),
+        ) {
             break;
         }
         drain_events(
@@ -130,12 +141,18 @@ fn run(
             &mut retries,
             messages,
             &mut selection_installed,
+            &mut installed_instrument,
+            history.as_mut(),
         );
+        if let Some(result) = history.as_mut().and_then(RithmicHistoryTask::try_recv) {
+            let _ = messages.send(history_message(result));
+        }
         if retries
             .retry_due(&mut worker, Instant::now())
             .is_ok_and(|generation| generation.is_some())
         {
             selection_installed = false;
+            installed_instrument = None;
             send_connection(
                 messages,
                 FeedConnectionState::Discovering,
@@ -178,6 +195,8 @@ fn process_command(
     events: &RithmicEvents,
     messages: &crate::market_worker::MarketWorkerSender,
     selection_installed: bool,
+    installed_instrument: Option<&InstalledRithmicInstrument>,
+    history: Option<&mut RithmicHistoryTask>,
 ) -> bool {
     let (dispatch, failure_message) = match commands.try_recv() {
         Ok(MarketWorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => return true,
@@ -192,6 +211,15 @@ fn process_command(
                 events.select_instrument(generation, selection)
             }),
             "Rithmic symbol selection could not be scheduled",
+        ),
+        Ok(MarketWorkerCommand::RithmicHistory(request)) => (
+            history.ok_or(()).and_then(|history| {
+                installed_instrument
+                    .cloned()
+                    .ok_or(())
+                    .and_then(|instrument| history.request(request, instrument).map_err(|_| ()))
+            }),
+            "Rithmic visible history could not be scheduled",
         ),
         Ok(MarketWorkerCommand::Recovery(_)) | Err(TryRecvError::Empty) => return false,
     };
@@ -211,22 +239,51 @@ fn drain_events(
     retries: &mut RithmicRetryScheduler,
     messages: &crate::market_worker::MarketWorkerSender,
     selection_installed: &mut bool,
+    installed_instrument: &mut Option<InstalledRithmicInstrument>,
+    mut history: Option<&mut RithmicHistoryTask>,
 ) {
     while events.has_ready() {
         while let Some(callback) = events.try_recv_catalog() {
             if active_generation(worker).ok().flatten() != Some(callback.generation) {
                 continue;
             }
-            if matches!(
-                &callback.event,
-                axiusflow_rithmic_protocol_adapter::RithmicCatalogEvent::SelectionInstalled { .. }
-            ) {
+            if let axiusflow_rithmic_protocol_adapter::RithmicCatalogEvent::SelectionInstalled {
+                selection_generation,
+                instrument,
+                ..
+            } = &callback.event
+            {
+                if let Some(history) = history.as_mut() {
+                    history.cancel();
+                }
                 *selection_installed = true;
+                *installed_instrument = Some(InstalledRithmicInstrument {
+                    selection_generation: *selection_generation,
+                    descriptor: instrument.clone(),
+                    entitlement_id: format!(
+                        "rithmic-test:{}:{}",
+                        instrument.venue_id, instrument.provider_symbol
+                    ),
+                });
             }
             let _ = messages.send(MarketWorkerMessage::RithmicCatalog(callback.event));
         }
         match try_recv_rithmic_event(worker, events, retries, Instant::now()) {
-            Ok(Some(event)) => publish_event(messages, &event, selection_installed),
+            Ok(Some(event)) => {
+                if matches!(
+                    event,
+                    AppliedRithmicEvent::RetryScheduled(_)
+                        | AppliedRithmicEvent::TerminalFailure { .. }
+                        | AppliedRithmicEvent::Semantic(ProviderSessionEvent::Invalidated { .. })
+                ) {
+                    if let Some(history) = history.as_mut() {
+                        history.cancel();
+                    }
+                    *selection_installed = false;
+                    *installed_instrument = None;
+                }
+                publish_event(messages, &event, selection_installed);
+            }
             Ok(None) => break,
             Err(_) => {
                 send_connection(

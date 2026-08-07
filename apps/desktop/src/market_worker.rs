@@ -4,6 +4,7 @@
 //! entitlement service, or production transport. It exercises the same bounded
 //! binary protocol and application model that a future connected adapter will own.
 
+use crate::rithmic_history::RithmicSeriesRequest;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketBarReplayPort, MarketGeneration, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot,
@@ -111,6 +112,11 @@ pub(crate) enum MarketWorkerMessage {
         message: String,
     },
     RithmicCatalog(RithmicCatalogEvent),
+    RithmicHistory {
+        selection_generation: NonZeroUsize,
+        series_generation: NonZeroUsize,
+        result: Result<Box<MarketWorkerBootstrap>, String>,
+    },
 }
 
 struct MarketWorkerMailbox {
@@ -260,6 +266,10 @@ impl MarketWorkerSender {
                 self.send_rithmic_catalog(queue, message);
                 None
             }
+            message @ MarketWorkerMessage::RithmicHistory { .. } => {
+                self.send_rithmic_history(queue, message);
+                None
+            }
             message => Some(message),
         }
     }
@@ -302,6 +312,33 @@ impl MarketWorkerSender {
         if let Some(index) = queue
             .iter()
             .position(|queued| matches!(queued, MarketWorkerMessage::RithmicCatalog(_)))
+        {
+            queue[index] = message;
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        }
+    }
+
+    fn send_rithmic_history(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicHistory { .. }))
         {
             queue[index] = message;
             return;
@@ -498,7 +535,8 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         MarketWorkerMessage::Recovery { .. }
         | MarketWorkerMessage::State { .. }
         | MarketWorkerMessage::Connection { .. }
-        | MarketWorkerMessage::RithmicCatalog(_) => None,
+        | MarketWorkerMessage::RithmicCatalog(_)
+        | MarketWorkerMessage::RithmicHistory { .. } => None,
     }
 }
 
@@ -571,6 +609,7 @@ pub(crate) enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
     RithmicSearch(RithmicSymbolSearch),
     RithmicSelect(RithmicInstrumentSelection),
+    RithmicHistory(RithmicSeriesRequest),
     Shutdown,
 }
 
@@ -838,12 +877,14 @@ impl MarketDataWorker {
                 TrySendError::Full(
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::RithmicSearch(_)
-                    | MarketWorkerCommand::RithmicSelect(_),
+                    | MarketWorkerCommand::RithmicSelect(_)
+                    | MarketWorkerCommand::RithmicHistory(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::RithmicSearch(_)
-                    | MarketWorkerCommand::RithmicSelect(_),
+                    | MarketWorkerCommand::RithmicSelect(_)
+                    | MarketWorkerCommand::RithmicHistory(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }
@@ -890,6 +931,28 @@ impl MarketDataWorker {
                 }
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                     unreachable!("Rithmic selection send errors retain the selection command")
+                }
+            })
+    }
+
+    pub fn try_request_rithmic_history(
+        &self,
+        request: RithmicSeriesRequest,
+    ) -> Result<(), TrySendError<RithmicSeriesRequest>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(request));
+        };
+        commands
+            .try_send(MarketWorkerCommand::RithmicHistory(request))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::RithmicHistory(request)) => {
+                    TrySendError::Full(request)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::RithmicHistory(request)) => {
+                    TrySendError::Disconnected(request)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("Rithmic history send errors retain the history request")
                 }
             })
     }
@@ -1167,7 +1230,9 @@ fn run_worker(
                     return;
                 }
             }
-            MarketWorkerCommand::RithmicSearch(_) | MarketWorkerCommand::RithmicSelect(_) => {}
+            MarketWorkerCommand::RithmicSearch(_)
+            | MarketWorkerCommand::RithmicSelect(_)
+            | MarketWorkerCommand::RithmicHistory(_) => {}
             MarketWorkerCommand::Shutdown => return,
         }
     }
@@ -1792,8 +1857,43 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_search_and_selection_commands_use_the_bounded_worker_channel() {
-        let (command_tx, command_rx) = mpsc::sync_channel(2);
+    fn latest_rithmic_history_result_is_generation_conflated() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let first = NonZeroUsize::MIN;
+        let latest = NonZeroUsize::new(2).expect("generation is nonzero");
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicHistory {
+                    selection_generation: first,
+                    series_generation: first,
+                    result: Err("first failed".to_string()),
+                })
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicHistory {
+                    selection_generation: first,
+                    series_generation: latest,
+                    result: Err("latest failed".to_string()),
+                })
+                .is_ok()
+        );
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RithmicHistory {
+                series_generation,
+                result: Err(error),
+                ..
+            }] if *series_generation == latest && error == "latest failed"
+        ));
+    }
+
+    #[test]
+    fn rithmic_catalog_and_history_commands_use_the_bounded_worker_channel() {
+        let (command_tx, command_rx) = mpsc::sync_channel(3);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None);
@@ -1823,6 +1923,13 @@ mod tests {
         worker
             .try_select_rithmic(selection)
             .expect("selection enters the bounded channel");
+        worker
+            .try_request_rithmic_history(crate::rithmic_history::RithmicSeriesRequest {
+                selection_generation: NonZeroUsize::MIN,
+                series_generation: NonZeroUsize::MIN,
+                series: crate::rithmic_history::RithmicSeries::Minute1,
+            })
+            .expect("history enters the bounded channel");
         assert!(matches!(
             command_rx.recv(),
             Ok(MarketWorkerCommand::RithmicSearch(_))
@@ -1830,6 +1937,10 @@ mod tests {
         assert!(matches!(
             command_rx.recv(),
             Ok(MarketWorkerCommand::RithmicSelect(_))
+        ));
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::RithmicHistory(_))
         ));
         let shutdown = thread::spawn(move || {
             assert!(matches!(
