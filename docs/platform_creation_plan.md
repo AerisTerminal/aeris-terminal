@@ -515,6 +515,11 @@ and uses the qualified local receive time instead of rejecting the frame. Catalo
 in `-Delayed` must use the base entitled exchange for reference, subscription,
 and history requests.
 
+A later native-vault-only repeat on 2026-08-07 again passed both authenticated
+ticker sessions, the 16-result search, reference, trades, quotes, depth,
+reconnect identity, and clean close, and returned 276 one-minute bars plus seven
+100-trade bars for `MNQU6` on `CME`.
+
 Windows frame evidence on 2026-08-07: the native display probe identified
 `LG ULTRAGEAR` (`\\.\DISPLAY1`) at 2560x1440, 1.25x scale, and 165,000 mHz.
 A 256-frame debug-profile Origin replay run after 32 warmup frames reported a
