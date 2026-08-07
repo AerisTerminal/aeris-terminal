@@ -430,10 +430,10 @@ impl HistoryCollector {
             self.duplicate_count = self.duplicate_count.saturating_add(1);
             return Ok(CollectionProgress::Pending);
         }
-        if keys
-            .iter()
-            .any(|key| !(self.request.start_seconds..=self.request.finish_seconds).contains(&key.0))
-        {
+        // Trade-count bars are indivisible and may straddle either requested
+        // time boundary. Retain a bar only when its key envelope overlaps the
+        // requested envelope; completely outside bars still fail closed.
+        if first.0 > self.request.finish_seconds || last.0 < self.request.start_seconds {
             return Err(CollectorError::OutsideRequestedRange);
         }
         if !keys.windows(2).all(|pair| pair[0] < pair[1]) {
@@ -650,6 +650,26 @@ mod tests {
         assert!(matches!(
             mismatched.accept(replay_tick(bar)),
             Err(CollectorError::SeriesMismatch)
+        ));
+    }
+
+    #[test]
+    fn tick_history_accepts_indivisible_bars_crossing_time_boundaries() {
+        let mut collector = HistoryCollector::try_new(tick_request(3)).expect("valid collector");
+        collector
+            .accept(replay_tick(tick_bar(&[(99, 900_000, "1"), (100, 1, "2")])))
+            .expect("provider-completed leading bar is retained");
+        collector
+            .accept(replay_tick(tick_bar(&[(101, 1, "3"), (101, 2, "4")])))
+            .expect("in-range bar is retained");
+        collector
+            .accept(replay_tick(tick_bar(&[(300, 1, "5"), (301, 2, "6")])))
+            .expect("provider-completed trailing bar is retained");
+
+        let mut outside = HistoryCollector::try_new(tick_request(2)).expect("valid collector");
+        assert!(matches!(
+            outside.accept(replay_tick(tick_bar(&[(98, 1, "1"), (99, 2, "2")]))),
+            Err(CollectorError::OutsideRequestedRange)
         ));
     }
 

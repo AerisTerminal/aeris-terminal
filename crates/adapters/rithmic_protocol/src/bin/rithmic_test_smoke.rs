@@ -6,7 +6,7 @@ use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes, RithmicSessionLimits,
     RithmicSessionMessage, RithmicTestSession, SearchPattern, SubscriptionAction,
     SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
-    TimeBarReplayRequest, TimeBarType,
+    TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
 };
 use std::{
     num::NonZeroUsize,
@@ -24,6 +24,14 @@ fn main() -> Result<(), String> {
     if subscription_rejected {
         return Err("rithmic_test_smoke=failed live_stream=provider_rejected".to_string());
     }
+    let (reconnected, reconnect_rejected) = run_ticker(&credentials, application)?;
+    if reconnect_rejected
+        || reconnected.symbol != selected.symbol
+        || reconnected.exchange != selected.exchange
+    {
+        return Err("rithmic_test_smoke=failed reconnect=identity_or_subscription".to_string());
+    }
+    println!("rithmic_reconnect=passed");
     println!(
         "rithmic_test_smoke=passed symbol={} exchange={}",
         selected.symbol, selected.exchange
@@ -266,9 +274,63 @@ fn run_history(
         return Err("history_empty".to_string());
     }
     println!("rithmic_history=passed bars={bar_count}");
+    run_tick_history(&mut history, selected, start, finish)?;
     history
         .close()
         .map_err(|error| format!("history_close_failed={error}"))?;
+    Ok(())
+}
+
+fn run_tick_history(
+    history: &mut axiusflow_rithmic_protocol_adapter::RithmicHistoryConnection,
+    selected: &SelectedInstrument,
+    start: i32,
+    finish: i32,
+) -> Result<(), String> {
+    const TRADES_PER_BAR: u16 = 100;
+    history
+        .replay_tick_bars(TickBarReplayRequest {
+            symbol: &selected.symbol,
+            exchange: &selected.exchange,
+            trades_per_bar: TRADES_PER_BAR,
+            start_seconds: start,
+            finish_seconds: finish,
+            maximum_bars: 300,
+        })
+        .map_err(|error| format!("tick_history_send_failed={error}"))?;
+    let mut collector = HistoryCollector::try_new(HistoryCollectionRequest {
+        symbol: selected.symbol.clone(),
+        exchange: selected.exchange.clone(),
+        series: HistorySeries::Tick {
+            trades_per_bar: TRADES_PER_BAR,
+        },
+        start_seconds: start,
+        finish_seconds: finish,
+        maximum_bars: NonZeroUsize::new(300).ok_or("tick_history_limit_invalid")?,
+    })
+    .map_err(|error| error.to_string())?;
+    let collected = loop {
+        if let RithmicSessionMessage::History(message) = history
+            .read_next()
+            .map_err(|error| format!("tick_history_read_failed={error}"))?
+        {
+            match collector
+                .accept(message)
+                .map_err(|error| error.to_string())?
+            {
+                CollectionProgress::Pending | CollectionProgress::Unhandled(_) => {}
+                CollectionProgress::Complete(result) => break result,
+            }
+        }
+    };
+    let bars = match collected.bars {
+        HistoryBars::Tick(bars) => bars,
+        HistoryBars::Time(_) => return Err("tick_history_wrong_series".to_string()),
+    };
+    if bars.is_empty() {
+        return Err("tick_history_empty".to_string());
+    }
+    println!("rithmic_tick_history=passed bars={}", bars.len());
     Ok(())
 }
 

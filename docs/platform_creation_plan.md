@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
 | Blocked | None. The remaining Stage C work is authorized resilience evidence, not credential or agreement access. |
-| Next | Finish tick-series semantics and named 60/120/144 Hz evidence; extend the authorized Test run through heartbeat-loss/reconnect/recovery |
+| Next | Integrate the now-proven Rithmic tick-bar replay/live path, capture named 60/120/144 Hz evidence, and extend authorized Test evidence through heartbeat loss |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -403,7 +403,7 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 ### Gate
 
 - [x] `tools/run_rithmic_protocol_conformance.sh` proves discovery, login, trades, quotes, depth, heartbeat, disconnect/reconnect, recovery, clean stop, bounds, allowlisting, redaction, and the kit-unavailable build.
-- [ ] Authorized Rithmic Test traffic repeats heartbeat-loss, disconnect/reconnect, and recovery evidence before provider behavior is marked `verified`; login, search/reference, trades, quotes, depth, history, and clean close already pass.
+- [ ] Authorized Rithmic Test traffic repeats heartbeat-loss evidence before provider behavior is marked `verified`; login, search/reference, trades, quotes, depth, time/tick history, a fresh disconnect/reconnect cycle, recovery, and clean close already pass.
 
 
 
@@ -495,8 +495,9 @@ deterministic headless gates.
 Provider evidence on 2026-08-07: Test login, a 16-result `MNQ` search, CME
 instrument reference, trades, quotes, complete depth, and a one-minute history
 replay all passed headlessly from the native vault. The successful combined run
-received all three live market classes and 264 historical bars for `MNQU6` on
-`CME`. Rithmic depth images may omit `ssboe`; the adapter preserves that absence
+received all three live market classes, 264 historical one-minute bars, and six
+100-trade historical tick bars for `MNQU6` on `CME`. A second fresh discovery,
+login, reference, and combined subscription cycle also passed. Rithmic depth images may omit `ssboe`; the adapter preserves that absence
 and uses the qualified local receive time instead of rejecting the frame. Catalog venues ending
 in `-Delayed` must use the base entitled exchange for reference, subscription,
 and history requests.
