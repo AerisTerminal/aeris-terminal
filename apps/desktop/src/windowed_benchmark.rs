@@ -1,11 +1,11 @@
-//! Windowed replay-to-presented-frame benchmark (`S1-13` evidence path).
+//! Windowed replay-to-frame-callback benchmark (`S1-13` and Stage E evidence path).
 //!
 //! Drives deterministic replay deltas through the real GPUI window one update per
-//! frame and measures update-to-presented latency and presented-frame cadence from
-//! GPUI's compositor-driven `on_next_frame` callbacks against the display profile
-//! reported by [`NativeDisplayProbe`]. Renderer submission is genuinely performed
-//! through GPUI's real Wayland window. Presentation is measured through compositor
-//! frame callbacks, not external scanout instrumentation, and the report says so.
+//! frame and measures update-to-next-frame latency and callback cadence from GPUI's
+//! `on_next_frame` callbacks against the display profile reported by
+//! [`NativeDisplayProbe`]. Renderer submission is genuinely performed through a
+//! native GPUI window. These callbacks run after the prior render but do not prove
+//! physical scanout, and the report says so.
 
 use crate::market_worker::FixtureMarketWorker;
 use axiusflow_chart_integration::OriginChartView;
@@ -34,8 +34,10 @@ const MEASURED_FRAMES: usize = 256;
 #[derive(Serialize)]
 struct DisplayOutputEvidence {
     name: Option<String>,
+    description: Option<String>,
     refresh_millihertz: Option<u32>,
     refresh_interval_nanos: Option<u64>,
+    pixel_size: Option<(u32, u32)>,
     effective_scale_milli: Option<u32>,
 }
 
@@ -64,8 +66,8 @@ struct WindowedBenchmarkReport {
     warmup_frames: usize,
     measured_frames: usize,
     updates_published: usize,
-    update_to_presented: LatencyEvidence,
-    present_interval: LatencyEvidence,
+    update_to_frame_callback: LatencyEvidence,
+    frame_callback_interval: LatencyEvidence,
     renderer_submission_performed: bool,
     physical_presentation_measured: bool,
     presentation_measurement_method: &'static str,
@@ -74,8 +76,8 @@ struct WindowedBenchmarkReport {
 }
 
 struct FrameSample {
-    update_to_presented_nanos: u64,
-    present_interval_nanos: u64,
+    update_to_frame_callback_nanos: u64,
+    frame_callback_interval_nanos: u64,
 }
 
 struct BenchmarkDriver {
@@ -98,17 +100,18 @@ impl BenchmarkDriver {
     fn step(&mut self, window: &mut Window, cx: &mut App) -> Step {
         let callback_at = Instant::now();
         if self.iteration > 0 {
-            let update_to_presented = callback_at
+            let update_to_frame_callback = callback_at
                 .saturating_duration_since(self.submitted_at)
                 .as_nanos();
-            let present_interval = callback_at
+            let frame_callback_interval = callback_at
                 .saturating_duration_since(self.last_callback_at)
                 .as_nanos();
             if self.iteration > WARMUP_FRAMES {
                 self.samples.push(FrameSample {
-                    update_to_presented_nanos: u64::try_from(update_to_presented)
+                    update_to_frame_callback_nanos: u64::try_from(update_to_frame_callback)
                         .unwrap_or(u64::MAX),
-                    present_interval_nanos: u64::try_from(present_interval).unwrap_or(u64::MAX),
+                    frame_callback_interval_nanos: u64::try_from(frame_callback_interval)
+                        .unwrap_or(u64::MAX),
                 });
             }
         }
@@ -193,15 +196,17 @@ fn display_evidence() -> DisplayEvidence {
                 .iter()
                 .map(|output: &DisplayOutput| DisplayOutputEvidence {
                     name: output.name().map(str::to_string),
+                    description: output.description().map(str::to_string),
                     refresh_millihertz: output.refresh_millihertz(),
                     refresh_interval_nanos: output.refresh_interval_nanos(),
+                    pixel_size: output.pixel_size(),
                     effective_scale_milli: output.effective_scale_milli(),
                 })
                 .collect(),
             presentation_clock: environment
                 .presentation_clock()
                 .map(|clock| format!("{clock:?}")),
-            probe: "wayland",
+            probe: native_probe_name(),
         },
         Err(_) => DisplayEvidence {
             outputs: Vec::new(),
@@ -211,10 +216,21 @@ fn display_evidence() -> DisplayEvidence {
     }
 }
 
+const fn native_probe_name() -> &'static str {
+    #[cfg(target_os = "linux")]
+    return "wayland";
+
+    #[cfg(target_os = "windows")]
+    return "windows_display_configuration";
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    "unavailable"
+}
+
 fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
     let report = WindowedBenchmarkReport {
-        schema_version: 1,
-        evidence_scope: "stage_1_windowed_replay_to_presented_frame",
+        schema_version: 2,
+        evidence_scope: "windowed_replay_to_frame_callback",
         source_revision: env::var("GITHUB_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty()),
@@ -222,16 +238,18 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
         warmup_frames: WARMUP_FRAMES,
         measured_frames: driver.samples.len(),
         updates_published: driver.iteration,
-        update_to_presented: latency_evidence(&driver.samples, |sample| {
-            sample.update_to_presented_nanos
+        update_to_frame_callback: latency_evidence(&driver.samples, |sample| {
+            sample.update_to_frame_callback_nanos
         }),
-        present_interval: latency_evidence(&driver.samples, |sample| sample.present_interval_nanos),
+        frame_callback_interval: latency_evidence(&driver.samples, |sample| {
+            sample.frame_callback_interval_nanos
+        }),
         renderer_submission_performed: true,
-        physical_presentation_measured: true,
-        presentation_measurement_method: "gpui_on_next_frame_compositor_frame_callbacks",
+        physical_presentation_measured: false,
+        presentation_measurement_method: "gpui_on_next_frame_after_prior_render",
         external_scanout_instrumented: false,
         limitations: [
-            "presentation_via_compositor_frame_callbacks_not_scanout",
+            "frame_callback_cadence_not_physical_scanout",
             "single_named_display_profile",
             "disconnected_fixture_data_source",
             "window_output_attribution_by_compositor_placement",
@@ -241,10 +259,10 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
     encoded.push(b'\n');
     fs::write(&driver.report_path, encoded)?;
     println!(
-        "windowed_replay_to_presented_frame=completed measured_frames={} update_to_presented_p50_ns={} present_interval_p50_ns={} report={}",
+        "windowed_replay_to_frame_callback=completed measured_frames={} update_to_frame_callback_p50_ns={} frame_callback_interval_p50_ns={} report={}",
         driver.samples.len(),
-        report.update_to_presented.p50,
-        report.present_interval.p50,
+        report.update_to_frame_callback.p50,
+        report.frame_callback_interval.p50,
         driver.report_path.display()
     );
     Ok(())

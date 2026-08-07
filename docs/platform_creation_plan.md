@@ -502,6 +502,14 @@ and uses the qualified local receive time instead of rejecting the frame. Catalo
 in `-Delayed` must use the base entitled exchange for reference, subscription,
 and history requests.
 
+Windows frame evidence on 2026-08-07: the native display probe identified
+`LG ULTRAGEAR` (`\\.\DISPLAY1`) at 2560x1440, 1.25x scale, and 165,000 mHz.
+A 256-frame debug-profile Origin replay run after 32 warmup frames reported a
+13.33 ms frame-callback interval p50 (about 75 Hz). The report now labels GPUI
+`on_next_frame` as post-render callback cadence rather than physical scanout.
+This does not satisfy the named 60/120/144 release-profile matrix, so the gate
+remains open.
+
 - [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [x] Correct DOM gap recovery.
 - [x] Responsive symbol/timeframe replacement.

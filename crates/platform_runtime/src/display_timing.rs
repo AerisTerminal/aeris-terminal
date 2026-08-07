@@ -10,12 +10,15 @@
 //! reports which clock presented-frame feedback will use. Per-frame feedback
 //! itself requires a committed surface, so it remains the UI layer's
 //! responsibility; this probe only reports the clock the feedback will carry.
-//! Windows, macOS, and X11 sessions report the port unavailable rather than
-//! inventing geometry.
+//! Windows reads the same current-mode fields through the operating system's
+//! display configuration APIs. macOS and unsupported Linux sessions report
+//! the port unavailable rather than inventing geometry.
 
 use crate::CapabilityAvailability;
 use core::fmt;
 use std::error::Error;
+#[cfg(target_os = "windows")]
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use wayland_client::{
@@ -79,6 +82,7 @@ pub struct DisplayOutput {
     pixel_size: Option<(u32, u32)>,
     integer_scale: Option<u32>,
     logical_size: Option<(u32, u32)>,
+    effective_scale_milli: Option<u32>,
 }
 
 impl DisplayOutput {
@@ -138,6 +142,9 @@ impl DisplayOutput {
     /// zero logical width or height is rejected instead of dividing by zero.
     #[must_use]
     pub fn effective_scale_milli(&self) -> Option<u32> {
+        if self.effective_scale_milli.is_some() {
+            return self.effective_scale_milli;
+        }
         if let (Some((pixel_width, _)), Some((logical_width, _))) =
             (self.pixel_size, self.logical_size)
             && logical_width > 0
@@ -211,10 +218,10 @@ impl NativeDisplayProbe {
     /// [`Self::probe`] with [`DisplayTimingError::NoSession`].
     #[must_use]
     pub const fn availability() -> CapabilityAvailability {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         return CapabilityAvailability::Available;
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         CapabilityAvailability::Unavailable
     }
 
@@ -229,9 +236,53 @@ impl NativeDisplayProbe {
         #[cfg(target_os = "linux")]
         return probe_wayland();
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        return probe_windows();
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Err(DisplayTimingError::UnsupportedPlatform)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn probe_windows() -> Result<DisplayEnvironment, DisplayTimingError> {
+    let displays = display_info::DisplayInfo::all().map_err(|_| DisplayTimingError::Transport)?;
+    let outputs = displays
+        .into_iter()
+        .filter_map(|display| {
+            if display.width == 0
+                || display.height == 0
+                || !display.frequency.is_finite()
+                || display.frequency <= 0.0
+                || !display.scale_factor.is_finite()
+                || display.scale_factor <= 0.0
+            {
+                return None;
+            }
+            let refresh_interval = Duration::from_secs_f32(display.frequency.recip());
+            let refresh_millihertz =
+                u32::try_from(1_000_000_000_000_u128.checked_div(refresh_interval.as_nanos())?)
+                    .ok()
+                    .filter(|&rate| (1..=1_000_000).contains(&rate))?;
+            let scale_milli =
+                u32::try_from(Duration::from_secs_f32(display.scale_factor).as_millis())
+                    .ok()
+                    .filter(|&scale| scale > 0)?;
+            Some(DisplayOutput {
+                name: Some(display.name),
+                description: (!display.friendly_name.is_empty()).then_some(display.friendly_name),
+                refresh_millihertz: Some(refresh_millihertz),
+                pixel_size: Some((display.width, display.height)),
+                integer_scale: None,
+                logical_size: None,
+                effective_scale_milli: Some(scale_milli),
+            })
+        })
+        .collect();
+    Ok(DisplayEnvironment {
+        outputs,
+        presentation_clock: None,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -436,10 +487,9 @@ fn probe_wayland() -> Result<DisplayEnvironment, DisplayTimingError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DisplayEnvironment, DisplayOutput, DisplayTimingError, NativeDisplayProbe,
-        PresentationClock,
-    };
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    use super::DisplayTimingError;
+    use super::{DisplayEnvironment, DisplayOutput, NativeDisplayProbe, PresentationClock};
     use crate::CapabilityAvailability;
 
     fn output(
@@ -454,6 +504,7 @@ mod tests {
             pixel_size: pixel,
             integer_scale: scale,
             logical_size: logical,
+            effective_scale_milli: None,
         }
     }
 
@@ -549,7 +600,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     #[test]
     fn unsupported_targets_fail_explicitly() {
         assert_eq!(
@@ -560,5 +611,26 @@ mod tests {
             NativeDisplayProbe::probe(),
             Err(DisplayTimingError::UnsupportedPlatform)
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_probe_reports_current_display_modes() {
+        assert_eq!(
+            NativeDisplayProbe::availability(),
+            CapabilityAvailability::Available
+        );
+        let environment = NativeDisplayProbe::probe().expect("Windows display APIs are available");
+        assert!(!environment.outputs().is_empty());
+        for output in environment.outputs() {
+            assert!(output.name().is_some_and(|name| !name.is_empty()));
+            assert!(output.refresh_millihertz().is_some_and(|rate| rate > 0));
+            assert!(output.pixel_size().is_some());
+            assert!(
+                output
+                    .effective_scale_milli()
+                    .is_some_and(|scale| scale > 0)
+            );
+        }
     }
 }

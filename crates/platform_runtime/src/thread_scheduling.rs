@@ -463,11 +463,18 @@ mod tests {
                 .as_slice(),
             &[65, 80]
         );
+        #[cfg(target_os = "linux")]
         assert!(
             scheduler
                 .apply_current_affinity(scheduler.current_affinity_targets()[1])
                 .is_ok()
         );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(matches!(
+            scheduler.apply_current_affinity(scheduler.current_affinity_targets()[1]),
+            Err(ThreadSchedulingError::AffinityUnavailable)
+        ));
+        #[cfg(target_os = "linux")]
         assert_eq!(
             state
                 .affinities
@@ -476,6 +483,14 @@ mod tests {
                 .as_slice(),
             &[8]
         );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(
+            state
+                .affinities
+                .lock()
+                .expect("affinity recording lock is available")
+                .is_empty()
+        );
 
         let state = Arc::new(RecordingState::default());
         let rejected = NativeThreadScheduler::with_backend(RecordingBackend {
@@ -483,9 +498,15 @@ mod tests {
             state,
             affinity_accepted: false,
         });
+        #[cfg(target_os = "linux")]
         assert!(matches!(
             rejected.apply_current_affinity(rejected.current_affinity_targets()[0]),
             Err(ThreadSchedulingError::AffinityRejected)
+        ));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(matches!(
+            rejected.apply_current_affinity(rejected.current_affinity_targets()[0]),
+            Err(ThreadSchedulingError::AffinityUnavailable)
         ));
     }
 }
