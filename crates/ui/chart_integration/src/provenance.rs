@@ -12,6 +12,14 @@ pub(crate) struct DisplayedProvenance {
 }
 
 impl DisplayedProvenance {
+    pub(crate) fn empty() -> Self {
+        Self {
+            by_source_sequence: BTreeMap::new(),
+            max_items: NonZeroUsize::new(DEFAULT_CHART_SERIES_MAX_POINTS)
+                .unwrap_or(NonZeroUsize::MIN),
+        }
+    }
+
     pub(crate) fn from_snapshot(snapshot: &ReplaySnapshot) -> Self {
         Self::from_snapshot_with_limit(
             snapshot,

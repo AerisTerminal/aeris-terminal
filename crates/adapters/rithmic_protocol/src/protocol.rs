@@ -462,6 +462,7 @@ mod kit {
 
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
     const MAX_IDENTITY_BYTES: usize = 256;
+    const MAX_TEMPLATE_VERSION_BYTES: usize = 32;
     const MAX_SYSTEMS: usize = 64;
     const MAX_HEARTBEAT_INTERVAL_SECONDS: f64 = 300.0;
     const TEST_SYSTEM: &str = "Rithmic Test";
@@ -900,7 +901,10 @@ mod kit {
         let response = rti::ResponseLogin::decode(frame).map_err(|_| ProtocolError::Decode)?;
         validate_response_fields(&response.user_msg, &response.rp_code)?;
         if accepted(&response.rp_code)
-            && response.template_version.as_deref() != Some(TEMPLATE_VERSION)
+            && !response
+                .template_version
+                .as_deref()
+                .is_some_and(valid_template_version)
         {
             return Err(ProtocolError::TemplateVersionMismatch);
         }
@@ -916,6 +920,15 @@ mod kit {
             accepted: accepted(&response.rp_code),
             heartbeat_seconds,
         })
+    }
+
+    fn valid_template_version(version: &str) -> bool {
+        !version.is_empty()
+            && version.len() <= MAX_TEMPLATE_VERSION_BYTES
+            && version
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+            && version.chars().any(|character| character.is_ascii_digit())
     }
 
     fn validate_response_fields(
@@ -1268,8 +1281,19 @@ mod tests {
             .encode_to_vec()
         };
         assert!(matches!(
-            codec.decode_control(&response(Some("3.9"), Some(10.0))),
+            codec.decode_control(&response(Some("broken"), Some(10.0))),
             Err(ProtocolError::TemplateVersionMismatch)
+        ));
+        assert!(matches!(
+            codec.decode_control(&response(None, Some(10.0))),
+            Err(ProtocolError::TemplateVersionMismatch)
+        ));
+        assert!(matches!(
+            codec.decode_control(&response(
+                Some(env!("RITHMIC_SCHEMA_TEMPLATE_VERSION")),
+                Some(10.0)
+            )),
+            Ok(DecodedControlMessage::Login { accepted: true, .. })
         ));
         assert!(matches!(
             codec.decode_control(&response(

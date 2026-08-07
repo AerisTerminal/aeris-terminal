@@ -24,7 +24,7 @@ const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 pub struct OriginChartView {
     engine: ChartEngine,
     renderer: GpuiChartRenderer,
-    data_bridge: ChartDataBridge,
+    data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
     frame: ChartFrame,
@@ -35,6 +35,29 @@ pub struct OriginChartView {
 }
 
 impl OriginChartView {
+    /// Creates an empty themed Origin surface without inventing market data.
+    #[must_use]
+    pub fn empty(theme: AxiusflowTheme) -> Self {
+        let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
+        apply_theme(&mut engine, &theme);
+        let retention_applied =
+            engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
+        debug_assert!(retention_applied);
+        apply_series_theme(&mut engine, &theme);
+        Self {
+            engine,
+            renderer: GpuiChartRenderer::new(),
+            data_bridge: None,
+            displayed_provenance: DisplayedProvenance::empty(),
+            price_divisor: 1.0,
+            frame: ChartFrame::default(),
+            axis_prims: Vec::new(),
+            theme,
+            built_for: (0.0, 0.0, 0.0),
+            fitted: false,
+        }
+    }
+
     /// Creates a chart from the bounded embedded replay and default theme.
     #[must_use]
     pub fn new() -> Self {
@@ -75,7 +98,7 @@ impl OriginChartView {
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
-            data_bridge,
+            data_bridge: Some(data_bridge),
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
             price_divisor: replay_price_divisor(replay),
             frame: ChartFrame::default(),
@@ -92,7 +115,14 @@ impl OriginChartView {
     ///
     /// Returns an error if the snapshot cannot establish resumable sequence state.
     pub fn load_replay(&mut self, replay: &ReplaySnapshot) -> Result<(), ReplayValidationError> {
-        self.data_bridge.install_snapshot(replay)?;
+        if let Some(bridge) = &mut self.data_bridge {
+            bridge.install_snapshot(replay)?;
+        } else {
+            self.data_bridge = Some(ChartDataBridge::try_new(
+                chart_data_queue_capacity(),
+                replay,
+            )?);
+        }
         install_replay(&mut self.engine, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
@@ -110,37 +140,50 @@ impl OriginChartView {
         &mut self,
         update: ReplayStreamUpdate,
     ) -> Result<(), Box<ReplayStreamUpdate>> {
-        self.data_bridge.try_push(update)
+        let Some(bridge) = &mut self.data_bridge else {
+            return Err(Box::new(update));
+        };
+        bridge.try_push(update)
     }
 
     /// Returns the number of replay commands waiting for the next frame.
     #[must_use]
     pub fn queued_replay_update_count(&self) -> usize {
-        self.data_bridge.queued_update_count()
+        self.data_bridge
+            .as_ref()
+            .map_or(0, ChartDataBridge::queued_update_count)
     }
 
     /// Returns whether a detected stream gap requires a replacement snapshot.
     #[must_use]
     pub fn replay_requires_snapshot(&self) -> bool {
-        self.data_bridge.requires_snapshot()
+        self.data_bridge
+            .as_ref()
+            .is_some_and(ChartDataBridge::requires_snapshot)
     }
 
     /// Returns the next sequence expected by the chart bridge.
     #[must_use]
     pub fn expected_replay_sequence(&self) -> Option<u64> {
-        self.data_bridge.expected_sequence()
+        self.data_bridge
+            .as_ref()
+            .and_then(ChartDataBridge::expected_sequence)
     }
 
     /// Returns bounded queue and resnapshot telemetry for this chart subscription.
     #[must_use]
     pub fn replay_bridge_metrics(&self) -> ChartBridgeMetrics {
-        self.data_bridge.metrics()
+        self.data_bridge
+            .as_ref()
+            .map_or_else(ChartBridgeMetrics::default, ChartDataBridge::metrics)
     }
 
     /// Peeks one retryable correlated recovery command without marking it dispatched.
     #[must_use]
     pub fn pending_replay_resnapshot_request(&self) -> Option<ReplayRecoveryCommand> {
-        self.data_bridge.pending_resnapshot_request()
+        self.data_bridge
+            .as_ref()
+            .and_then(ChartDataBridge::pending_resnapshot_request)
     }
 
     /// Offers recovery to a bounded worker queue and marks dispatch only after acceptance.
@@ -152,7 +195,10 @@ impl OriginChartView {
         &mut self,
         dispatch: impl FnOnce(ReplayRecoveryCommand) -> Result<(), DispatchError>,
     ) -> Result<bool, DispatchError> {
-        self.data_bridge.try_dispatch_recovery(dispatch)
+        let Some(bridge) = &mut self.data_bridge else {
+            return Ok(false);
+        };
+        bridge.try_dispatch_recovery(dispatch)
     }
 
     /// Installs a response only when its request ID matches the active dispatched recovery.
@@ -165,10 +211,10 @@ impl OriginChartView {
         request_id: u64,
         replay: &ReplaySnapshot,
     ) -> Result<bool, ReplayValidationError> {
-        if !self
-            .data_bridge
-            .install_recovery_snapshot(request_id, replay)?
-        {
+        let Some(bridge) = &mut self.data_bridge else {
+            return Ok(false);
+        };
+        if !bridge.install_recovery_snapshot(request_id, replay)? {
             return Ok(false);
         }
         install_replay(&mut self.engine, replay);
@@ -181,12 +227,16 @@ impl OriginChartView {
 
     /// Records failure only for the active correlated recovery request.
     pub fn mark_replay_recovery_failed(&mut self, request_id: u64) -> bool {
-        self.data_bridge.mark_recovery_failed(request_id)
+        self.data_bridge
+            .as_mut()
+            .is_some_and(|bridge| bridge.mark_recovery_failed(request_id))
     }
 
     /// Blocks ordered chart updates and requests a correlated replacement snapshot.
     pub fn mark_replay_stream_invalid(&mut self) {
-        self.data_bridge.mark_stream_invalid();
+        if let Some(bridge) = &mut self.data_bridge {
+            bridge.mark_stream_invalid();
+        }
     }
 
     /// Returns canonical evidence for a displayed value by its source sequence.
@@ -214,7 +264,10 @@ impl OriginChartView {
     }
 
     fn apply_pending_data(&mut self) {
-        match self.data_bridge.drain_merged() {
+        let Some(bridge) = &mut self.data_bridge else {
+            return;
+        };
+        match bridge.drain_merged() {
             Ok(Some(update)) if update.mutates_series() => {
                 let replaces_snapshot = update.snapshot().is_some();
                 if let Some(snapshot) = update.snapshot() {
@@ -229,7 +282,7 @@ impl OriginChartView {
             }
             Ok(_) => {}
             Err(error) => {
-                self.data_bridge.mark_stream_invalid();
+                bridge.mark_stream_invalid();
                 eprintln!("replay update rejected; snapshot required: {error}");
             }
         }
@@ -328,5 +381,29 @@ impl Render for OriginChartView {
                 )
                 .size_full(),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_chart_surface_accepts_its_first_real_snapshot() {
+        let mut chart = OriginChartView::empty(AxiusflowTheme::dark());
+        assert_eq!(chart.queued_replay_update_count(), 0);
+        assert_eq!(chart.expected_replay_sequence(), None);
+        assert_eq!(chart.replay_bridge_metrics(), ChartBridgeMetrics::default());
+        assert!(chart.latest_market_provenance().is_none());
+
+        let replay = EmbeddedReplaySource
+            .execute(LoadEmbeddedReplay { bar_count: 16 })
+            .expect("embedded replay validates");
+        chart.load_replay(&replay).expect("first snapshot installs");
+        assert_eq!(
+            chart.expected_replay_sequence(),
+            replay.stream().last_sequence().checked_add(1)
+        );
+        assert!(chart.latest_market_provenance().is_some());
     }
 }

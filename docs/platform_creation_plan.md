@@ -458,7 +458,7 @@ None — gate met.
 
 ## 10. Stage E — Main Rithmic UI vertical
 
-**Status:** `in_progress` (bounded shell, symbol selection, and series-selection/history-request vertical landed)
+**Status:** `in_progress` (bounded shell, symbol selection, series selection, and truthful empty Origin surface landed)
 
 Begin only after Stage 0 is `verified` and Stages C and D pass their
 deterministic headless gates.
@@ -476,6 +476,8 @@ deterministic headless gates.
 - [x] Show provider profile, Test environment, and connection state.
 - [x] Search and select discovered symbols.
 - [x] Select tick, 1m, 5m, 15m, 1h, and daily series.
+- [x] Keep the Origin chart mounted before provider data arrives; never substitute fixture candles.
+- [x] Run a native-vault-only headless Test smoke for login, discovery, selection, history, and streaming.
 - [ ] Hydrate visible-range-first history into the Origin chart.
 - [ ] Replace forming candles and append completed candles deterministically.
 - [ ] Build a read-only DOM from one snapshot plus ordered deltas.
@@ -488,6 +490,12 @@ deterministic headless gates.
 
 
 ### Gate
+
+Provider evidence on 2026-08-07: Test login, a 16-result `MNQ` search, and
+instrument reference lookup passed. The provider explicitly rejected both a
+dated-contract market-data subscription and a one-minute history replay. Live
+chart hydration therefore remains externally blocked on Test data entitlement;
+the desktop must display the empty Origin surface and rejection state truthfully.
 
 - [ ] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [ ] Correct DOM gap recovery.

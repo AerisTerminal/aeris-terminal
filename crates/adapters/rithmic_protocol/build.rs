@@ -1,6 +1,7 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
 const KIT_DISABLED_ENV: &str = "AXIUSFLOW_RITHMIC_KIT_DISABLED";
+const LOGIN_TEMPLATE_VERSION: &str = "3.9";
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rustc-check-cfg=cfg(rithmic_kit)");
@@ -38,7 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let change_log = proto_dir.join("change_log");
     println!("cargo:rerun-if-changed={}", change_log.display());
     let change_log_contents = fs::read_to_string(&change_log)?;
-    let template_version = change_log_contents
+    let schema_template_version = change_log_contents
         .lines()
         .find_map(|line| line.split_once("template version"))
         .map(|(_, version)| version.trim())
@@ -65,7 +66,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .disable_comments(["."])
         .include_file("rithmic.protobuf.rs")
         .compile_protos(&schemas, &[proto_dir])?;
-    println!("cargo:rustc-env=RITHMIC_TEMPLATE_VERSION={template_version}");
+    println!("cargo:rustc-env=RITHMIC_SCHEMA_TEMPLATE_VERSION={schema_template_version}");
+    println!("cargo:rustc-env=RITHMIC_TEMPLATE_VERSION={LOGIN_TEMPLATE_VERSION}");
     println!("cargo:rustc-cfg=rithmic_kit");
     Ok(())
 }

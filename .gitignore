@@ -2,4 +2,5 @@
 /origin_charts/
 /.cache/
 /provider_kit/
+/local-data/
 __pycache__/

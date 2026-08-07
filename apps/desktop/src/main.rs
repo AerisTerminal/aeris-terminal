@@ -133,8 +133,9 @@ impl TerminalApp {
                 let profile = shell.profile_label();
                 let connection = shell.connection();
                 let message = shell.message().to_string();
+                let chart = cx.new(move |_| OriginChartView::empty(theme));
                 (
-                    None,
+                    Some(chart),
                     ChartState::Loading,
                     message.clone(),
                     profile.clone(),
@@ -370,6 +371,11 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
+        let theme = self.theme;
+        self.chart = Some(cx.new(move |_| OriginChartView::empty(theme)));
+    }
+
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
         if !self.market_worker.is_connected() {
             return;
@@ -592,7 +598,7 @@ impl TerminalApp {
             } => {
                 if self.symbol_browser.confirm_selection(selection_generation) {
                     self.series_browser.reset();
-                    self.chart = None;
+                    self.reset_chart_surface(cx);
                     self.bridge_label = "bridge awaiting series selection".to_string();
                     self.replay_label = "Selected instrument · choose a series".to_string();
                     self.subscription_id =
@@ -631,7 +637,7 @@ impl TerminalApp {
         if series == rithmic_history::RithmicSeries::Tick {
             self.series_browser
                 .accept(request.selection_generation, request.series_generation);
-            self.chart = None;
+            self.reset_chart_surface(cx);
             self.bridge_label = "bridge awaiting tick-series support".to_string();
             self.replay_label = "Tick series · historical continuity unavailable".to_string();
             self.series_message =
@@ -646,7 +652,7 @@ impl TerminalApp {
             .try_request_rithmic_history(request)
             .is_ok()
         {
-            self.chart = None;
+            self.reset_chart_surface(cx);
             self.bridge_label = "bridge awaiting visible history".to_string();
             self.series_message = format!("Loading {} visible history", series.label());
             self.set_chart_state(
@@ -777,6 +783,7 @@ impl Render for TerminalApp {
             .child(
                 div()
                     .id("primary_chart")
+                    .v_flex()
                     .flex_1()
                     .m(px(12.0))
                     .rounded(button_radius)
@@ -784,16 +791,32 @@ impl Render for TerminalApp {
                     .border_1()
                     .border_color(gpui_color(colors.border))
                     .bg(gpui_color(colors.card))
-                    .children(self.chart.clone())
-                    .children(self.chart.is_none().then(|| {
+                    .child(
                         div()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                            .flex_none()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(gpui_color(colors.border))
+                            .text_xs()
                             .text_color(gpui_color(colors.muted_foreground))
-                            .child(chart_state_label)
-                    })),
+                            .child(chart_state_label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .children(self.chart.clone())
+                            .children(self.chart.is_none().then(|| {
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(gpui_color(colors.muted_foreground))
+                                    .child(chart_state_label)
+                            })),
+                    ),
             )
             .children(diagnostics_panel)
     }

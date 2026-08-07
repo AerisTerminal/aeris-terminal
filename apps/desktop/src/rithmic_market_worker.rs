@@ -303,6 +303,8 @@ fn open_worker(
     detailed_diagnostics: bool,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<(RithmicWorker, RithmicEvents), String> {
+    std::fs::create_dir_all(&history_root)
+        .map_err(|_| "Rithmic history directory is unavailable".to_string())?;
     let credential_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
         .map_err(|_| "native credential vault unavailable".to_string())?;
     let key_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
@@ -493,7 +495,26 @@ fn terminal_failure(reason: ProviderInvalidationReason) -> (FeedConnectionState,
             FeedConnectionState::Stopped,
             "Rithmic Test agreements require attention",
         ),
-        _ => (
+        ProviderInvalidationReason::UnsupportedSystem => (
+            FeedConnectionState::Stopped,
+            "Rithmic Test was not offered by system discovery",
+        ),
+        ProviderInvalidationReason::SchemaMismatch => (
+            FeedConnectionState::Stopped,
+            "Rithmic rejected the protocol template version",
+        ),
+        ProviderInvalidationReason::MalformedMessage => (
+            FeedConnectionState::Stopped,
+            "Rithmic returned an unexpected protocol response",
+        ),
+        ProviderInvalidationReason::Transport => (
+            FeedConnectionState::Stopped,
+            "Rithmic Test transport stopped",
+        ),
+        ProviderInvalidationReason::HeartbeatSilence
+        | ProviderInvalidationReason::MessageSilence
+        | ProviderInvalidationReason::SequenceGap
+        | ProviderInvalidationReason::QueueOverflow => (
             FeedConnectionState::Stopped,
             "Rithmic Test session cannot continue",
         ),

@@ -15,6 +15,7 @@ use std::{
 use tungstenite::{Connector, WebSocket, protocol::WebSocketConfig, stream::MaybeTlsStream};
 
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TCP_CONNECT_ATTEMPT_LIMIT: Duration = Duration::from_secs(1);
 const MAXIMUM_RESOLVED_ADDRESSES: usize = 16;
 
 type ResolutionResult = io::Result<Vec<SocketAddr>>;
@@ -202,7 +203,7 @@ fn connect_tcp(
             }
             let attempts_left =
                 u32::try_from(addresses.len() - index).map_err(|_| RithmicSessionError::Connect)?;
-            let attempt_timeout = (remaining / attempts_left).min(NETWORK_POLL_INTERVAL);
+            let attempt_timeout = connect_attempt_timeout(remaining, attempts_left);
             match connect_address(*address, attempt_timeout) {
                 Ok(stream) => {
                     stream
@@ -226,6 +227,10 @@ fn connect_tcp(
         }
         thread::sleep(remaining.min(NETWORK_POLL_INTERVAL));
     }
+}
+
+fn connect_attempt_timeout(remaining: Duration, attempts_left: u32) -> Duration {
+    (remaining / attempts_left).min(TCP_CONNECT_ATTEMPT_LIMIT)
 }
 
 fn connect_address(address: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
@@ -305,4 +310,22 @@ fn start_resolver() -> Result<mpsc::SyncSender<ResolutionRequest>, ()> {
         })
         .map_err(|_| ())?;
     Ok(sender)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_connect_attempts_are_not_limited_to_the_io_poll_interval() {
+        assert_eq!(
+            connect_attempt_timeout(Duration::from_secs(15), 1),
+            TCP_CONNECT_ATTEMPT_LIMIT
+        );
+        assert!(TCP_CONNECT_ATTEMPT_LIMIT > NETWORK_POLL_INTERVAL);
+        assert_eq!(
+            connect_attempt_timeout(Duration::from_millis(600), 2),
+            Duration::from_millis(300)
+        );
+    }
 }

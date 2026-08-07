@@ -120,7 +120,7 @@ pub struct ReplayRecoveryCommand {
 }
 
 /// Observable bounded-bridge state used for resnapshot and overload telemetry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ChartBridgeMetrics {
     pub queued_updates: usize,
     pub queue_overflows: u64,
