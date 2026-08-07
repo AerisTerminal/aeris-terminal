@@ -11,14 +11,18 @@ use axiusflow_application::{
     ReplayStreamUpdate, ReplayValidationError, UseCase,
 };
 use axiusflow_design_system::AxiusflowTheme;
-use gpui::{App, Bounds, Context, Entity, Render, Window, canvas, div, prelude::*, rgb};
+use gpui::{
+    App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Render, ScrollWheelEvent, Window, canvas, div, prelude::*, px, rgb,
+};
 use num_traits::ToPrimitive;
-use origin_engine::{ChartEngine, ChartFrame};
+use origin_engine::{ChartEngine, ChartFrame, PriceScaleTarget};
 use origin_render::draw_list::Prim;
 use origin_render_gpui::backend::measure_text;
 use origin_render_gpui::{GpuiChartRenderer, OriginViewport, PreparedOriginFrame};
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
+const WHEEL_LINE_HEIGHT: f32 = 32.0;
 
 /// A GPUI entity hosting one authoritative Origin chart engine and renderer.
 pub struct OriginChartView {
@@ -32,6 +36,8 @@ pub struct OriginChartView {
     theme: AxiusflowTheme,
     built_for: (f32, f32, f32),
     fitted: bool,
+    viewport_origin: (f32, f32),
+    panning: bool,
 }
 
 impl OriginChartView {
@@ -55,6 +61,8 @@ impl OriginChartView {
             theme,
             built_for: (0.0, 0.0, 0.0),
             fitted: false,
+            viewport_origin: (0.0, 0.0),
+            panning: false,
         }
     }
 
@@ -106,6 +114,8 @@ impl OriginChartView {
             theme,
             built_for: (0.0, 0.0, 0.0),
             fitted: false,
+            viewport_origin: (0.0, 0.0),
+            panning: false,
         }
     }
 
@@ -294,6 +304,133 @@ impl OriginChartView {
         self.built_for = (0.0, 0.0, 0.0);
     }
 
+    fn local_position(&self, position: gpui::Point<gpui::Pixels>) -> (f64, f64) {
+        let window_x: f32 = position.x.into();
+        let window_y: f32 = position.y.into();
+        let chart_x = f64::from(window_x - self.viewport_origin.0);
+        let y = f64::from(window_y - self.viewport_origin.1);
+        (chart_x - self.engine.pane_left, y)
+    }
+
+    fn update_crosshair(&mut self, pane_x: f64, y: f64) {
+        self.engine.crosshair =
+            (pane_x >= 0.0 && pane_x <= self.engine.pane_w && y >= 0.0 && y <= self.engine.pane_h)
+                .then_some((pane_x, y));
+        self.invalidate_series_frame();
+    }
+
+    fn begin_pan(&mut self, pane_x: f64, y: f64) {
+        if pane_x < 0.0 || pane_x > self.engine.pane_w || y < 0.0 || y > self.engine.pane_h {
+            self.panning = false;
+            self.update_crosshair(pane_x, y);
+            return;
+        }
+        self.engine.time_scale.end_scroll();
+        self.engine.time_scale.start_scroll(pane_x);
+        self.panning = true;
+        self.update_crosshair(pane_x, y);
+    }
+
+    fn pan_to(&mut self, pane_x: f64, y: f64) {
+        if self.panning {
+            self.engine.time_scale.scroll_to(pane_x);
+        }
+        self.update_crosshair(pane_x, y);
+    }
+
+    fn end_pan(&mut self, pane_x: f64, y: f64) {
+        if self.panning {
+            self.engine.time_scale.end_scroll();
+            self.panning = false;
+        }
+        self.update_crosshair(pane_x, y);
+    }
+
+    fn apply_wheel(&mut self, pane_x: f64, y: f64, normalized_x: f64, normalized_y: f64) {
+        if normalized_y != 0.0 {
+            let zoom = origin_engine::wheel_zoom_scale(normalized_y);
+            let pane = self.engine.pane_index_at_y(y);
+            if pane_x < 0.0 {
+                self.engine
+                    .price_axis_wheel_zoom(pane, PriceScaleTarget::Left, y, zoom);
+            } else if pane_x > self.engine.pane_w {
+                self.engine
+                    .price_axis_wheel_zoom(pane, PriceScaleTarget::Right, y, zoom);
+            } else {
+                self.engine.time_scale.zoom(pane_x, zoom);
+            }
+        }
+        if normalized_x != 0.0 {
+            self.engine.time_scale.start_scroll(0.0);
+            self.engine
+                .time_scale
+                .scroll_to(origin_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
+            self.engine.time_scale.end_scroll();
+        }
+        self.update_crosshair(pane_x, y);
+    }
+
+    fn clear_pointer(&mut self, cx: &mut Context<Self>) {
+        if self.panning {
+            self.engine.time_scale.end_scroll();
+            self.panning = false;
+        }
+        self.engine.crosshair = None;
+        self.invalidate_series_frame();
+        cx.notify();
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pane_x, y) = self.local_position(event.position);
+        self.begin_pan(pane_x, y);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pane_x, y) = self.local_position(event.position);
+        if self.panning && event.dragging() {
+            self.pan_to(pane_x, y);
+        } else {
+            self.update_crosshair(pane_x, y);
+        }
+        cx.notify();
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let (pane_x, y) = self.local_position(event.position);
+        self.end_pan(pane_x, y);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pane_x, y) = self.local_position(event.position);
+        let delta = event.delta.pixel_delta(px(WHEEL_LINE_HEIGHT));
+        let dx: f32 = delta.x.into();
+        let dy: f32 = delta.y.into();
+        let normalized_x = f64::from(dx) / 100.0;
+        let normalized_y = f64::from(dy) / 100.0;
+        self.apply_wheel(pane_x, y, normalized_x, normalized_y);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn rebuild(&mut self, width: f32, height: f32, scale_factor: f32, window: &Window) {
         self.apply_pending_data();
         let dimensions = (width, height, scale_factor);
@@ -358,10 +495,22 @@ impl Render for OriginChartView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
+        let hover_entity = entity.clone();
 
         div()
+            .id("origin_chart_surface")
             .size_full()
             .bg(rgb(self.theme.colors.background.rgb_u32()))
+            .on_hover(move |hovered, _, cx| {
+                if !*hovered {
+                    hover_entity.update(cx, OriginChartView::clear_pointer);
+                }
+            })
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(
                 canvas(
                     move |bounds: Bounds<gpui::Pixels>, window, cx| {
@@ -369,6 +518,8 @@ impl Render for OriginChartView {
                         let height = bounds.size.height.into();
                         let scale_factor = window.scale_factor();
                         prepaint_entity.update(cx, |chart, _| {
+                            chart.viewport_origin =
+                                (bounds.origin.x.into(), bounds.origin.y.into());
                             chart.rebuild(width, height, scale_factor, window);
                         });
                         bounds
@@ -388,6 +539,15 @@ impl Render for OriginChartView {
 mod tests {
     use super::*;
 
+    fn interactive_chart() -> OriginChartView {
+        let mut chart = OriginChartView::with_theme(AxiusflowTheme::dark());
+        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart.engine.fit_content();
+        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart.fitted = true;
+        chart
+    }
+
     #[test]
     fn empty_chart_surface_accepts_its_first_real_snapshot() {
         let mut chart = OriginChartView::empty(AxiusflowTheme::dark());
@@ -405,5 +565,34 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[test]
+    fn wheel_zoom_and_horizontal_scroll_mutate_origin_without_refitting() {
+        let mut chart = interactive_chart();
+        let spacing = chart.engine.bar_spacing();
+        chart.apply_wheel(400.0, 200.0, 0.0, 1.0);
+        assert!((chart.engine.bar_spacing() - spacing).abs() > f64::EPSILON);
+        let offset = chart.engine.right_offset();
+        chart.apply_wheel(400.0, 200.0, 1.0, 0.0);
+        assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
+        assert!(chart.fitted);
+    }
+
+    #[test]
+    fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
+        let mut chart = interactive_chart();
+        chart.begin_pan(-1.0, 200.0);
+        assert!(!chart.panning);
+        chart.begin_pan(300.0, 200.0);
+        assert!(chart.panning);
+        assert_eq!(chart.engine.crosshair, Some((300.0, 200.0)));
+        let offset = chart.engine.right_offset();
+        chart.pan_to(340.0, 200.0);
+        assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
+        chart.end_pan(340.0, 200.0);
+        assert!(!chart.panning);
+        chart.update_crosshair(-1.0, 200.0);
+        assert!(chart.engine.crosshair.is_none());
     }
 }

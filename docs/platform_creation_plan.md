@@ -486,6 +486,7 @@ deterministic headless gates.
 - [x] Add an optional collapsible feed-health and latency panel.
 - [x] Conflate chart and depth updates on frame boundaries.
 - [x] Fence symbol/timeframe replacement by selection generation.
+- [x] Forward native pointer crosshair, drag-to-pan, and wheel zoom/scroll into Origin.
 - [x] Bound hidden-window work and retained state.
 
 The native header now uses GPUI Component dropdown menus for exact contract and
