@@ -1,9 +1,12 @@
 use crate::{
-    AggregateBookAssembler, AggregateBookLimits, AggregateBookOutcome, DecodedControlMessage,
-    DecodedMarketMessage, MarketDataSubscription, MarketIdentity, OrderBookLevel,
-    ProviderTimestamp, QuoteLevel, QuoteSideUpdate, RetryDisposition, RithmicApplication,
-    RithmicCredentialBytes, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
-    RithmicTestSession, SubscriptionAction, TradeAggressor,
+    AggregateBookAssembler, AggregateBookLimits, AggregateBookOutcome, CollectedSymbols,
+    CollectionProgress, CollectorError, DecodedCatalogMessage, DecodedControlMessage,
+    DecodedMarketMessage, InstrumentReference, InstrumentReferenceRequest, InstrumentType,
+    MarketDataSubscription, MarketIdentity, OrderBookLevel, ProviderTimestamp, QuoteLevel,
+    QuoteSideUpdate, RetryDisposition, RithmicApplication, RithmicCredentialBytes,
+    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession,
+    SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
+    SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
 };
 use axiusflow_desktop_provider_runtime::{
     AuthenticationState, ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerError,
@@ -24,6 +27,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -38,6 +42,9 @@ pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.axiusflow.terminal";
 pub const RITHMIC_TEST_VAULT_KEY: &str = "provider-rithmic-test-default-v1";
 const MAXIMUM_INSTRUMENTS: usize = 128;
 const MAXIMUM_IDENTITY_BYTES: usize = 256;
+const SESSION_COMMAND_CAPACITY: usize = 8;
+const SESSION_COMMAND_BATCH: usize = 4;
+const SESSION_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAXIMUM_CALLBACK_EVENTS: usize = 4_096;
 const MAXIMUM_CALLBACK_BYTES: usize = 256 * 1024 * 1024;
 const MAXIMUM_SILENCE_TIMEOUT: Duration = Duration::from_mins(5);
@@ -59,6 +66,290 @@ pub struct RithmicProviderInstrument {
     pub trades: bool,
     pub quotes: bool,
     pub order_book: bool,
+}
+
+/// Bounded, owned symbol-search intent for one UI search generation.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RithmicSymbolSearch {
+    search_generation: NonZeroUsize,
+    search_text: String,
+    exchange: Option<String>,
+    product_code: Option<String>,
+    instrument_type: Option<InstrumentType>,
+    pattern: SearchPattern,
+    maximum_results: NonZeroUsize,
+}
+
+impl fmt::Debug for RithmicSymbolSearch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RithmicSymbolSearch")
+            .field("search_generation", &self.search_generation)
+            .field("maximum_results", &self.maximum_results)
+            .field("query", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RithmicSymbolSearch {
+    /// Creates one bounded search without retaining provider text in diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty, oversized, or control-bearing field, or
+    /// for a result bound above the direct-session instrument limit.
+    pub fn try_new(
+        search_generation: NonZeroUsize,
+        search_text: impl Into<String>,
+        exchange: Option<String>,
+        product_code: Option<String>,
+        instrument_type: Option<InstrumentType>,
+        pattern: SearchPattern,
+        maximum_results: NonZeroUsize,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        let search_text = search_text.into();
+        if maximum_results.get() > MAXIMUM_INSTRUMENTS
+            || !valid_command_field(&search_text)
+            || exchange
+                .as_ref()
+                .is_some_and(|value| !valid_command_field(value))
+            || product_code
+                .as_ref()
+                .is_some_and(|value| !valid_command_field(value))
+        {
+            return Err(RithmicProviderCommandError::InvalidRequest);
+        }
+        Ok(Self {
+            search_generation,
+            search_text,
+            exchange,
+            product_code,
+            instrument_type,
+            pattern,
+            maximum_results,
+        })
+    }
+
+    fn protocol_request(&self) -> SymbolSearchRequest<'_> {
+        SymbolSearchRequest {
+            search_text: &self.search_text,
+            exchange: self.exchange.as_deref(),
+            product_code: self.product_code.as_deref(),
+            instrument_type: self.instrument_type,
+            pattern: self.pattern,
+        }
+    }
+
+    fn collection_request(&self) -> SymbolSearchCollectionRequest {
+        SymbolSearchCollectionRequest {
+            exchange: self.exchange.clone(),
+            product_code: self.product_code.clone(),
+            instrument_type: self
+                .instrument_type
+                .map(instrument_type_name)
+                .map(str::to_string),
+            maximum_results: self.maximum_results,
+        }
+    }
+}
+
+/// Exact selection from the latest completed search.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RithmicInstrumentSelection {
+    selection_generation: NonZeroUsize,
+    search_generation: NonZeroUsize,
+    symbol: String,
+    exchange: String,
+    entitlement_id: String,
+    trades: bool,
+    quotes: bool,
+    order_book: bool,
+}
+
+/// Read-only market-data families enabled for one selected instrument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RithmicReadOnlySubscription {
+    trades: bool,
+    quotes: bool,
+    order_book: bool,
+}
+
+impl RithmicReadOnlySubscription {
+    /// Creates a non-empty read-only market-data selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when every market-data family is disabled.
+    pub fn try_new(
+        trades: bool,
+        quotes: bool,
+        order_book: bool,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        if !(trades || quotes || order_book) {
+            return Err(RithmicProviderCommandError::InvalidRequest);
+        }
+        Ok(Self {
+            trades,
+            quotes,
+            order_book,
+        })
+    }
+
+    const fn is_empty(self) -> bool {
+        !(self.trades || self.quotes || self.order_book)
+    }
+}
+
+impl fmt::Debug for RithmicInstrumentSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RithmicInstrumentSelection")
+            .field("selection_generation", &self.selection_generation)
+            .field("search_generation", &self.search_generation)
+            .field("instrument", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RithmicInstrumentSelection {
+    /// Creates one bounded read-only selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identities or an empty market-data intent.
+    pub fn try_new(
+        selection_generation: NonZeroUsize,
+        search_generation: NonZeroUsize,
+        symbol: impl Into<String>,
+        exchange: impl Into<String>,
+        entitlement_id: impl Into<String>,
+        subscription: RithmicReadOnlySubscription,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        let symbol = symbol.into();
+        let exchange = exchange.into();
+        let entitlement_id = entitlement_id.into();
+        if !valid_command_field(&symbol)
+            || !valid_command_field(&exchange)
+            || !valid_command_field(&entitlement_id)
+            || subscription.is_empty()
+        {
+            return Err(RithmicProviderCommandError::InvalidRequest);
+        }
+        Ok(Self {
+            selection_generation,
+            search_generation,
+            symbol,
+            exchange,
+            entitlement_id,
+            trades: subscription.trades,
+            quotes: subscription.quotes,
+            order_book: subscription.order_book,
+        })
+    }
+}
+
+/// Coarse asynchronous rejection for a bounded catalog command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RithmicCatalogRejection {
+    SearchRejected,
+    SupersededSearch,
+    InstrumentUnavailable,
+    SubscriptionRejected,
+}
+
+/// Adapter-local catalog output, fenced by session and UI generations.
+#[derive(Clone, Eq, PartialEq)]
+pub enum RithmicCatalogEvent {
+    SearchCompleted {
+        session_generation: SessionGeneration,
+        search_generation: NonZeroUsize,
+        symbols: CollectedSymbols,
+    },
+    SelectionInstalled {
+        session_generation: SessionGeneration,
+        selection_generation: NonZeroUsize,
+        instrument: InstrumentDescriptor,
+    },
+    CommandRejected {
+        session_generation: SessionGeneration,
+        command_generation: NonZeroUsize,
+        reason: RithmicCatalogRejection,
+    },
+}
+
+impl fmt::Debug for RithmicCatalogEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SearchCompleted {
+                session_generation,
+                search_generation,
+                symbols,
+            } => formatter
+                .debug_struct("SearchCompleted")
+                .field("session_generation", session_generation)
+                .field("search_generation", search_generation)
+                .field("result_count", &symbols.results.len())
+                .finish(),
+            Self::SelectionInstalled {
+                session_generation,
+                selection_generation,
+                ..
+            } => formatter
+                .debug_struct("SelectionInstalled")
+                .field("session_generation", session_generation)
+                .field("selection_generation", selection_generation)
+                .field("instrument", &"[REDACTED]")
+                .finish(),
+            Self::CommandRejected {
+                session_generation,
+                command_generation,
+                reason,
+            } => formatter
+                .debug_struct("CommandRejected")
+                .field("session_generation", session_generation)
+                .field("command_generation", command_generation)
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+/// Redacted command-validation and delivery failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RithmicProviderCommandError {
+    InvalidRequest,
+    SessionUnavailable,
+    StaleGeneration,
+    QueueFull,
+}
+
+impl fmt::Display for RithmicProviderCommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Rithmic catalog command failed: {self:?}")
+    }
+}
+
+impl Error for RithmicProviderCommandError {}
+
+fn valid_command_field(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAXIMUM_IDENTITY_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+const fn instrument_type_name(instrument_type: InstrumentType) -> &'static str {
+    match instrument_type {
+        InstrumentType::Future => "FUTURE",
+        InstrumentType::FutureOption => "FUTURE_OPTION",
+        InstrumentType::FutureStrategy => "FUTURE_STRATEGY",
+        InstrumentType::Equity => "EQUITY",
+        InstrumentType::EquityOption => "EQUITY_OPTION",
+        InstrumentType::EquityStrategy => "EQUITY_STRATEGY",
+        InstrumentType::Index => "INDEX",
+        InstrumentType::IndexOption => "INDEX_OPTION",
+        InstrumentType::Spread => "SPREAD",
+        InstrumentType::Synthetic => "SYNTHETIC",
+    }
 }
 
 impl RithmicProviderInstrument {
@@ -213,6 +504,23 @@ pub struct RithmicProviderEvents {
     callbacks: Arc<SharedCallbacks>,
 }
 
+/// One bounded adapter-local catalog callback.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RithmicCatalogCallback {
+    pub generation: SessionGeneration,
+    pub event: RithmicCatalogEvent,
+}
+
+impl fmt::Debug for RithmicCatalogCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RithmicCatalogCallback")
+            .field("generation", &self.generation)
+            .field("event", &self.event)
+            .finish()
+    }
+}
+
 impl RithmicProviderEvents {
     #[must_use]
     pub fn has_ready(&self) -> bool {
@@ -221,7 +529,17 @@ impl RithmicProviderEvents {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !state.queue.is_empty() || state.terminal.is_some()
+        if !state.queue.is_empty() || state.terminal.is_some() {
+            return true;
+        }
+        drop(state);
+        !self
+            .callbacks
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queue
+            .is_empty()
     }
 
     #[must_use]
@@ -248,6 +566,70 @@ impl RithmicProviderEvents {
                 retry: terminal.retry,
             })
     }
+
+    /// Receives at most one bounded catalog callback.
+    #[must_use]
+    pub fn try_recv_catalog(&self) -> Option<RithmicCatalogCallback> {
+        let mut catalog = self
+            .callbacks
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued = catalog.queue.pop_front()?;
+        catalog.queued_bytes = catalog.queued_bytes.saturating_sub(queued.retained_bytes);
+        Some(RithmicCatalogCallback {
+            generation: queued.generation,
+            event: queued.event,
+        })
+    }
+
+    /// Enqueues one bounded symbol search for the exact active session generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error for a missing/stale session or a full command queue.
+    pub fn search_symbols(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicSymbolSearch,
+    ) -> Result<(), RithmicProviderCommandError> {
+        self.send_command(generation, RithmicSessionCommand::Search(request))
+    }
+
+    /// Enqueues one read-only selection from the latest completed symbol search.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error for a missing/stale session or a full command queue.
+    pub fn select_instrument(
+        &self,
+        generation: SessionGeneration,
+        request: RithmicInstrumentSelection,
+    ) -> Result<(), RithmicProviderCommandError> {
+        self.send_command(generation, RithmicSessionCommand::Select(request))
+    }
+
+    fn send_command(
+        &self,
+        generation: SessionGeneration,
+        command: RithmicSessionCommand,
+    ) -> Result<(), RithmicProviderCommandError> {
+        let commands = self
+            .callbacks
+            .commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (active_generation, sender) = commands
+            .as_ref()
+            .ok_or(RithmicProviderCommandError::SessionUnavailable)?;
+        if *active_generation != generation {
+            return Err(RithmicProviderCommandError::StaleGeneration);
+        }
+        sender.try_send(command).map_err(|error| match error {
+            TrySendError::Full(_) => RithmicProviderCommandError::QueueFull,
+            TrySendError::Disconnected(_) => RithmicProviderCommandError::SessionUnavailable,
+        })
+    }
 }
 
 /// Redacted direct-driver lifecycle failures.
@@ -273,6 +655,7 @@ type SessionTask = dyn Fn(
         SessionGeneration,
         RithmicCredentialBytes,
         Arc<AtomicBool>,
+        Receiver<RithmicSessionCommand>,
         SessionEmitter,
     ) + Send
     + Sync
@@ -282,6 +665,20 @@ struct ActiveSession {
     generation: SessionGeneration,
     stop: Arc<AtomicBool>,
     handle: JoinHandle<()>,
+}
+
+enum RithmicSessionCommand {
+    Search(RithmicSymbolSearch),
+    Select(RithmicInstrumentSelection),
+}
+
+impl fmt::Debug for RithmicSessionCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Search(request) => formatter.debug_tuple("Search").field(request).finish(),
+            Self::Select(request) => formatter.debug_tuple("Select").field(request).finish(),
+        }
+    }
 }
 
 struct QueuedCallback {
@@ -298,10 +695,23 @@ struct CallbackState {
     failed: bool,
 }
 
+struct QueuedCatalogCallback {
+    generation: SessionGeneration,
+    event: RithmicCatalogEvent,
+    retained_bytes: usize,
+}
+
+struct CatalogCallbackState {
+    queue: VecDeque<QueuedCatalogCallback>,
+    queued_bytes: usize,
+}
+
 struct SharedCallbacks {
     limits: RithmicCallbackLimits,
     maximum_instruments: NonZeroUsize,
     state: Mutex<CallbackState>,
+    catalog: Mutex<CatalogCallbackState>,
+    commands: Mutex<Option<(SessionGeneration, SyncSender<RithmicSessionCommand>)>>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -388,6 +798,49 @@ impl SessionEmitter {
         }
     }
 
+    fn send_catalog(&self, event: RithmicCatalogEvent) -> bool {
+        if catalog_event_generation(&event) != self.generation {
+            self.invalid(
+                ProviderInvalidationReason::MalformedMessage,
+                RetryDisposition::Terminal,
+            );
+            return false;
+        }
+        let Some(retained_bytes) = retained_catalog_event_bytes(&event) else {
+            self.invalid(
+                ProviderInvalidationReason::QueueOverflow,
+                RetryDisposition::Transient,
+            );
+            return false;
+        };
+        let mut catalog = self
+            .callbacks
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_bytes = catalog.queued_bytes.checked_add(retained_bytes);
+        let accepted = catalog.queue.len() < self.callbacks.limits.event_capacity.get()
+            && next_bytes.is_some_and(|bytes| bytes <= self.callbacks.limits.byte_capacity.get());
+        if accepted {
+            catalog.queued_bytes = next_bytes.unwrap_or(catalog.queued_bytes);
+            catalog.queue.push_back(QueuedCatalogCallback {
+                generation: self.generation,
+                event,
+                retained_bytes,
+            });
+        }
+        drop(catalog);
+        if accepted {
+            self.wake();
+        } else {
+            self.invalid(
+                ProviderInvalidationReason::QueueOverflow,
+                RetryDisposition::Transient,
+            );
+        }
+        accepted
+    }
+
     fn wake(&self) {
         if let Some(wake) = &self.callbacks.wake {
             wake();
@@ -465,6 +918,11 @@ impl RithmicProviderDriver {
                 terminal: None,
                 failed: false,
             }),
+            catalog: Mutex::new(CatalogCallbackState {
+                queue: VecDeque::with_capacity(callback_limits.event_capacity.get()),
+                queued_bytes: 0,
+            }),
+            commands: Mutex::new(None),
             wake,
         });
         (
@@ -488,6 +946,7 @@ impl RithmicProviderDriver {
                 .active
                 .take()
                 .ok_or(RithmicProviderDriverError::StopUnconfirmed)?;
+            self.clear_commands(active.generation);
             let _ = active.handle.join();
         }
         Ok(())
@@ -495,6 +954,20 @@ impl RithmicProviderDriver {
 
     fn owns_events(&self, events: &RithmicProviderEvents) -> bool {
         Arc::ptr_eq(&self.callbacks, &events.callbacks)
+    }
+
+    fn clear_commands(&self, generation: SessionGeneration) {
+        let mut commands = self
+            .callbacks
+            .commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if commands
+            .as_ref()
+            .is_some_and(|(active, _)| *active == generation)
+        {
+            *commands = None;
+        }
     }
 }
 
@@ -523,7 +996,22 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             callbacks.terminal = None;
             callbacks.failed = false;
         }
+        {
+            let mut catalog = self
+                .callbacks
+                .catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            catalog.queue.clear();
+            catalog.queued_bytes = 0;
+        }
         let stop = Arc::new(AtomicBool::new(false));
+        let (command_tx, command_rx) = sync_channel(SESSION_COMMAND_CAPACITY);
+        *self
+            .callbacks
+            .commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((generation, command_tx));
         let task = Arc::clone(&self.task);
         let config = self.config.clone();
         let emitter = SessionEmitter {
@@ -536,7 +1024,14 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             .name(format!("rithmic-session-{}", generation.get()))
             .spawn(move || {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    task(config, generation, credentials, task_stop, emitter);
+                    task(
+                        config,
+                        generation,
+                        credentials,
+                        task_stop,
+                        command_rx,
+                        emitter,
+                    );
                 }))
                 .is_err()
                 {
@@ -546,7 +1041,10 @@ impl ProviderSessionDriver for RithmicProviderDriver {
                     );
                 }
             })
-            .map_err(|_| RithmicProviderDriverError::ThreadUnavailable)?;
+            .map_err(|_| {
+                self.clear_commands(generation);
+                RithmicProviderDriverError::ThreadUnavailable
+            })?;
         self.active = Some(ActiveSession {
             generation,
             stop,
@@ -565,6 +1063,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             return Err(RithmicProviderDriverError::StaleGeneration);
         }
         active.stop.store(true, Ordering::Release);
+        self.clear_commands(generation);
         let _ = active.handle.join();
         Ok(())
     }
@@ -574,6 +1073,7 @@ impl Drop for RithmicProviderDriver {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
             active.stop.store(true, Ordering::Release);
+            self.clear_commands(active.generation);
             let _ = active.handle.join();
         }
     }
@@ -788,80 +1288,89 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
 }
 
 fn direct_session_task() -> Arc<SessionTask> {
-    Arc::new(|config, generation, credential_bytes, stop, emitter| {
-        if !emitter.send(ProviderSessionEvent::DiscoveryStarted) {
-            return;
-        }
-        let connection = {
-            let Ok(credentials) = credential_bytes.credentials() else {
-                emitter.invalid(
-                    ProviderInvalidationReason::Authentication,
-                    RetryDisposition::Terminal,
-                );
+    Arc::new(
+        |config, generation, credential_bytes, stop, commands, emitter| {
+            if !emitter.send(ProviderSessionEvent::DiscoveryStarted) {
                 return;
+            }
+            let connection = {
+                let Ok(credentials) = credential_bytes.credentials() else {
+                    emitter.invalid(
+                        ProviderInvalidationReason::Authentication,
+                        RetryDisposition::Terminal,
+                    );
+                    return;
+                };
+                RithmicTestSession::discover_and_login(
+                    credentials,
+                    RithmicApplication {
+                        name: &config.application_name,
+                        version: &config.application_version,
+                    },
+                    config.session_limits,
+                    Some(Arc::clone(&stop)),
+                )
             };
-            RithmicTestSession::discover_and_login(
-                credentials,
-                RithmicApplication {
-                    name: &config.application_name,
-                    version: &config.application_version,
-                },
-                config.session_limits,
-                Some(Arc::clone(&stop)),
-            )
-        };
-        drop(credential_bytes);
-        let mut connection = match connection {
-            Ok(connection) => connection,
-            Err(error) => {
+            drop(credential_bytes);
+            let mut connection = match connection {
+                Ok(connection) => connection,
+                Err(error) => {
+                    if error != RithmicSessionError::Cancelled && !stop.load(Ordering::Acquire) {
+                        emit_connection_failure(&emitter, generation, error);
+                    }
+                    return;
+                }
+            };
+            if !emitter.send(ProviderSessionEvent::SystemsDiscovered {
+                environments: vec![RithmicProviderConfig::environment()],
+            }) || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
+                generation,
+                state: AuthenticationState::Accepted,
+            }) {
+                stop.store(true, Ordering::Release);
+            }
+            if stop.load(Ordering::Acquire) {
+                let _ = connection.close();
+                return;
+            }
+            if let Err(error) = install_subscriptions(&mut connection, &config, &stop) {
                 if error != RithmicSessionError::Cancelled && !stop.load(Ordering::Acquire) {
-                    emit_connection_failure(&emitter, generation, error);
+                    let (reason, retry) = session_failure(error);
+                    emitter.invalid(reason, retry);
                 }
                 return;
             }
-        };
-        if !emitter.send(ProviderSessionEvent::SystemsDiscovered {
-            environments: vec![RithmicProviderConfig::environment()],
-        }) || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
-            generation,
-            state: AuthenticationState::Accepted,
-        }) {
-            stop.store(true, Ordering::Release);
-        }
-        if stop.load(Ordering::Acquire) {
-            let _ = connection.close();
-            return;
-        }
-        if let Err(error) = install_subscriptions(&mut connection, &config, &stop) {
-            if error != RithmicSessionError::Cancelled && !stop.load(Ordering::Acquire) {
-                let (reason, retry) = session_failure(error);
+            if !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
+                generation,
+                instruments: config
+                    .instruments
+                    .iter()
+                    .map(|instrument| instrument.descriptor.clone())
+                    .collect(),
+            }) {
+                stop.store(true, Ordering::Release);
+            }
+            let result = if stop.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                collect_market(
+                    &mut connection,
+                    &config,
+                    generation,
+                    &stop,
+                    &commands,
+                    &emitter,
+                )
+            };
+            if stop.load(Ordering::Acquire) {
+                let _ = connection.close();
+                return;
+            }
+            if let Err((reason, retry)) = result {
                 emitter.invalid(reason, retry);
             }
-            return;
-        }
-        if !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
-            generation,
-            instruments: config
-                .instruments
-                .iter()
-                .map(|instrument| instrument.descriptor.clone())
-                .collect(),
-        }) {
-            stop.store(true, Ordering::Release);
-        }
-        let result = if stop.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            collect_market(&mut connection, &config, generation, &stop, &emitter)
-        };
-        if stop.load(Ordering::Acquire) {
-            let _ = connection.close();
-            return;
-        }
-        if let Err((reason, retry)) = result {
-            emitter.invalid(reason, retry);
-        }
-    })
+        },
+    )
 }
 
 fn emit_connection_failure(
@@ -904,47 +1413,103 @@ fn install_subscriptions(
     Ok(())
 }
 
+enum PendingCatalogCommand {
+    Search {
+        generation: NonZeroUsize,
+        collector: SymbolSearchCollector,
+    },
+    Reference(RithmicInstrumentSelection),
+}
+
+enum SubscriptionPhase {
+    Unsubscribe(usize),
+    Subscribe,
+}
+
+struct PendingSubscription {
+    selection: RithmicInstrumentSelection,
+    instrument: RithmicProviderInstrument,
+    previous: Vec<RithmicProviderInstrument>,
+    phase: SubscriptionPhase,
+}
+
+type SymbolKey = (String, String);
+type LatestSymbolSearch = (NonZeroUsize, BTreeMap<SymbolKey, SymbolSearchResult>);
+
+#[derive(Default)]
+struct CatalogCommandState {
+    pending_catalog: Option<PendingCatalogCommand>,
+    pending_subscription: Option<PendingSubscription>,
+    latest_search: Option<LatestSymbolSearch>,
+}
+
+struct DirectSessionState {
+    last_message: Instant,
+    next_heartbeat: Instant,
+    heartbeat_deadline: Option<Instant>,
+    source_ordinal: u64,
+    catalog: CatalogCommandState,
+}
+
 fn collect_market(
     connection: &mut crate::RithmicTickerConnection,
     config: &RithmicProviderConfig,
     generation: SessionGeneration,
     stop: &AtomicBool,
+    commands: &Receiver<RithmicSessionCommand>,
     emitter: &SessionEmitter,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let mut canonical = CanonicalSessionState::try_new(config, generation)?;
     let heartbeat_interval = connection.heartbeat_interval();
     let started = Instant::now();
-    let mut last_message = started;
-    let mut next_heartbeat = started + heartbeat_interval;
-    let mut heartbeat_deadline = None;
-    let mut source_ordinal = 0_u64;
+    let mut state = DirectSessionState {
+        last_message: started,
+        next_heartbeat: started + heartbeat_interval,
+        heartbeat_deadline: None,
+        source_ordinal: 0,
+        catalog: CatalogCommandState::default(),
+    };
     loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
+        if state.catalog.pending_catalog.is_none() && state.catalog.pending_subscription.is_none() {
+            process_session_commands(
+                connection,
+                commands,
+                generation,
+                emitter,
+                &mut state.catalog.pending_catalog,
+                state.catalog.latest_search.as_ref(),
+            )?;
+        }
         let now = Instant::now();
-        if now.duration_since(last_message) >= config.message_silence_timeout {
+        if now.duration_since(state.last_message) >= config.message_silence_timeout {
             return Err((
                 ProviderInvalidationReason::MessageSilence,
                 RetryDisposition::Transient,
             ));
         }
-        if heartbeat_deadline.is_some_and(|deadline| now >= deadline) {
+        if state
+            .heartbeat_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
             return Err((
                 ProviderInvalidationReason::HeartbeatSilence,
                 RetryDisposition::Transient,
             ));
         }
-        if heartbeat_deadline.is_none() && now >= next_heartbeat {
+        if state.heartbeat_deadline.is_none() && now >= state.next_heartbeat {
             connection.send_heartbeat().map_err(session_failure)?;
-            heartbeat_deadline = Some(now + config.session_limits.response_timeout);
-            next_heartbeat = now + heartbeat_interval;
+            state.heartbeat_deadline = Some(now + config.session_limits.response_timeout);
+            state.next_heartbeat = now + heartbeat_interval;
         }
-        let mut deadline = last_message + config.message_silence_timeout;
-        if let Some(pending) = heartbeat_deadline {
+        let mut deadline = (state.last_message + config.message_silence_timeout)
+            .min(now + SESSION_COMMAND_POLL_INTERVAL);
+        if let Some(pending) = state.heartbeat_deadline {
             deadline = deadline.min(pending);
         } else {
-            deadline = deadline.min(next_heartbeat);
+            deadline = deadline.min(state.next_heartbeat);
         }
         let message = match connection.read_next_until(deadline) {
             Ok(message) => message,
@@ -952,53 +1517,395 @@ fn collect_market(
             Err(RithmicSessionError::Cancelled) if stop.load(Ordering::Acquire) => return Ok(()),
             Err(error) => return Err(session_failure(error)),
         };
-        last_message = Instant::now();
-        source_ordinal = source_ordinal.checked_add(1).ok_or((
-            ProviderInvalidationReason::MalformedMessage,
-            RetryDisposition::Terminal,
-        ))?;
-        match message {
-            RithmicSessionMessage::Market(message) => {
-                let received_unix_nanos = unix_nanos_now()?;
-                if let Some(event) =
-                    canonical.convert(message, source_ordinal, received_unix_nanos)?
-                    && !emitter.send(ProviderSessionEvent::Market { generation, event })
-                {
-                    stop.store(true, Ordering::Release);
-                    return Ok(());
-                }
-            }
-            RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
-                accepted: true,
-                ..
-            }) => {
-                heartbeat_deadline = None;
-                if !emitter.send(ProviderSessionEvent::Heartbeat {
-                    generation,
-                    received_unix_nanos: unix_nanos_now()?,
-                }) {
-                    stop.store(true, Ordering::Release);
-                    return Ok(());
-                }
-            }
-            RithmicSessionMessage::Control(DecodedControlMessage::ForcedLogout) => {
-                return Err((
-                    ProviderInvalidationReason::Authentication,
-                    RetryDisposition::Terminal,
-                ));
-            }
-            _ => {
-                return Err((
-                    ProviderInvalidationReason::MalformedMessage,
-                    RetryDisposition::Terminal,
-                ));
-            }
+        state.last_message = Instant::now();
+        state.source_ordinal = state.source_ordinal.checked_add(1).ok_or_else(malformed)?;
+        if !handle_session_message(
+            connection,
+            message,
+            generation,
+            emitter,
+            &mut state,
+            &mut canonical,
+            stop,
+        )? {
+            return Ok(());
         }
     }
 }
 
-struct CanonicalSessionState<'a> {
-    config: &'a RithmicProviderConfig,
+fn handle_session_message(
+    connection: &mut crate::RithmicTickerConnection,
+    message: RithmicSessionMessage,
+    generation: SessionGeneration,
+    emitter: &SessionEmitter,
+    state: &mut DirectSessionState,
+    canonical: &mut CanonicalSessionState,
+    stop: &AtomicBool,
+) -> Result<bool, (ProviderInvalidationReason, RetryDisposition)> {
+    match message {
+        RithmicSessionMessage::Catalog(message) => {
+            handle_catalog_message(
+                connection,
+                message,
+                generation,
+                emitter,
+                &mut state.catalog,
+                canonical,
+            )?;
+        }
+        RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
+            accepted,
+        }) if state.catalog.pending_subscription.is_some() => {
+            advance_subscription(
+                connection,
+                generation,
+                emitter,
+                accepted,
+                &mut state.catalog.pending_subscription,
+                canonical,
+            )?;
+        }
+        RithmicSessionMessage::Market(message) => {
+            let received_unix_nanos = unix_nanos_now()?;
+            if let Some(event) =
+                canonical.convert(message, state.source_ordinal, received_unix_nanos)?
+                && !emitter.send(ProviderSessionEvent::Market { generation, event })
+            {
+                stop.store(true, Ordering::Release);
+                return Ok(false);
+            }
+        }
+        RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
+            accepted: true, ..
+        }) => {
+            state.heartbeat_deadline = None;
+            if !emitter.send(ProviderSessionEvent::Heartbeat {
+                generation,
+                received_unix_nanos: unix_nanos_now()?,
+            }) {
+                stop.store(true, Ordering::Release);
+                return Ok(false);
+            }
+        }
+        RithmicSessionMessage::Control(DecodedControlMessage::ForcedLogout) => {
+            return Err((
+                ProviderInvalidationReason::Authentication,
+                RetryDisposition::Terminal,
+            ));
+        }
+        _ => return Err(malformed()),
+    }
+    Ok(true)
+}
+
+fn process_session_commands(
+    connection: &mut crate::RithmicTickerConnection,
+    commands: &Receiver<RithmicSessionCommand>,
+    session_generation: SessionGeneration,
+    emitter: &SessionEmitter,
+    pending: &mut Option<PendingCatalogCommand>,
+    latest_search: Option<&LatestSymbolSearch>,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    for _ in 0..SESSION_COMMAND_BATCH {
+        let command = match commands.try_recv() {
+            Ok(command) => command,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
+        };
+        match command {
+            RithmicSessionCommand::Search(request) => {
+                let collector = SymbolSearchCollector::try_new(request.collection_request())
+                    .map_err(|_| malformed())?;
+                if let Err(error) = connection.search_symbols(request.protocol_request()) {
+                    let rejection = search_command_failure(error)?;
+                    if !send_rejection(
+                        emitter,
+                        session_generation,
+                        request.search_generation,
+                        rejection,
+                    ) {
+                        return Err((
+                            ProviderInvalidationReason::QueueOverflow,
+                            RetryDisposition::Transient,
+                        ));
+                    }
+                    continue;
+                }
+                *pending = Some(PendingCatalogCommand::Search {
+                    generation: request.search_generation,
+                    collector,
+                });
+                return Ok(());
+            }
+            RithmicSessionCommand::Select(selection) => {
+                let available = latest_search.is_some_and(|(generation, symbols)| {
+                    *generation == selection.search_generation
+                        && symbols
+                            .contains_key(&(selection.exchange.clone(), selection.symbol.clone()))
+                });
+                if !available {
+                    let reason = latest_search.map_or(
+                        RithmicCatalogRejection::SupersededSearch,
+                        |(generation, _)| {
+                            if *generation == selection.search_generation {
+                                RithmicCatalogRejection::InstrumentUnavailable
+                            } else {
+                                RithmicCatalogRejection::SupersededSearch
+                            }
+                        },
+                    );
+                    if !send_rejection(
+                        emitter,
+                        session_generation,
+                        selection.selection_generation,
+                        reason,
+                    ) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                connection
+                    .request_instrument_reference(InstrumentReferenceRequest {
+                        symbol: &selection.symbol,
+                        exchange: &selection.exchange,
+                    })
+                    .map_err(session_failure)?;
+                *pending = Some(PendingCatalogCommand::Reference(selection));
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn search_command_failure(
+    error: RithmicSessionError,
+) -> Result<RithmicCatalogRejection, (ProviderInvalidationReason, RetryDisposition)> {
+    if error == RithmicSessionError::RequestInFlight {
+        Ok(RithmicCatalogRejection::SearchRejected)
+    } else {
+        Err(session_failure(error))
+    }
+}
+
+fn handle_catalog_message(
+    connection: &mut crate::RithmicTickerConnection,
+    message: DecodedCatalogMessage,
+    session_generation: SessionGeneration,
+    emitter: &SessionEmitter,
+    state: &mut CatalogCommandState,
+    canonical: &CanonicalSessionState,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let Some(pending) = state.pending_catalog.as_mut() else {
+        return Err(malformed());
+    };
+    match pending {
+        PendingCatalogCommand::Search {
+            generation,
+            collector,
+        } => match collector.accept(message) {
+            Ok(CollectionProgress::Pending) => Ok(()),
+            Ok(CollectionProgress::Complete(symbols)) => {
+                let search_generation = *generation;
+                state.latest_search = Some((
+                    search_generation,
+                    symbols
+                        .results
+                        .iter()
+                        .cloned()
+                        .map(|symbol| ((symbol.exchange.clone(), symbol.symbol.clone()), symbol))
+                        .collect(),
+                ));
+                state.pending_catalog = None;
+                if !emitter.send_catalog(RithmicCatalogEvent::SearchCompleted {
+                    session_generation,
+                    search_generation,
+                    symbols,
+                }) {
+                    return Err((
+                        ProviderInvalidationReason::QueueOverflow,
+                        RetryDisposition::Transient,
+                    ));
+                }
+                Ok(())
+            }
+            Err(CollectorError::Rejected) => {
+                let search_generation = *generation;
+                state.pending_catalog = None;
+                send_rejection(
+                    emitter,
+                    session_generation,
+                    search_generation,
+                    RithmicCatalogRejection::SearchRejected,
+                );
+                Ok(())
+            }
+            Ok(CollectionProgress::Unhandled(_)) | Err(_) => Err(malformed()),
+        },
+        PendingCatalogCommand::Reference(selection) => {
+            let DecodedCatalogMessage::InstrumentReference(reference) = message else {
+                return Err(malformed());
+            };
+            let selection = selection.clone();
+            state.pending_catalog = None;
+            let Some(reference) = reference else {
+                send_rejection(
+                    emitter,
+                    session_generation,
+                    selection.selection_generation,
+                    RithmicCatalogRejection::InstrumentUnavailable,
+                );
+                return Ok(());
+            };
+            let instrument = selected_instrument(&selection, reference)?;
+            let previous = canonical.instruments.clone();
+            let phase = if previous.is_empty() {
+                connection
+                    .update_market_data(subscription_request(
+                        &instrument,
+                        SubscriptionAction::Subscribe,
+                    ))
+                    .map_err(session_failure)?;
+                SubscriptionPhase::Subscribe
+            } else {
+                connection
+                    .update_market_data(subscription_request(
+                        &previous[0],
+                        SubscriptionAction::Unsubscribe,
+                    ))
+                    .map_err(session_failure)?;
+                SubscriptionPhase::Unsubscribe(0)
+            };
+            state.pending_subscription = Some(PendingSubscription {
+                selection,
+                instrument,
+                previous,
+                phase,
+            });
+            Ok(())
+        }
+    }
+}
+
+fn advance_subscription(
+    connection: &mut crate::RithmicTickerConnection,
+    session_generation: SessionGeneration,
+    emitter: &SessionEmitter,
+    accepted: bool,
+    pending: &mut Option<PendingSubscription>,
+    canonical: &mut CanonicalSessionState,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let Some(plan) = pending.as_mut() else {
+        return Err(malformed());
+    };
+    if !accepted {
+        send_rejection(
+            emitter,
+            session_generation,
+            plan.selection.selection_generation,
+            RithmicCatalogRejection::SubscriptionRejected,
+        );
+        return Err((
+            ProviderInvalidationReason::Transport,
+            RetryDisposition::Transient,
+        ));
+    }
+    match plan.phase {
+        SubscriptionPhase::Unsubscribe(index) => {
+            let next = index + 1;
+            if let Some(instrument) = plan.previous.get(next) {
+                connection
+                    .update_market_data(subscription_request(
+                        instrument,
+                        SubscriptionAction::Unsubscribe,
+                    ))
+                    .map_err(session_failure)?;
+                plan.phase = SubscriptionPhase::Unsubscribe(next);
+            } else {
+                connection
+                    .update_market_data(subscription_request(
+                        &plan.instrument,
+                        SubscriptionAction::Subscribe,
+                    ))
+                    .map_err(session_failure)?;
+                plan.phase = SubscriptionPhase::Subscribe;
+            }
+            Ok(())
+        }
+        SubscriptionPhase::Subscribe => {
+            let plan = pending.take().ok_or_else(malformed)?;
+            canonical.replace_instrument(plan.instrument.clone())?;
+            if !emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
+                session_generation,
+                selection_generation: plan.selection.selection_generation,
+                instrument: plan.instrument.descriptor,
+            }) {
+                return Err((
+                    ProviderInvalidationReason::QueueOverflow,
+                    RetryDisposition::Transient,
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn selected_instrument(
+    selection: &RithmicInstrumentSelection,
+    reference: InstrumentReference,
+) -> Result<RithmicProviderInstrument, (ProviderInvalidationReason, RetryDisposition)> {
+    if reference.symbol != selection.symbol || reference.exchange != selection.exchange {
+        return Err(malformed());
+    }
+    let instrument_id = format!("rithmic:{}:{}", reference.exchange, reference.symbol);
+    let descriptor = InstrumentDescriptor {
+        instrument_id,
+        provider_symbol: reference.symbol.clone(),
+        display_symbol: reference.name.unwrap_or(reference.symbol),
+        venue_id: reference.exchange,
+        price_scale: reference.price_precision.unwrap_or(0),
+        quantity_scale: 0,
+    };
+    if descriptor.validate().is_err() {
+        return Err(malformed());
+    }
+    Ok(RithmicProviderInstrument {
+        descriptor,
+        entitlement_id: selection.entitlement_id.clone(),
+        trades: selection.trades,
+        quotes: selection.quotes,
+        order_book: selection.order_book,
+    })
+}
+
+fn subscription_request(
+    instrument: &RithmicProviderInstrument,
+    action: SubscriptionAction,
+) -> MarketDataSubscription<'_> {
+    MarketDataSubscription {
+        symbol: &instrument.descriptor.provider_symbol,
+        exchange: &instrument.descriptor.venue_id,
+        action,
+        trades: instrument.trades,
+        quotes: instrument.quotes,
+        order_book: instrument.order_book,
+    }
+}
+
+fn send_rejection(
+    emitter: &SessionEmitter,
+    session_generation: SessionGeneration,
+    command_generation: NonZeroUsize,
+    reason: RithmicCatalogRejection,
+) -> bool {
+    emitter.send_catalog(RithmicCatalogEvent::CommandRejected {
+        session_generation,
+        command_generation,
+        reason,
+    })
+}
+
+struct CanonicalSessionState {
+    instruments: Vec<RithmicProviderInstrument>,
     generation: SessionGeneration,
     quotes: BTreeMap<String, QuoteState>,
     books: BTreeMap<String, AggregateBookAssembler>,
@@ -1010,9 +1917,9 @@ struct QuoteState {
     ask: Option<QuoteLevel>,
 }
 
-impl<'a> CanonicalSessionState<'a> {
+impl CanonicalSessionState {
     fn try_new(
-        config: &'a RithmicProviderConfig,
+        config: &RithmicProviderConfig,
         generation: SessionGeneration,
     ) -> Result<Self, (ProviderInvalidationReason, RetryDisposition)> {
         let mut books = BTreeMap::new();
@@ -1036,7 +1943,7 @@ impl<'a> CanonicalSessionState<'a> {
             }
         }
         Ok(Self {
-            config,
+            instruments: config.instruments.clone(),
             generation,
             quotes: BTreeMap::new(),
             books,
@@ -1146,11 +2053,39 @@ impl<'a> CanonicalSessionState<'a> {
         &self,
         identity: &MarketIdentity,
     ) -> Result<&RithmicProviderInstrument, (ProviderInvalidationReason, RetryDisposition)> {
-        self.config
-            .instruments
+        self.instruments
             .iter()
             .find(|instrument| instrument.identity_matches(identity))
             .ok_or_else(malformed)
+    }
+
+    fn replace_instrument(
+        &mut self,
+        instrument: RithmicProviderInstrument,
+    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+        self.instruments.clear();
+        self.instruments.push(instrument);
+        self.quotes.clear();
+        self.books.clear();
+        let instrument = &self.instruments[0];
+        if instrument.order_book {
+            let limits = AggregateBookLimits::try_new(
+                NonZeroUsize::new(4_096).unwrap_or(NonZeroUsize::MIN),
+                NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN),
+            )
+            .map_err(|_| malformed())?;
+            self.books.insert(
+                instrument.descriptor.instrument_id.clone(),
+                AggregateBookAssembler::new(
+                    MarketIdentity {
+                        symbol: instrument.descriptor.provider_symbol.clone(),
+                        exchange: instrument.descriptor.venue_id.clone(),
+                    },
+                    limits,
+                ),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1346,6 +2281,59 @@ fn retained_event_bytes(event: &ProviderSessionEvent) -> Option<usize> {
     Some(bytes)
 }
 
+fn retained_catalog_event_bytes(event: &RithmicCatalogEvent) -> Option<usize> {
+    let mut bytes = size_of::<RithmicCatalogEvent>();
+    let mut add = |value: usize| {
+        bytes = bytes.checked_add(value)?;
+        Some(())
+    };
+    match event {
+        RithmicCatalogEvent::SearchCompleted { symbols, .. } => {
+            add(symbols
+                .results
+                .len()
+                .checked_mul(size_of::<SymbolSearchResult>())?)?;
+            for symbol in &symbols.results {
+                add(symbol.symbol.capacity())?;
+                add(symbol.exchange.capacity())?;
+                for field in [
+                    &symbol.name,
+                    &symbol.product_code,
+                    &symbol.instrument_type,
+                    &symbol.expiration_date,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    add(field.capacity())?;
+                }
+            }
+        }
+        RithmicCatalogEvent::SelectionInstalled { instrument, .. } => {
+            add(instrument.instrument_id.capacity())?;
+            add(instrument.provider_symbol.capacity())?;
+            add(instrument.display_symbol.capacity())?;
+            add(instrument.venue_id.capacity())?;
+        }
+        RithmicCatalogEvent::CommandRejected { .. } => {}
+    }
+    Some(bytes)
+}
+
+const fn catalog_event_generation(event: &RithmicCatalogEvent) -> SessionGeneration {
+    match event {
+        RithmicCatalogEvent::SearchCompleted {
+            session_generation, ..
+        }
+        | RithmicCatalogEvent::SelectionInstalled {
+            session_generation, ..
+        }
+        | RithmicCatalogEvent::CommandRejected {
+            session_generation, ..
+        } => *session_generation,
+    }
+}
+
 fn event_generation(event: &ProviderSessionEvent) -> Option<SessionGeneration> {
     match event {
         ProviderSessionEvent::AuthenticationChanged { generation, .. }
@@ -1483,7 +2471,7 @@ mod tests {
     }
 
     fn runtime_task() -> Arc<SessionTask> {
-        Arc::new(|config, generation, _, _, emitter| {
+        Arc::new(|config, generation, _, _, _, emitter| {
             if !emitter.send(ProviderSessionEvent::DiscoveryStarted)
                 || !emitter.send(ProviderSessionEvent::SystemsDiscovered {
                     environments: vec![RithmicProviderConfig::environment()],
@@ -1818,7 +2806,7 @@ mod tests {
 
     #[test]
     fn driver_fences_stop_to_the_exact_active_generation() {
-        let task: Arc<SessionTask> = Arc::new(|_, _, _, stop, _| {
+        let task: Arc<SessionTask> = Arc::new(|_, _, _, stop, _, _| {
             while !stop.load(Ordering::Acquire) {
                 thread::yield_now();
             }
@@ -1842,9 +2830,213 @@ mod tests {
             .expect("owning generation stops");
     }
 
+    fn search(search_generation: usize) -> RithmicSymbolSearch {
+        RithmicSymbolSearch::try_new(
+            NonZeroUsize::new(search_generation).expect("search generation is nonzero"),
+            "ES",
+            Some("CME".to_string()),
+            None,
+            Some(InstrumentType::Future),
+            SearchPattern::Contains,
+            nonzero(16),
+        )
+        .expect("search validates")
+    }
+
+    #[test]
+    fn catalog_commands_validate_bounds_and_redact_provider_text() {
+        let search = search(1);
+        let search_debug = format!("{search:?}");
+        assert!(search_debug.contains("[REDACTED]"));
+        assert!(!search_debug.contains("ES"));
+        assert!(!search_debug.contains("CME"));
+        assert_eq!(
+            RithmicSymbolSearch::try_new(
+                NonZeroUsize::MIN,
+                "x".repeat(MAXIMUM_IDENTITY_BYTES + 1),
+                None,
+                None,
+                None,
+                SearchPattern::Equals,
+                nonzero(1),
+            ),
+            Err(RithmicProviderCommandError::InvalidRequest)
+        );
+        assert_eq!(
+            RithmicSymbolSearch::try_new(
+                NonZeroUsize::MIN,
+                "ES",
+                None,
+                None,
+                None,
+                SearchPattern::Equals,
+                nonzero(MAXIMUM_INSTRUMENTS + 1),
+            ),
+            Err(RithmicProviderCommandError::InvalidRequest)
+        );
+
+        let selection = RithmicInstrumentSelection::try_new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            "ESM7",
+            "CME",
+            "private-entitlement",
+            RithmicReadOnlySubscription::try_new(true, true, true)
+                .expect("read-only selection validates"),
+        )
+        .expect("selection validates");
+        let selection_debug = format!("{selection:?}");
+        assert!(selection_debug.contains("[REDACTED]"));
+        assert!(!selection_debug.contains("ESM7"));
+        assert!(!selection_debug.contains("private-entitlement"));
+        assert_eq!(
+            RithmicInstrumentSelection::try_new(
+                NonZeroUsize::MIN,
+                NonZeroUsize::MIN,
+                "ESM7",
+                "CME",
+                "entitlement",
+                RithmicReadOnlySubscription {
+                    trades: false,
+                    quotes: false,
+                    order_book: false,
+                },
+            ),
+            Err(RithmicProviderCommandError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn active_session_command_queue_is_bounded_generation_fenced_and_closed_on_stop() {
+        let task_started = Arc::new(Barrier::new(2));
+        let session_started = Arc::clone(&task_started);
+        let task: Arc<SessionTask> = Arc::new(move |_, _, _, stop, _, _| {
+            session_started.wait();
+            while !stop.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        });
+        let (mut driver, events) =
+            RithmicProviderDriver::with_task(config(), callback_limits(16, 64 * 1_024), task);
+        let credentials = credentials();
+        driver
+            .start_session(generation(11), credentials.as_bytes())
+            .expect("session starts");
+        task_started.wait();
+
+        assert_eq!(
+            events.search_symbols(generation(10), search(1)),
+            Err(RithmicProviderCommandError::StaleGeneration)
+        );
+        for command_generation in 1..=SESSION_COMMAND_CAPACITY {
+            events
+                .search_symbols(generation(11), search(command_generation))
+                .expect("bounded command queues");
+        }
+        assert_eq!(
+            events.search_symbols(generation(11), search(SESSION_COMMAND_CAPACITY + 1)),
+            Err(RithmicProviderCommandError::QueueFull)
+        );
+
+        driver
+            .stop_session(generation(11))
+            .expect("active command path stops");
+        assert_eq!(
+            events.search_symbols(generation(11), search(12)),
+            Err(RithmicProviderCommandError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn overlapping_provider_search_is_rejected_without_invalidating_the_session() {
+        assert_eq!(
+            search_command_failure(RithmicSessionError::RequestInFlight),
+            Ok(RithmicCatalogRejection::SearchRejected)
+        );
+        assert_eq!(
+            search_command_failure(RithmicSessionError::Transport),
+            Err((
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Transient,
+            ))
+        );
+    }
+
+    #[test]
+    fn catalog_callbacks_are_bounded_generation_fenced_and_redacted() {
+        let producer_done = Arc::new(Barrier::new(2));
+        let task_done = Arc::clone(&producer_done);
+        let send_results = Arc::new(Mutex::new(None));
+        let task_results = Arc::clone(&send_results);
+        let task: Arc<SessionTask> = Arc::new(move |_, generation, _, _, _, emitter| {
+            let symbols = CollectedSymbols {
+                results: vec![SymbolSearchResult {
+                    symbol: "ESM7".to_string(),
+                    exchange: "CME".to_string(),
+                    name: Some("E-mini S&P 500".to_string()),
+                    product_code: Some("ES".to_string()),
+                    instrument_type: Some("FUTURE".to_string()),
+                    expiration_date: Some("202706".to_string()),
+                }],
+                duplicate_count: 0,
+            };
+            let first = emitter.send_catalog(RithmicCatalogEvent::SearchCompleted {
+                session_generation: generation,
+                search_generation: NonZeroUsize::MIN,
+                symbols: symbols.clone(),
+            });
+            let second = emitter.send_catalog(RithmicCatalogEvent::SearchCompleted {
+                session_generation: generation,
+                search_generation: nonzero(2),
+                symbols,
+            });
+            *task_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((first, second));
+            task_done.wait();
+        });
+        let (mut driver, events) =
+            RithmicProviderDriver::with_task(config(), callback_limits(1, 64 * 1_024), task);
+        let credentials = credentials();
+        driver
+            .start_session(generation(12), credentials.as_bytes())
+            .expect("session starts");
+        producer_done.wait();
+        assert_eq!(
+            *send_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some((true, false))
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let catalog = loop {
+            if let Some(catalog) = events.try_recv_catalog() {
+                break catalog;
+            }
+            assert!(Instant::now() < deadline, "catalog callback timed out");
+            thread::yield_now();
+        };
+        assert_eq!(catalog.generation, generation(12));
+        let debug = format!("{catalog:?}");
+        assert!(debug.contains("result_count"));
+        assert!(!debug.contains("ESM7"));
+        assert!(!debug.contains("E-mini"));
+        assert_eq!(
+            wait_event(&events).event,
+            ProviderSessionEvent::Invalidated {
+                generation: Some(generation(12)),
+                reason: ProviderInvalidationReason::QueueOverflow,
+            }
+        );
+        driver
+            .stop_session(generation(12))
+            .expect("finished catalog producer joins");
+    }
+
     #[test]
     fn panicked_session_task_latches_terminal_invalidation() {
-        let task: Arc<SessionTask> = Arc::new(|_, _, _, _, _| {
+        let task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, _| {
             panic!("controlled session task panic");
         });
         let (mut driver, events) =
@@ -1875,7 +3067,7 @@ mod tests {
         let task_done = Arc::clone(&producer_done);
         let send_results = Arc::new(Mutex::new(None));
         let task_results = Arc::clone(&send_results);
-        let task: Arc<SessionTask> = Arc::new(move |_, _, _, _, emitter| {
+        let task: Arc<SessionTask> = Arc::new(move |_, _, _, _, _, emitter| {
             let first = emitter.send(ProviderSessionEvent::DiscoveryStarted);
             let second = emitter.send(ProviderSessionEvent::DiscoveryStarted);
             *task_results
@@ -1919,7 +3111,7 @@ mod tests {
 
     #[test]
     fn callback_queue_fails_closed_on_byte_or_generation_bounds() {
-        let byte_task: Arc<SessionTask> = Arc::new(|_, _, _, _, emitter| {
+        let byte_task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, emitter| {
             assert!(!emitter.send(ProviderSessionEvent::DiscoveryStarted));
         });
         let (mut byte_driver, byte_events) =
@@ -1939,7 +3131,7 @@ mod tests {
             .stop_session(generation(6))
             .expect("finished session is joined");
 
-        let generation_task: Arc<SessionTask> = Arc::new(|_, _, _, _, emitter| {
+        let generation_task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, emitter| {
             assert!(!emitter.send(ProviderSessionEvent::AuthenticationChanged {
                 generation: generation(8),
                 state: AuthenticationState::Accepted,

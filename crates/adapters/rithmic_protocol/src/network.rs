@@ -188,110 +188,54 @@ fn connect_tcp(
     if addresses.is_empty() {
         return Err(RithmicSessionError::Resolve);
     }
-    for (index, address) in addresses.iter().enumerate() {
+    loop {
         if stop
             .as_ref()
             .is_some_and(|stop| stop.load(Ordering::Acquire))
         {
             return Err(RithmicSessionError::Cancelled);
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let attempts_left =
-            u32::try_from(addresses.len() - index).map_err(|_| RithmicSessionError::Connect)?;
-        let attempt_deadline = Instant::now() + remaining / attempts_left;
-        match connect_address(*address, attempt_deadline, stop.as_deref()) {
-            Ok(stream) => {
-                stream
-                    .set_nodelay(true)
-                    .map_err(|_| RithmicSessionError::Connect)?;
-                return Ok(DeadlineTcpStream {
-                    stream,
-                    deadline,
-                    stop,
-                });
+        for (index, address) in addresses.iter().enumerate() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RithmicSessionError::Connect);
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                return Err(RithmicSessionError::Cancelled);
+            let attempts_left =
+                u32::try_from(addresses.len() - index).map_err(|_| RithmicSessionError::Connect)?;
+            let attempt_timeout = (remaining / attempts_left).min(NETWORK_POLL_INTERVAL);
+            match connect_address(*address, attempt_timeout) {
+                Ok(stream) => {
+                    stream
+                        .set_nodelay(true)
+                        .map_err(|_| RithmicSessionError::Connect)?;
+                    return Ok(DeadlineTcpStream {
+                        stream,
+                        deadline,
+                        stop,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    return Err(RithmicSessionError::Cancelled);
+                }
+                Err(_) => {}
             }
-            Err(_) => {}
-        }
-    }
-    Err(RithmicSessionError::Connect)
-}
-
-fn connect_address(
-    address: SocketAddr,
-    deadline: Instant,
-    stop: Option<&AtomicBool>,
-) -> io::Result<TcpStream> {
-    let socket = Socket::new(
-        Domain::for_address(address),
-        Type::STREAM,
-        Some(Protocol::TCP),
-    )?;
-    socket.set_nonblocking(true)?;
-    match socket.connect(&address.into()) {
-        Ok(()) => return finish_socket(socket),
-        Err(error) if connection_is_pending(&error) => {}
-        Err(error) => return Err(error),
-    }
-    loop {
-        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-        if let Some(error) = socket.take_error()? {
-            return Err(error);
-        }
-        match socket.peer_addr() {
-            Ok(_) => return finish_socket(socket),
-            Err(error)
-                if error.kind() == io::ErrorKind::NotConnected || connection_is_pending(&error) => {
-            }
-            Err(error) => return Err(error),
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline"));
+            return Err(RithmicSessionError::Connect);
         }
         thread::sleep(remaining.min(NETWORK_POLL_INTERVAL));
     }
 }
 
-fn finish_socket(socket: Socket) -> io::Result<TcpStream> {
-    socket.set_nonblocking(false)?;
+fn connect_address(address: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    socket.connect_timeout(&address.into(), timeout)?;
     Ok(socket.into())
-}
-
-fn connection_is_pending(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if matches!(error.raw_os_error(), Some(114 | 115)) {
-        return true;
-    }
-    #[cfg(target_os = "windows")]
-    if matches!(error.raw_os_error(), Some(10_035..=10_037)) {
-        return true;
-    }
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "watchos",
-        target_os = "visionos",
-        target_os = "freebsd",
-        target_os = "dragonfly",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
-    if matches!(error.raw_os_error(), Some(36 | 37)) {
-        return true;
-    }
-    false
 }
 
 fn resolve_addresses(

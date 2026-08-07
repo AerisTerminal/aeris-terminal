@@ -1043,7 +1043,13 @@ fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
+    OpenOptions::new().write(true).open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_readonly(true);
@@ -1095,19 +1101,22 @@ fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
-    match fs::metadata(path) {
-        Ok(metadata) => {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            fs::set_permissions(path, permissions)?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
-    fs::remove_file(path)?;
-    Ok(true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn is_segment_file_name(name: &str) -> bool {
@@ -1142,7 +1151,8 @@ fn harden_private_directory(path: &Path) -> Result<(), DesktopStorageError> {
 }
 
 #[cfg(not(unix))]
-fn harden_private_directory(_path: &Path) -> Result<(), DesktopStorageError> {
+fn harden_private_directory(path: &Path) -> Result<(), DesktopStorageError> {
+    fs::metadata(path)?;
     Ok(())
 }
 
@@ -1167,7 +1177,22 @@ fn sync_directory(path: &Path) -> Result<(), DesktopStorageError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), DesktopStorageError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    OpenOptions::new()
+        .access_mode(GENERIC_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_directory(_path: &Path) -> Result<(), DesktopStorageError> {
     Err(DesktopStorageError::InvalidConfiguration(
         "directory metadata durability is unavailable on this platform",

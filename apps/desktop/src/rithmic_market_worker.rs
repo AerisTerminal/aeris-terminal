@@ -32,7 +32,7 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 const MESSAGE_CAPACITY: usize = 32;
-const COMMAND_CAPACITY: usize = 1;
+const COMMAND_CAPACITY: usize = 8;
 const CALLBACK_CAPACITY: usize = 256;
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const MAXIMUM_DEPTH: usize = 256;
@@ -42,6 +42,7 @@ const CATALOG_KEY_ID: &str = "rithmic-test-history-catalog-key-v1";
 
 type RithmicWorker =
     DesktopMarketWorker<ProvenancedMarketBar, NativeCredentialVault, RithmicProviderDriver>;
+type RithmicEvents = axiusflow_rithmic_protocol_adapter::RithmicProviderEvents;
 
 pub(crate) fn start(
     history_root: PathBuf,
@@ -118,29 +119,23 @@ fn run(
     }
 
     let mut retries = RithmicRetryScheduler::default();
+    let mut selection_installed = false;
     loop {
-        match commands.try_recv() {
-            Ok(MarketWorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => break,
-            Ok(MarketWorkerCommand::Recovery(_)) | Err(TryRecvError::Empty) => {}
+        if process_command(commands, &worker, &events, messages, selection_installed) {
+            break;
         }
-        while events.has_ready() {
-            match try_recv_rithmic_event(&mut worker, &events, &mut retries, Instant::now()) {
-                Ok(Some(event)) => publish_event(messages, &event),
-                Ok(None) => break,
-                Err(_) => {
-                    send_connection(
-                        messages,
-                        FeedConnectionState::Recovering,
-                        "Rithmic Test session recovery is required",
-                    );
-                    break;
-                }
-            }
-        }
+        drain_events(
+            &mut worker,
+            &events,
+            &mut retries,
+            messages,
+            &mut selection_installed,
+        );
         if retries
             .retry_due(&mut worker, Instant::now())
             .is_ok_and(|generation| generation.is_some())
         {
+            selection_installed = false;
             send_connection(
                 messages,
                 FeedConnectionState::Discovering,
@@ -177,18 +172,80 @@ fn run(
     );
 }
 
+fn process_command(
+    commands: &Receiver<MarketWorkerCommand>,
+    worker: &RithmicWorker,
+    events: &RithmicEvents,
+    messages: &crate::market_worker::MarketWorkerSender,
+    selection_installed: bool,
+) -> bool {
+    let (dispatch, failure_message) = match commands.try_recv() {
+        Ok(MarketWorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => return true,
+        Ok(MarketWorkerCommand::RithmicSearch(search)) => (
+            dispatch_catalog_command(worker, events, |events, generation| {
+                events.search_symbols(generation, search)
+            }),
+            "Rithmic symbol search could not be scheduled",
+        ),
+        Ok(MarketWorkerCommand::RithmicSelect(selection)) => (
+            dispatch_catalog_command(worker, events, |events, generation| {
+                events.select_instrument(generation, selection)
+            }),
+            "Rithmic symbol selection could not be scheduled",
+        ),
+        Ok(MarketWorkerCommand::Recovery(_)) | Err(TryRecvError::Empty) => return false,
+    };
+    if dispatch.is_err() {
+        send_connection(
+            messages,
+            catalog_connection_state(selection_installed),
+            failure_message,
+        );
+    }
+    false
+}
+
+fn drain_events(
+    worker: &mut RithmicWorker,
+    events: &RithmicEvents,
+    retries: &mut RithmicRetryScheduler,
+    messages: &crate::market_worker::MarketWorkerSender,
+    selection_installed: &mut bool,
+) {
+    while events.has_ready() {
+        while let Some(callback) = events.try_recv_catalog() {
+            if active_generation(worker).ok().flatten() != Some(callback.generation) {
+                continue;
+            }
+            if matches!(
+                &callback.event,
+                axiusflow_rithmic_protocol_adapter::RithmicCatalogEvent::SelectionInstalled { .. }
+            ) {
+                *selection_installed = true;
+            }
+            let _ = messages.send(MarketWorkerMessage::RithmicCatalog(callback.event));
+        }
+        match try_recv_rithmic_event(worker, events, retries, Instant::now()) {
+            Ok(Some(event)) => publish_event(messages, &event, selection_installed),
+            Ok(None) => break,
+            Err(_) => {
+                send_connection(
+                    messages,
+                    FeedConnectionState::Recovering,
+                    "Rithmic Test session recovery is required",
+                );
+                break;
+            }
+        }
+    }
+}
+
 fn open_worker(
     history_root: PathBuf,
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
     wake: Arc<dyn Fn() + Send + Sync>,
-) -> Result<
-    (
-        RithmicWorker,
-        axiusflow_rithmic_protocol_adapter::RithmicProviderEvents,
-    ),
-    String,
-> {
+) -> Result<(RithmicWorker, RithmicEvents), String> {
     let credential_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
         .map_err(|_| "native credential vault unavailable".to_string())?;
     let key_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
@@ -241,12 +298,28 @@ fn open_worker(
     Ok((worker, events))
 }
 
-fn publish_event(messages: &crate::market_worker::MarketWorkerSender, event: &AppliedRithmicEvent) {
-    let (state, message) = reduce_event(event);
+fn publish_event(
+    messages: &crate::market_worker::MarketWorkerSender,
+    event: &AppliedRithmicEvent,
+    selection_installed: &mut bool,
+) {
+    if matches!(
+        event,
+        AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered {
+            instruments,
+            ..
+        }) if !instruments.is_empty()
+    ) {
+        *selection_installed = true;
+    }
+    let (state, message) = reduce_event(event, *selection_installed);
     send_connection(messages, state, message);
 }
 
-fn reduce_event(event: &AppliedRithmicEvent) -> (FeedConnectionState, &'static str) {
+fn reduce_event(
+    event: &AppliedRithmicEvent,
+    selection_installed: bool,
+) -> (FeedConnectionState, &'static str) {
     match event {
         AppliedRithmicEvent::Semantic(ProviderSessionEvent::DiscoveryStarted) => (
             FeedConnectionState::Discovering,
@@ -276,9 +349,16 @@ fn reduce_event(event: &AppliedRithmicEvent) -> (FeedConnectionState, &'static s
             FeedConnectionState::Stopped,
             "Rithmic Test agreements require attention",
         ),
+        AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered {
+            instruments,
+            ..
+        }) if instruments.is_empty() => (
+            FeedConnectionState::Authenticating,
+            "Rithmic Test session is ready for instrument search",
+        ),
         AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered { .. }) => (
             FeedConnectionState::Streaming,
-            "Rithmic Test discovery is ready for instrument selection",
+            "Rithmic Test instrument selection is installed",
         ),
         AppliedRithmicEvent::RetryScheduled(_) => (
             FeedConnectionState::Recovering,
@@ -288,17 +368,62 @@ fn reduce_event(event: &AppliedRithmicEvent) -> (FeedConnectionState, &'static s
         AppliedRithmicEvent::Semantic(ProviderSessionEvent::Stopped) => {
             (FeedConnectionState::Stopped, "Rithmic Test session stopped")
         }
-        AppliedRithmicEvent::Semantic(
-            ProviderSessionEvent::Market { .. } | ProviderSessionEvent::Heartbeat { .. },
-        ) => (
+        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market { .. }) => (
             FeedConnectionState::Streaming,
             "Rithmic Test feed is streaming",
+        ),
+        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Heartbeat { .. })
+            if selection_installed =>
+        {
+            (
+                FeedConnectionState::Streaming,
+                "Rithmic Test selected feed is active",
+            )
+        }
+        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Heartbeat { .. }) => (
+            FeedConnectionState::Authenticating,
+            "Rithmic Test session is ready for instrument search",
         ),
         AppliedRithmicEvent::Semantic(ProviderSessionEvent::Invalidated { .. }) => (
             FeedConnectionState::Recovering,
             "Rithmic Test session recovery is required",
         ),
     }
+}
+
+fn active_generation(
+    worker: &RithmicWorker,
+) -> Result<Option<axiusflow_desktop_provider_runtime::SessionGeneration>, ()> {
+    match worker.provider_state().map_err(|_| ())? {
+        axiusflow_desktop_provider_runtime::DesktopProviderState::Connecting {
+            generation, ..
+        }
+        | axiusflow_desktop_provider_runtime::DesktopProviderState::Streaming { generation } => {
+            Ok(Some(generation))
+        }
+        _ => Ok(None),
+    }
+}
+
+const fn catalog_connection_state(selection_installed: bool) -> FeedConnectionState {
+    if selection_installed {
+        FeedConnectionState::Streaming
+    } else {
+        FeedConnectionState::Authenticating
+    }
+}
+
+fn dispatch_catalog_command(
+    worker: &RithmicWorker,
+    events: &RithmicEvents,
+    dispatch: impl FnOnce(
+        &RithmicEvents,
+        axiusflow_desktop_provider_runtime::SessionGeneration,
+    )
+        -> Result<(), axiusflow_rithmic_protocol_adapter::RithmicProviderCommandError>,
+) -> Result<(), ()> {
+    let generation = active_generation(worker)?.ok_or(())?;
+    dispatch(events, generation).map_err(|_| ())
 }
 
 fn terminal_failure(reason: ProviderInvalidationReason) -> (FeedConnectionState, &'static str) {
@@ -396,7 +521,7 @@ mod tests {
                     generation: generation(),
                     instruments: Vec::new(),
                 }),
-                FeedConnectionState::Streaming,
+                FeedConnectionState::Authenticating,
             ),
             (
                 AppliedRithmicEvent::Semantic(ProviderSessionEvent::Stopped),
@@ -404,8 +529,25 @@ mod tests {
             ),
         ];
         for (event, expected) in cases {
-            assert_eq!(reduce_event(&event).0, expected);
+            assert_eq!(reduce_event(&event, false).0, expected);
         }
+    }
+
+    #[test]
+    fn preselection_heartbeat_never_claims_live_market_data() {
+        let heartbeat = AppliedRithmicEvent::Semantic(ProviderSessionEvent::Heartbeat {
+            generation: generation(),
+            received_unix_nanos: 1,
+        });
+        let (state, message) = reduce_event(&heartbeat, false);
+        assert_eq!(state, FeedConnectionState::Authenticating);
+        assert!(!message.contains("streaming"));
+        assert!(!message.contains("live"));
+
+        assert_eq!(
+            reduce_event(&heartbeat, true).0,
+            FeedConnectionState::Streaming
+        );
     }
 
     #[test]
@@ -415,10 +557,13 @@ mod tests {
             ProviderInvalidationReason::AgreementRequired,
             ProviderInvalidationReason::UnsupportedSystem,
         ] {
-            let (state, message) = reduce_event(&AppliedRithmicEvent::TerminalFailure {
-                generation: generation(),
-                reason,
-            });
+            let (state, message) = reduce_event(
+                &AppliedRithmicEvent::TerminalFailure {
+                    generation: generation(),
+                    reason,
+                },
+                false,
+            );
             assert_eq!(state, FeedConnectionState::Stopped);
             assert!(!message.contains("account"));
             assert!(!message.contains("user"));

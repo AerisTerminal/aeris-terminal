@@ -11,6 +11,10 @@ use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::{DiagnosticsQueue, FeedDiagnosticsSnapshot, LocalLatencyMetric};
+use axiusflow_rithmic_protocol_adapter::{
+    RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
+    RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
+};
 use gpui::{
     App, Bounds, Context, Entity, Hsla, Render, TitlebarOptions, Window, WindowBounds,
     WindowOptions, div, prelude::*, px, rgb, size,
@@ -18,6 +22,7 @@ use gpui::{
 use gpui_component::{
     Root, StyledExt,
     button::{Button, ButtonCustomVariant, ButtonVariants},
+    input::{Input, InputState},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
@@ -89,6 +94,9 @@ struct TerminalApp {
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
+    symbol_input: Option<Entity<InputState>>,
+    symbol_browser: rithmic_shell::RithmicSymbolBrowser,
+    symbol_message: String,
 }
 
 struct HeaderState {
@@ -105,6 +113,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
         startup: MarketWorkerStartup,
         market_worker: MarketDataWorker,
+        symbol_input: Option<Entity<InputState>>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
         let (
@@ -199,6 +208,9 @@ impl TerminalApp {
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
+            symbol_input,
+            symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
+            symbol_message: "Search for an entitled Rithmic Test symbol".to_string(),
         }
     }
 
@@ -403,6 +415,9 @@ impl TerminalApp {
                     self.connection_message = Some(message);
                     cx.notify();
                 }
+                MarketWorkerMessage::RithmicCatalog(event) => {
+                    self.apply_rithmic_catalog(event, cx);
+                }
             }
         }
         if disconnected && self.connection_state.is_some() {
@@ -468,6 +483,123 @@ impl TerminalApp {
         }
     }
 
+    fn search_rithmic_symbols(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = &self.symbol_input else {
+            return;
+        };
+        let query = input.read(cx).value().to_string();
+        let request = match self.symbol_browser.begin_search(&query) {
+            Ok(request) => request,
+            Err(message) => {
+                self.symbol_message = message.to_string();
+                cx.notify();
+                return;
+            }
+        };
+        let search = RithmicSymbolSearch::try_new(
+            request.request_id,
+            request.query,
+            None,
+            None,
+            None,
+            SearchPattern::Contains,
+            std::num::NonZeroUsize::new(rithmic_shell::MAXIMUM_SYMBOL_RESULTS)
+                .unwrap_or(std::num::NonZeroUsize::MIN),
+        );
+        let Ok(search) = search else {
+            self.symbol_browser.reject_command(request.request_id);
+            self.symbol_message = "Symbol search request is invalid".to_string();
+            cx.notify();
+            return;
+        };
+        if self.market_worker.try_search_rithmic(search).is_ok() {
+            self.symbol_message = "Searching Rithmic Test symbols".to_string();
+        } else {
+            self.symbol_browser.reject_command(request.request_id);
+            self.symbol_message = "Symbol search is busy; try again".to_string();
+        }
+        cx.notify();
+    }
+
+    fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(selection) = self.symbol_browser.select(index) else {
+            return;
+        };
+        let entitlement_id = format!(
+            "rithmic-test:{}:{}",
+            selection.instrument.exchange, selection.instrument.symbol
+        );
+        let request =
+            RithmicReadOnlySubscription::try_new(true, true, false).and_then(|subscription| {
+                RithmicInstrumentSelection::try_new(
+                    selection.generation,
+                    selection.search_generation,
+                    selection.instrument.symbol.clone(),
+                    selection.instrument.exchange.clone(),
+                    entitlement_id,
+                    subscription,
+                )
+            });
+        let Ok(request) = request else {
+            self.symbol_browser.reject_command(selection.generation);
+            self.symbol_message = "Symbol selection is invalid".to_string();
+            cx.notify();
+            return;
+        };
+        if self.market_worker.try_select_rithmic(request).is_ok() {
+            self.symbol_message = format!(
+                "Selecting {} · {}",
+                selection.instrument.symbol, selection.instrument.exchange
+            );
+        } else {
+            self.symbol_browser.reject_command(selection.generation);
+            self.symbol_message = "Symbol selection is busy; try again".to_string();
+        }
+        cx.notify();
+    }
+
+    fn apply_rithmic_catalog(&mut self, event: RithmicCatalogEvent, cx: &mut Context<Self>) {
+        match event {
+            RithmicCatalogEvent::SearchCompleted {
+                search_generation,
+                symbols,
+                ..
+            } => {
+                let result_count = symbols.results.len();
+                if self
+                    .symbol_browser
+                    .apply_results(search_generation, symbols.results)
+                {
+                    self.symbol_message = format!("{result_count} matching symbols");
+                }
+            }
+            RithmicCatalogEvent::SelectionInstalled {
+                selection_generation,
+                instrument,
+                ..
+            } => {
+                if self.symbol_browser.confirm_selection(selection_generation) {
+                    self.subscription_id =
+                        format!("{} · {}", instrument.display_symbol, instrument.venue_id);
+                    self.symbol_message = format!("Selected {}", instrument.display_symbol);
+                    self.connection_state = Some(FeedConnectionState::Streaming);
+                    self.connection_message =
+                        Some("Rithmic Test market subscription active".to_string());
+                }
+            }
+            RithmicCatalogEvent::CommandRejected {
+                command_generation,
+                reason,
+                ..
+            } => {
+                if self.symbol_browser.reject_command(command_generation) {
+                    self.symbol_message = catalog_rejection_message(reason).to_string();
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn chart_state_label(&self) -> String {
         if let (Some(state), Some(message)) = (self.connection_state, &self.connection_message) {
             return format!("{} · {message}", rithmic_shell::connection_label(state));
@@ -491,6 +623,23 @@ impl Render for TerminalApp {
         let diagnostics_panel = self
             .diagnostics_expanded
             .then(|| diagnostics_panel(self.diagnostics.as_ref(), &colors, button_radius));
+        let symbol_panel = self.symbol_input.clone().map(|input| {
+            symbol_browser_panel(
+                cx,
+                &app,
+                &input,
+                SymbolBrowserPanelState {
+                    results: self.symbol_browser.results().to_vec(),
+                    selected: self
+                        .symbol_browser
+                        .selected()
+                        .map(|selection| selection.instrument.clone()),
+                    message: self.symbol_message.clone(),
+                    colors,
+                    radius: button_radius,
+                },
+            )
+        });
         let header = terminal_header(
             cx,
             app,
@@ -510,6 +659,7 @@ impl Render for TerminalApp {
             .bg(gpui_color(colors.background))
             .text_color(gpui_color(colors.foreground))
             .child(header)
+            .children(symbol_panel)
             .child(
                 div()
                     .id("primary_chart")
@@ -535,11 +685,104 @@ impl Render for TerminalApp {
     }
 }
 
+fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
+    match reason {
+        RithmicCatalogRejection::SearchRejected => "Rithmic Test rejected the symbol search",
+        RithmicCatalogRejection::SupersededSearch => "A newer symbol search replaced this one",
+        RithmicCatalogRejection::InstrumentUnavailable => {
+            "The selected symbol is no longer available"
+        }
+        RithmicCatalogRejection::SubscriptionRejected => {
+            "Rithmic Test rejected the market subscription"
+        }
+    }
+}
+
+struct SymbolBrowserPanelState {
+    results: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
+    selected: Option<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
+    message: String,
+    colors: axiusflow_design_system::ThemeColors,
+    radius: gpui::Pixels,
+}
+
+fn symbol_browser_panel(
+    cx: &mut Context<TerminalApp>,
+    app: &Entity<TerminalApp>,
+    input: &Entity<InputState>,
+    state: SymbolBrowserPanelState,
+) -> impl IntoElement + use<> {
+    let colors = state.colors;
+    let radius = state.radius;
+    let button_variant = ButtonCustomVariant::new(cx)
+        .color(gpui_color(colors.secondary))
+        .foreground(gpui_color(colors.secondary_foreground))
+        .hover(gpui_color(colors.accent))
+        .active(gpui_color(colors.muted));
+    let search_app = app.clone();
+    let result_buttons = state
+        .results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let select_app = app.clone();
+            let is_selected = state.selected.as_ref().is_some_and(|selected| {
+                selected.symbol == result.symbol && selected.exchange == result.exchange
+            });
+            Button::new(format!("rithmic_symbol_{index}"))
+                .label(format!(
+                    "{} · {}{}",
+                    result.symbol,
+                    result.exchange,
+                    if is_selected { " · selected" } else { "" }
+                ))
+                .rounded(radius)
+                .custom(button_variant)
+                .on_click(move |_, _, cx| {
+                    select_app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
+                })
+        });
+    div()
+        .flex_none()
+        .v_flex()
+        .gap_2()
+        .mx(px(12.0))
+        .mt(px(12.0))
+        .p_3()
+        .rounded(radius)
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.card))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Input::new(input).w(px(320.0)))
+                .child(
+                    Button::new("rithmic_symbol_search")
+                        .label("Search")
+                        .rounded(radius)
+                        .custom(button_variant)
+                        .on_click(move |_, _, cx| {
+                            search_app.update(cx, TerminalApp::search_rithmic_symbols);
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.muted_foreground))
+                        .child(state.message),
+                ),
+        )
+        .child(div().flex().flex_wrap().gap_2().children(result_buttons))
+}
+
 fn terminal_header(
     cx: &mut Context<TerminalApp>,
     app: Entity<TerminalApp>,
     state: HeaderState,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let colors = state.theme.colors;
     let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
     let passive_button = ButtonCustomVariant::new(cx)
@@ -956,7 +1199,11 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let terminal = cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker));
+                let symbol_input = matches!(&bootstrap, MarketWorkerStartup::Shell(_)).then(|| {
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
+                });
+                let terminal =
+                    cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker, symbol_input));
                 cx.new(|cx| Root::new(terminal, window, cx))
             },
         )

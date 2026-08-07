@@ -18,6 +18,9 @@ use axiusflow_market_protocol_adapter::{
 };
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
+use axiusflow_rithmic_protocol_adapter::{
+    RithmicCatalogEvent, RithmicInstrumentSelection, RithmicSymbolSearch,
+};
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
@@ -107,6 +110,7 @@ pub(crate) enum MarketWorkerMessage {
         state: FeedConnectionState,
         message: String,
     },
+    RithmicCatalog(RithmicCatalogEvent),
 }
 
 struct MarketWorkerMailbox {
@@ -153,14 +157,9 @@ impl MarketWorkerSender {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(());
         }
-        if matches!(&message, MarketWorkerMessage::Diagnostics(_)) {
-            self.send_diagnostics(&mut queue, message);
+        let Some(message) = self.send_conflated(&mut queue, message) else {
             return Ok(());
-        }
-        if matches!(&message, MarketWorkerMessage::Connection { .. }) {
-            self.send_connection(&mut queue, message);
-            return Ok(());
-        }
+        };
         if matches!(
             queue.back(),
             Some(MarketWorkerMessage::State {
@@ -243,6 +242,28 @@ impl MarketWorkerSender {
         Ok(())
     }
 
+    fn send_conflated(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) -> Option<MarketWorkerMessage> {
+        match message {
+            message @ MarketWorkerMessage::Diagnostics(_) => {
+                self.send_diagnostics(queue, message);
+                None
+            }
+            message @ MarketWorkerMessage::Connection { .. } => {
+                self.send_connection(queue, message);
+                None
+            }
+            message @ MarketWorkerMessage::RithmicCatalog(_) => {
+                self.send_rithmic_catalog(queue, message);
+                None
+            }
+            message => Some(message),
+        }
+    }
+
     fn send_connection(
         &self,
         queue: &mut VecDeque<MarketWorkerMessage>,
@@ -271,6 +292,33 @@ impl MarketWorkerSender {
             queue.remove(index);
         }
         queue.push_back(message);
+    }
+
+    fn send_rithmic_catalog(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicCatalog(_)))
+        {
+            queue[index] = message;
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        }
     }
 
     fn send_diagnostics(
@@ -449,7 +497,8 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         }
         MarketWorkerMessage::Recovery { .. }
         | MarketWorkerMessage::State { .. }
-        | MarketWorkerMessage::Connection { .. } => None,
+        | MarketWorkerMessage::Connection { .. }
+        | MarketWorkerMessage::RithmicCatalog(_) => None,
     }
 }
 
@@ -520,6 +569,8 @@ fn mailbox_overflow_state() -> MarketWorkerMessage {
 
 pub(crate) enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
+    RithmicSearch(RithmicSymbolSearch),
+    RithmicSelect(RithmicInstrumentSelection),
     Shutdown,
 }
 
@@ -784,9 +835,61 @@ impl MarketDataWorker {
                 TrySendError::Disconnected(MarketWorkerCommand::Recovery(command)) => {
                     TrySendError::Disconnected(command)
                 }
-                TrySendError::Full(MarketWorkerCommand::Shutdown)
-                | TrySendError::Disconnected(MarketWorkerCommand::Shutdown) => {
+                TrySendError::Full(
+                    MarketWorkerCommand::Shutdown
+                    | MarketWorkerCommand::RithmicSearch(_)
+                    | MarketWorkerCommand::RithmicSelect(_),
+                )
+                | TrySendError::Disconnected(
+                    MarketWorkerCommand::Shutdown
+                    | MarketWorkerCommand::RithmicSearch(_)
+                    | MarketWorkerCommand::RithmicSelect(_),
+                ) => {
                     unreachable!("recovery send errors retain the recovery command")
+                }
+            })
+    }
+
+    pub fn try_search_rithmic(
+        &self,
+        search: RithmicSymbolSearch,
+    ) -> Result<(), TrySendError<RithmicSymbolSearch>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(search));
+        };
+        commands
+            .try_send(MarketWorkerCommand::RithmicSearch(search))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::RithmicSearch(search)) => {
+                    TrySendError::Full(search)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::RithmicSearch(search)) => {
+                    TrySendError::Disconnected(search)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("Rithmic search send errors retain the search command")
+                }
+            })
+    }
+
+    pub fn try_select_rithmic(
+        &self,
+        selection: RithmicInstrumentSelection,
+    ) -> Result<(), TrySendError<RithmicInstrumentSelection>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(selection));
+        };
+        commands
+            .try_send(MarketWorkerCommand::RithmicSelect(selection))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::RithmicSelect(selection)) => {
+                    TrySendError::Full(selection)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::RithmicSelect(selection)) => {
+                    TrySendError::Disconnected(selection)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("Rithmic selection send errors retain the selection command")
                 }
             })
     }
@@ -1064,6 +1167,7 @@ fn run_worker(
                     return;
                 }
             }
+            MarketWorkerCommand::RithmicSearch(_) | MarketWorkerCommand::RithmicSelect(_) => {}
             MarketWorkerCommand::Shutdown => return,
         }
     }
@@ -1079,6 +1183,10 @@ mod tests {
     use axiusflow_application::ReplayStreamUpdate;
     use axiusflow_desktop_provider_runtime::SessionGeneration;
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
+    use axiusflow_rithmic_protocol_adapter::{
+        RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
+        RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
+    };
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
@@ -1612,5 +1720,127 @@ mod tests {
                 }
             ] if message == "network changed"
         ));
+    }
+
+    #[test]
+    fn latest_rithmic_catalog_result_is_conflated_without_displacing_market_state() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicCatalog(
+                    RithmicCatalogEvent::CommandRejected {
+                        session_generation: generation,
+                        command_generation: NonZeroUsize::MIN,
+                        reason: RithmicCatalogRejection::SupersededSearch,
+                    },
+                ))
+                .is_ok()
+        );
+        let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicCatalog(
+                    RithmicCatalogEvent::CommandRejected {
+                        session_generation: generation,
+                        command_generation: latest_generation,
+                        reason: RithmicCatalogRejection::InstrumentUnavailable,
+                    },
+                ))
+                .is_ok()
+        );
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::RithmicCatalog(
+                RithmicCatalogEvent::CommandRejected {
+                    command_generation,
+                    reason: RithmicCatalogRejection::InstrumentUnavailable,
+                    ..
+                }
+            )] if *command_generation == latest_generation
+        ));
+
+        assert!(
+            sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message: "terminal".to_string(),
+                })
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(MarketWorkerMessage::RithmicCatalog(
+                    RithmicCatalogEvent::CommandRejected {
+                        session_generation: generation,
+                        command_generation: latest_generation,
+                        reason: RithmicCatalogRejection::SubscriptionRejected,
+                    },
+                ))
+                .is_ok()
+        );
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::State {
+                state: ChartState::Error,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn rithmic_search_and_selection_commands_use_the_bounded_worker_channel() {
+        let (command_tx, command_rx) = mpsc::sync_channel(2);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None);
+        let search = RithmicSymbolSearch::try_new(
+            NonZeroUsize::MIN,
+            "ES",
+            None,
+            None,
+            None,
+            SearchPattern::Contains,
+            NonZeroUsize::new(16).expect("result bound is nonzero"),
+        )
+        .expect("search validates");
+        let selection = RithmicInstrumentSelection::try_new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            "ESU6",
+            "CME",
+            "rithmic-test-cme",
+            RithmicReadOnlySubscription::try_new(true, true, false)
+                .expect("read-only subscription validates"),
+        )
+        .expect("selection validates");
+        worker
+            .try_search_rithmic(search)
+            .expect("search enters the bounded channel");
+        worker
+            .try_select_rithmic(selection)
+            .expect("selection enters the bounded channel");
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::RithmicSearch(_))
+        ));
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::RithmicSelect(_))
+        ));
+        let shutdown = thread::spawn(move || {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::Shutdown)
+            ));
+            shutdown_tx
+                .send(())
+                .expect("shutdown acknowledgement sends");
+        });
+        drop(worker);
+        shutdown.join().expect("shutdown observer exits");
     }
 }

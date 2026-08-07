@@ -331,17 +331,15 @@ fn seed_corrupt_cache(root: &Path) {
 }
 
 fn corrupt_file(path: &Path) {
-    let mut permissions = fs::metadata(path)
-        .expect("fixture segment metadata reads")
-        .permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .expect("fixture segment metadata reads")
+            .permissions();
         permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions).expect("fixture segment becomes writable");
     }
-    #[cfg(not(unix))]
-    permissions.set_readonly(false);
-    fs::set_permissions(path, permissions).expect("fixture segment becomes writable");
     fs::write(path, b"corrupt").expect("fixture cache corruption writes");
 }
 
@@ -445,6 +443,7 @@ fn assert_message_redacted(message: &MarketWorkerMessage) {
             Err(error) => error.clone(),
         },
         MarketWorkerMessage::Diagnostics(snapshot) => format!("{snapshot:?}"),
+        MarketWorkerMessage::RithmicCatalog(event) => format!("{event:?}"),
         MarketWorkerMessage::Update(publication) => format!(
             "{} {} {}",
             publication.subscription_id,

@@ -100,6 +100,7 @@ pub(super) fn forward_commands(
                     return;
                 }
             }
+            Ok(MarketWorkerCommand::RithmicSearch(_) | MarketWorkerCommand::RithmicSelect(_)) => {}
             Ok(MarketWorkerCommand::Shutdown) | Err(_) => {
                 let _ = inbox_tx.send(WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown));
                 return;
@@ -124,7 +125,10 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                     .provider_wake_pending
                     .store(false, Ordering::Release);
             }
-            WorkerInboxEvent::UiDiagnosticsReady => {}
+            WorkerInboxEvent::UiDiagnosticsReady
+            | WorkerInboxEvent::Command(
+                MarketWorkerCommand::RithmicSearch(_) | MarketWorkerCommand::RithmicSelect(_),
+            ) => {}
             WorkerInboxEvent::Environment(event) => {
                 context.state.recovery_announced |= apply_environment_event(
                     context.worker,

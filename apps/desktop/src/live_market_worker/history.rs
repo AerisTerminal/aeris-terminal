@@ -781,17 +781,15 @@ mod tests {
     }
 
     fn corrupt_file(path: &std::path::Path) {
-        let mut permissions = fs::metadata(path)
-            .expect("segment metadata reads")
-            .permissions();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path)
+                .expect("segment metadata reads")
+                .permissions();
             permissions.set_mode(0o600);
+            fs::set_permissions(path, permissions).expect("segment becomes writable");
         }
-        #[cfg(not(unix))]
-        permissions.set_readonly(false);
-        fs::set_permissions(path, permissions).expect("segment becomes writable");
         fs::write(path, b"corrupt").expect("segment corruption writes");
     }
 }

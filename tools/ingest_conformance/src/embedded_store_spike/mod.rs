@@ -160,7 +160,8 @@ fn filesystem_type(path: &Path) -> Result<String, Box<dyn Error>> {
 }
 
 #[cfg(not(unix))]
-fn filesystem_type(_path: &Path) -> Result<String, Box<dyn Error>> {
+fn filesystem_type(path: &Path) -> Result<String, Box<dyn Error>> {
+    fs::metadata(path)?;
     Ok("unreported".to_string())
 }
 

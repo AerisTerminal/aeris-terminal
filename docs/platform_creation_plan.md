@@ -56,9 +56,9 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stage E** (`in_progress` — reliable pre-login Rithmic shell landed). **Stage C** is `blocked_external` after deterministic conformance. |
+| Current stage(s) | **Stage E** (`in_progress` — bounded Rithmic shell and symbol search/selection landed). **Stage C** is `blocked_external` after deterministic conformance. |
 | Blocked | Stage C authorized Test evidence requires signed R|Trader agreements and vault credentials on the developer machine. |
-| Next | Add generation-fenced Rithmic symbol search and selection to the local shell; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
+| Next | Add generation-fenced Rithmic series selection and visible-range-first chart history; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -71,7 +71,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | B — Provider-neutral runtime | `verified` | [x] complete |
 | C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
-| E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; symbol selection [ ] |
+| E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; bounded symbol search/selection [x]; series selection [ ] |
 | F — Readiness / endurance | `ready` | [ ] not started |
 
 ### Remaining focus (ordered)
@@ -108,7 +108,7 @@ Full scope policy:
 | Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
 | Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized Test evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
-| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a bounded local shell before vault/login/history work, shows the explicit Rithmic Test profile and coarse redacted connection state, and runs discovery/login/retry/diagnostics/shutdown on a background worker. Symbol selection, chart/history, and DOM remain. |
+| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a bounded local shell before vault/login/history work, shows the explicit Rithmic Test profile and coarse redacted connection state, and runs discovery/login/search/selection/subscription/retry/diagnostics/shutdown off the UI thread with session and selection-generation fencing. Series selection, chart/history, and DOM remain. |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
 | Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
 
@@ -457,7 +457,7 @@ None — gate met.
 
 ## 10. Stage E — Main Rithmic UI vertical
 
-**Status:** `in_progress` (pre-login shell and connection-state vertical landed)
+**Status:** `in_progress` (pre-login shell plus bounded symbol search/selection vertical landed)
 
 Begin only after Stage 0 is `verified` and Stages C and D pass their
 deterministic headless gates.
@@ -473,7 +473,7 @@ deterministic headless gates.
 
 - [x] Launch a reliable local shell before login or history completion.
 - [x] Show provider profile, Test environment, and connection state.
-- [ ] Search and select discovered symbols.
+- [x] Search and select discovered symbols.
 - [ ] Select tick, 1m, 5m, 15m, 1h, and daily series.
 - [ ] Hydrate visible-range-first history into the Origin chart.
 - [ ] Replace forming candles and append completed candles deterministically.

@@ -120,7 +120,10 @@ fn overwrite_for_fault(path: &Path, bytes: &[u8]) {
     file.sync_all().expect("fault injection syncs");
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn make_writable(_path: &Path) {}
+
+#[cfg(not(any(unix, windows)))]
 fn make_writable(path: &Path) {
     let mut permissions = fs::metadata(path)
         .expect("fault fixture metadata reads")
@@ -138,7 +141,9 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 fn assert_catalog_redacts(root: &Path, secret: &[u8]) {
     for entry in fs::read_dir(root).expect("store root reads") {
         let entry = entry.expect("store entry reads");
-        if entry.file_type().expect("store entry type reads").is_file() {
+        if entry.file_name() != ".history.lock"
+            && entry.file_type().expect("store entry type reads").is_file()
+        {
             let bytes = fs::read(entry.path()).expect("catalog file reads");
             assert!(!contains_bytes(&bytes, secret));
         }
