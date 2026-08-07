@@ -24,6 +24,16 @@ use origin_render_gpui::{GpuiChartRenderer, OriginViewport, PreparedOriginFrame}
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChartDrag {
+    Pane,
+    TimeAxis,
+    PriceAxis {
+        pane: usize,
+        target: PriceScaleTarget,
+    },
+}
+
 /// A GPUI entity hosting one authoritative Origin chart engine and renderer.
 pub struct OriginChartView {
     engine: ChartEngine,
@@ -37,7 +47,7 @@ pub struct OriginChartView {
     built_for: (f32, f32, f32),
     fitted: bool,
     viewport_origin: (f32, f32),
-    panning: bool,
+    drag: Option<ChartDrag>,
 }
 
 impl OriginChartView {
@@ -62,7 +72,7 @@ impl OriginChartView {
             built_for: (0.0, 0.0, 0.0),
             fitted: false,
             viewport_origin: (0.0, 0.0),
-            panning: false,
+            drag: None,
         }
     }
 
@@ -115,7 +125,7 @@ impl OriginChartView {
             built_for: (0.0, 0.0, 0.0),
             fitted: false,
             viewport_origin: (0.0, 0.0),
-            panning: false,
+            drag: None,
         }
     }
 
@@ -319,29 +329,76 @@ impl OriginChartView {
         self.invalidate_series_frame();
     }
 
-    fn begin_pan(&mut self, pane_x: f64, y: f64) {
-        if pane_x < 0.0 || pane_x > self.engine.pane_w || y < 0.0 || y > self.engine.pane_h {
-            self.panning = false;
+    fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize) {
+        self.end_drag(pane_x, y);
+        let pane = self.engine.pane_index_at_y(y);
+        if click_count >= 2 {
+            if y > self.engine.pane_h {
+                self.engine.reset_time_scale();
+            } else if pane_x < 0.0 {
+                self.engine
+                    .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Left, true);
+            } else if pane_x > self.engine.pane_w {
+                self.engine
+                    .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Right, true);
+            }
             self.update_crosshair(pane_x, y);
             return;
         }
-        self.engine.time_scale.end_scroll();
-        self.engine.time_scale.start_scroll(pane_x);
-        self.panning = true;
+        self.drag = if y > self.engine.pane_h {
+            self.engine.time_axis_start_scale(pane_x);
+            Some(ChartDrag::TimeAxis)
+        } else if pane_x < 0.0
+            && self
+                .engine
+                .price_axis_scalable(pane, PriceScaleTarget::Left)
+        {
+            self.engine
+                .price_axis_start_scale(pane, PriceScaleTarget::Left, y);
+            Some(ChartDrag::PriceAxis {
+                pane,
+                target: PriceScaleTarget::Left,
+            })
+        } else if pane_x > self.engine.pane_w
+            && self
+                .engine
+                .price_axis_scalable(pane, PriceScaleTarget::Right)
+        {
+            self.engine
+                .price_axis_start_scale(pane, PriceScaleTarget::Right, y);
+            Some(ChartDrag::PriceAxis {
+                pane,
+                target: PriceScaleTarget::Right,
+            })
+        } else if pane_x >= 0.0 && y >= 0.0 && y <= self.engine.pane_h {
+            self.engine.time_scale.start_scroll(pane_x);
+            Some(ChartDrag::Pane)
+        } else {
+            None
+        };
         self.update_crosshair(pane_x, y);
     }
 
-    fn pan_to(&mut self, pane_x: f64, y: f64) {
-        if self.panning {
-            self.engine.time_scale.scroll_to(pane_x);
+    fn drag_to(&mut self, pane_x: f64, y: f64) {
+        match self.drag {
+            Some(ChartDrag::Pane) => self.engine.time_scale.scroll_to(pane_x),
+            Some(ChartDrag::TimeAxis) => self.engine.time_axis_scale_to(pane_x),
+            Some(ChartDrag::PriceAxis { pane, target }) => {
+                self.engine.price_axis_scale_to(pane, target, y);
+            }
+            None => {}
         }
         self.update_crosshair(pane_x, y);
     }
 
-    fn end_pan(&mut self, pane_x: f64, y: f64) {
-        if self.panning {
-            self.engine.time_scale.end_scroll();
-            self.panning = false;
+    fn end_drag(&mut self, pane_x: f64, y: f64) {
+        match self.drag.take() {
+            Some(ChartDrag::Pane) => self.engine.time_scale.end_scroll(),
+            Some(ChartDrag::TimeAxis) => self.engine.time_axis_end_scale(),
+            Some(ChartDrag::PriceAxis { pane, target }) => {
+                self.engine.price_axis_end_scale(pane, target);
+            }
+            None => {}
         }
         self.update_crosshair(pane_x, y);
     }
@@ -371,10 +428,7 @@ impl OriginChartView {
     }
 
     fn clear_pointer(&mut self, cx: &mut Context<Self>) {
-        if self.panning {
-            self.engine.time_scale.end_scroll();
-            self.panning = false;
-        }
+        self.end_drag(-1.0, -1.0);
         self.engine.crosshair = None;
         self.invalidate_series_frame();
         cx.notify();
@@ -387,7 +441,7 @@ impl OriginChartView {
         cx: &mut Context<Self>,
     ) {
         let (pane_x, y) = self.local_position(event.position);
-        self.begin_pan(pane_x, y);
+        self.begin_drag(pane_x, y, event.click_count);
         cx.stop_propagation();
         cx.notify();
     }
@@ -399,8 +453,8 @@ impl OriginChartView {
         cx: &mut Context<Self>,
     ) {
         let (pane_x, y) = self.local_position(event.position);
-        if self.panning && event.dragging() {
-            self.pan_to(pane_x, y);
+        if self.drag.is_some() && event.dragging() {
+            self.drag_to(pane_x, y);
         } else {
             self.update_crosshair(pane_x, y);
         }
@@ -409,7 +463,7 @@ impl OriginChartView {
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let (pane_x, y) = self.local_position(event.position);
-        self.end_pan(pane_x, y);
+        self.end_drag(pane_x, y);
         cx.stop_propagation();
         cx.notify();
     }
@@ -582,17 +636,47 @@ mod tests {
     #[test]
     fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
         let mut chart = interactive_chart();
-        chart.begin_pan(-1.0, 200.0);
-        assert!(!chart.panning);
-        chart.begin_pan(300.0, 200.0);
-        assert!(chart.panning);
+        chart.begin_drag(300.0, 200.0, 1);
+        assert_eq!(chart.drag, Some(ChartDrag::Pane));
         assert_eq!(chart.engine.crosshair, Some((300.0, 200.0)));
         let offset = chart.engine.right_offset();
-        chart.pan_to(340.0, 200.0);
+        chart.drag_to(340.0, 200.0);
         assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
-        chart.end_pan(340.0, 200.0);
-        assert!(!chart.panning);
+        chart.end_drag(340.0, 200.0);
+        assert!(chart.drag.is_none());
         chart.update_crosshair(-1.0, 200.0);
         assert!(chart.engine.crosshair.is_none());
+    }
+
+    #[test]
+    fn axes_drag_and_double_click_reset_through_origin() {
+        let mut chart = interactive_chart();
+        chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1);
+        assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
+        chart.drag_to(340.0, chart.engine.pane_h + 10.0);
+        chart.end_drag(340.0, chart.engine.pane_h + 10.0);
+        assert!(chart.drag.is_none());
+
+        let right_axis_x = chart.engine.pane_w + 1.0;
+        chart.begin_drag(right_axis_x, 200.0, 1);
+        assert!(matches!(
+            chart.drag,
+            Some(ChartDrag::PriceAxis {
+                target: PriceScaleTarget::Right,
+                ..
+            })
+        ));
+        chart.drag_to(right_axis_x, 240.0);
+        chart.end_drag(right_axis_x, 240.0);
+        assert!(chart.drag.is_none());
+
+        chart.engine.time_scale.start_scroll(0.0);
+        chart.engine.time_scale.scroll_to(80.0);
+        chart.engine.time_scale.end_scroll();
+        let offset = chart.engine.right_offset();
+        assert!(offset.abs() > f64::EPSILON);
+        chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 2);
+        assert!(chart.engine.right_offset().abs() < offset.abs());
+        assert!(chart.drag.is_none());
     }
 }
