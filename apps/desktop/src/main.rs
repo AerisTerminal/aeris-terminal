@@ -32,9 +32,7 @@ use market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
     UiDiagnosticsFeedback,
 };
-use std::{sync::mpsc::TrySendError, time::Duration};
-
-const MARKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
+use std::sync::mpsc::TrySendError;
 
 fn generation_status(
     worker_label: &str,
@@ -101,6 +99,7 @@ struct TerminalApp {
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     window_active: bool,
+    frame_poll_scheduled: bool,
     feed_diagnostics: Option<Box<FeedDiagnosticsSnapshot>>,
     chart_state: ChartState,
     chart_state_message: String,
@@ -242,12 +241,12 @@ impl TerminalApp {
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
         );
         let dom = cx.new(move |_| ReadOnlyDomView::new(theme));
-        Self::start_market_poll(cx);
         Self {
             chart,
             dom,
             side_panel: None,
             window_active: true,
+            frame_poll_scheduled: false,
             feed_diagnostics: None,
             chart_state,
             chart_state_message,
@@ -266,19 +265,6 @@ impl TerminalApp {
             series_message: "Select a symbol before choosing a series".to_string(),
             rithmic_autoload_started: false,
         }
-    }
-
-    fn start_market_poll(cx: &mut Context<Self>) {
-        let poll_executor = cx.background_executor().clone();
-        cx.spawn(async move |app, cx| {
-            loop {
-                poll_executor.timer(MARKET_POLL_INTERVAL).await;
-                if app.update(cx, TerminalApp::poll_market_worker).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     fn apply_publication(
@@ -578,6 +564,21 @@ impl TerminalApp {
                 let _ = sender.send(diagnostics.into_presented());
             });
         }
+    }
+
+    fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.frame_poll_scheduled || !self.window_active {
+            return;
+        }
+        self.frame_poll_scheduled = true;
+        let app = cx.entity();
+        window.on_next_frame(move |_, cx| {
+            app.update(cx, |app, cx| {
+                app.frame_poll_scheduled = false;
+                app.poll_market_worker(cx);
+                cx.notify();
+            });
+        });
     }
 
     fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) {
@@ -908,6 +909,7 @@ impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_diagnostics_frame(window);
         self.window_active = window.is_window_active();
+        self.schedule_market_frame(window, cx);
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
