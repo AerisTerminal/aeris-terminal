@@ -24,6 +24,8 @@ pub use aggregation::{
 };
 pub use config::{CoinbaseConfig, MAXIMUM_PRODUCTS};
 pub use decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
+#[cfg(feature = "deterministic-fixtures")]
+pub use desktop_driver::CoinbaseProviderFixtureControl;
 pub use desktop_driver::{
     CoinbaseDesktopEventError, CoinbaseProviderDriver, CoinbaseProviderDriverError,
     CoinbaseProviderEvent, CoinbaseProviderEvents, CoinbaseProviderInvalidReason,

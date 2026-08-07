@@ -1,6 +1,8 @@
 //! Explicit direct-device Coinbase desktop composition.
 
 mod composition;
+#[cfg(test)]
+mod conformance;
 mod diagnostics;
 mod history;
 mod lifecycle;
@@ -15,8 +17,10 @@ use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
 };
 use axiusflow_chart_integration::ReplayRecoveryCommand;
-use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
-use axiusflow_desktop_provider_runtime::{DesktopProviderState, SessionGeneration};
+use axiusflow_coinbase_market_adapter::{CoinbaseDesktopEventError, CoinbaseProviderEvents};
+use axiusflow_desktop_provider_runtime::{
+    DesktopMarketWorkerError, DesktopProviderError, DesktopProviderState, SessionGeneration,
+};
 use axiusflow_desktop_storage::SegmentEncryptionKey;
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::BarDefinition;
@@ -39,8 +43,8 @@ use composition::{
 };
 use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
-    InitialHistoryContext, PreparedHistory, StreamingSeriesContext, install_ready_history,
-    prepare_initial_history,
+    DirectHistorySource, HistorySource, InitialHistoryContext, PreparedHistory,
+    StreamingSeriesContext, install_ready_history, prepare_initial_history,
 };
 use lifecycle::{
     EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
@@ -87,7 +91,7 @@ struct WorkerThreadInput {
     detailed_diagnostics: bool,
 }
 
-struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault> {
+struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource> {
     profile: ProductProfile,
     worker: CoinbaseDesktopWorker<V>,
     events: CoinbaseProviderEvents,
@@ -97,6 +101,7 @@ struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault> {
     worker_label: String,
     model: MarketBarClientModel,
     state: LiveLoopState,
+    history_source: H,
 }
 
 pub(crate) fn start(
@@ -170,7 +175,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         detailed_diagnostics,
     } = input;
     let OpenedWorker {
-        mut worker,
+        worker,
         events,
         segment_key,
     } = open_worker(
@@ -182,6 +187,40 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         detailed_diagnostics,
     )?;
     let (initial_network, monitors_active) = environment_events(inbox_tx.clone());
+    let running = prepare_running_worker(
+        profile,
+        OpenedWorker {
+            worker,
+            events,
+            segment_key,
+        },
+        initial_network,
+        monitors_active,
+        DirectHistorySource,
+        &message_tx,
+    )?;
+    run_worker_loop(
+        running,
+        &message_tx,
+        &inbox_rx,
+        &provider_wake_pending,
+        &ui_diagnostics_rx,
+    )
+}
+
+fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource>(
+    profile: ProductProfile,
+    opened: OpenedWorker<V>,
+    initial_network: Option<NetworkEvent>,
+    monitors_active: bool,
+    history_source: H,
+    message_tx: &MarketWorkerSender,
+) -> Result<RunningWorker<V, H>, String> {
+    let OpenedWorker {
+        mut worker,
+        events,
+        segment_key,
+    } = opened;
     apply_initial_network(&mut worker, initial_network)?;
     let instrument = instrument(&profile)?;
     let bar_definition = bar_definition();
@@ -189,6 +228,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
     let mut model = client_model();
     let retained = prepare_initial_history(
         &mut worker,
+        &history_source,
         &InitialHistoryContext {
             profile: &profile,
             segment_key: &segment_key,
@@ -198,9 +238,9 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
             initial_network,
         },
         &mut model,
-        &message_tx,
+        message_tx,
     )?;
-    let running = RunningWorker {
+    Ok(RunningWorker {
         instrument,
         bar_definition,
         worker_label,
@@ -213,22 +253,16 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
             recovery_announced: false,
             pending_recovery: VecDeque::with_capacity(COMMAND_CAPACITY),
         },
+        history_source,
         profile,
         worker,
         events,
         segment_key,
-    };
-    run_worker_loop(
-        running,
-        &message_tx,
-        &inbox_rx,
-        &provider_wake_pending,
-        &ui_diagnostics_rx,
-    )
+    })
 }
 
-fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault>(
-    mut running: RunningWorker<V>,
+fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource>(
+    mut running: RunningWorker<V, H>,
     message_tx: &MarketWorkerSender,
     inbox_rx: &Receiver<WorkerInboxEvent>,
     provider_wake_pending: &AtomicBool,
@@ -248,6 +282,7 @@ fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault>(
                 provider_wake_pending,
             },
         )? {
+            running.worker.stop().map_err(|error| error.to_string())?;
             return Ok(());
         }
 
@@ -263,6 +298,7 @@ fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault>(
 
         if install_ready_history(
             &mut running.worker,
+            &mut running.history_source,
             &StreamingSeriesContext {
                 profile: &running.profile,
                 segment_key: &running.segment_key,
@@ -359,7 +395,6 @@ fn fence_failed_history<V: axiusflow_platform_runtime::CredentialVault>(
     retained: &mut VecDeque<ProvenancedMarketBar>,
     recovery_announced: &mut bool,
     message_tx: &MarketWorkerSender,
-    error: &str,
 ) -> Result<(), String> {
     worker.reset_aggregation();
     worker
@@ -369,7 +404,8 @@ fn fence_failed_history<V: axiusflow_platform_runtime::CredentialVault>(
     *recovery_announced = true;
     let _ = message_tx.send(MarketWorkerMessage::State {
         state: ChartState::Recovering,
-        message: format!("Coinbase history recovery required: {error}"),
+        message: "Coinbase history recovery required; awaiting a fresh covering snapshot"
+            .to_string(),
     });
     Ok(())
 }
@@ -444,6 +480,7 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
             {
                 return Ok(());
             }
+            Err(error) if is_stale_coinbase_callback(&error) => continue,
             Err(error) => return Err(error.to_string()),
         };
         let Some((generation, completed)) = received else {
@@ -481,16 +518,26 @@ fn establish_coinbase_stream_if_ready<V: axiusflow_platform_runtime::CredentialV
     events: &CoinbaseProviderEvents,
     streaming_generation: Option<SessionGeneration>,
 ) -> Result<(), String> {
-    if streaming_generation.is_none()
-        && events.has_ready()
-        && worker
-            .try_recv_coinbase_aggregated_bar(events)
-            .map_err(|error| error.to_string())?
-            .is_some()
-    {
-        return Err("completed Coinbase bar arrived before history seeding".to_string());
+    if streaming_generation.is_none() && events.has_ready() {
+        match worker.try_recv_coinbase_aggregated_bar(events) {
+            Ok(Some(_)) => {
+                return Err("completed Coinbase bar arrived before history seeding".to_string());
+            }
+            Ok(None) => {}
+            Err(error) if is_stale_coinbase_callback(&error) => {}
+            Err(error) => return Err(error.to_string()),
+        }
     }
     Ok(())
+}
+
+fn is_stale_coinbase_callback(error: &CoinbaseDesktopEventError) -> bool {
+    matches!(
+        error,
+        CoinbaseDesktopEventError::Runtime(DesktopMarketWorkerError::Provider(
+            DesktopProviderError::StaleGeneration
+        ))
+    )
 }
 
 fn request_recovery_if_required<V: axiusflow_platform_runtime::CredentialVault>(

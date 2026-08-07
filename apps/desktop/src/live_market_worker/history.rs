@@ -9,8 +9,9 @@ use axiusflow_application::{
     ReplayStreamUpdate,
 };
 use axiusflow_coinbase_market_adapter::{
-    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, ENTITLEMENT_CLASS,
-    decode_history_bar, decode_history_segment, encode_history_segment, history_segment_item_count,
+    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
+    ENTITLEMENT_CLASS, decode_history_bar, decode_history_segment, encode_history_segment,
+    history_segment_item_count,
 };
 use axiusflow_desktop_history::{
     ControlPlaneState, HistoryDecoder, HydrationOutcome, HydrationRequest, ProviderConnectionState,
@@ -37,8 +38,36 @@ use std::{
 
 pub(super) struct PreparedHistory {
     pub(super) identity: SegmentIdentity,
-    completion: Completion,
+    pub(super) completion: Completion,
     pub(super) received_unix_nanos: i64,
+}
+
+pub(super) trait HistorySource: Send {
+    fn now_unix_nanos(&self) -> Result<i64, String>;
+
+    fn fetch(
+        &mut self,
+        profile: &ProductProfile,
+        now_unix_nanos: i64,
+    ) -> Result<PreparedHistory, String>;
+}
+
+pub(super) struct DirectHistorySource;
+
+impl HistorySource for DirectHistorySource {
+    fn now_unix_nanos(&self) -> Result<i64, String> {
+        unix_nanos()
+    }
+
+    fn fetch(
+        &mut self,
+        profile: &ProductProfile,
+        now_unix_nanos: i64,
+    ) -> Result<PreparedHistory, String> {
+        let mut adapter =
+            CoinbaseHistoryCapabilityAdapter::try_new().map_err(|error| error.to_string())?;
+        fetch_history_with_adapter(profile, &mut adapter, now_unix_nanos)
+    }
 }
 
 struct CoinbaseSegmentDecoder;
@@ -108,8 +137,12 @@ pub(super) struct InitialHistoryContext<'a> {
     pub(super) initial_network: Option<axiusflow_platform_runtime::NetworkEvent>,
 }
 
-pub(super) fn install_ready_history<V: axiusflow_platform_runtime::CredentialVault>(
+pub(super) fn install_ready_history<
+    V: axiusflow_platform_runtime::CredentialVault,
+    H: HistorySource,
+>(
     worker: &mut CoinbaseDesktopWorker<V>,
+    history_source: &mut H,
     context: &StreamingSeriesContext<'_>,
     state: &mut LiveLoopState,
     model: &mut MarketBarClientModel,
@@ -125,6 +158,7 @@ pub(super) fn install_ready_history<V: axiusflow_platform_runtime::CredentialVau
     };
     let history = install_streaming_history(
         worker,
+        history_source,
         &StreamingHistoryRequest {
             generation,
             profile: context.profile,
@@ -137,45 +171,46 @@ pub(super) fn install_ready_history<V: axiusflow_platform_runtime::CredentialVau
         model,
         message_tx,
     );
-    match history {
-        Ok(history) => {
-            state.retained = history;
-            state.streaming_generation = Some(generation);
-            state.reconnect_backoff.reset();
-            state.recovery_announced = false;
-            Ok(false)
-        }
-        Err(error) => {
-            fence_failed_history(
-                worker,
-                generation,
-                &mut state.retained,
-                &mut state.recovery_announced,
-                message_tx,
-                &error,
-            )?;
-            Ok(true)
-        }
+    if let Ok(history) = history {
+        state.retained = history;
+        state.streaming_generation = Some(generation);
+        state.reconnect_backoff.reset();
+        state.recovery_announced = false;
+        Ok(false)
+    } else {
+        fence_failed_history(
+            worker,
+            generation,
+            &mut state.retained,
+            &mut state.recovery_announced,
+            message_tx,
+        )?;
+        Ok(true)
     }
 }
 
-fn install_streaming_history<V: axiusflow_platform_runtime::CredentialVault>(
+fn install_streaming_history<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource>(
     worker: &mut CoinbaseDesktopWorker<V>,
+    history_source: &mut H,
     request: &StreamingHistoryRequest<'_>,
     prepared: &mut Option<PreparedHistory>,
     model: &mut MarketBarClientModel,
     message_tx: &MarketWorkerSender,
 ) -> Result<VecDeque<ProvenancedMarketBar>, String> {
-    let history = match prepared.take() {
-        Some(history) => history,
-        None => fetch_history(request.profile)?,
+    let history = if let Some(history) = prepared.take() {
+        history
+    } else {
+        let now = history_source.now_unix_nanos()?;
+        history_source.fetch(request.profile, now)?
     };
+    let now = history_source.now_unix_nanos()?;
     install_history(
         worker,
         request.generation,
         request.profile,
         &history,
         request.segment_key,
+        now,
     )?;
     let bars = worker.coinbase_bar_history(&request.profile.product_id)?;
     let retained = bars
@@ -206,11 +241,12 @@ fn install_streaming_history<V: axiusflow_platform_runtime::CredentialVault>(
 
 pub(super) fn prepare_initial_history<V: axiusflow_platform_runtime::CredentialVault>(
     worker: &mut CoinbaseDesktopWorker<V>,
+    history_source: &impl HistorySource,
     context: &InitialHistoryContext<'_>,
     model: &mut MarketBarClientModel,
     message_tx: &MarketWorkerSender,
 ) -> Result<VecDeque<ProvenancedMarketBar>, String> {
-    let now = unix_nanos()?;
+    let now = history_source.now_unix_nanos()?;
     let now_seconds = now / 1_000_000_000;
     let scope = HistoryScope {
         provider_id: "coinbase".to_string(),
@@ -355,10 +391,11 @@ fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
     profile: &ProductProfile,
     history: &PreparedHistory,
     segment_key: &SegmentEncryptionKey,
+    now_unix_nanos: i64,
 ) -> Result<(), String> {
     let interest = RequestInterest::new(NonZeroU64::MIN);
     let now_seconds =
-        history_installation_time(history.identity.range_end_unix_nanos, unix_nanos()?)?;
+        history_installation_time(history.identity.range_end_unix_nanos, now_unix_nanos)?;
     let binding = worker
         .begin_scheduled_history_handoff(
             generation,
@@ -415,8 +452,11 @@ pub(super) fn history_installation_time(
     Ok(now_unix_nanos / 1_000_000_000)
 }
 
-fn fetch_history(profile: &ProductProfile) -> Result<PreparedHistory, String> {
-    let now = unix_nanos()?;
+pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
+    profile: &ProductProfile,
+    adapter: &mut CoinbaseHistoryCapabilityAdapter<T>,
+    now: i64,
+) -> Result<PreparedHistory, String> {
     let minute_nanos = 60_000_000_000_i64;
     let end = now.div_euclid(minute_nanos) * minute_nanos;
     let start = end
@@ -437,8 +477,6 @@ fn fetch_history(profile: &ProductProfile) -> Result<PreparedHistory, String> {
         maximum_items: nonzero(HISTORY_BARS),
         continuation: None,
     };
-    let mut adapter =
-        CoinbaseHistoryCapabilityAdapter::try_new().map_err(|error| error.to_string())?;
     let mut scheduler = HistoryScheduler::try_new(
         adapter.capabilities().clone(),
         SchedulerConfig {
@@ -460,11 +498,13 @@ fn fetch_history(profile: &ProductProfile) -> Result<PreparedHistory, String> {
         .map_err(|error| error.to_string())?
         .dispatch
         .ok_or_else(|| "Coinbase history request was not dispatchable".to_string())?;
-    let page = adapter.fetch_page(&dispatch.request)?;
+    let page = adapter
+        .fetch_page(&dispatch.request)
+        .map_err(|_| "Coinbase history provider fetch failed".to_string())?;
     if page.items.is_empty() {
         return Err("Coinbase returned no completed history bars".to_string());
     }
-    let received_unix_nanos = unix_nanos()?;
+    let received_unix_nanos = now;
     let completion = scheduler
         .complete(dispatch.dispatch_id, page, received_unix_nanos)
         .map_err(|error| error.to_string())?;
@@ -498,7 +538,8 @@ fn history_identity(profile: &ProductProfile, start: i64, end: i64) -> SegmentId
 #[cfg(test)]
 mod tests {
     use super::{
-        InitialHistoryContext, history_identity, history_installation_time, prepare_initial_history,
+        DirectHistorySource, InitialHistoryContext, history_identity, history_installation_time,
+        prepare_initial_history,
     };
     use crate::{
         live_market_worker::{
@@ -669,8 +710,10 @@ mod tests {
         let instrument = instrument(profile).expect("instrument validates");
         let definition = bar_definition();
         let mut model = client_model();
+        let history_source = DirectHistorySource;
         let retained = prepare_initial_history(
             &mut worker,
+            &history_source,
             &InitialHistoryContext {
                 profile,
                 segment_key: &segment_key(),

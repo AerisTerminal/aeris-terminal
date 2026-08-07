@@ -1,7 +1,7 @@
 use crate::{CanonicalTrade, CoinbaseConfig, CoinbaseSession, SessionOutcome};
 use axiusflow_desktop_provider_runtime::{
-    DesktopMarketWorker, DesktopMarketWorkerError, ProviderCredentialRequirement,
-    ProviderSessionDriver, SessionGeneration,
+    DesktopMarketWorker, DesktopMarketWorkerError, DesktopProviderError, DesktopProviderState,
+    ProviderCredentialRequirement, ProviderSessionDriver, SessionGeneration,
 };
 use axiusflow_platform_runtime::CredentialVault;
 use core::fmt;
@@ -73,6 +73,58 @@ impl fmt::Debug for CoinbaseProviderEvent {
 /// Receiving half of the bounded direct Coinbase callback channel.
 pub struct CoinbaseProviderEvents {
     callbacks: Arc<SharedCallbacks>,
+}
+
+/// Deterministic control surface over the production Coinbase callback queue.
+#[cfg(feature = "deterministic-fixtures")]
+pub struct CoinbaseProviderFixtureControl {
+    callbacks: Arc<SharedCallbacks>,
+    started: Mutex<std::sync::mpsc::Receiver<SessionGeneration>>,
+    stopped: Mutex<std::sync::mpsc::Receiver<SessionGeneration>>,
+}
+
+#[cfg(feature = "deterministic-fixtures")]
+impl CoinbaseProviderFixtureControl {
+    #[must_use]
+    pub fn wait_started(&self, timeout: std::time::Duration) -> Option<SessionGeneration> {
+        self.started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv_timeout(timeout)
+            .ok()
+    }
+
+    #[must_use]
+    pub fn wait_stopped(&self, timeout: std::time::Duration) -> Option<SessionGeneration> {
+        self.stopped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv_timeout(timeout)
+            .ok()
+    }
+
+    pub fn established(&self, generation: SessionGeneration) -> bool {
+        self.emitter(generation).established()
+    }
+
+    pub fn heartbeat(&self, generation: SessionGeneration) -> bool {
+        self.emitter(generation).heartbeat()
+    }
+
+    pub fn trade(&self, generation: SessionGeneration, trade: CanonicalTrade) -> bool {
+        self.emitter(generation).trade(trade)
+    }
+
+    pub fn invalid(&self, generation: SessionGeneration, reason: CoinbaseProviderInvalidReason) {
+        self.emitter(generation).invalid(reason);
+    }
+
+    fn emitter(&self, generation: SessionGeneration) -> SessionEmitter {
+        SessionEmitter {
+            generation,
+            callbacks: Arc::clone(&self.callbacks),
+        }
+    }
 }
 
 impl CoinbaseProviderEvents {
@@ -250,6 +302,44 @@ impl CoinbaseProviderDriver {
         Self::with_task_and_wake(config, event_capacity, direct_session_task(), Some(wake))
     }
 
+    /// Creates a controlled deterministic driver over the production callback and stop paths.
+    ///
+    /// The control reports started/stopped generations and can inject explicitly fenced
+    /// callbacks. It exists only for deterministic cross-crate conformance tests.
+    #[cfg(feature = "deterministic-fixtures")]
+    #[must_use]
+    pub fn new_controlled_with_wake(
+        config: CoinbaseConfig,
+        event_capacity: NonZeroUsize,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> (Self, CoinbaseProviderEvents, CoinbaseProviderFixtureControl) {
+        let callbacks = new_callbacks(event_capacity, Some(wake));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(8);
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(8);
+        let task: Arc<SessionTask> = Arc::new(move |_config, generation, stop, _emitter| {
+            let _ = started_tx.try_send(generation);
+            while !stop.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            let _ = stopped_tx.try_send(generation);
+        });
+        let driver = Self {
+            config,
+            callbacks: Arc::clone(&callbacks),
+            task,
+            active: None,
+        };
+        let events = CoinbaseProviderEvents {
+            callbacks: Arc::clone(&callbacks),
+        };
+        let control = CoinbaseProviderFixtureControl {
+            callbacks,
+            started: Mutex::new(started_rx),
+            stopped: Mutex::new(stopped_rx),
+        };
+        (driver, events, control)
+    }
+
     #[cfg(test)]
     fn with_task(
         config: CoinbaseConfig,
@@ -265,15 +355,7 @@ impl CoinbaseProviderDriver {
         task: Arc<SessionTask>,
         wake: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> (Self, CoinbaseProviderEvents) {
-        let callbacks = Arc::new(SharedCallbacks {
-            capacity: event_capacity,
-            state: Mutex::new(CallbackState {
-                queue: VecDeque::with_capacity(event_capacity.get()),
-                terminal: None,
-                failed: false,
-            }),
-            wake,
-        });
+        let callbacks = new_callbacks(event_capacity, wake);
         (
             Self {
                 config,
@@ -303,6 +385,21 @@ impl CoinbaseProviderDriver {
     fn owns_events(&self, events: &CoinbaseProviderEvents) -> bool {
         Arc::ptr_eq(&self.callbacks, &events.callbacks)
     }
+}
+
+fn new_callbacks(
+    event_capacity: NonZeroUsize,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> Arc<SharedCallbacks> {
+    Arc::new(SharedCallbacks {
+        capacity: event_capacity,
+        state: Mutex::new(CallbackState {
+            queue: VecDeque::with_capacity(event_capacity.get()),
+            terminal: None,
+            failed: false,
+        }),
+        wake,
+    })
 }
 
 impl ProviderSessionDriver for CoinbaseProviderDriver {
@@ -456,13 +553,13 @@ pub fn try_recv_coinbase_trade<T: Clone, V: CredentialVault>(
             Ok(None)
         }
         CoinbaseProviderEvent::Trade { generation, trade } => {
-            worker.ensure_streaming_generation(generation)?;
+            ensure_coinbase_streaming_generation(worker, generation)?;
             worker
                 .record_trade_diagnostics(generation, Some(trade.provider_timestamp_unix_nanos))?;
             Ok(Some((generation, trade)))
         }
         CoinbaseProviderEvent::Heartbeat { generation } => {
-            worker.ensure_streaming_generation(generation)?;
+            ensure_coinbase_streaming_generation(worker, generation)?;
             worker.record_heartbeat_diagnostics(generation)?;
             Ok(None)
         }
@@ -501,7 +598,7 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
             Ok(None)
         }
         CoinbaseProviderEvent::Trade { generation, trade } => {
-            worker.ensure_streaming_generation(generation)?;
+            ensure_coinbase_streaming_generation(worker, generation)?;
             worker
                 .record_trade_diagnostics(generation, Some(trade.provider_timestamp_unix_nanos))?;
             let Some(aggregator) = aggregators
@@ -520,7 +617,7 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
             Ok(completed.map(|bar| (generation, bar)))
         }
         CoinbaseProviderEvent::Heartbeat { generation } => {
-            worker.ensure_streaming_generation(generation)?;
+            ensure_coinbase_streaming_generation(worker, generation)?;
             worker.record_heartbeat_diagnostics(generation)?;
             Ok(None)
         }
@@ -534,6 +631,25 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
             Ok(None)
         }
     }
+}
+
+fn ensure_coinbase_streaming_generation<T: Clone, V: CredentialVault>(
+    worker: &DesktopMarketWorker<T, V, CoinbaseProviderDriver>,
+    generation: SessionGeneration,
+) -> Result<(), DesktopMarketWorkerError> {
+    let active_generation = match worker.provider_state()? {
+        DesktopProviderState::Connecting {
+            generation: active, ..
+        }
+        | DesktopProviderState::Streaming { generation: active } => Some(active),
+        _ => None,
+    };
+    if active_generation.is_some_and(|active| active != generation) {
+        return Err(DesktopMarketWorkerError::Provider(
+            DesktopProviderError::StaleGeneration,
+        ));
+    }
+    worker.ensure_streaming_generation(generation)
 }
 
 /// Applies at most one callback and returns only the completed canonical bar.

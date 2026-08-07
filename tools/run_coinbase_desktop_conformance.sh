@@ -18,4 +18,4 @@ do
         --all-features
 done
 
-echo "coinbase_desktop_component_conformance=passed explicit_states=true bounded_event_inbox=true bounded_history=true coalescing=true ordered_recovery=true btc_eth_continuity=true shipping_offline_startup=passed shipping_corrupt_cache_rejection=passed shipping_reconnect=not_proven shipping_corrupt_cache_refetch=not_proven shipping_redaction=not_proven shipping_shutdown=not_proven live_desktop_smoke=not_run"
+echo "coinbase_desktop_shipping_conformance=passed explicit_states=true bounded_event_inbox=true bounded_history=true coalescing=true ordered_recovery=true btc_eth_continuity=true shipping_bounded_launch=true shipping_offline_startup=true shipping_corrupt_cache_refetch=true shipping_reconnect=true shipping_stale_generation_fence=true shipping_redaction=true shipping_history_live_continuity=true shipping_shutdown=true live_desktop_smoke=not_run"
