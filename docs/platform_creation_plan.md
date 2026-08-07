@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 25
+**Revision:** 26
 **Last updated:** 2026-08-07
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -56,9 +56,9 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stage C** (`in_progress` — Rithmic read-only headless core). Stage A follows Stage C priority work. |
-| Blocked | Live Test login still requires signed R|Trader agreements and vault credentials on the developer machine. Deterministic Stage C work is unblocked. |
-| Next | Provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed; keep Stage C deterministic recovery fixtures green while that external gate opens |
+| Current stage(s) | **Stage A** (`in_progress` — Coinbase shipping desktop gate). **Stage C** is `blocked_external` after deterministic conformance. |
+| Blocked | Stage C authorized Test evidence requires signed R|Trader agreements and vault credentials on the developer machine. |
+| Next | Complete the Stage A shipping desktop live smoke; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -67,18 +67,18 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Stage | Status | Progress |
 |---|---|---|
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
-| A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
+| A — Stabilize Coinbase | `in_progress` | deterministic desktop conformance [x]; shipping desktop live smoke [ ] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | deterministic headless conformance [x]; authorized Test evidence [ ] |
+| C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
-| E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
+| E — Main Rithmic UI | `ready` | [ ] queued after Stage A |
 | F — Readiness / endurance | `ready` | [ ] not started |
 
 ### Remaining focus (ordered)
 
 - [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
+- [ ] **Stage A:** deterministic desktop conformance [x]; shipping desktop live smoke [ ], then freeze (see §6).
 - [ ] **Stage C:** deterministic headless conformance [x]; authorized Rithmic Test evidence [ ] (see §8).
-- [ ] **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
 
 
 
@@ -244,21 +244,23 @@ New agents: if Stage 0 is not `verified`, do Stage 0 only.
 
 ## 6. Stage A — Stabilize and freeze Coinbase
 
-**Status:** `in_progress` (queued after Stage C priority work)
+**Status:** `in_progress`
 
-Stage 0 is verified. Stage A remains queued behind the Stage C priority batch.
+Stage 0 and the Stage C deterministic gate are verified. Stage A is the active
+unblocked product batch while authorized Rithmic Test evidence remains external.
 
 ### Remaining work
 
-- [ ] Replace the synthetic placeholder bar with explicit chart states: `Loading`, `Ready`, `Stale`, `Recovering`, and `Error`.
-- [ ] Split the oversized desktop live worker by composition, history, lifecycle/recovery, publication/provenance, and tests.
-- [ ] Make one coordinator fence provider recovery and chart resnapshot, reject stale generations/callbacks/recovery IDs, and wait for a new covering snapshot.
-- [ ] Replace 10 ms polling with one bounded event-driven inbox covering provider, environment, UI recovery, and shutdown; drain a bounded batch per wakeup.
-- [ ] Replace front-removal vectors with fixed-capacity `VecDeque` storage.
-- [ ] Coalesce state and forming-bar UI updates where safe.
-- [ ] Deliver completed bars in order or fence and request one recovery snapshot.
-- [ ] Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity.
-- [ ] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
+- [x] Replace the synthetic placeholder bar with explicit chart states: `Loading`, `Ready`, `Stale`, `Recovering`, and `Error`.
+- [x] Split the oversized desktop live worker by composition, history, lifecycle/recovery, publication/provenance, and tests.
+- [x] Make one coordinator fence provider recovery and chart resnapshot, reject stale generations/callbacks/recovery IDs, and wait for a new covering snapshot.
+- [x] Replace 10 ms polling with one bounded event-driven inbox covering provider, environment, UI recovery, and shutdown; drain a bounded batch per wakeup.
+- [x] Replace front-removal vectors with fixed-capacity `VecDeque` storage.
+- [x] Coalesce state and forming-bar UI updates where safe.
+- [x] Deliver completed bars in order or fence and request one recovery snapshot.
+- [x] Deterministic conformance proves bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity.
+- [x] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
+- [ ] Repeat the deterministic gate through the shipping desktop path against the public Coinbase feed.
 
 
 
@@ -266,6 +268,10 @@ Stage 0 is verified. Stage A remains queued behind the Stage C priority batch.
 
 - [ ] Coinbase shipping desktop path passes deterministic and live smoke coverage with explicit state, bounded event-driven behavior, one recovery owner, nonblocking publication, and no unreviewed warnings.
 - [ ] After this gate, Coinbase receives correctness fixes only—no symbols, timeframes, depth, analytics, or cloud routes.
+
+Deterministic evidence command:
+
+- `tools/run_coinbase_desktop_conformance.sh`
 
 
 
@@ -287,9 +293,10 @@ None — gate met.
 
 ## 8. Stage C — Rithmic read-only headless core
 
-**Status:** `in_progress`
+**Status:** `blocked_external`
 
-Stage 0 is verified. Stage C is the active priority batch.
+Stage 0 and Stage C deterministic conformance are verified. Authorized Test
+evidence remains blocked on agreement acceptance and native-vault provisioning.
 
 Rithmic has unlocked the R|Protocol path (kit download + Rithmic Test credentials).
 The local kit is installed. Implementation of encoding/decoding and the read-only
