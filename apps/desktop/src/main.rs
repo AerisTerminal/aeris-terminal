@@ -2,11 +2,14 @@
 
 mod live_market_worker;
 mod market_worker;
+mod rithmic_market_worker;
+mod rithmic_shell;
 mod windowed_benchmark;
 
 use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
+use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::{DiagnosticsQueue, FeedDiagnosticsSnapshot, LocalLatencyMetric};
 use gpui::{
     App, Bounds, Context, Entity, Hsla, Render, TitlebarOptions, Window, WindowBounds,
@@ -84,6 +87,8 @@ struct TerminalApp {
     diagnostics: Option<FeedDiagnosticsSnapshot>,
     diagnostics_expanded: bool,
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
+    connection_state: Option<FeedConnectionState>,
+    connection_message: Option<String>,
 }
 
 struct HeaderState {
@@ -92,6 +97,7 @@ struct HeaderState {
     bridge_label: String,
     chart_state: ChartState,
     diagnostics_expanded: bool,
+    connection_state: Option<FeedConnectionState>,
 }
 
 impl TerminalApp {
@@ -101,42 +107,69 @@ impl TerminalApp {
         market_worker: MarketDataWorker,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
-        let (chart, chart_state, chart_state_message, replay_label, worker_label, subscription_id) =
-            match startup {
-                MarketWorkerStartup::Loading {
-                    instrument,
-                    subscription_id,
+        let (
+            chart,
+            chart_state,
+            chart_state_message,
+            replay_label,
+            worker_label,
+            subscription_id,
+            connection_state,
+            connection_message,
+        ) = match startup {
+            MarketWorkerStartup::Shell(shell) => {
+                let profile = shell.profile_label();
+                let connection = shell.connection();
+                let message = shell.message().to_string();
+                (
+                    None,
+                    ChartState::Loading,
+                    message.clone(),
+                    profile.clone(),
+                    "Rithmic market worker".to_string(),
+                    "instrument selection pending".to_string(),
+                    Some(connection),
+                    Some(message),
+                )
+            }
+            MarketWorkerStartup::Loading {
+                instrument,
+                subscription_id,
+                worker_label,
+            } => {
+                let _ = instrument;
+                (
+                    None,
+                    ChartState::Loading,
+                    "waiting for a covering market snapshot".to_string(),
+                    "waiting for a covering market snapshot".to_string(),
                     worker_label,
-                } => {
-                    let _ = instrument;
-                    (
-                        None,
-                        ChartState::Loading,
-                        "waiting for a covering market snapshot".to_string(),
-                        "waiting for a covering market snapshot".to_string(),
-                        worker_label,
-                        subscription_id,
-                    )
-                }
-                MarketWorkerStartup::Ready(bootstrap) => {
-                    let replay_label = generation_status(
-                        &bootstrap.worker_label,
-                        &bootstrap.subscription_id,
-                        &bootstrap.generation,
-                    );
-                    let snapshot = bootstrap.snapshot;
-                    let chart =
-                        cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
-                    (
-                        Some(chart),
-                        ChartState::Ready,
-                        "market snapshot is current".to_string(),
-                        replay_label,
-                        bootstrap.worker_label,
-                        bootstrap.subscription_id,
-                    )
-                }
-            };
+                    subscription_id,
+                    None,
+                    None,
+                )
+            }
+            MarketWorkerStartup::Ready(bootstrap) => {
+                let replay_label = generation_status(
+                    &bootstrap.worker_label,
+                    &bootstrap.subscription_id,
+                    &bootstrap.generation,
+                );
+                let snapshot = bootstrap.snapshot;
+                let chart =
+                    cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                (
+                    Some(chart),
+                    ChartState::Ready,
+                    "market snapshot is current".to_string(),
+                    replay_label,
+                    bootstrap.worker_label,
+                    bootstrap.subscription_id,
+                    None,
+                    None,
+                )
+            }
+        };
         let bridge_label = chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
@@ -164,6 +197,8 @@ impl TerminalApp {
             diagnostics: None,
             diagnostics_expanded: false,
             pending_ui_diagnostics: None,
+            connection_state,
+            connection_message,
         }
     }
 
@@ -363,9 +398,18 @@ impl TerminalApp {
                 MarketWorkerMessage::State { state, message } => {
                     self.set_chart_state(state, message, cx);
                 }
+                MarketWorkerMessage::Connection { state, message } => {
+                    self.connection_state = Some(state);
+                    self.connection_message = Some(message);
+                    cx.notify();
+                }
             }
         }
-        if disconnected && self.chart_state != ChartState::Error {
+        if disconnected && self.connection_state.is_some() {
+            self.connection_state = Some(FeedConnectionState::Stopped);
+            self.connection_message = Some("Rithmic market worker stopped".to_string());
+            cx.notify();
+        } else if disconnected && self.chart_state != ChartState::Error {
             self.set_chart_state(
                 ChartState::Error,
                 "worker channel disconnected".to_string(),
@@ -425,6 +469,9 @@ impl TerminalApp {
     }
 
     fn chart_state_label(&self) -> String {
+        if let (Some(state), Some(message)) = (self.connection_state, &self.connection_message) {
+            return format!("{} · {message}", rithmic_shell::connection_label(state));
+        }
         format!(
             "{} · {}",
             self.chart_state.label(),
@@ -453,6 +500,7 @@ impl Render for TerminalApp {
                 bridge_label: self.bridge_label.clone(),
                 chart_state: self.chart_state,
                 diagnostics_expanded: self.diagnostics_expanded,
+                connection_state: self.connection_state,
             },
         );
 
@@ -522,7 +570,10 @@ fn terminal_header(
                     Button::new("market_data_source")
                         .label(format!(
                             "{} · {}",
-                            state.chart_state.label(),
+                            state.connection_state.map_or_else(
+                                || state.chart_state.label(),
+                                rithmic_shell::connection_label,
+                            ),
                             state.replay_label
                         ))
                         .rounded(radius)
@@ -799,6 +850,22 @@ fn run_coinbase_live_smoke_command(
     )
 }
 
+fn parse_rithmic_test_arguments(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(std::path::PathBuf, bool), String> {
+    let usage = "usage: axiusflow_desktop --rithmic-test <history-root> [--detailed-diagnostics]";
+    let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
+    let detailed_diagnostics = match arguments.next() {
+        Some(flag) if flag == "--detailed-diagnostics" => true,
+        Some(_) => return Err(usage.to_string()),
+        None => false,
+    };
+    if arguments.next().is_some() {
+        return Err(usage.to_string());
+    }
+    Ok((std::path::PathBuf::from(history_root), detailed_diagnostics))
+}
+
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -815,7 +882,22 @@ fn main() {
                 .expect("the Coinbase shipping live smoke passes");
             return;
         }
-        if argument == "--coinbase-live" {
+        if argument == "--rithmic-test" {
+            let (history_root, detailed_diagnostics) = parse_rithmic_test_arguments(arguments)
+                .unwrap_or_else(|usage| {
+                    eprintln!("{usage}");
+                    std::process::exit(2);
+                });
+            MarketDataWorker::start_rithmic(
+                history_root,
+                std::thread::current().id(),
+                detailed_diagnostics,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("Rithmic Test shell could not start: {error}");
+                std::process::exit(1);
+            })
+        } else if argument == "--coinbase-live" {
             let product = arguments.next().unwrap_or_else(|| {
                 eprintln!(
                     "usage: axiusflow_desktop --coinbase-live <BTC-USD|ETH-USD> <history-root> [--detailed-diagnostics]"
@@ -885,7 +967,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChartState, publication_chart_state, reconciled_bridge_state};
+    use super::{
+        ChartState, parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
+    };
+    use std::ffi::OsString;
 
     #[test]
     fn publication_is_ready_only_after_bridge_acceptance_without_recovery() {
@@ -903,6 +988,25 @@ mod tests {
         assert_eq!(
             reconciled_bridge_state(ChartState::Stale, true),
             ChartState::Stale
+        );
+    }
+
+    #[test]
+    fn rithmic_test_cli_requires_one_history_root_and_only_the_diagnostics_flag() {
+        let (root, detailed) = parse_rithmic_test_arguments(
+            ["cache", "--detailed-diagnostics"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("valid Rithmic Test arguments parse");
+        assert_eq!(root, std::path::PathBuf::from("cache"));
+        assert!(detailed);
+        assert!(parse_rithmic_test_arguments(std::iter::empty()).is_err());
+        assert!(
+            parse_rithmic_test_arguments(
+                [OsString::from("cache"), OsString::from("--unknown")].into_iter()
+            )
+            .is_err()
         );
     }
 }

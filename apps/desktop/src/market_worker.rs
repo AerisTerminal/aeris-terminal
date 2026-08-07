@@ -16,6 +16,7 @@ use axiusflow_market_protocol_adapter::{
     encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
     try_encode_replay_snapshot_chunk_envelopes,
 };
+use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
 use std::{
     collections::VecDeque,
@@ -74,6 +75,7 @@ pub(crate) struct MarketWorkerBootstrap {
 }
 
 pub(crate) enum MarketWorkerStartup {
+    Shell(crate::rithmic_shell::RithmicShellState),
     Loading {
         instrument: axiusflow_instruments::InstrumentRevision,
         subscription_id: String,
@@ -99,6 +101,10 @@ pub(crate) enum MarketWorkerMessage {
     },
     State {
         state: ChartState,
+        message: String,
+    },
+    Connection {
+        state: FeedConnectionState,
         message: String,
     },
 }
@@ -149,6 +155,10 @@ impl MarketWorkerSender {
         }
         if matches!(&message, MarketWorkerMessage::Diagnostics(_)) {
             self.send_diagnostics(&mut queue, message);
+            return Ok(());
+        }
+        if matches!(&message, MarketWorkerMessage::Connection { .. }) {
+            self.send_connection(&mut queue, message);
             return Ok(());
         }
         if matches!(
@@ -231,6 +241,36 @@ impl MarketWorkerSender {
         }
         self.replace_overflowed_queue(&mut queue, message);
         Ok(())
+    }
+
+    fn send_connection(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::Connection { .. }))
+        {
+            queue[index] = message;
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity {
+            let Some(index) = queue.iter().position(|queued| {
+                !matches!(
+                    queued,
+                    MarketWorkerMessage::Recovery { .. }
+                        | MarketWorkerMessage::State {
+                            state: ChartState::Error,
+                            ..
+                        }
+                )
+            }) else {
+                return;
+            };
+            queue.remove(index);
+        }
+        queue.push_back(message);
     }
 
     fn send_diagnostics(
@@ -407,7 +447,9 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         MarketWorkerMessage::Diagnostics(snapshot) => {
             snapshot.session_generation.map(SessionGeneration::new)
         }
-        MarketWorkerMessage::Recovery { .. } | MarketWorkerMessage::State { .. } => None,
+        MarketWorkerMessage::Recovery { .. }
+        | MarketWorkerMessage::State { .. }
+        | MarketWorkerMessage::Connection { .. } => None,
     }
 }
 
@@ -691,6 +733,14 @@ impl MarketDataWorker {
         detailed_diagnostics: bool,
     ) -> Result<(MarketWorkerStartup, Self), String> {
         crate::live_market_worker::start(product_id, history_root, ui_thread, detailed_diagnostics)
+    }
+
+    pub fn start_rithmic(
+        history_root: PathBuf,
+        ui_thread: thread::ThreadId,
+        detailed_diagnostics: bool,
+    ) -> Result<(MarketWorkerStartup, Self), String> {
+        crate::rithmic_market_worker::start(history_root, ui_thread, detailed_diagnostics)
     }
 
     pub(crate) const fn from_channels(

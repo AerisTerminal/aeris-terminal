@@ -756,6 +756,7 @@ dependencies = [
  "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
+ "axiusflow_rithmic_protocol_adapter",
  "axiusflow_terminal_ui",
  "getrandom 0.4.3",
  "gpui",

@@ -438,7 +438,8 @@ fn wait_for_recovery_and_diagnostics(worker: &mut MarketDataWorker) -> Vec<Marke
 
 fn assert_message_redacted(message: &MarketWorkerMessage) {
     let rendered = match message {
-        MarketWorkerMessage::State { message, .. } => message.clone(),
+        MarketWorkerMessage::State { message, .. }
+        | MarketWorkerMessage::Connection { message, .. } => message.clone(),
         MarketWorkerMessage::Recovery { result, .. } => match result {
             Ok(_) => "recovery succeeded".to_string(),
             Err(error) => error.clone(),

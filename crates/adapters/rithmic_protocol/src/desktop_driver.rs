@@ -107,7 +107,7 @@ impl RithmicProviderConfig {
     /// # Errors
     ///
     /// Returns an error for invalid application identity, session bounds,
-    /// canonical registry metadata, duplicate identities, or empty selections.
+    /// canonical registry metadata, or duplicate identities.
     pub fn try_new(
         application_name: impl Into<String>,
         application_version: impl Into<String>,
@@ -122,7 +122,6 @@ impl RithmicProviderConfig {
             || session_limits.validate().is_err()
             || message_silence_timeout < session_limits.response_timeout
             || message_silence_timeout > MAXIMUM_SILENCE_TIMEOUT
-            || instruments.is_empty()
             || instruments.len() > MAXIMUM_INSTRUMENTS
         {
             return Err(RithmicProviderConfigError);
@@ -151,7 +150,9 @@ impl RithmicProviderConfig {
         })
     }
 
-    fn environment() -> ProviderEnvironment {
+    /// Returns the fixed non-secret Rithmic Test provider profile.
+    #[must_use]
+    pub fn environment() -> ProviderEnvironment {
         ProviderEnvironment {
             provider_id: PROVIDER_ID.to_string(),
             system_id: SYSTEM_ID.to_string(),
@@ -1436,6 +1437,28 @@ mod tests {
             vec![instrument()],
         )
         .expect("fixture configuration validates")
+    }
+
+    #[test]
+    fn discovery_only_configuration_does_not_require_a_guessed_instrument() {
+        let config = RithmicProviderConfig::try_new(
+            "AxiusFlow",
+            "0.1.0",
+            RithmicSessionLimits::default(),
+            Duration::from_secs(30),
+            Vec::new(),
+        )
+        .expect("discovery-only configuration validates");
+
+        assert!(config.instruments.is_empty());
+        assert_eq!(
+            RithmicProviderConfig::environment(),
+            ProviderEnvironment {
+                provider_id: "rithmic".to_string(),
+                system_id: "RITHMIC_TEST".to_string(),
+                environment: "Test".to_string(),
+            }
+        );
     }
 
     fn callback_limits(events: usize, bytes: usize) -> RithmicCallbackLimits {
