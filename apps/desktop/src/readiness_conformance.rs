@@ -1,11 +1,23 @@
 //! Headless desktop burst and frame-conflation evidence.
 
-use crate::market_worker::{FixtureMarketWorker, MarketWorkerMessage, market_worker_channel};
+use crate::{
+    market_worker::{FixtureMarketWorker, MarketWorkerMessage, market_worker_channel},
+    rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart, RithmicLiveChartError},
+};
+use axiusflow_instruments::InstrumentPrecision;
+use axiusflow_market_data::{
+    AggressorSide, BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
+    MarketTrade, OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
+};
+use axiusflow_provider_history::{
+    HandoffCoordinator, HandoffState, SequencedHistory, VerifiedHistorySnapshot,
+};
+use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use serde::Serialize;
 use std::{
     error::Error,
     fs,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::Path,
     thread,
     time::{Duration, Instant},
@@ -57,6 +69,26 @@ struct DesktopBurstEvidence {
     working_set_sampled_growth_bytes: u64,
     maximum_working_set_growth_bytes: u64,
     working_set_within_bound: bool,
+    gap_recovery: DesktopGapRecoveryEvidence,
+}
+
+#[derive(Serialize)]
+struct DesktopGapRecoveryEvidence {
+    trade_ordering_fault_rejected: bool,
+    history: HistoryGapRecoveryEvidence,
+    depth: DepthGapRecoveryEvidence,
+}
+
+#[derive(Serialize)]
+struct HistoryGapRecoveryEvidence {
+    history_gap_requires_snapshot: bool,
+    history_covering_snapshot_recovers: bool,
+}
+
+#[derive(Serialize)]
+struct DepthGapRecoveryEvidence {
+    depth_gap_clears_book: bool,
+    depth_covering_snapshot_recovers: bool,
 }
 
 struct ProcessMemoryProbe {
@@ -174,9 +206,10 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     if !bounded_latest_state_conflation || !single_frame_drain_gate || !working_set_within_bound {
         return Err("desktop burst/frame conflation contract failed".into());
     }
+    let gap_recovery = collect_gap_recovery_evidence()?;
 
     Ok(DesktopBurstEvidence {
-        schema_version: 1,
+        schema_version: 2,
         evidence_scope: "deterministic_desktop_burst_and_frame_conflation",
         burst_updates: BURST_UPDATES,
         mailbox_capacity,
@@ -194,6 +227,183 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
         working_set_sampled_growth_bytes,
         maximum_working_set_growth_bytes: MAXIMUM_WORKING_SET_GROWTH_BYTES,
         working_set_within_bound,
+        gap_recovery,
+    })
+}
+
+fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn Error>> {
+    let evidence = DesktopGapRecoveryEvidence {
+        trade_ordering_fault_rejected: collect_trade_gap_evidence()?,
+        history: collect_history_gap_evidence()?,
+        depth: collect_depth_gap_evidence()?,
+    };
+    if !evidence.trade_ordering_fault_rejected
+        || !evidence.history.history_gap_requires_snapshot
+        || !evidence.history.history_covering_snapshot_recovers
+        || !evidence.depth.depth_gap_clears_book
+        || !evidence.depth.depth_covering_snapshot_recovers
+    {
+        return Err("desktop gap recovery contract failed".into());
+    }
+    Ok(evidence)
+}
+
+fn collect_trade_gap_evidence() -> Result<bool, Box<dyn Error>> {
+    let mut fixture = FixtureMarketWorker::try_new()?;
+    let snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let generation = RithmicChartGeneration {
+        selection: NonZeroUsize::MIN,
+        series: NonZeroUsize::MIN,
+    };
+    let seed = snapshot
+        .bars()
+        .last()
+        .ok_or("fixture snapshot did not contain a chart seed")?;
+    let first_trade_timestamp = seed
+        .provenance()
+        .exchange_timestamp_unix_nanos
+        .checked_add(1)
+        .ok_or("fixture timestamp overflowed")?;
+    let trade = MarketTrade {
+        metadata: EventMetadata {
+            provider_id: seed.provenance().source_id.clone(),
+            instrument_id: snapshot.instrument().instrument_id.as_str().to_string(),
+            entitlement_id: seed.provenance().entitlement_revision.clone(),
+            source_sequence: 100,
+            session_generation: 7,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: Some(first_trade_timestamp),
+                provider_unix_nanos: Some(first_trade_timestamp),
+                received_unix_nanos: first_trade_timestamp,
+            },
+        },
+        trade_id: "readiness-trade-100".to_string(),
+        price: seed.value().close,
+        quantity: 1,
+        aggressor: AggressorSide::Unknown,
+    };
+    let mut chart = RithmicLiveChart::from_history(generation, &snapshot)?;
+    chart.apply_trade(generation, &trade)?;
+    Ok(matches!(
+        chart.apply_trade(generation, &trade),
+        Err(RithmicLiveChartError::OutOfOrderTrade)
+    ))
+}
+
+fn collect_history_gap_evidence() -> Result<HistoryGapRecoveryEvidence, Box<dyn Error>> {
+    let mut history = HandoffCoordinator::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    history.install_snapshot(history_snapshot(1, 2)?)?;
+    let gap_result = history.push_live(sequenced_history(4));
+    let history_gap_requires_snapshot = gap_result.is_err()
+        && matches!(
+            history.state(),
+            HandoffState::SnapshotRequired {
+                minimum_generation: 1,
+                minimum_watermark: 4
+            }
+        );
+    history.install_snapshot(history_snapshot(2, 4)?)?;
+    let history_covering_snapshot_recovers = matches!(
+        history.state(),
+        HandoffState::Live {
+            generation: 2,
+            last_sequence: 4
+        }
+    );
+    Ok(HistoryGapRecoveryEvidence {
+        history_gap_requires_snapshot,
+        history_covering_snapshot_recovers,
+    })
+}
+
+fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Error>> {
+    let mut dom = ReadOnlyDom::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    dom.select(DomSelection {
+        provider_id: "rithmic".to_string(),
+        instrument_id: "mnq".to_string(),
+        entitlement_id: "test".to_string(),
+        session_generation: 7,
+        selection_generation: 1,
+        precision: InstrumentPrecision::try_new(2, 0)?,
+    });
+    dom.apply_event(&depth_snapshot(10))?;
+    dom.apply_event(&depth_delta(11))?;
+    let depth_gap = dom.apply_event(&depth_delta(13));
+    let recovering = dom
+        .frame()
+        .ok_or("DOM selection disappeared during recovery")?;
+    let depth_gap_clears_book = depth_gap.is_err()
+        && recovering.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
+        && recovering.rows.is_empty();
+    let depth_covering_snapshot_recovers = matches!(
+        dom.apply_event(&depth_snapshot(13))?,
+        DomUpdateOutcome::Published(frame)
+            if frame.state == OrderBookState::Ready && frame.source_watermark == 13
+    );
+    Ok(DepthGapRecoveryEvidence {
+        depth_gap_clears_book,
+        depth_covering_snapshot_recovers,
+    })
+}
+
+fn sequenced_history(sequence: u64) -> SequencedHistory<u64> {
+    SequencedHistory {
+        sequence: NonZeroU64::new(sequence).unwrap_or(NonZeroU64::MIN),
+        value: sequence,
+    }
+}
+
+fn history_snapshot(
+    generation: u64,
+    watermark: u64,
+) -> Result<VerifiedHistorySnapshot<u64>, Box<dyn Error>> {
+    let items = (1..=watermark).map(sequenced_history).collect();
+    Ok(VerifiedHistorySnapshot::try_new(
+        NonZeroU64::new(generation).unwrap_or(NonZeroU64::MIN),
+        items,
+    )?)
+}
+
+fn depth_metadata(sequence: u64) -> EventMetadata {
+    EventMetadata {
+        provider_id: "rithmic".to_string(),
+        instrument_id: "mnq".to_string(),
+        entitlement_id: "test".to_string(),
+        source_sequence: sequence,
+        session_generation: 7,
+        timestamps: QualifiedTimestamp {
+            exchange_unix_nanos: Some(i64::try_from(sequence).unwrap_or(i64::MAX)),
+            provider_unix_nanos: None,
+            received_unix_nanos: i64::try_from(sequence).unwrap_or(i64::MAX),
+        },
+    }
+}
+
+fn depth_snapshot(sequence: u64) -> MarketEvent {
+    MarketEvent::DepthSnapshot(DepthSnapshot {
+        metadata: depth_metadata(sequence),
+        bids: vec![DepthLevel {
+            price: 20_000,
+            quantity: 2,
+            order_count: Some(1),
+        }],
+        asks: vec![DepthLevel {
+            price: 20_025,
+            quantity: 3,
+            order_count: Some(1),
+        }],
+    })
+}
+
+fn depth_delta(sequence: u64) -> MarketEvent {
+    MarketEvent::DepthDelta(DepthDelta {
+        metadata: depth_metadata(sequence),
+        side: BookSide::Bid,
+        level: DepthLevel {
+            price: 20_000,
+            quantity: 4,
+            order_count: Some(2),
+        },
     })
 }
 
@@ -335,7 +545,7 @@ pub(crate) fn run_endurance(report_path: &Path, duration: Duration) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{BURST_UPDATES, FramePollGate, collect_evidence};
+    use super::{BURST_UPDATES, FramePollGate, collect_evidence, collect_gap_recovery_evidence};
 
     #[test]
     fn frame_gate_accepts_one_request_until_completion() {
@@ -355,6 +565,24 @@ mod tests {
         assert!(evidence.bounded_latest_state_conflation);
         assert!(evidence.single_frame_drain_gate);
         assert!(evidence.working_set_within_bound);
+        assert!(evidence.gap_recovery.trade_ordering_fault_rejected);
+        assert!(
+            evidence
+                .gap_recovery
+                .history
+                .history_covering_snapshot_recovers
+        );
+        assert!(evidence.gap_recovery.depth.depth_covering_snapshot_recovers);
+    }
+
+    #[test]
+    fn gaps_fail_closed_and_covering_snapshots_recover() {
+        let evidence = collect_gap_recovery_evidence().expect("gap recovery evidence passes");
+        assert!(evidence.trade_ordering_fault_rejected);
+        assert!(evidence.history.history_gap_requires_snapshot);
+        assert!(evidence.history.history_covering_snapshot_recovers);
+        assert!(evidence.depth.depth_gap_clears_book);
+        assert!(evidence.depth.depth_covering_snapshot_recovers);
     }
 
     #[test]

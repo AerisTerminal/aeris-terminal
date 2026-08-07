@@ -528,7 +528,7 @@ Capture evidence for:
 
 - [x] Slow consumers and publication overflow.
 - [ ] Heartbeat and message-silence loss.
-- [ ] Trade, history, and depth gaps.
+- [x] Trade, history, and depth gaps.
 - [x] Disconnect, bounded reconnect, and terminal failures.
 - [ ] Suspend/resume and offline startup.
 - [x] Burst traffic and frame-aligned conflation.
@@ -545,15 +545,21 @@ The desktop suites separately pass authenticated cache-corruption fallback,
 covering resnapshot after publication overflow, and terminal Rithmic failure
 redaction. The message-silence row remains open until the already-passing
 deterministic silent-peer timeout is repeated as authorized Rithmic heartbeat
-loss; the broader gap row remains open for combined trade/history/depth fault
-evidence.
+loss.
+
+The schema-2 desktop readiness artifact now exercises the production live-chart,
+history-handoff, and read-only DOM state machines together. It rejects a repeated
+trade sequence without mutating the chart, latches history snapshot-required on
+a sequence discontinuity and accepts only a newer covering generation, and
+clears depth on a sequence gap until a covering complete image restores the
+book. All five named gap/recovery outcomes passed on Windows on 2026-08-07.
 
 Desktop burst evidence on 2026-08-07: the headless
 `--desktop-readiness` command published 10,000 successively newer Rithmic chart
 snapshots without draining the UI mailbox. The fixed-capacity 32-item mailbox
 retained exactly one item at series generation 10,000, and 10,000 attempted
 frame-drain schedules admitted exactly one callback until completion. The
-command writes schema-1 JSON and opens no window.
+command writes schema-2 JSON and opens no window.
 
 The same Windows run sampled the process working set throughout the burst:
 12,763,136 bytes at baseline, 14,462,976 bytes current/high-water after the
