@@ -488,6 +488,11 @@ deterministic headless gates.
 - [x] Fence symbol/timeframe replacement by selection generation.
 - [x] Bound hidden-window work and retained state.
 
+The native header now uses GPUI Component dropdown menus for exact contract and
+series selection. The current item is checked, the instrument menu is bounded
+to the generation-fenced catalog result set, and selection no longer relies on
+opaque click-to-cycle behavior.
+
 
 
 ### Gate

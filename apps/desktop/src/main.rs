@@ -25,6 +25,7 @@ use gpui::{
 use gpui_component::{
     Disableable, Root, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
+    menu::{DropdownMenu, PopupMenuItem},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
@@ -158,6 +159,9 @@ struct HeaderState {
     theme: AxiusflowTheme,
     market_label: String,
     series_label: String,
+    instruments: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
+    selected_instrument: Option<(String, String)>,
+    selected_series: Option<rithmic_history::RithmicSeries>,
     controls: HeaderControls,
     dom_visible: bool,
     health_visible: bool,
@@ -969,40 +973,6 @@ impl TerminalApp {
             cx.notify();
         }
     }
-
-    fn select_next_rithmic_symbol(&mut self, cx: &mut Context<Self>) {
-        let results = self.symbol_browser.results();
-        if results.is_empty() {
-            let _ = self.search_rithmic_query("MNQ", cx);
-            return;
-        }
-        let selected_symbol = self
-            .symbol_browser
-            .selected()
-            .map(|selection| selection.instrument.symbol.as_str());
-        let next = selected_symbol
-            .and_then(|symbol| results.iter().position(|result| result.symbol == symbol))
-            .map_or(0, |index| (index + 1) % results.len());
-        self.select_rithmic_symbol(next, cx);
-    }
-
-    fn select_next_rithmic_series(&mut self, cx: &mut Context<Self>) {
-        if self.symbol_browser.selected().is_none() {
-            return;
-        }
-        let current = self
-            .series_browser
-            .selected()
-            .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
-                request.series
-            });
-        let supported = &rithmic_history::RithmicSeries::ALL;
-        let next = supported
-            .iter()
-            .position(|series| *series == current)
-            .map_or(0, |index| (index + 1) % supported.len());
-        self.select_rithmic_series(supported[next], cx);
-    }
 }
 
 impl Render for TerminalApp {
@@ -1015,7 +985,7 @@ impl Render for TerminalApp {
         let app = cx.entity();
         let header = terminal_header(
             cx,
-            app,
+            &app,
             HeaderState {
                 theme,
                 market_label: self.subscription_id.clone(),
@@ -1024,6 +994,14 @@ impl Render for TerminalApp {
                     .selected()
                     .map_or("1m", |request| request.series.label())
                     .to_string(),
+                instruments: self.symbol_browser.results().to_vec(),
+                selected_instrument: self.symbol_browser.selected().map(|selection| {
+                    (
+                        selection.instrument.symbol.clone(),
+                        selection.instrument.exchange.clone(),
+                    )
+                }),
+                selected_series: self.series_browser.selected().map(|request| request.series),
                 controls: HeaderControls::from_state(
                     !self.symbol_browser.results().is_empty(),
                     self.symbol_browser.selected().is_some(),
@@ -1112,7 +1090,7 @@ fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
 
 fn terminal_header(
     cx: &mut Context<TerminalApp>,
-    app: Entity<TerminalApp>,
+    app: &Entity<TerminalApp>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let colors = state.theme.colors;
@@ -1123,6 +1101,38 @@ fn terminal_header(
         .active(gpui_color(colors.muted));
     let (connection_label, connection_color) =
         connection_presentation(state.connection_state, state.chart_state, state.delayed);
+    let instruments = state.instruments;
+    let selected_instrument = state.selected_instrument;
+    let selected_series = state.selected_series;
+    let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
+    let dom_toggle = panel_toggle(
+        "dom_toggle",
+        if state.dom_visible { "Chart" } else { "DOM" },
+        active_button,
+        state.controls.enabled(HeaderControls::DOM),
+        app.clone(),
+        TerminalApp::toggle_dom,
+    );
+    let health_toggle = panel_toggle(
+        "health_toggle",
+        if state.health_visible {
+            "Chart"
+        } else {
+            "Health"
+        },
+        active_button,
+        state.controls.enabled(HeaderControls::HEALTH),
+        app.clone(),
+        TerminalApp::toggle_health,
+    );
+    let theme_toggle = theme_toggle(app.clone(), &state.theme, active_button);
+    let series_selector = series_selector(
+        app.clone(),
+        state.series_label,
+        selected_series,
+        active_button,
+        state.controls.enabled(HeaderControls::SERIES),
+    );
     TitleBar::new().child(
         div()
             .h_full()
@@ -1131,21 +1141,7 @@ fn terminal_header(
             .gap_4()
             .items_center()
             .child(div().text_sm().child("Axiusflow"))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(gpui_color(colors.muted_foreground))
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(gpui_color(connection_color(&state.theme))),
-                    )
-                    .child(connection_label),
-            )
+            .child(connection)
             .child(
                 div()
                     .h_full()
@@ -1155,65 +1151,119 @@ fn terminal_header(
                     .child(
                         Button::new("instrument_selector")
                             .label(state.market_label)
+                            .dropdown_caret(true)
                             .custom(active_button)
                             .disabled(!state.controls.enabled(HeaderControls::INSTRUMENT))
-                            .on_click({
+                            .dropdown_menu({
                                 let app = app.clone();
-                                move |_, _, cx| {
-                                    app.update(cx, TerminalApp::select_next_rithmic_symbol);
+                                move |menu, _, _| {
+                                    instruments.iter().enumerate().fold(
+                                        menu.scrollable(true),
+                                        |menu, (index, instrument)| {
+                                            let checked = selected_instrument.as_ref().is_some_and(
+                                                |(symbol, exchange)| {
+                                                    symbol == &instrument.symbol
+                                                        && exchange == &instrument.exchange
+                                                },
+                                            );
+                                            let app = app.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(format!(
+                                                    "{} Â· {}",
+                                                    instrument.symbol, instrument.exchange
+                                                ))
+                                                .checked(checked)
+                                                .on_click(move |_, _, cx| {
+                                                    app.update(cx, |app, cx| {
+                                                        app.select_rithmic_symbol(index, cx);
+                                                    });
+                                                }),
+                                            )
+                                        },
+                                    )
                                 }
                             }),
                     )
-                    .child(
-                        Button::new("series_selector")
-                            .label(state.series_label)
-                            .custom(active_button)
-                            .disabled(!state.controls.enabled(HeaderControls::SERIES))
-                            .on_click({
-                                let app = app.clone();
-                                move |_, _, cx| {
-                                    app.update(cx, TerminalApp::select_next_rithmic_series);
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("dom_toggle")
-                            .label(if state.dom_visible { "Chart" } else { "DOM" })
-                            .custom(active_button)
-                            .disabled(!state.controls.enabled(HeaderControls::DOM))
-                            .on_click({
-                                let app = app.clone();
-                                move |_, _, cx| {
-                                    app.update(cx, TerminalApp::toggle_dom);
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("health_toggle")
-                            .label(if state.health_visible {
-                                "Chart"
-                            } else {
-                                "Health"
-                            })
-                            .custom(active_button)
-                            .disabled(!state.controls.enabled(HeaderControls::HEALTH))
-                            .on_click({
-                                let app = app.clone();
-                                move |_, _, cx| {
-                                    app.update(cx, TerminalApp::toggle_health);
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("theme_toggle")
-                            .label(state.theme.mode.toggled().label())
-                            .custom(active_button)
-                            .on_click(move |_, window, cx| {
-                                app.update(cx, |app, cx| app.toggle_theme(window, cx));
-                            }),
-                    ),
+                    .child(series_selector)
+                    .child(dom_toggle)
+                    .child(health_toggle)
+                    .child(theme_toggle),
             ),
     )
+}
+
+fn connection_badge(
+    label: &'static str,
+    color: ThemeColor,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> impl IntoElement + use<> {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(gpui_color(colors.muted_foreground))
+        .child(div().size(px(6.0)).rounded_full().bg(gpui_color(color)))
+        .child(label)
+}
+
+fn panel_toggle(
+    id: &'static str,
+    label: &'static str,
+    variant: ButtonCustomVariant,
+    enabled: bool,
+    app: Entity<TerminalApp>,
+    toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+) -> impl IntoElement {
+    Button::new(id)
+        .label(label)
+        .custom(variant)
+        .disabled(!enabled)
+        .on_click(move |_, _, cx| {
+            app.update(cx, toggle);
+        })
+}
+
+fn theme_toggle(
+    app: Entity<TerminalApp>,
+    theme: &AxiusflowTheme,
+    variant: ButtonCustomVariant,
+) -> impl IntoElement + use<> {
+    Button::new("theme_toggle")
+        .label(theme.mode.toggled().label())
+        .custom(variant)
+        .on_click(move |_, window, cx| {
+            app.update(cx, |app, cx| app.toggle_theme(window, cx));
+        })
+}
+
+fn series_selector(
+    app: Entity<TerminalApp>,
+    label: String,
+    selected: Option<rithmic_history::RithmicSeries>,
+    variant: ButtonCustomVariant,
+    enabled: bool,
+) -> impl IntoElement {
+    Button::new("series_selector")
+        .label(label)
+        .dropdown_caret(true)
+        .custom(variant)
+        .disabled(!enabled)
+        .dropdown_menu(move |menu, _, _| {
+            rithmic_history::RithmicSeries::ALL
+                .iter()
+                .fold(menu, |menu, series| {
+                    let series = *series;
+                    let app = app.clone();
+                    menu.item(
+                        PopupMenuItem::new(series.label())
+                            .checked(selected == Some(series))
+                            .on_click(move |_, _, cx| {
+                                app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
+                            }),
+                    )
+                })
+        })
 }
 
 type ConnectionColor = fn(&AxiusflowTheme) -> ThemeColor;
