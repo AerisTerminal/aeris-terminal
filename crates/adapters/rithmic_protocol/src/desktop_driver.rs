@@ -1666,7 +1666,7 @@ fn process_session_commands(
                 connection
                     .request_instrument_reference(InstrumentReferenceRequest {
                         symbol: &selection.symbol,
-                        exchange: &selection.exchange,
+                        exchange: market_data_exchange(&selection.exchange),
                     })
                     .map_err(session_failure)?;
                 *pending = Some(PendingCatalogCommand::Reference(selection));
@@ -1853,7 +1853,9 @@ fn selected_instrument(
     selection: &RithmicInstrumentSelection,
     reference: InstrumentReference,
 ) -> Result<RithmicProviderInstrument, (ProviderInvalidationReason, RetryDisposition)> {
-    if reference.symbol != selection.symbol || reference.exchange != selection.exchange {
+    if reference.symbol != selection.symbol
+        || reference.exchange != market_data_exchange(&selection.exchange)
+    {
         return Err(malformed());
     }
     let instrument_id = format!("rithmic:{}:{}", reference.exchange, reference.symbol);
@@ -1875,6 +1877,12 @@ fn selected_instrument(
         quotes: selection.quotes,
         order_book: selection.order_book,
     })
+}
+
+fn market_data_exchange(catalog_exchange: &str) -> &str {
+    catalog_exchange
+        .strip_suffix("-Delayed")
+        .unwrap_or(catalog_exchange)
 }
 
 fn subscription_request(
@@ -2889,6 +2897,8 @@ mod tests {
         assert!(selection_debug.contains("[REDACTED]"));
         assert!(!selection_debug.contains("ESM7"));
         assert!(!selection_debug.contains("private-entitlement"));
+        assert_eq!(market_data_exchange("CME-Delayed"), "CME");
+        assert_eq!(market_data_exchange("CME"), "CME");
         assert_eq!(
             RithmicInstrumentSelection::try_new(
                 NonZeroUsize::MIN,

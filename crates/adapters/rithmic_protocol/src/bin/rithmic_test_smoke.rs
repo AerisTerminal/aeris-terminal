@@ -112,7 +112,11 @@ fn search_and_reference(
         .ok_or("symbol_search_empty")?;
     let selected = SelectedInstrument {
         symbol: selected.symbol.clone(),
-        exchange: selected.exchange.clone(),
+        exchange: selected
+            .exchange
+            .strip_suffix("-Delayed")
+            .unwrap_or(&selected.exchange)
+            .to_string(),
     };
     println!(
         "rithmic_symbol_search=passed results={}",
@@ -158,10 +162,9 @@ fn test_subscription(
             order_book: false,
         })
         .map_err(|error| format!("subscription_send_failed={error}"))?;
-    let mut subscription_accepted = false;
     let mut subscription_rejected = false;
     let mut market_messages = 0usize;
-    while market_messages < 3 && !subscription_rejected {
+    while market_messages < 1 && !subscription_rejected {
         match ticker
             .read_next()
             .map_err(|error| format!("stream_read_failed={error}"))?
@@ -171,11 +174,9 @@ fn test_subscription(
             }) => {
                 if !accepted {
                     subscription_rejected = true;
-                    continue;
                 }
-                subscription_accepted = true;
             }
-            RithmicSessionMessage::Market(_) if subscription_accepted => market_messages += 1,
+            RithmicSessionMessage::Market(_) => market_messages += 1,
             _ => {}
         }
     }

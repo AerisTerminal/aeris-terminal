@@ -491,11 +491,12 @@ deterministic headless gates.
 
 ### Gate
 
-Provider evidence on 2026-08-07: Test login, a 16-result `MNQ` search, and
-instrument reference lookup passed. The provider explicitly rejected both a
-dated-contract market-data subscription and a one-minute history replay. Live
-chart hydration therefore remains externally blocked on Test data entitlement;
-the desktop must display the empty Origin surface and rejection state truthfully.
+Provider evidence on 2026-08-07: Test login, a 16-result `MNQ` search, CME
+instrument reference, live market data, and a one-minute history replay all
+passed headlessly from the native vault. The successful run received a live
+market frame and 259 historical bars for `MNQU6` on `CME`. Catalog venues ending
+in `-Delayed` must use the base entitled exchange for reference, subscription,
+and history requests.
 
 - [ ] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [ ] Correct DOM gap recovery.

@@ -295,7 +295,7 @@ fn timestamp(
     microseconds: Option<i32>,
 ) -> Result<ProviderTimestamp, ProtocolError> {
     let seconds = seconds.ok_or(ProtocolError::MissingField("ssboe"))?;
-    let microseconds = microseconds.ok_or(ProtocolError::MissingField("usecs"))?;
+    let microseconds = microseconds.unwrap_or(0);
     if seconds < 0 || !(0..1_000_000).contains(&microseconds) {
         return Err(ProtocolError::InvalidHeartbeat);
     }
@@ -420,6 +420,17 @@ mod tests {
     use super::*;
     use crate::{RithmicProtocolCodec, generated::rti};
     use prost::Message;
+
+    #[test]
+    fn omitted_market_microseconds_default_to_zero() {
+        assert_eq!(
+            timestamp(Some(1_800_000_000), None),
+            Ok(ProviderTimestamp {
+                seconds: 1_800_000_000,
+                microseconds: 0,
+            })
+        );
+    }
 
     #[test]
     fn decodes_trade_quote_and_bounded_book() {

@@ -366,7 +366,14 @@ impl HistoryCollector {
             return Err(CollectorError::ReplayKindMismatch);
         };
         self.validate_identity(&bar.identity.symbol, &bar.identity.exchange)?;
-        if bar.bar_type != bar_type || bar.period != period.to_string() {
+        let expected_period = match bar_type {
+            DecodedTimeBarType::Minute => period.checked_mul(60),
+            DecodedTimeBarType::Second | DecodedTimeBarType::Daily | DecodedTimeBarType::Weekly => {
+                Some(period)
+            }
+        }
+        .ok_or(CollectorError::SeriesMismatch)?;
+        if bar.bar_type != bar_type || bar.period != expected_period.to_string() {
             return Err(CollectorError::SeriesMismatch);
         }
         if !(self.request.start_seconds..=self.request.finish_seconds).contains(&bar.marker_seconds)
@@ -717,7 +724,7 @@ mod tests {
                 exchange: "CME".to_string(),
             },
             bar_type: DecodedTimeBarType::Minute,
-            period: "1".to_string(),
+            period: "60".to_string(),
             marker_seconds,
             ohlc: Ohlc {
                 open: 10.0,

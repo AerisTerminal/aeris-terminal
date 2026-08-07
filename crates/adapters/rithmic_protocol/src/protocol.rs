@@ -463,6 +463,7 @@ mod kit {
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
     const MAX_IDENTITY_BYTES: usize = 256;
     const MAX_TEMPLATE_VERSION_BYTES: usize = 32;
+    const MAX_RESPONSE_CODES: usize = 8;
     const MAX_SYSTEMS: usize = 64;
     const MAX_HEARTBEAT_INTERVAL_SECONDS: f64 = 300.0;
     const TEST_SYSTEM: &str = "Rithmic Test";
@@ -939,13 +940,18 @@ mod kit {
         for message in user_messages {
             validate_field("user_msg", message)?;
         }
-        match codes {
-            [code] if code == "0" => {}
-            [code, detail] if code.parse::<u32>().is_ok_and(|value| value > 0) => {
-                validate_field("rp_code", code)?;
-                validate_field("rp_code_detail", detail)?;
-            }
-            _ => return Err(ProtocolError::ResponseCodeShape),
+        if codes == ["0"] {
+            return Ok(());
+        }
+        let Some((code, details)) = codes.split_first() else {
+            return Err(ProtocolError::ResponseCodeShape);
+        };
+        if codes.len() > MAX_RESPONSE_CODES || !code.parse::<u32>().is_ok_and(|value| value > 0) {
+            return Err(ProtocolError::ResponseCodeShape);
+        }
+        validate_field("rp_code", code)?;
+        for detail in details {
+            validate_field("rp_code_detail", detail)?;
         }
         Ok(())
     }
@@ -1140,6 +1146,19 @@ mod tests {
             codec.decode_control(&malformed_codes),
             Err(ProtocolError::ResponseCodeShape)
         ));
+
+        let rejected_subscription = rti::ResponseMarketDataUpdate {
+            template_id: 101,
+            user_msg: Vec::new(),
+            rp_code: vec!["1".to_string()],
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec
+                .decode_control(&rejected_subscription)
+                .expect("single-code rejection decodes"),
+            DecodedControlMessage::MarketDataSubscription { accepted: false }
+        );
 
         let login = rti::ResponseLogin {
             template_id: 11,
