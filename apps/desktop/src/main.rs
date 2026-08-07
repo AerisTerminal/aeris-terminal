@@ -25,7 +25,8 @@ use gpui::{
 use gpui_component::{
     Disableable, Root, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
-    menu::{DropdownMenu, PopupMenuItem},
+    input::{Input, InputState},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
@@ -129,6 +130,7 @@ struct TerminalApp {
     series_message: String,
     rithmic_autoload_started: bool,
     rithmic_reconnect: RithmicReconnectState,
+    symbol_input: Option<Entity<InputState>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,6 +164,7 @@ struct HeaderState {
     instruments: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
     selected_instrument: Option<(String, String)>,
     selected_series: Option<rithmic_history::RithmicSeries>,
+    symbol_input: Option<Entity<InputState>>,
     controls: HeaderControls,
     dom_visible: bool,
     health_visible: bool,
@@ -209,6 +212,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
         startup: MarketWorkerStartup,
         market_worker: MarketDataWorker,
+        symbol_input: Option<Entity<InputState>>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
         let (
@@ -304,6 +308,7 @@ impl TerminalApp {
             series_message: "Select a symbol before choosing a series".to_string(),
             rithmic_autoload_started: false,
             rithmic_reconnect: RithmicReconnectState::Idle,
+            symbol_input,
         }
     }
 
@@ -687,6 +692,14 @@ impl TerminalApp {
         dispatched
     }
 
+    fn search_rithmic_input(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = &self.symbol_input else {
+            return;
+        };
+        let query = input.read(cx).value().to_string();
+        self.search_rithmic_query(&query, cx);
+    }
+
     fn begin_rithmic_reconnect(&mut self) {
         if self.rithmic_reconnect != RithmicReconnectState::Idle {
             return;
@@ -1002,8 +1015,9 @@ impl Render for TerminalApp {
                     )
                 }),
                 selected_series: self.series_browser.selected().map(|request| request.series),
+                symbol_input: self.symbol_input.clone(),
                 controls: HeaderControls::from_state(
-                    !self.symbol_browser.results().is_empty(),
+                    self.symbol_input.is_some() || !self.symbol_browser.results().is_empty(),
                     self.symbol_browser.selected().is_some(),
                     self.feed_diagnostics.is_some(),
                 ),
@@ -1104,6 +1118,7 @@ fn terminal_header(
     let instruments = state.instruments;
     let selected_instrument = state.selected_instrument;
     let selected_series = state.selected_series;
+    let symbol_input = state.symbol_input;
     let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
     let dom_toggle = panel_toggle(
         "dom_toggle",
@@ -1133,6 +1148,15 @@ fn terminal_header(
         active_button,
         state.controls.enabled(HeaderControls::SERIES),
     );
+    let instrument_selector = instrument_selector(
+        app.clone(),
+        state.market_label,
+        instruments,
+        selected_instrument,
+        symbol_input,
+        active_button,
+        state.controls.enabled(HeaderControls::INSTRUMENT),
+    );
     TitleBar::new().child(
         div()
             .h_full()
@@ -1148,48 +1172,90 @@ fn terminal_header(
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        Button::new("instrument_selector")
-                            .label(state.market_label)
-                            .dropdown_caret(true)
-                            .custom(active_button)
-                            .disabled(!state.controls.enabled(HeaderControls::INSTRUMENT))
-                            .dropdown_menu({
-                                let app = app.clone();
-                                move |menu, _, _| {
-                                    instruments.iter().enumerate().fold(
-                                        menu.scrollable(true),
-                                        |menu, (index, instrument)| {
-                                            let checked = selected_instrument.as_ref().is_some_and(
-                                                |(symbol, exchange)| {
-                                                    symbol == &instrument.symbol
-                                                        && exchange == &instrument.exchange
-                                                },
-                                            );
-                                            let app = app.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(format!(
-                                                    "{} Â· {}",
-                                                    instrument.symbol, instrument.exchange
-                                                ))
-                                                .checked(checked)
-                                                .on_click(move |_, _, cx| {
-                                                    app.update(cx, |app, cx| {
-                                                        app.select_rithmic_symbol(index, cx);
-                                                    });
-                                                }),
-                                            )
-                                        },
-                                    )
-                                }
-                            }),
-                    )
+                    .child(instrument_selector)
                     .child(series_selector)
                     .child(dom_toggle)
                     .child(health_toggle)
                     .child(theme_toggle),
             ),
     )
+}
+
+fn instrument_selector(
+    app: Entity<TerminalApp>,
+    label: String,
+    instruments: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
+    selected: Option<(String, String)>,
+    input: Option<Entity<InputState>>,
+    variant: ButtonCustomVariant,
+    enabled: bool,
+) -> impl IntoElement {
+    Button::new("instrument_selector")
+        .label(label)
+        .dropdown_caret(true)
+        .custom(variant)
+        .disabled(!enabled)
+        .dropdown_menu(move |menu, _, _| {
+            instrument_menu(menu, &app, &instruments, selected.as_ref(), input.as_ref())
+        })
+}
+
+fn instrument_menu(
+    menu: PopupMenu,
+    app: &Entity<TerminalApp>,
+    instruments: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
+    selected: Option<&(String, String)>,
+    input: Option<&Entity<InputState>>,
+) -> PopupMenu {
+    let menu = match input {
+        Some(input) => menu
+            .item(instrument_search_item(input.clone(), app.clone()))
+            .separator(),
+        None => menu,
+    };
+    instruments
+        .iter()
+        .enumerate()
+        .fold(menu.scrollable(true), |menu, (index, instrument)| {
+            let checked = selected.is_some_and(|(symbol, exchange)| {
+                symbol == &instrument.symbol && exchange == &instrument.exchange
+            });
+            let app = app.clone();
+            menu.item(
+                PopupMenuItem::new(instrument_menu_label(instrument))
+                    .checked(checked)
+                    .on_click(move |_, _, cx| {
+                        app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
+                    }),
+            )
+        })
+}
+
+fn instrument_search_item(input: Entity<InputState>, app: Entity<TerminalApp>) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Input::new(&input).w(px(220.0)))
+            .child(
+                Button::new("rithmic_header_search")
+                    .label("Search")
+                    .primary()
+                    .on_click({
+                        let app = app.clone();
+                        move |_, _, cx| {
+                            app.update(cx, TerminalApp::search_rithmic_input);
+                        }
+                    }),
+            )
+    })
+}
+
+fn instrument_menu_label(
+    instrument: &axiusflow_rithmic_protocol_adapter::SymbolSearchResult,
+) -> String {
+    format!("{} / {}", instrument.symbol, instrument.exchange)
 }
 
 fn connection_badge(
@@ -1670,6 +1736,24 @@ fn run_desktop_endurance_command(
     .map_err(|error| error.to_string())
 }
 
+fn symbol_input_for_startup(
+    startup: &MarketWorkerStartup,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<InputState>> {
+    matches!(startup, MarketWorkerStartup::Shell(_))
+        .then(|| cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols")))
+}
+
+fn desktop_window_options(cx: &mut App) -> WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitleBar::title_bar_options()),
+        ..Default::default()
+    }
+}
+
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -1756,19 +1840,14 @@ fn main() {
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         sync_component_theme(&AxiusflowTheme::dark(), None, cx);
-        let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+        let options = desktop_window_options(cx);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitleBar::title_bar_options()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let terminal = cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker));
-                cx.new(|cx| Root::new(terminal, window, cx))
-            },
-        )
+        cx.open_window(options, move |window, cx| {
+            let symbol_input = symbol_input_for_startup(&bootstrap, window, cx);
+            let terminal =
+                cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker, symbol_input));
+            cx.new(|cx| Root::new(terminal, window, cx))
+        })
         .expect("the Axiusflow terminal window opens");
         cx.activate(true);
     });
