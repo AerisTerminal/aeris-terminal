@@ -526,15 +526,27 @@ remains open.
 
 Capture evidence for:
 
-- [ ] Slow consumers and publication overflow.
+- [x] Slow consumers and publication overflow.
 - [ ] Heartbeat and message-silence loss.
 - [ ] Trade, history, and depth gaps.
-- [ ] Disconnect, bounded reconnect, and terminal failures.
+- [x] Disconnect, bounded reconnect, and terminal failures.
 - [ ] Suspend/resume and offline startup.
 - [ ] Burst traffic and frame-aligned conflation.
-- [ ] Cache corruption and covering resnapshot.
+- [x] Cache corruption and covering resnapshot.
 - [ ] Current and high-water memory.
 - [ ] Eight-hour headless and desktop endurance.
+
+Deterministic evidence on 2026-08-07: the cross-platform ingest conformance now
+emits named Stage F results rather than an opaque aggregate bitmask. A Windows
+run passed slow-consumer publication overflow with atomic rollback, lifecycle
+event overflow with last-generation retention, bounded reconnect exhaustion and
+fresh-budget recovery, ordered-gap recovery, and corrupt-snapshot rejection.
+The desktop suites separately pass authenticated cache-corruption fallback,
+covering resnapshot after publication overflow, and terminal Rithmic failure
+redaction. The message-silence row remains open until the already-passing
+deterministic silent-peer timeout is repeated as authorized Rithmic heartbeat
+loss; the broader gap row remains open for combined trade/history/depth fault
+evidence.
 
 
 

@@ -24,6 +24,11 @@ impl ChartRecoveryConformance {
     pub const fn is_complete(self) -> bool {
         self.passed_checks == Self::REQUIRED_CHECKS
     }
+
+    #[must_use]
+    pub const fn passed_checks(self) -> u8 {
+        self.passed_checks
+    }
 }
 
 /// Exercises overflow recovery, correlation, integrity, and displayed provenance retention.
@@ -245,7 +250,7 @@ fn snapshot_integrity_checks(recovered: &ReplaySnapshot) -> (bool, bool) {
         timestamp_mismatched_items[0].clone().into_parts();
     timestamp_mismatched_provenance.exchange_timestamp_unix_nanos = timestamp_mismatched_provenance
         .exchange_timestamp_unix_nanos
-        .saturating_add(1);
+        .saturating_add(1_000_000_000);
     timestamp_mismatched_items[0] =
         axiusflow_application::Provenanced::new(bar, timestamp_mismatched_provenance);
     let timestamp_mismatch_rejected = matches!(

@@ -33,10 +33,18 @@ pub struct WebSocketLoopbackConformance {
 
 impl WebSocketLoopbackConformance {
     const REQUIRED_CHECKS: u16 = 0x03ff;
+    const COALESCED_OVERFLOW_ROLLED_BACK: u16 = 1 << 9;
 
     #[must_use]
     pub const fn is_complete(self) -> bool {
         self.passed_checks == Self::REQUIRED_CHECKS
+    }
+
+    /// Reports whether a slow consumer overflowed the fixed publication queue
+    /// atomically, retained the prior generation, and required recovery.
+    #[must_use]
+    pub const fn slow_consumer_overflow_recovered(self) -> bool {
+        self.passed_checks & Self::COALESCED_OVERFLOW_ROLLED_BACK != 0
     }
 }
 
@@ -391,4 +399,22 @@ pub(crate) fn projected_websocket_updates_match(
             &publications[1].update,
             ReplayStreamUpdate::Delta(actual) if actual == delta
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebSocketLoopbackConformance;
+
+    #[test]
+    fn slow_consumer_evidence_requires_its_exact_check() {
+        assert!(
+            WebSocketLoopbackConformance {
+                passed_checks: 1 << 9
+            }
+            .slow_consumer_overflow_recovered()
+        );
+        assert!(
+            !WebSocketLoopbackConformance { passed_checks: 0 }.slow_consumer_overflow_recovered()
+        );
+    }
 }

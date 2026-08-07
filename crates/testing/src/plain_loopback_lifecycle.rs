@@ -37,6 +37,9 @@ pub struct PlainLoopbackLifecycleConformance {
 
 impl PlainLoopbackLifecycleConformance {
     const REQUIRED_CHECKS: u16 = 0x1fff;
+    const EVENT_OVERFLOW_RECOVERED: u16 = 1 << 7;
+    const RECONNECT_EXHAUSTION_AND_RECOVERY: u16 = 0x0f << 8;
+    const SILENT_PEER_TIMEOUT: u16 = 1 << 12;
 
     #[must_use]
     pub const fn passed_checks(self) -> u16 {
@@ -46,6 +49,28 @@ impl PlainLoopbackLifecycleConformance {
     #[must_use]
     pub const fn is_complete(self) -> bool {
         self.passed_checks == Self::REQUIRED_CHECKS
+    }
+
+    /// Reports whether lifecycle event pressure collapsed to one recovery
+    /// event while preserving the last accepted generation.
+    #[must_use]
+    pub const fn event_overflow_recovered(self) -> bool {
+        self.passed_checks & Self::EVENT_OVERFLOW_RECOVERED != 0
+    }
+
+    /// Reports whether bounded reconnect exhaustion, reset after a covering
+    /// snapshot, a fresh retry budget, and terminal event pressure all passed.
+    #[must_use]
+    pub const fn bounded_reconnect_recovered(self) -> bool {
+        self.passed_checks & Self::RECONNECT_EXHAUSTION_AND_RECOVERY
+            == Self::RECONNECT_EXHAUSTION_AND_RECOVERY
+    }
+
+    /// Reports whether a connected peer that emitted no message crossed the
+    /// exact silence deadline and entered recovery.
+    #[must_use]
+    pub const fn silent_peer_timeout_recovered(self) -> bool {
+        self.passed_checks & Self::SILENT_PEER_TIMEOUT != 0
     }
 }
 
@@ -671,4 +696,26 @@ fn run_lifecycle_silent_peer_timeout(
                 reason: WebSocketRecoveryReason::TransportFailure,
                 attempts: 1,
             }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlainLoopbackLifecycleConformance;
+
+    #[test]
+    fn named_resilience_evidence_uses_exact_checks() {
+        let complete = PlainLoopbackLifecycleConformance {
+            passed_checks: 0x1fff,
+        };
+        assert!(complete.event_overflow_recovered());
+        assert!(complete.bounded_reconnect_recovered());
+        assert!(complete.silent_peer_timeout_recovered());
+
+        let incomplete = PlainLoopbackLifecycleConformance {
+            passed_checks: (1 << 7) | (1 << 12),
+        };
+        assert!(incomplete.event_overflow_recovered());
+        assert!(!incomplete.bounded_reconnect_recovered());
+        assert!(incomplete.silent_peer_timeout_recovered());
+    }
 }

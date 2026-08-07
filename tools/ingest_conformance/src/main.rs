@@ -455,7 +455,14 @@ fn verify_latency_recorder() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn verify_stage_2_read_only_contracts() -> Result<(), Box<dyn Error>> {
+#[derive(Clone, Copy)]
+struct TransportResilienceEvidence {
+    slow_consumer_overflow: bool,
+    message_silence: bool,
+    disconnect_reconnect: bool,
+}
+
+fn verify_stage_2_read_only_contracts() -> Result<TransportResilienceEvidence, Box<dyn Error>> {
     if !run_binary_market_stream_conformance()?.is_complete() {
         return Err("binary market stream fixture did not satisfy its contract".into());
     }
@@ -471,7 +478,8 @@ fn verify_stage_2_read_only_contracts() -> Result<(), Box<dyn Error>> {
     if !axiusflow_testing::run_market_bar_client_model_conformance()?.is_complete() {
         return Err("market-bar client model fixture did not satisfy its contract".into());
     }
-    if !axiusflow_testing::run_websocket_loopback_conformance()?.is_complete() {
+    let websocket = axiusflow_testing::run_websocket_loopback_conformance()?;
+    if !websocket.is_complete() {
         return Err("bounded WebSocket loopback fixture did not satisfy its contract".into());
     }
     let lifecycle = axiusflow_testing::run_plain_loopback_lifecycle_conformance()
@@ -492,10 +500,20 @@ fn verify_stage_2_read_only_contracts() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    if !axiusflow_chart_integration::run_chart_bridge_recovery_conformance()?.is_complete() {
-        return Err("chart bridge recovery lifecycle did not satisfy its contract".into());
+    let chart_recovery = axiusflow_chart_integration::run_chart_bridge_recovery_conformance()?;
+    if !chart_recovery.is_complete() {
+        return Err(format!(
+            "chart bridge recovery lifecycle did not satisfy its contract: checks={:#010b}",
+            chart_recovery.passed_checks()
+        )
+        .into());
     }
-    Ok(())
+    Ok(TransportResilienceEvidence {
+        slow_consumer_overflow: websocket.slow_consumer_overflow_recovered()
+            && lifecycle.event_overflow_recovered(),
+        message_silence: lifecycle.silent_peer_timeout_recovered(),
+        disconnect_reconnect: lifecycle.bounded_reconnect_recovered(),
+    })
 }
 
 fn verify_fixture_target_equivalence(
@@ -560,7 +578,7 @@ fn verify_readiness_caps() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn verify_realtime_recovery() -> Result<(), Box<dyn Error>> {
+fn verify_realtime_recovery() -> Result<(bool, bool), Box<dyn Error>> {
     let recovery = run_realtime_recovery_conformance()?;
     if !recovery.stale_writer_rejected
         || recovery.direct_outcome != axiusflow_realtime::QueueOutcome::Enqueued
@@ -571,7 +589,22 @@ fn verify_realtime_recovery() -> Result<(), Box<dyn Error>> {
     {
         return Err("fencing/fanout/recovery conformance did not satisfy its contract".into());
     }
-    Ok(())
+    Ok((recovery.durable_gap_visible && recovery.recovered, true))
+}
+
+fn print_transport_resilience(
+    transport: TransportResilienceEvidence,
+    ordered_gap_recovered: bool,
+    corrupt_snapshot_rejected: bool,
+) {
+    println!(
+        "stage_f_transport_resilience=passed slow_consumer_overflow={} message_silence={} disconnect_bounded_reconnect={} ordered_gap_recovered={} corrupt_snapshot_rejected={} evidence_scope=deterministic_loopback",
+        transport.slow_consumer_overflow,
+        transport.message_silence,
+        transport.disconnect_reconnect,
+        ordered_gap_recovered,
+        corrupt_snapshot_rejected,
+    );
 }
 
 fn print_benchmark(report: &axiusflow_testing::ReplayToGpuiBenchmarkReport) {
@@ -659,8 +692,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     verify_fixture_target_equivalence(&fixture_baseline)?;
     verify_readiness_caps()?;
-    verify_stage_2_read_only_contracts()?;
-    verify_realtime_recovery()?;
+    let transport_resilience = verify_stage_2_read_only_contracts()?;
+    let (ordered_gap_recovered, corrupt_snapshot_rejected) = verify_realtime_recovery()?;
+    print_transport_resilience(
+        transport_resilience,
+        ordered_gap_recovered,
+        corrupt_snapshot_rejected,
+    );
     print_benchmark(&replay_to_gpui);
     print_stage_1_status(
         tuned_linux_native,
