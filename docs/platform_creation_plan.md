@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
 | Blocked | None. The remaining Stage C work is authorized resilience evidence, not credential or agreement access. |
-| Next | Integrate the now-proven Rithmic tick-bar replay/live path, capture named 60/120/144 Hz evidence, and extend authorized Test evidence through heartbeat loss |
+| Next | Capture named 60/120/144 Hz evidence and extend authorized Test evidence through heartbeat loss |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -108,7 +108,7 @@ Full scope policy:
 | Rithmic access             | `verified`    | The kit is installed locally under `provider_kit/`; native-vault credentials, Test login, search/reference, trades, quotes, depth, and history were exercised successfully on 2026-08-07. |
 | Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized resilience/recovery evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
-| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded history seeds Origin, canonical trades replace the forming candle and append completed candles off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. After session invalidation the exact contract and timeframe are re-discovered and reinstalled before history, candles, and depth resume. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Tick-series semantics and pacing evidence remain. |
+| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. After session invalidation the exact contract and timeframe are re-discovered and reinstalled before history, candles, and depth resume. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
 | Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
 
@@ -475,8 +475,8 @@ deterministic headless gates.
 - [x] Launch a reliable local shell before login or history completion.
 - [x] Show provider profile, Test environment, and connection state.
 - [x] Search and select discovered symbols.
-- [x] Select 1m, 5m, 15m, 1h, and daily series.
-- [ ] Define and implement truthful tick-series aggregation and continuity.
+- [x] Select 100-trade, 1m, 5m, 15m, 1h, and daily series.
+- [x] Define and implement truthful tick-series aggregation and continuity.
 - [x] Keep the Origin chart mounted before provider data arrives; never substitute fixture candles.
 - [x] Run a native-vault-only headless Test smoke for login, discovery, selection, history, and streaming.
 - [x] Hydrate visible-range-first history into the Origin chart.

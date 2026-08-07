@@ -1237,6 +1237,7 @@ mod tests {
             ),
             version: 1,
             interval_seconds: 60,
+            trades_per_bar: None,
         }
     }
 }

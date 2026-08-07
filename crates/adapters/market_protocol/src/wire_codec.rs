@@ -201,6 +201,7 @@ pub fn try_decode_market_bar(
         definition_id: wire.bar_definition_id,
         version: wire.bar_definition_version,
         interval_seconds: wire.interval_seconds,
+        trades_per_bar: None,
     };
     definition.validate()?;
 
@@ -384,6 +385,7 @@ fn verify_market_snapshot_checksum(
             bar_definition_id: &bar_definition.definition_id,
             bar_definition_version: bar_definition.version,
             bar_interval_seconds: bar_definition.interval_seconds,
+            bar_trades_per_bar: bar_definition.trades_per_bar,
         },
         stream.items().iter().map(|item| {
             let bar = item.value();

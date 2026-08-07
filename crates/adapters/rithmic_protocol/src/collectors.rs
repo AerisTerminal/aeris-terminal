@@ -276,7 +276,6 @@ pub struct HistoryCollector {
     tick_bars: BTreeMap<TickKey, DecodedTickBar>,
     tick_keys: BTreeSet<TickKey>,
     last_time_marker: Option<i32>,
-    last_tick_key: Option<TickKey>,
     duplicate_count: usize,
     state: CollectorState,
 }
@@ -295,7 +294,6 @@ impl HistoryCollector {
             tick_bars: BTreeMap::new(),
             tick_keys: BTreeSet::new(),
             last_time_marker: None,
-            last_tick_key: None,
             duplicate_count: 0,
             state: CollectorState::Collecting,
         })
@@ -442,20 +440,12 @@ impl HistoryCollector {
         if keys.iter().any(|key| self.tick_keys.contains(key)) {
             return Err(CollectorError::TickKeyOverlap);
         }
-        if self
-            .last_tick_key
-            .as_ref()
-            .is_some_and(|previous| first <= *previous)
-        {
-            return Err(CollectorError::NonMonotonic);
-        }
         self.ensure_capacity(self.tick_bars.len())?;
         if self.tick_keys.len().saturating_add(keys.len()) > MAX_REPLAY_TICK_KEYS {
             return Err(CollectorError::TickKeyLimitExceeded {
                 maximum: MAX_REPLAY_TICK_KEYS,
             });
         }
-        self.last_tick_key = Some(last);
         self.tick_keys.extend(keys.drain(..));
         self.tick_bars.insert(first, bar);
         Ok(CollectionProgress::Pending)
@@ -670,6 +660,30 @@ mod tests {
         assert!(matches!(
             outside.accept(replay_tick(tick_bar(&[(98, 1, "1"), (99, 2, "2")]))),
             Err(CollectorError::OutsideRequestedRange)
+        ));
+    }
+
+    #[test]
+    fn tick_history_sorts_nonoverlapping_provider_frames_by_exact_key() {
+        let mut collector = HistoryCollector::try_new(tick_request(2)).expect("valid collector");
+        collector
+            .accept(replay_tick(tick_bar(&[(121, 1, "3"), (121, 2, "4")])))
+            .expect("later frame is retained");
+        collector
+            .accept(replay_tick(tick_bar(&[(120, 1, "1"), (120, 2, "2")])))
+            .expect("earlier frame is retained");
+        let complete = collector
+            .accept(DecodedHistoryMessage::ReplayComplete {
+                kind: ReplayKind::Tick,
+                accepted: true,
+            })
+            .expect("replay completes");
+        assert!(matches!(
+            complete,
+            CollectionProgress::Complete(CollectedHistory {
+                bars: HistoryBars::Tick(bars),
+                ..
+            }) if bars[0].keys[0].seconds == 120 && bars[1].keys[0].seconds == 121
         ));
     }
 

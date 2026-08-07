@@ -159,6 +159,7 @@ pub(crate) fn replay_snapshot_with_generation(
             bar_definition_id: &snapshot.bar_definition().definition_id,
             bar_definition_version: snapshot.bar_definition().version,
             bar_interval_seconds: snapshot.bar_definition().interval_seconds,
+            bar_trades_per_bar: snapshot.bar_definition().trades_per_bar,
         },
         snapshot.bars().iter().map(|item| {
             let bar = item.value();

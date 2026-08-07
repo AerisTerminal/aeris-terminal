@@ -66,9 +66,11 @@ pub(crate) fn apply_merged_chart_data(
     let rows = update.accepted_deltas().iter().map(|item| {
         let bar = *item.value();
         (
-            bar.exchange_timestamp_seconds
+            item.provenance()
+                .exchange_timestamp_unix_nanos
                 .to_f64()
-                .expect("validated replay timestamps fit f64"),
+                .expect("validated replay timestamps fit f64")
+                / 1_000_000_000.0,
             [
                 fixed_price(bar.open, *price_divisor),
                 fixed_price(bar.high, *price_divisor),
@@ -101,9 +103,11 @@ pub(crate) fn install_replay_with_deltas(
     for item in replay.bars().iter().chain(deltas) {
         let bar = *item.value();
         times.push(
-            bar.exchange_timestamp_seconds
+            item.provenance()
+                .exchange_timestamp_unix_nanos
                 .to_f64()
-                .expect("validated replay timestamps fit f64"),
+                .expect("validated replay timestamps fit f64")
+                / 1_000_000_000.0,
         );
         open.push(fixed_price(bar.open, price_divisor));
         high.push(fixed_price(bar.high, price_divisor));

@@ -257,6 +257,7 @@ pub(super) fn bar_definition() -> BarDefinition {
         definition_id: "coinbase:spot:one_minute:unadjusted:v1".to_string(),
         version: 1,
         interval_seconds: 60,
+        trades_per_bar: None,
     }
 }
 

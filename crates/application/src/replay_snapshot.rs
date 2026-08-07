@@ -91,6 +91,7 @@ impl ReplaySnapshot {
         validate_provenanced_market_bar(first_item)?;
         let first_bar = *first_item.value();
         let mut previous = first_bar;
+        let mut previous_timestamp = first_item.provenance().exchange_timestamp_unix_nanos;
         for item in &bars {
             validate_provenanced_market_bar(item)?;
             let item_provenance = item.provenance();
@@ -113,12 +114,14 @@ impl ReplaySnapshot {
         for item in bars.iter().skip(1) {
             let bar = *item.value();
             StreamDelta::try_new(previous.source_sequence, bar.source_sequence, ())?;
-            if bar.exchange_timestamp_seconds <= previous.exchange_timestamp_seconds {
+            let timestamp = item.provenance().exchange_timestamp_unix_nanos;
+            if timestamp <= previous_timestamp {
                 return Err(ReplayValidationError::NonIncreasingTimestamp {
                     source_sequence: bar.source_sequence,
                 });
             }
             previous = bar;
+            previous_timestamp = timestamp;
         }
         if evidence.first_sequence != first_bar.source_sequence {
             return Err(ReplayValidationError::SnapshotEvidenceMismatch(
@@ -254,7 +257,7 @@ pub enum ReplayStreamUpdate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReplaySession {
     sequence_tracker: SequenceTracker,
-    last_exchange_timestamp_seconds: i64,
+    last_exchange_timestamp_unix_nanos: i64,
 }
 
 impl ReplaySession {
@@ -266,15 +269,15 @@ impl ReplaySession {
     pub fn try_new(snapshot: &ReplaySnapshot) -> Result<Self, ReplayValidationError> {
         let mut sequence_tracker = SequenceTracker::default();
         sequence_tracker.install_snapshot(snapshot.stream())?;
-        let last_exchange_timestamp_seconds = snapshot
+        let last_exchange_timestamp_unix_nanos = snapshot
             .bars()
             .last()
             .ok_or(StreamProtocolError::EmptySnapshot)?
-            .value()
-            .exchange_timestamp_seconds;
+            .provenance()
+            .exchange_timestamp_unix_nanos;
         Ok(Self {
             sequence_tracker,
-            last_exchange_timestamp_seconds,
+            last_exchange_timestamp_unix_nanos,
         })
     }
 
@@ -309,16 +312,16 @@ impl ReplaySession {
         let decision = candidate.accept_delta(delta)?;
         match decision {
             SequenceDecision::Accepted => {
-                if delta.item().value().exchange_timestamp_seconds
-                    <= self.last_exchange_timestamp_seconds
+                if delta.item().provenance().exchange_timestamp_unix_nanos
+                    <= self.last_exchange_timestamp_unix_nanos
                 {
                     return Err(ReplayValidationError::NonIncreasingTimestamp {
                         source_sequence: delta.sequence(),
                     });
                 }
                 self.sequence_tracker = candidate;
-                self.last_exchange_timestamp_seconds =
-                    delta.item().value().exchange_timestamp_seconds;
+                self.last_exchange_timestamp_unix_nanos =
+                    delta.item().provenance().exchange_timestamp_unix_nanos;
             }
             SequenceDecision::Gap { .. } | SequenceDecision::SnapshotRequired => {
                 self.sequence_tracker = candidate;
@@ -338,5 +341,38 @@ impl ReplaySession {
     #[must_use]
     pub const fn requires_snapshot(self) -> bool {
         self.sequence_tracker.requires_snapshot()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarReplayPort, Provenanced};
+
+    #[test]
+    fn snapshot_orders_bars_by_exact_provenance_time_within_one_second() {
+        let baseline = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+            .expect("fixture snapshot");
+        let first = baseline.bars()[0].clone();
+        let mut second_bar = *baseline.bars()[1].value();
+        second_bar.exchange_timestamp_seconds = first.value().exchange_timestamp_seconds;
+        let mut second_provenance = baseline.bars()[1].provenance().clone();
+        second_provenance.exchange_timestamp_unix_nanos =
+            first.provenance().exchange_timestamp_unix_nanos + 500_000_000;
+        let second = Provenanced::new(second_bar, second_provenance);
+
+        let snapshot = ReplaySnapshot::try_from_provenanced_values(
+            baseline.instrument().clone(),
+            baseline.provenance(),
+            baseline.bar_definition().clone(),
+            2,
+            vec![first, second],
+        )
+        .expect("subsecond ordering is retained");
+        assert_eq!(
+            snapshot.bars()[0].value().exchange_timestamp_seconds,
+            snapshot.bars()[1].value().exchange_timestamp_seconds
+        );
     }
 }

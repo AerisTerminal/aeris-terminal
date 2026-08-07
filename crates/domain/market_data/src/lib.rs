@@ -20,7 +20,10 @@ pub use order_book::{
 pub struct BarDefinition {
     pub definition_id: String,
     pub version: u32,
+    /// Fixed time cadence in seconds, or zero for a trade-count series.
     pub interval_seconds: u32,
+    /// Trades in each bar for a trade-count series, otherwise absent.
+    pub trades_per_bar: Option<u32>,
 }
 
 impl BarDefinition {
@@ -36,8 +39,13 @@ impl BarDefinition {
         if self.version == 0 {
             return Err(MarketDataValidationError::ZeroBarDefinitionVersion);
         }
-        if self.interval_seconds == 0 {
+        if self.interval_seconds == 0 && self.trades_per_bar.is_none() {
             return Err(MarketDataValidationError::ZeroBarInterval);
+        }
+        if self.interval_seconds > 0 && self.trades_per_bar.is_some()
+            || self.trades_per_bar == Some(0)
+        {
+            return Err(MarketDataValidationError::InvalidBarCadence);
         }
         Ok(())
     }
@@ -89,6 +97,7 @@ pub enum MarketDataValidationError {
     EmptyBarDefinitionId,
     ZeroBarDefinitionVersion,
     ZeroBarInterval,
+    InvalidBarCadence,
     ZeroSourceSequence,
     InvalidOhlc { source_sequence: u64 },
     NegativeVolume { source_sequence: u64 },
@@ -119,6 +128,9 @@ impl fmt::Display for MarketDataValidationError {
                 formatter.write_str("bar definition version must be non-zero")
             }
             Self::ZeroBarInterval => formatter.write_str("bar interval must be non-zero"),
+            Self::InvalidBarCadence => {
+                formatter.write_str("bar cadence must be either time or non-zero trade count")
+            }
             Self::ZeroSourceSequence => formatter.write_str("source sequence must be non-zero"),
             Self::InvalidOhlc { source_sequence } => {
                 write!(
@@ -172,3 +184,32 @@ impl fmt::Display for MarketDataValidationError {
 }
 
 impl Error for MarketDataValidationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_definition_requires_exactly_one_nonzero_cadence() {
+        let definition = |interval_seconds, trades_per_bar| BarDefinition {
+            definition_id: "fixture".to_string(),
+            version: 1,
+            interval_seconds,
+            trades_per_bar,
+        };
+        assert!(definition(60, None).validate().is_ok());
+        assert!(definition(0, Some(100)).validate().is_ok());
+        assert_eq!(
+            definition(0, None).validate(),
+            Err(MarketDataValidationError::ZeroBarInterval)
+        );
+        assert_eq!(
+            definition(60, Some(100)).validate(),
+            Err(MarketDataValidationError::InvalidBarCadence)
+        );
+        assert_eq!(
+            definition(0, Some(0)).validate(),
+            Err(MarketDataValidationError::InvalidBarCadence)
+        );
+    }
+}

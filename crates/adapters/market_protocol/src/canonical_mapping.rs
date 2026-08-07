@@ -243,6 +243,7 @@ pub fn try_project_canonical_market_bar_snapshot(
             bar_definition_id: &bar_definition.definition_id,
             bar_definition_version: bar_definition.version,
             bar_interval_seconds: bar_definition.interval_seconds,
+            bar_trades_per_bar: bar_definition.trades_per_bar,
         },
         bars.iter().map(|item| {
             let bar = item.value();

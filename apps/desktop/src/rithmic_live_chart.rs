@@ -62,6 +62,7 @@ pub(crate) enum RithmicLiveChartError {
     VolumeOverflow,
     SnapshotGenerationOverflow,
     SnapshotInvalid,
+    UnsupportedCadence,
 }
 
 impl fmt::Display for RithmicLiveChartError {
@@ -81,6 +82,7 @@ impl fmt::Display for RithmicLiveChartError {
             Self::VolumeOverflow => "Rithmic live chart bar volume overflowed",
             Self::SnapshotGenerationOverflow => "Rithmic live chart snapshot generation overflowed",
             Self::SnapshotInvalid => "Rithmic live chart snapshot validation failed",
+            Self::UnsupportedCadence => "Rithmic trade aggregation requires a time cadence",
         })
     }
 }
@@ -95,7 +97,7 @@ pub(crate) struct RithmicLiveChart {
     provider_id: String,
     instrument_id: String,
     entitlement_id: String,
-    interval_seconds: i64,
+    cadence: LiveCadence,
     forming: MarketBar,
     bars: Vec<ProvenancedMarketBar>,
     retained_bar_count: usize,
@@ -105,6 +107,13 @@ pub(crate) struct RithmicLiveChart {
     schema_version: u32,
     live_session_generation: Option<u64>,
     last_trade_sequence: Option<u64>,
+    history_boundary_unix_nanos: i64,
+}
+
+#[derive(Clone, Copy)]
+enum LiveCadence {
+    Time { interval_seconds: i64 },
+    Tick { trades_per_bar: u32, forming: u32 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,6 +128,19 @@ impl RithmicLiveChart {
         generation: RithmicChartGeneration,
         snapshot: &ReplaySnapshot,
     ) -> Result<Self, RithmicLiveChartError> {
+        let cadence = match (
+            snapshot.bar_definition().interval_seconds,
+            snapshot.bar_definition().trades_per_bar,
+        ) {
+            (seconds, None) if seconds > 0 => LiveCadence::Time {
+                interval_seconds: i64::from(seconds),
+            },
+            (0, Some(trades_per_bar)) if trades_per_bar > 0 => LiveCadence::Tick {
+                trades_per_bar,
+                forming: trades_per_bar,
+            },
+            _ => return Err(RithmicLiveChartError::UnsupportedCadence),
+        };
         let seed = snapshot
             .bars()
             .last()
@@ -139,7 +161,7 @@ impl RithmicLiveChart {
             provider_id: seed.provenance().source_id.clone(),
             instrument_id: snapshot.instrument().instrument_id.as_str().to_string(),
             entitlement_id: seed.provenance().entitlement_revision.clone(),
-            interval_seconds: i64::from(snapshot.bar_definition().interval_seconds),
+            cadence,
             forming: *seed.value(),
             bars: snapshot.bars().to_vec(),
             retained_bar_count,
@@ -149,6 +171,7 @@ impl RithmicLiveChart {
             schema_version: first.provenance().schema_version,
             live_session_generation: None,
             last_trade_sequence: None,
+            history_boundary_unix_nanos: seed.provenance().exchange_timestamp_unix_nanos,
         })
     }
 
@@ -185,40 +208,36 @@ impl RithmicLiveChart {
             .timestamps
             .exchange_unix_nanos
             .ok_or(RithmicLiveChartError::MissingExchangeTimestamp)?;
-        let exchange_seconds = exchange_nanos.div_euclid(NANOS_PER_SECOND);
-        let bucket = exchange_seconds
-            .div_euclid(self.interval_seconds)
-            .checked_mul(self.interval_seconds)
-            .ok_or(RithmicLiveChartError::TimestampOverflow)?;
-        if bucket < self.forming.exchange_timestamp_seconds {
-            return Err(RithmicLiveChartError::OutOfOrderTrade);
-        }
-
-        let update = if bucket == self.forming.exchange_timestamp_seconds {
-            let mut forming = self.forming;
-            forming.high = forming.high.max(trade.price);
-            forming.low = forming.low.min(trade.price);
-            forming.close = trade.price;
-            forming.volume = forming
-                .volume
-                .checked_add(trade.quantity)
-                .ok_or(RithmicLiveChartError::VolumeOverflow)?;
-            RithmicLiveChartUpdate::ReplaceForming { forming }
-        } else {
-            let completed = self.forming;
-            let forming = MarketBar {
-                source_sequence: completed
-                    .source_sequence
-                    .checked_add(1)
-                    .ok_or(RithmicLiveChartError::SequenceOverflow)?,
-                exchange_timestamp_seconds: bucket,
-                open: trade.price,
-                high: trade.price,
-                low: trade.price,
-                close: trade.price,
-                volume: trade.quantity,
-            };
-            RithmicLiveChartUpdate::CompleteAndStart { completed, forming }
+        let (update, bar_exchange_nanos, next_cadence) = match self.cadence {
+            LiveCadence::Time { interval_seconds } => {
+                let bucket = exchange_nanos
+                    .div_euclid(NANOS_PER_SECOND)
+                    .div_euclid(interval_seconds)
+                    .checked_mul(interval_seconds)
+                    .ok_or(RithmicLiveChartError::TimestampOverflow)?;
+                (
+                    self.apply_time_trade(trade, bucket)?,
+                    bucket
+                        .checked_mul(NANOS_PER_SECOND)
+                        .ok_or(RithmicLiveChartError::TimestampOverflow)?,
+                    self.cadence,
+                )
+            }
+            LiveCadence::Tick {
+                trades_per_bar,
+                forming,
+            } => {
+                let (update, timestamp, next_forming) =
+                    self.apply_tick_trade(trade, exchange_nanos, trades_per_bar, forming)?;
+                (
+                    update,
+                    timestamp,
+                    LiveCadence::Tick {
+                        trades_per_bar,
+                        forming: next_forming,
+                    },
+                )
+            }
         };
         let snapshot_generation = self
             .snapshot_generation
@@ -226,7 +245,10 @@ impl RithmicLiveChart {
             .ok_or(RithmicLiveChartError::SnapshotGenerationOverflow)?;
         let mut bars = self.bars.clone();
         let forming = update.forming();
-        let provenanced = Provenanced::new(forming, self.live_provenance(trade, forming));
+        let provenanced = Provenanced::new(
+            forming,
+            self.live_provenance(trade, forming, bar_exchange_nanos),
+        );
         if update.completed().is_some() {
             bars.push(provenanced);
             if bars.len() > self.retained_bar_count {
@@ -248,6 +270,7 @@ impl RithmicLiveChart {
         self.forming = forming;
         self.bars = bars;
         self.snapshot_generation = snapshot_generation;
+        self.cadence = next_cadence;
         self.live_session_generation = Some(trade.metadata.session_generation);
         self.last_trade_sequence = Some(trade.metadata.source_sequence);
         Ok(RithmicLiveChartPublication {
@@ -255,6 +278,62 @@ impl RithmicLiveChart {
             update,
             snapshot,
         })
+    }
+
+    fn apply_time_trade(
+        &self,
+        trade: &MarketTrade,
+        bucket: i64,
+    ) -> Result<RithmicLiveChartUpdate, RithmicLiveChartError> {
+        if bucket < self.forming.exchange_timestamp_seconds {
+            return Err(RithmicLiveChartError::OutOfOrderTrade);
+        }
+        if bucket == self.forming.exchange_timestamp_seconds {
+            return Ok(RithmicLiveChartUpdate::ReplaceForming {
+                forming: updated_forming(self.forming, trade)?,
+            });
+        }
+        Ok(RithmicLiveChartUpdate::CompleteAndStart {
+            completed: self.forming,
+            forming: started_bar(self.forming, trade, bucket)?,
+        })
+    }
+
+    fn apply_tick_trade(
+        &self,
+        trade: &MarketTrade,
+        exchange_nanos: i64,
+        trades_per_bar: u32,
+        forming_trades: u32,
+    ) -> Result<(RithmicLiveChartUpdate, i64, u32), RithmicLiveChartError> {
+        if forming_trades >= trades_per_bar {
+            let forming = started_bar(
+                self.forming,
+                trade,
+                exchange_nanos.div_euclid(NANOS_PER_SECOND),
+            )?;
+            return Ok((
+                RithmicLiveChartUpdate::CompleteAndStart {
+                    completed: self.forming,
+                    forming,
+                },
+                exchange_nanos,
+                1,
+            ));
+        }
+        let timestamp = self
+            .bars
+            .last()
+            .ok_or(RithmicLiveChartError::EmptyHistory)?
+            .provenance()
+            .exchange_timestamp_unix_nanos;
+        Ok((
+            RithmicLiveChartUpdate::ReplaceForming {
+                forming: updated_forming(self.forming, trade)?,
+            },
+            timestamp,
+            forming_trades.saturating_add(1),
+        ))
     }
 
     fn validate_ordering(&self, trade: &MarketTrade) -> Result<(), RithmicLiveChartError> {
@@ -269,13 +348,24 @@ impl RithmicLiveChart {
         {
             return Err(RithmicLiveChartError::OutOfOrderTrade);
         }
+        if self.last_trade_sequence.is_none()
+            && trade
+                .metadata
+                .timestamps
+                .exchange_unix_nanos
+                .is_some_and(|timestamp| timestamp <= self.history_boundary_unix_nanos)
+        {
+            return Err(RithmicLiveChartError::OutOfOrderTrade);
+        }
         Ok(())
     }
 
-    fn live_provenance(&self, trade: &MarketTrade, forming: MarketBar) -> MarketEventProvenance {
-        let exchange = forming
-            .exchange_timestamp_seconds
-            .saturating_mul(NANOS_PER_SECOND);
+    fn live_provenance(
+        &self,
+        trade: &MarketTrade,
+        forming: MarketBar,
+        exchange: i64,
+    ) -> MarketEventProvenance {
         let provider = trade
             .metadata
             .timestamps
@@ -312,6 +402,39 @@ impl RithmicLiveChart {
             semantic_class: 2,
         }
     }
+}
+
+fn updated_forming(
+    mut forming: MarketBar,
+    trade: &MarketTrade,
+) -> Result<MarketBar, RithmicLiveChartError> {
+    forming.high = forming.high.max(trade.price);
+    forming.low = forming.low.min(trade.price);
+    forming.close = trade.price;
+    forming.volume = forming
+        .volume
+        .checked_add(trade.quantity)
+        .ok_or(RithmicLiveChartError::VolumeOverflow)?;
+    Ok(forming)
+}
+
+fn started_bar(
+    completed: MarketBar,
+    trade: &MarketTrade,
+    exchange_timestamp_seconds: i64,
+) -> Result<MarketBar, RithmicLiveChartError> {
+    Ok(MarketBar {
+        source_sequence: completed
+            .source_sequence
+            .checked_add(1)
+            .ok_or(RithmicLiveChartError::SequenceOverflow)?,
+        exchange_timestamp_seconds,
+        open: trade.price,
+        high: trade.price,
+        low: trade.price,
+        close: trade.price,
+        volume: trade.quantity,
+    })
 }
 
 #[cfg(test)]
@@ -404,6 +527,7 @@ mod tests {
                 definition_id: "rithmic:1m:unadjusted:v1".to_string(),
                 version: 1,
                 interval_seconds: 60,
+                trades_per_bar: None,
             },
             1,
             provenanced,
@@ -431,6 +555,71 @@ mod tests {
             quantity,
             aggressor: AggressorSide::Buy,
         }
+    }
+
+    fn tick_snapshot(trades_per_bar: u32) -> ReplaySnapshot {
+        let baseline = snapshot();
+        ReplaySnapshot::try_from_provenanced_values(
+            baseline.instrument().clone(),
+            baseline.provenance(),
+            BarDefinition {
+                definition_id: format!("rithmic:{trades_per_bar}t:unadjusted:v1"),
+                version: 1,
+                interval_seconds: 0,
+                trades_per_bar: Some(trades_per_bar),
+            },
+            2,
+            baseline.bars().to_vec(),
+        )
+        .expect("tick snapshot validates")
+    }
+
+    #[test]
+    fn tick_cadence_starts_after_history_then_completes_exact_trade_counts() {
+        let fence = generation(1, 1);
+        let mut chart =
+            RithmicLiveChart::from_history(fence, &tick_snapshot(3)).expect("tick chart seeds");
+        let mut trades = [
+            trade(100, 9, START + 20, 20_040, 1),
+            trade(101, 9, START + 20, 20_050, 2),
+            trade(102, 9, START + 20, 20_030, 3),
+            trade(103, 9, START + 20, 20_060, 4),
+        ];
+        for (index, trade) in trades.iter_mut().enumerate() {
+            trade.metadata.timestamps.exchange_unix_nanos = Some(
+                (START + 20) * NANOS_PER_SECOND
+                    + i64::try_from(index + 1).expect("index fits") * 1_000,
+            );
+        }
+
+        assert!(matches!(
+            chart.apply_trade(fence, &trades[0]).expect("first tick"),
+            RithmicLiveChartPublication {
+                update: RithmicLiveChartUpdate::CompleteAndStart { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            chart
+                .apply_trade(fence, &trades[1])
+                .expect("second tick")
+                .update,
+            RithmicLiveChartUpdate::ReplaceForming { .. }
+        ));
+        assert!(matches!(
+            chart
+                .apply_trade(fence, &trades[2])
+                .expect("third tick")
+                .update,
+            RithmicLiveChartUpdate::ReplaceForming { .. }
+        ));
+        assert!(matches!(
+            chart
+                .apply_trade(fence, &trades[3])
+                .expect("next bar")
+                .update,
+            RithmicLiveChartUpdate::CompleteAndStart { .. }
+        ));
     }
 
     #[test]

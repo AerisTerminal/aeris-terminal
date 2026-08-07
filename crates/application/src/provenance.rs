@@ -59,13 +59,11 @@ pub fn validate_provenanced_market_bar(
             provenance: provenance.source_sequence,
         });
     }
-    let expected_exchange_timestamp_unix_nanos = bar
-        .exchange_timestamp_seconds
-        .checked_mul(1_000_000_000)
-        .ok_or(ReplayValidationError::ExchangeTimestampOverflow {
-            source_sequence: bar.source_sequence,
-        })?;
-    if provenance.exchange_timestamp_unix_nanos != expected_exchange_timestamp_unix_nanos {
+    if provenance
+        .exchange_timestamp_unix_nanos
+        .div_euclid(1_000_000_000)
+        != bar.exchange_timestamp_seconds
+    {
         return Err(ReplayValidationError::ProvenanceExchangeTimestampMismatch {
             source_sequence: bar.source_sequence,
             bar_seconds: bar.exchange_timestamp_seconds,
@@ -114,6 +112,7 @@ pub(crate) fn snapshot_checksum(
             bar_definition_id: &bar_definition.definition_id,
             bar_definition_version: bar_definition.version,
             bar_interval_seconds: bar_definition.interval_seconds,
+            bar_trades_per_bar: bar_definition.trades_per_bar,
         },
         bars.iter().map(|item| {
             let bar = item.value();
@@ -157,5 +156,34 @@ pub(crate) fn embedded_event_provenance(bar: &MarketBar) -> MarketEventProvenanc
         quality_flags: 0,
         nic_timestamp_source: 0,
         semantic_class: 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_bar_accepts_subsecond_provenance_within_its_exchange_second() {
+        let bar = MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: 10,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+        };
+        let mut provenance = embedded_event_provenance(&bar);
+        provenance.exchange_timestamp_unix_nanos += 123_456_000;
+        let item = Provenanced::new(bar, provenance.clone());
+        assert!(validate_provenanced_market_bar(&item).is_ok());
+
+        provenance.exchange_timestamp_unix_nanos = 11_000_000_000;
+        let mismatched = Provenanced::new(bar, provenance);
+        assert!(matches!(
+            validate_provenanced_market_bar(&mismatched),
+            Err(ReplayValidationError::ProvenanceExchangeTimestampMismatch { .. })
+        ));
     }
 }

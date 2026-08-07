@@ -96,7 +96,12 @@ impl RithmicTimeBarResolution {
         }
     }
 
-    fn interval_seconds(&self) -> Result<u64, RithmicHistoryAdapterError> {
+    /// Returns the exact fixed interval represented by this resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the period cannot be represented in seconds.
+    pub fn interval_seconds(&self) -> Result<u64, RithmicHistoryAdapterError> {
         let unit = match self.bar_type {
             TimeBarType::Second => 1,
             TimeBarType::Minute => 60,
@@ -203,28 +208,39 @@ impl RithmicHistoryTransport for RithmicHistorySessionTransport {
         &mut self,
         request: HistoryCollectionRequest,
     ) -> Result<CollectedHistory, String> {
-        let HistorySeries::Time { bar_type, period } = request.series else {
-            return Err(RithmicHistoryAdapterError::InvalidRequest.to_string());
-        };
-        let wire_type = match bar_type {
-            DecodedTimeBarType::Second => TimeBarType::Second,
-            DecodedTimeBarType::Minute => TimeBarType::Minute,
-            DecodedTimeBarType::Daily => TimeBarType::Daily,
-            DecodedTimeBarType::Weekly => TimeBarType::Weekly,
-        };
         let maximum_bars = u16::try_from(request.maximum_bars.get())
             .map_err(|_| RithmicHistoryAdapterError::InvalidRequest.to_string())?;
-        self.connection
-            .replay_time_bars(TimeBarReplayRequest {
-                symbol: &request.symbol,
-                exchange: &request.exchange,
-                bar_type: wire_type,
-                period,
-                start_seconds: request.start_seconds,
-                finish_seconds: request.finish_seconds,
-                maximum_bars,
-            })
-            .map_err(|_| RithmicHistoryAdapterError::Transport.to_string())?;
+        match request.series {
+            HistorySeries::Time { bar_type, period } => {
+                let wire_type = match bar_type {
+                    DecodedTimeBarType::Second => TimeBarType::Second,
+                    DecodedTimeBarType::Minute => TimeBarType::Minute,
+                    DecodedTimeBarType::Daily => TimeBarType::Daily,
+                    DecodedTimeBarType::Weekly => TimeBarType::Weekly,
+                };
+                self.connection.replay_time_bars(TimeBarReplayRequest {
+                    symbol: &request.symbol,
+                    exchange: &request.exchange,
+                    bar_type: wire_type,
+                    period,
+                    start_seconds: request.start_seconds,
+                    finish_seconds: request.finish_seconds,
+                    maximum_bars,
+                })
+            }
+            HistorySeries::Tick { trades_per_bar } => {
+                self.connection
+                    .replay_tick_bars(crate::TickBarReplayRequest {
+                        symbol: &request.symbol,
+                        exchange: &request.exchange,
+                        trades_per_bar,
+                        start_seconds: request.start_seconds,
+                        finish_seconds: request.finish_seconds,
+                        maximum_bars,
+                    })
+            }
+        }
+        .map_err(|_| RithmicHistoryAdapterError::Transport.to_string())?;
         let mut collector = HistoryCollector::try_new(request)
             .map_err(|_| RithmicHistoryAdapterError::InvalidRequest.to_string())?;
         let deadline = Instant::now() + self.replay_timeout;
@@ -579,6 +595,63 @@ pub fn canonical_rithmic_time_bar(
     })
 }
 
+/// One canonical trade-count bar with its subsecond exchange timestamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalRithmicTickBar {
+    pub value: MarketBar,
+    pub exchange_timestamp_unix_nanos: i64,
+}
+
+/// Converts one provider tick bar without discarding its subsecond ordering key.
+///
+/// # Errors
+///
+/// Returns an error for mismatched identity/specifier, invalid keys, missing
+/// volume, or unrepresentable fixed-point values.
+pub fn canonical_rithmic_tick_bar(
+    instrument: &RithmicProviderInstrument,
+    trades_per_bar: u16,
+    source_sequence: NonZeroU64,
+    bar: &crate::DecodedTickBar,
+) -> Result<CanonicalRithmicTickBar, RithmicHistoryAdapterError> {
+    let last = bar
+        .keys
+        .last()
+        .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
+    if bar.identity.symbol != instrument.descriptor.provider_symbol
+        || bar.identity.exchange != instrument.descriptor.venue_id
+        || bar.trades_per_bar != trades_per_bar.to_string()
+        || last.seconds < 0
+        || !(0..1_000_000).contains(&last.microseconds)
+    {
+        return Err(RithmicHistoryAdapterError::MalformedHistory);
+    }
+    let exchange_timestamp_unix_nanos = i64::from(last.seconds)
+        .checked_mul(NANOS_PER_SECOND_I64)
+        .and_then(|seconds| seconds.checked_add(i64::from(last.microseconds) * 1_000))
+        .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
+    let value = MarketBar {
+        source_sequence: source_sequence.get(),
+        exchange_timestamp_seconds: i64::from(last.seconds),
+        open: fixed_price(bar.ohlc.open, instrument.descriptor.price_scale)?,
+        high: fixed_price(bar.ohlc.high, instrument.descriptor.price_scale)?,
+        low: fixed_price(bar.ohlc.low, instrument.descriptor.price_scale)?,
+        close: fixed_price(bar.ohlc.close, instrument.descriptor.price_scale)?,
+        volume: fixed_volume(
+            bar.volume
+                .ok_or(RithmicHistoryAdapterError::MalformedHistory)?,
+            instrument.descriptor.quantity_scale,
+        )?,
+    };
+    value
+        .validate()
+        .map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
+    Ok(CanonicalRithmicTickBar {
+        value,
+        exchange_timestamp_unix_nanos,
+    })
+}
+
 /// Decodes one adapter-owned provider-history payload.
 ///
 /// # Errors
@@ -808,7 +881,7 @@ impl RithmicBarContinuity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BarIdentity, ObservedHistoryRange, Ohlc};
+    use crate::{BarIdentity, DecodedTickBar, ObservedHistoryRange, Ohlc, TickBarKey};
     use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
     use axiusflow_provider_history::HistoryRange;
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
@@ -872,6 +945,46 @@ mod tests {
                 NonZeroU16::new(1).unwrap(),
             ),
             Err(RithmicHistoryAdapterError::InvalidConfiguration)
+        );
+    }
+
+    #[test]
+    fn canonical_tick_bar_preserves_subsecond_ordering_and_fixed_point_values() {
+        let decoded = DecodedTickBar {
+            identity: BarIdentity {
+                symbol: "ESM7".to_string(),
+                exchange: "CME".to_string(),
+            },
+            trades_per_bar: "100".to_string(),
+            keys: vec![TickBarKey {
+                sequence: "provider-sequence".to_string(),
+                seconds: 1_800_000_000,
+                microseconds: 123_456,
+            }],
+            ohlc: Ohlc {
+                open: 5_100.25,
+                high: 5_101.0,
+                low: 5_100.0,
+                close: 5_100.75,
+            },
+            trades: Some(100),
+            volume: Some(42),
+            bid_volume: None,
+            ask_volume: None,
+        };
+        let canonical = canonical_rithmic_tick_bar(
+            &instrument(),
+            100,
+            NonZeroU64::new(7).unwrap_or(NonZeroU64::MIN),
+            &decoded,
+        )
+        .expect("tick bar converts");
+        assert_eq!(canonical.value.source_sequence, 7);
+        assert_eq!(canonical.value.open, 510_025);
+        assert_eq!(canonical.value.volume, 42);
+        assert_eq!(
+            canonical.exchange_timestamp_unix_nanos,
+            1_800_000_000_123_456_000
         );
     }
 

@@ -16,10 +16,10 @@ use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
     RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicProviderInstrument,
     RithmicSessionLimits, RithmicTestSession, RithmicTimeBarResolution, TimeBarType,
-    canonical_rithmic_time_bar,
+    canonical_rithmic_tick_bar, canonical_rithmic_time_bar,
 };
 use std::{
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -36,6 +36,7 @@ const HISTORY_RESULT_CAPACITY: usize = 2;
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAXIMUM_CONTROL_MESSAGES: usize = 64;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
+const TICK_TRADES_PER_BAR: u16 = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RithmicSeries {
@@ -59,7 +60,7 @@ impl RithmicSeries {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Tick => "Tick",
+            Self::Tick => "100t",
             Self::Minute1 => "1m",
             Self::Minute5 => "5m",
             Self::Minute15 => "15m",
@@ -81,7 +82,7 @@ impl RithmicSeries {
 
     fn resolution(self) -> Result<RithmicTimeBarResolution, String> {
         let (bar_type, period) = match self {
-            Self::Tick => return Err("Historical tick continuity is unavailable".to_string()),
+            Self::Tick => return Err("Tick series has no time resolution".to_string()),
             Self::Minute1 => (TimeBarType::Minute, 1),
             Self::Minute5 => (TimeBarType::Minute, 5),
             Self::Minute15 => (TimeBarType::Minute, 15),
@@ -292,9 +293,8 @@ fn run_history_worker(
 
 fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap, String> {
     let range = visible_range(request.series, SystemTime::now())?;
-    let resolution = request.series.resolution()?;
     let connection = connect_history(Arc::clone(&request.stop))?;
-    let transport = RithmicHistorySessionTransport::try_new(
+    let mut transport = RithmicHistorySessionTransport::try_new(
         connection,
         REPLAY_TIMEOUT,
         NonZeroUsize::new(MAXIMUM_CONTROL_MESSAGES).unwrap_or(NonZeroUsize::MIN),
@@ -311,11 +311,44 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
         .map_err(|_| "Rithmic history range is invalid".to_string())?;
     let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND)
         .map_err(|_| "Rithmic history range is invalid".to_string())?;
+    let bars = match request.series {
+        RithmicSeries::Tick => collect_tick_history(
+            &mut transport,
+            &provider_instrument,
+            start_seconds,
+            finish_seconds,
+        )?,
+        series => {
+            let resolution = series.resolution()?;
+            collect_time_history(
+                &mut transport,
+                &provider_instrument,
+                &resolution,
+                start_seconds,
+                finish_seconds,
+            )?
+        }
+    };
+    bootstrap_from_bars(request, bars, unix_nanos_now()?)
+}
+
+#[derive(Clone, Copy)]
+struct CanonicalHistoryBar {
+    value: MarketBar,
+    exchange_timestamp_unix_nanos: i64,
+}
+
+fn collect_time_history(
+    transport: &mut RithmicHistorySessionTransport,
+    instrument: &RithmicProviderInstrument,
+    resolution: &RithmicTimeBarResolution,
+    start_seconds: i32,
+    finish_seconds: i32,
+) -> Result<Vec<CanonicalHistoryBar>, String> {
     let interval_seconds = i32::try_from(
-        request
-            .series
+        resolution
             .interval_seconds()
-            .ok_or_else(|| "Rithmic history series is invalid".to_string())?,
+            .map_err(|_| "Rithmic history series is invalid".to_string())?,
     )
     .map_err(|_| "Rithmic history series is invalid".to_string())?;
     let collection_start = start_seconds
@@ -324,10 +357,9 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
     let collection_finish = finish_seconds
         .checked_add(interval_seconds)
         .ok_or_else(|| "Rithmic history range is invalid".to_string())?;
-    let mut transport = transport;
     let collected = transport.collect_history(HistoryCollectionRequest {
-        symbol: provider_instrument.descriptor.provider_symbol.clone(),
-        exchange: provider_instrument.descriptor.venue_id.clone(),
+        symbol: instrument.descriptor.provider_symbol.clone(),
+        exchange: instrument.descriptor.venue_id.clone(),
         series: HistorySeries::Time {
             bar_type: match resolution.bar_type {
                 TimeBarType::Second => {
@@ -355,17 +387,57 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
         .filter(|bar| bar.marker_seconds >= start_seconds && bar.marker_seconds <= finish_seconds)
         .enumerate()
         .map(|(index, bar)| {
-            canonical_rithmic_time_bar(&provider_instrument, &resolution, bar)
+            canonical_rithmic_time_bar(instrument, resolution, bar)
                 .map(|sequenced| {
                     let mut bar = sequenced.value;
                     bar.source_sequence =
                         u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-                    bar
+                    CanonicalHistoryBar {
+                        value: bar,
+                        exchange_timestamp_unix_nanos: bar.exchange_timestamp_seconds
+                            * NANOS_PER_SECOND,
+                    }
                 })
                 .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    bootstrap_from_bars(request, bars, unix_nanos_now()?)
+    Ok(bars)
+}
+
+fn collect_tick_history(
+    transport: &mut RithmicHistorySessionTransport,
+    instrument: &RithmicProviderInstrument,
+    start_seconds: i32,
+    finish_seconds: i32,
+) -> Result<Vec<CanonicalHistoryBar>, String> {
+    let collected = transport.collect_history(HistoryCollectionRequest {
+        symbol: instrument.descriptor.provider_symbol.clone(),
+        exchange: instrument.descriptor.venue_id.clone(),
+        series: HistorySeries::Tick {
+            trades_per_bar: TICK_TRADES_PER_BAR,
+        },
+        start_seconds,
+        finish_seconds,
+        maximum_bars: NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
+    })?;
+    let HistoryBars::Tick(decoded) = collected.bars else {
+        return Err("Rithmic history returned the wrong series".to_string());
+    };
+    decoded
+        .iter()
+        .enumerate()
+        .map(|(index, bar)| {
+            let sequence =
+                NonZeroU64::new(u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
+                    .unwrap_or(NonZeroU64::MIN);
+            canonical_rithmic_tick_bar(instrument, TICK_TRADES_PER_BAR, sequence, bar)
+                .map(|bar| CanonicalHistoryBar {
+                    value: bar.value,
+                    exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
+                })
+                .map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
 fn connect_history(
@@ -397,14 +469,16 @@ fn connect_history(
 }
 
 fn visible_range(series: RithmicSeries, now: SystemTime) -> Result<HistoryRange, String> {
-    let interval = series
-        .interval_seconds()
-        .ok_or_else(|| "Historical tick continuity is unavailable".to_string())?;
     let now_seconds = now
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is invalid".to_string())?
         .as_secs();
-    let end_seconds = now_seconds - (now_seconds % interval);
+    let interval = series.interval_seconds().unwrap_or(60);
+    let end_seconds = if series == RithmicSeries::Tick {
+        now_seconds
+    } else {
+        now_seconds - (now_seconds % interval)
+    };
     let span_seconds = interval
         .checked_mul(MAXIMUM_VISIBLE_BARS as u64)
         .ok_or_else(|| "Rithmic visible range overflowed".to_string())?;
@@ -425,7 +499,7 @@ fn visible_range(series: RithmicSeries, now: SystemTime) -> Result<HistoryRange,
 
 fn bootstrap_from_bars(
     request: &HistoryFetchRequest,
-    bars: Vec<MarketBar>,
+    bars: Vec<CanonicalHistoryBar>,
     received_unix_nanos: i64,
 ) -> Result<MarketWorkerBootstrap, String> {
     if bars.is_empty() || bars.len() > MAXIMUM_VISIBLE_BARS {
@@ -444,24 +518,29 @@ fn bootstrap_from_bars(
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     };
-    let interval_seconds = u32::try_from(
-        request
-            .series
-            .interval_seconds()
-            .ok_or_else(|| "Historical tick continuity is unavailable".to_string())?,
-    )
-    .map_err(|_| "Rithmic interval is invalid".to_string())?;
+    let interval_seconds = request
+        .series
+        .interval_seconds()
+        .map_or(Ok(0), u32::try_from)
+        .map_err(|_| "Rithmic interval is invalid".to_string())?;
     let definition = BarDefinition {
         definition_id: format!("rithmic:{}:unadjusted:v1", request.series.label()),
         version: 1,
         interval_seconds,
+        trades_per_bar: (request.series == RithmicSeries::Tick)
+            .then_some(u32::from(TICK_TRADES_PER_BAR)),
     };
     let ownership_epoch = u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX);
     let provenanced = bars
         .into_iter()
         .map(|bar| {
-            let provenance = history_provenance(request, &bar, received_unix_nanos)?;
-            let item = Provenanced::new(bar, provenance);
+            let provenance = history_provenance(
+                request,
+                &bar.value,
+                bar.exchange_timestamp_unix_nanos,
+                received_unix_nanos,
+            )?;
+            let item = Provenanced::new(bar.value, provenance);
             validate_provenanced_market_bar(&item).map_err(|error| error.to_string())?;
             Ok(item)
         })
@@ -498,18 +577,14 @@ fn bootstrap_from_bars(
 fn history_provenance(
     request: &HistoryFetchRequest,
     bar: &MarketBar,
+    exchange: i64,
     received_unix_nanos: i64,
 ) -> Result<MarketEventProvenance, String> {
-    let exchange = bar
-        .exchange_timestamp_seconds
-        .checked_mul(NANOS_PER_SECOND)
-        .ok_or_else(|| "Rithmic history timestamp overflowed".to_string())?;
+    if exchange.div_euclid(NANOS_PER_SECOND) != bar.exchange_timestamp_seconds {
+        return Err("Rithmic history timestamp is inconsistent".to_string());
+    }
     Ok(MarketEventProvenance {
-        event_id: format!(
-            "rithmic_history_{}_{}",
-            request.series.label(),
-            bar.exchange_timestamp_seconds
-        ),
+        event_id: format!("rithmic_history_{}_{}", request.series.label(), exchange),
         event_time_unix_nanos: exchange,
         publication_time_unix_nanos: received_unix_nanos,
         producer: "axiusflow_desktop_rithmic_history_worker".to_string(),
@@ -602,7 +677,12 @@ mod tests {
                     * i64::try_from(MAXIMUM_VISIBLE_BARS).expect("visible bound fits")
             );
         }
-        assert!(visible_range(RithmicSeries::Tick, now).is_err());
+        let tick = visible_range(RithmicSeries::Tick, now).expect("tick envelope validates");
+        assert_eq!(tick.end_unix_nanos, 1_800_123_456 * NANOS_PER_SECOND);
+        assert_eq!(
+            tick.end_unix_nanos - tick.start_unix_nanos,
+            60 * NANOS_PER_SECOND * i64::try_from(MAXIMUM_VISIBLE_BARS).expect("bound fits")
+        );
     }
 
     #[test]

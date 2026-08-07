@@ -102,6 +102,7 @@ pub struct MarketSnapshotIdentityRef<'identity> {
     pub bar_definition_id: &'identity str,
     pub bar_definition_version: u32,
     pub bar_interval_seconds: u32,
+    pub bar_trades_per_bar: Option<u32>,
 }
 
 /// Borrowed canonical fields used by the shared snapshot checksum algorithm.
@@ -136,6 +137,7 @@ pub fn compute_market_snapshot_checksum<'value>(
     update_string_digest(&mut digest, identity.bar_definition_id);
     digest.update(identity.bar_definition_version.to_be_bytes());
     digest.update(identity.bar_interval_seconds.to_be_bytes());
+    digest.update(identity.bar_trades_per_bar.unwrap_or(0).to_be_bytes());
     for value in values {
         digest.update(value.source_sequence.to_be_bytes());
         digest.update(value.exchange_timestamp_seconds.to_be_bytes());

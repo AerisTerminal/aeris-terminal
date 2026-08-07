@@ -833,20 +833,7 @@ impl TerminalApp {
             return;
         };
         let request = self.series_browser.select(selection.generation, series);
-        if series == rithmic_history::RithmicSeries::Tick {
-            self.series_browser
-                .accept(request.selection_generation, request.series_generation);
-            self.reset_chart_surface(cx);
-            self.bridge_label = "bridge awaiting tick-series support".to_string();
-            self.replay_label = "Tick series · historical continuity unavailable".to_string();
-            self.series_message =
-                "Tick series selected; historical tick continuity is not available yet".to_string();
-            self.set_chart_state(
-                ChartState::Error,
-                "historical tick continuity is not available yet".to_string(),
-                cx,
-            );
-        } else if self
+        if self
             .market_worker
             .try_request_rithmic_history(request)
             .is_ok()
@@ -1009,7 +996,7 @@ impl TerminalApp {
             .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
                 request.series
             });
-        let supported = &rithmic_history::RithmicSeries::ALL[1..];
+        let supported = &rithmic_history::RithmicSeries::ALL;
         let next = supported
             .iter()
             .position(|series| *series == current)

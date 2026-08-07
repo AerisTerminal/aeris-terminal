@@ -3,7 +3,10 @@ use crate::{
         MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
         market_worker_channel,
     },
-    rithmic_history::{InstalledRithmicInstrument, RithmicHistoryTask, history_message},
+    rithmic_history::{
+        InstalledRithmicInstrument, RithmicHistoryResult, RithmicHistoryTask, RithmicSeriesRequest,
+        history_message,
+    },
     rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart},
     rithmic_shell::RithmicShellState,
 };
@@ -25,6 +28,7 @@ use axiusflow_rithmic_protocol_adapter::{
 };
 use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use std::{
+    collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
     sync::{
@@ -44,6 +48,7 @@ const MAXIMUM_DEPTH: usize = 256;
 const IDLE_WAIT: Duration = Duration::from_millis(50);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const CATALOG_KEY_ID: &str = "rithmic-test-history-catalog-key-v1";
+const MAXIMUM_BUFFERED_HISTORY_TRADES: usize = 4_096;
 
 type RithmicWorker =
     DesktopMarketWorker<ProvenancedMarketBar, NativeCredentialVault, RithmicProviderDriver>;
@@ -54,6 +59,9 @@ struct RithmicRuntimeState {
     installed_instrument: Option<InstalledRithmicInstrument>,
     history: Option<RithmicHistoryTask>,
     live_chart: Option<RithmicLiveChart>,
+    pending_live_request: Option<RithmicSeriesRequest>,
+    buffered_history_trades: VecDeque<axiusflow_market_data::MarketTrade>,
+    history_trade_overflow: bool,
     dom: ReadOnlyDom,
 }
 
@@ -64,6 +72,9 @@ impl RithmicRuntimeState {
             installed_instrument: None,
             history: RithmicHistoryTask::start().ok(),
             live_chart: None,
+            pending_live_request: None,
+            buffered_history_trades: VecDeque::with_capacity(MAXIMUM_BUFFERED_HISTORY_TRADES),
+            history_trade_overflow: false,
             dom: ReadOnlyDom::new(nonzero(20)),
         }
     }
@@ -164,18 +175,9 @@ fn run_connected(
             .history
             .as_mut()
             .and_then(RithmicHistoryTask::try_recv)
+            && apply_history_result(messages, &mut state, result)
         {
-            state.live_chart = result.result.as_ref().ok().and_then(|bootstrap| {
-                RithmicLiveChart::from_history(
-                    RithmicChartGeneration {
-                        selection: result.selection_generation,
-                        series: result.series_generation,
-                    },
-                    &bootstrap.snapshot,
-                )
-                .ok()
-            });
-            let _ = messages.send(history_message(result));
+            continue;
         }
         if retries
             .retry_due(&mut worker, Instant::now())
@@ -184,6 +186,9 @@ fn run_connected(
             state.selection_installed = false;
             state.installed_instrument = None;
             state.live_chart = None;
+            state.pending_live_request = None;
+            state.buffered_history_trades.clear();
+            state.history_trade_overflow = false;
             send_connection(
                 messages,
                 FeedConnectionState::Discovering,
@@ -220,6 +225,67 @@ fn run_connected(
     );
 }
 
+fn apply_history_result(
+    messages: &crate::market_worker::MarketWorkerSender,
+    state: &mut RithmicRuntimeState,
+    result: RithmicHistoryResult,
+) -> bool {
+    let generation = RithmicChartGeneration {
+        selection: result.selection_generation,
+        series: result.series_generation,
+    };
+    let mut chart =
+        result.result.as_ref().ok().and_then(|bootstrap| {
+            RithmicLiveChart::from_history(generation, &bootstrap.snapshot).ok()
+        });
+    let _ = messages.send(history_message(result));
+    let matching_request = state.pending_live_request.is_some_and(|request| {
+        request.selection_generation == generation.selection
+            && request.series_generation == generation.series
+    });
+    if matching_request && !state.history_trade_overflow {
+        let mut valid = true;
+        if let Some(active_chart) = chart.as_mut() {
+            while let Some(trade) = state.buffered_history_trades.pop_front() {
+                if !publish_trade(messages, active_chart, &trade) {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if !valid {
+            chart = None;
+        }
+    }
+    if matching_request && state.history_trade_overflow && reschedule_history(state) {
+        let _ = messages.send(MarketWorkerMessage::State {
+            state: crate::market_worker::ChartState::Recovering,
+            message: "Rithmic history is covering buffered trade overflow".to_string(),
+        });
+        return true;
+    }
+    state.pending_live_request = None;
+    state.buffered_history_trades.clear();
+    state.history_trade_overflow = false;
+    state.live_chart = chart;
+    false
+}
+
+fn reschedule_history(state: &mut RithmicRuntimeState) -> bool {
+    let rescheduled = state
+        .pending_live_request
+        .zip(state.installed_instrument.clone())
+        .is_some_and(|(request, instrument)| {
+            state
+                .history
+                .as_mut()
+                .is_some_and(|history| history.request(request, instrument).is_ok())
+        });
+    state.buffered_history_trades.clear();
+    state.history_trade_overflow = false;
+    rescheduled
+}
+
 fn process_command(
     commands: &Receiver<MarketWorkerCommand>,
     worker: &RithmicWorker,
@@ -246,6 +312,9 @@ fn process_command(
         }
         Ok(MarketWorkerCommand::RithmicHistory(request)) => {
             state.live_chart = None;
+            state.pending_live_request = Some(request);
+            state.buffered_history_trades.clear();
+            state.history_trade_overflow = false;
             (
                 state.history.as_mut().ok_or(()).and_then(|history| {
                     state
@@ -291,6 +360,9 @@ fn drain_events(
                     history.cancel();
                 }
                 state.live_chart = None;
+                state.pending_live_request = None;
+                state.buffered_history_trades.clear();
+                state.history_trade_overflow = false;
                 state.selection_installed = true;
                 state.installed_instrument = Some(InstalledRithmicInstrument {
                     selection_generation: *selection_generation,
@@ -336,11 +408,14 @@ fn drain_events(
                     state.selection_installed = false;
                     state.installed_instrument = None;
                     state.live_chart = None;
+                    state.pending_live_request = None;
+                    state.buffered_history_trades.clear();
+                    state.history_trade_overflow = false;
                     if let Some(frame) = state.dom.mark_stale() {
                         let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
                     }
                 }
-                publish_live_chart(messages, &event, &mut state.live_chart);
+                publish_live_chart(messages, &event, state);
                 publish_dom(messages, &event, &mut state.dom);
                 publish_event(messages, &event, &mut state.selection_installed);
             }
@@ -381,7 +456,7 @@ fn publish_dom(
 fn publish_live_chart(
     messages: &crate::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
-    live_chart: &mut Option<RithmicLiveChart>,
+    state: &mut RithmicRuntimeState,
 ) {
     let AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market {
         event: MarketEvent::Trade(trade),
@@ -390,9 +465,39 @@ fn publish_live_chart(
     else {
         return;
     };
-    let Some(chart) = live_chart.as_mut() else {
+    let Some(chart) = state.live_chart.as_mut() else {
+        if state.pending_live_request.is_some() && !state.history_trade_overflow {
+            buffer_history_trade(
+                &mut state.buffered_history_trades,
+                &mut state.history_trade_overflow,
+                trade,
+            );
+        }
         return;
     };
+    if !publish_trade(messages, chart, trade) {
+        state.live_chart = None;
+    }
+}
+
+fn buffer_history_trade(
+    buffer: &mut VecDeque<axiusflow_market_data::MarketTrade>,
+    overflowed: &mut bool,
+    trade: &axiusflow_market_data::MarketTrade,
+) {
+    if buffer.len() >= MAXIMUM_BUFFERED_HISTORY_TRADES {
+        buffer.clear();
+        *overflowed = true;
+    } else {
+        buffer.push_back(trade.clone());
+    }
+}
+
+fn publish_trade(
+    messages: &crate::market_worker::MarketWorkerSender,
+    chart: &mut RithmicLiveChart,
+    trade: &axiusflow_market_data::MarketTrade,
+) -> bool {
     let generation = chart.generation();
     match chart.apply_trade(generation, trade) {
         Ok(publication) => {
@@ -401,17 +506,18 @@ fn publish_live_chart(
                 series_generation: publication.generation.series,
                 snapshot: publication.snapshot,
             });
+            true
         }
         Err(
             crate::rithmic_live_chart::RithmicLiveChartError::OutOfOrderTrade
             | crate::rithmic_live_chart::RithmicLiveChartError::StaleGeneration,
-        ) => {}
+        ) => true,
         Err(_) => {
-            *live_chart = None;
             let _ = messages.send(MarketWorkerMessage::State {
                 state: crate::market_worker::ChartState::Recovering,
                 message: "Rithmic live candles require a covering history snapshot".to_string(),
             });
+            false
         }
     }
 }
@@ -691,6 +797,7 @@ fn nonzero(value: usize) -> NonZeroUsize {
 mod tests {
     use super::*;
     use axiusflow_desktop_provider_runtime::{ProviderEnvironment, SessionGeneration};
+    use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 
     fn generation() -> SessionGeneration {
         SessionGeneration::new(NonZeroU64::MIN)
@@ -788,5 +895,38 @@ mod tests {
         stopped_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("drop requests and acknowledges shutdown");
+    }
+
+    #[test]
+    fn history_handoff_trade_buffer_fails_closed_at_its_exact_bound() {
+        let trade = MarketTrade {
+            metadata: EventMetadata {
+                provider_id: "rithmic".to_string(),
+                instrument_id: "mnq".to_string(),
+                entitlement_id: "test".to_string(),
+                source_sequence: 1,
+                session_generation: 1,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(1),
+                    provider_unix_nanos: Some(1),
+                    received_unix_nanos: 1,
+                },
+            },
+            trade_id: "trade".to_string(),
+            price: 1,
+            quantity: 1,
+            aggressor: AggressorSide::Unknown,
+        };
+        let mut buffer = VecDeque::new();
+        let mut overflowed = false;
+        for _ in 0..MAXIMUM_BUFFERED_HISTORY_TRADES {
+            buffer_history_trade(&mut buffer, &mut overflowed, &trade);
+        }
+        assert_eq!(buffer.len(), MAXIMUM_BUFFERED_HISTORY_TRADES);
+        assert!(!overflowed);
+
+        buffer_history_trade(&mut buffer, &mut overflowed, &trade);
+        assert!(buffer.is_empty());
+        assert!(overflowed);
     }
 }

@@ -50,10 +50,11 @@ pub use history::{
     HistorySource, Ohlc, ReplayKind, TickBarKey,
 };
 pub use history_adapter::{
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicBarContinuity, RithmicHistoryAdapterError,
-    RithmicHistoryCapabilityAdapter, RithmicHistoryLimits, RithmicHistorySessionTransport,
-    RithmicHistoryTransport, RithmicTimeBarResolution, canonical_rithmic_time_bar,
-    covering_snapshot_from_page, decode_rithmic_history_bar,
+    CanonicalRithmicTickBar, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicBarContinuity,
+    RithmicHistoryAdapterError, RithmicHistoryCapabilityAdapter, RithmicHistoryLimits,
+    RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicTimeBarResolution,
+    canonical_rithmic_tick_bar, canonical_rithmic_time_bar, covering_snapshot_from_page,
+    decode_rithmic_history_bar,
 };
 pub use market::{
     DecodedMarketMessage, MarketIdentity, OrderBookLevel, OrderBookSides, OrderBookUpdate,
