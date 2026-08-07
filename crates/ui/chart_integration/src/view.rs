@@ -178,6 +178,12 @@ impl OriginChartView {
         self.invalidate_series_frame();
     }
 
+    /// Returns whether the newest bar is aligned to the real-time edge.
+    #[must_use]
+    pub fn is_at_latest(&self) -> bool {
+        self.engine.scroll_position().abs() < f64::EPSILON
+    }
+
     /// Enqueues one replay update for the next chart frame.
     ///
     /// # Errors
@@ -490,6 +496,7 @@ impl OriginChartView {
             "+" | "=" => self.engine.time_scale.zoom(center, 0.5),
             "-" | "_" => self.engine.time_scale.zoom(center, -0.5),
             "home" => self.reset_view(),
+            "end" => self.scroll_to_latest(),
             "escape" => {
                 self.end_drag(-1.0, -1.0);
                 self.engine.crosshair = None;
@@ -807,7 +814,7 @@ mod tests {
 
         chart.scroll_to_latest();
 
-        assert!(chart.engine.scroll_position().abs() < f64::EPSILON);
+        assert!(chart.is_at_latest());
         assert!((chart.engine.bar_spacing() - spacing).abs() < f64::EPSILON);
     }
 
@@ -829,6 +836,10 @@ mod tests {
         assert!(chart.engine.crosshair.is_none());
         assert!(chart.apply_key("home", false));
         assert!(chart.engine.scroll_position().abs() < f64::EPSILON);
+        chart.engine.scroll_to_position(-4.0);
+        assert!(!chart.is_at_latest());
+        assert!(chart.apply_key("end", false));
+        assert!(chart.is_at_latest());
         assert!(!chart.apply_key("a", false));
     }
 

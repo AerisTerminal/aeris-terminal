@@ -227,7 +227,14 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::FIT | Self::LATEST;
+            self.0 |= Self::FIT;
+        }
+        self
+    }
+
+    const fn with_latest(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= Self::LATEST;
         }
         self
     }
@@ -1033,6 +1040,12 @@ impl TerminalApp {
             });
         }
     }
+
+    fn chart_at_latest(&self, cx: &App) -> bool {
+        self.chart
+            .as_ref()
+            .is_none_or(|chart| chart.read(cx).is_at_latest())
+    }
 }
 
 impl Render for TerminalApp {
@@ -1043,6 +1056,7 @@ impl Render for TerminalApp {
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
+        let chart_at_latest = self.chart_at_latest(cx);
         let header = terminal_header(
             cx,
             &app,
@@ -1069,7 +1083,8 @@ impl Render for TerminalApp {
                     self.symbol_browser.selected().is_some(),
                     self.feed_diagnostics.is_some(),
                 )
-                .with_chart_controls(self.chart_state == ChartState::Ready),
+                .with_chart_controls(self.chart_state == ChartState::Ready)
+                .with_latest(self.chart_state == ChartState::Ready && !chart_at_latest),
                 dom_visible: self.side_panel == Some(SidePanel::Dom),
                 health_visible: self.side_panel == Some(SidePanel::Health),
                 connection_state: self
@@ -2107,7 +2122,9 @@ mod tests {
         assert_eq!(duration_label(850_000), "850 µs");
         assert_eq!(duration_label(42_000_000), "42 ms");
         assert_eq!(duration_label(1_500_000_000), "1.5 s");
-        let controls = HeaderControls::from_state(true, true, false).with_chart_controls(true);
+        let controls = HeaderControls::from_state(true, true, false)
+            .with_chart_controls(true)
+            .with_latest(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
