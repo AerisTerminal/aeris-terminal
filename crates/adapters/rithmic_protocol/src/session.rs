@@ -125,7 +125,7 @@ impl RithmicTestSession {
         .map(RithmicTickerConnection::new)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, rithmic_kit))]
     pub(crate) fn connect_history_with(
         endpoint: RithmicEndpoint,
         credentials: RithmicCredentials<'_>,

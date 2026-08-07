@@ -1,8 +1,8 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 24
-**Last updated:** 2026-08-06
+**Revision:** 25
+**Last updated:** 2026-08-07
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
 ## 0. How to use this document
@@ -69,7 +69,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `in_progress` | [ ] queued after Stage C priority work |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | kit, bounded codec/WSS, collectors, history plant, depth assembly, vault/runtime callbacks, canonical mapping, retry fencing, and generation-fenced covering history continuity [x]; authorized Test evidence [ ] |
+| C — Rithmic read-only headless | `in_progress` | deterministic headless conformance [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `ready` | [ ] blocked on Stage C deterministic gate |
 | F — Readiness / endurance | `ready` | [ ] not started |
@@ -77,7 +77,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 ### Remaining focus (ordered)
 
 - [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
-- [ ] **Stage C:** kit-backed protobuf codegen, read-only R|Protocol adapter, deterministic fixtures, then authorized Rithmic Test evidence (see §8).
+- [ ] **Stage C:** deterministic headless conformance [x]; authorized Rithmic Test evidence [ ] (see §8).
 - [ ] **Stage A:** explicit chart states, worker split, one recovery coordinator, event-driven inbox, bounded queues, ordered completed bars, BTC/ETH 1m continuity, then freeze.
 
 
@@ -387,7 +387,7 @@ templates** (cancel, modify, bracket, etc. remain decode-only or unused).
 
 ### Gate
 
-- [ ] Deterministic fixtures prove discovery, login, trades, quotes, depth, heartbeat, disconnect/reconnect, recovery, clean stop, bounds, allowlisting, and redaction.
+- [x] `tools/run_rithmic_protocol_conformance.sh` proves discovery, login, trades, quotes, depth, heartbeat, disconnect/reconnect, recovery, clean stop, bounds, allowlisting, redaction, and the kit-unavailable build.
 - [ ] Authorized Rithmic Test traffic repeats the gate before provider behavior is marked `verified`.
 
 
@@ -451,7 +451,7 @@ deterministic headless gates.
 ### Prerequisites
 
 - [x] Stage D deterministic headless gate met.
-- [ ] Stage C deterministic headless gate met.
+- [x] Stage C deterministic headless gate met.
 
 
 

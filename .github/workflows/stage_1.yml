@@ -37,6 +37,8 @@ jobs:
         run: cargo run --quiet --package axiusflow_naming_check
       - name: acceleration_retirement_contract
         run: tools/run_acceleration_retirement_conformance.sh
+      - name: rithmic_protocol_portable_contract
+        run: tools/run_rithmic_protocol_conformance.sh
 
   portable_matrix:
     name: portable_${{ matrix.os }}
