@@ -12,8 +12,9 @@ use axiusflow_application::{
 };
 use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
-    App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Render, ScrollWheelEvent, Window, canvas, div, prelude::*, px, rgb,
+    App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div, prelude::*, px,
+    rgb,
 };
 use num_traits::ToPrimitive;
 use origin_engine::{ChartEngine, ChartFrame, PriceScaleTarget};
@@ -48,6 +49,7 @@ pub struct OriginChartView {
     fitted: bool,
     viewport_origin: (f32, f32),
     drag: Option<ChartDrag>,
+    focus_handle: Option<FocusHandle>,
 }
 
 impl OriginChartView {
@@ -73,6 +75,7 @@ impl OriginChartView {
             fitted: false,
             viewport_origin: (0.0, 0.0),
             drag: None,
+            focus_handle: None,
         }
     }
 
@@ -126,6 +129,7 @@ impl OriginChartView {
             fitted: false,
             viewport_origin: (0.0, 0.0),
             drag: None,
+            focus_handle: None,
         }
     }
 
@@ -448,16 +452,53 @@ impl OriginChartView {
         cx.notify();
     }
 
+    fn apply_key(&mut self, key: &str, accelerated: bool) -> bool {
+        let step = if accelerated { 10.0 } else { 1.0 };
+        let center = self.engine.pane_w / 2.0;
+        match key {
+            "left" => self
+                .engine
+                .scroll_to_position(self.engine.scroll_position() - step),
+            "right" => self
+                .engine
+                .scroll_to_position(self.engine.scroll_position() + step),
+            "+" | "=" => self.engine.time_scale.zoom(center, 0.5),
+            "-" | "_" => self.engine.time_scale.zoom(center, -0.5),
+            "home" => self.reset_view(),
+            "escape" => {
+                self.end_drag(-1.0, -1.0);
+                self.engine.crosshair = None;
+            }
+            _ => return false,
+        }
+        self.invalidate_series_frame();
+        true
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(focus_handle) = &self.focus_handle {
+            window.focus(focus_handle, cx);
+        }
         let (pane_x, y) = self.local_position(event.position);
         self.begin_drag(pane_x, y, event.click_count);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let modifiers = event.keystroke.modifiers;
+        if self.apply_key(
+            event.keystroke.key.as_str(),
+            modifiers.control || modifiers.shift,
+        ) {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     fn on_mouse_move(
@@ -564,11 +605,17 @@ impl Render for OriginChartView {
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
         let hover_entity = entity.clone();
+        let focus_handle = self
+            .focus_handle
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
 
         div()
             .id("origin_chart_surface")
             .size_full()
             .bg(rgb(self.theme.colors.background.rgb_u32()))
+            .track_focus(&focus_handle)
+            .key_context("OriginChart")
             .on_hover(move |hovered, _, cx| {
                 if !*hovered {
                     hover_entity.update(cx, OriginChartView::clear_pointer);
@@ -579,6 +626,7 @@ impl Render for OriginChartView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_key_down(cx.listener(Self::on_key_down))
             .child(
                 canvas(
                     move |bounds: Bounds<gpui::Pixels>, window, cx| {
@@ -721,5 +769,26 @@ mod tests {
             Some(true)
         );
         assert!(chart.fitted);
+    }
+
+    #[test]
+    fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
+        let mut chart = interactive_chart();
+        let offset = chart.engine.scroll_position();
+        assert!(chart.apply_key("right", false));
+        assert!((chart.engine.scroll_position() - offset - 1.0).abs() < f64::EPSILON);
+        assert!(chart.apply_key("left", true));
+        assert!((chart.engine.scroll_position() - offset + 9.0).abs() < f64::EPSILON);
+
+        let spacing = chart.engine.bar_spacing();
+        assert!(chart.apply_key("+", false));
+        assert!((chart.engine.bar_spacing() - spacing).abs() > f64::EPSILON);
+
+        chart.engine.crosshair = Some((100.0, 100.0));
+        assert!(chart.apply_key("escape", false));
+        assert!(chart.engine.crosshair.is_none());
+        assert!(chart.apply_key("home", false));
+        assert!(chart.engine.scroll_position().abs() < f64::EPSILON);
+        assert!(!chart.apply_key("a", false));
     }
 }
