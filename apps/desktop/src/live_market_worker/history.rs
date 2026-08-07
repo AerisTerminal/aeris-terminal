@@ -1,6 +1,7 @@
 use super::{
-    CoinbaseDesktopWorker, HISTORY_BARS, LiveLoopState, ProductProfile, fence_failed_history,
-    history_provenance, nonzero, publish_update, unix_nanos,
+    CoinbaseDesktopWorker, HISTORY_BARS, LiveLoopState, ProductProfile, cached_history_provenance,
+    fence_failed_history, history_provenance, nonzero, publish_cached_update, publish_update,
+    unix_nanos,
 };
 use crate::market_worker::MarketWorkerSender;
 use axiusflow_application::{
@@ -9,15 +10,18 @@ use axiusflow_application::{
 };
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, ENTITLEMENT_CLASS,
-    decode_history_bar, encode_history_segment,
+    decode_history_bar, decode_history_segment, encode_history_segment, history_segment_item_count,
 };
-use axiusflow_desktop_history::StartupCacheState;
+use axiusflow_desktop_history::{
+    ControlPlaneState, HistoryDecoder, HydrationOutcome, HydrationRequest, ProviderConnectionState,
+    StartupCacheState,
+};
 use axiusflow_desktop_provider_runtime::{
     DesktopProviderState, HistoryCompletionInstall, SessionGeneration,
 };
 use axiusflow_desktop_storage::{
-    DataKind, HistoryScope, PublicationRequest, RecoveryAction, RetentionPolicy,
-    SegmentEncryptionKey, SegmentIdentity,
+    DataKind, HistoryScope, HistorySeriesIdentity, PublicationRequest, RecoveryAction,
+    RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
 };
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::{BarDefinition, MarketBar};
@@ -37,6 +41,36 @@ pub(super) struct PreparedHistory {
     pub(super) received_unix_nanos: i64,
 }
 
+struct CoinbaseSegmentDecoder;
+
+impl HistoryDecoder<MarketBar> for CoinbaseSegmentDecoder {
+    fn retained_decoded_bytes(&mut self, payload: &[u8]) -> Result<usize, String> {
+        history_segment_item_count(payload)?
+            .checked_mul(size_of::<
+                axiusflow_provider_history::SequencedHistory<MarketBar>,
+            >())
+            .ok_or_else(|| "Coinbase retained history size overflow".to_string())
+    }
+
+    fn decode(
+        &mut self,
+        payload: &[u8],
+        maximum_decoded_bytes: usize,
+    ) -> Result<
+        (
+            Vec<axiusflow_provider_history::SequencedHistory<MarketBar>>,
+            usize,
+        ),
+        String,
+    > {
+        let retained_bytes = self.retained_decoded_bytes(payload)?;
+        if retained_bytes > maximum_decoded_bytes {
+            return Err("Coinbase retained history exceeds its decoded bound".to_string());
+        }
+        decode_history_segment(payload).map(|values| (values, retained_bytes))
+    }
+}
+
 pub(super) struct StreamingSeriesContext<'a> {
     pub(super) profile: &'a ProductProfile,
     pub(super) segment_key: &'a SegmentEncryptionKey,
@@ -54,8 +88,28 @@ struct StreamingHistoryRequest<'a> {
     worker_label: &'a str,
 }
 
-pub(super) fn install_ready_history(
-    worker: &mut CoinbaseDesktopWorker,
+struct CachedHistoryRequest<'a> {
+    identity: &'a SegmentIdentity,
+    segment_key: &'a SegmentEncryptionKey,
+    provider_state: ProviderConnectionState,
+    now_seconds: i64,
+    received_unix_nanos: i64,
+    instrument: &'a InstrumentRevision,
+    bar_definition: &'a BarDefinition,
+    worker_label: &'a str,
+}
+
+pub(super) struct InitialHistoryContext<'a> {
+    pub(super) profile: &'a ProductProfile,
+    pub(super) segment_key: &'a SegmentEncryptionKey,
+    pub(super) instrument: &'a InstrumentRevision,
+    pub(super) bar_definition: &'a BarDefinition,
+    pub(super) worker_label: &'a str,
+    pub(super) initial_network: Option<axiusflow_platform_runtime::NetworkEvent>,
+}
+
+pub(super) fn install_ready_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
     context: &StreamingSeriesContext<'_>,
     state: &mut LiveLoopState,
     model: &mut MarketBarClientModel,
@@ -105,8 +159,8 @@ pub(super) fn install_ready_history(
     }
 }
 
-fn install_streaming_history(
-    worker: &mut CoinbaseDesktopWorker,
+fn install_streaming_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
     request: &StreamingHistoryRequest<'_>,
     prepared: &mut Option<PreparedHistory>,
     model: &mut MarketBarClientModel,
@@ -150,17 +204,153 @@ fn install_streaming_history(
     Ok(retained)
 }
 
-pub(super) fn prepare_initial_history(
-    worker: &mut CoinbaseDesktopWorker,
-) -> Result<Option<PreparedHistory>, String> {
-    worker
+pub(super) fn prepare_initial_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    context: &InitialHistoryContext<'_>,
+    model: &mut MarketBarClientModel,
+    message_tx: &MarketWorkerSender,
+) -> Result<VecDeque<ProvenancedMarketBar>, String> {
+    let now = unix_nanos()?;
+    let now_seconds = now / 1_000_000_000;
+    let scope = HistoryScope {
+        provider_id: "coinbase".to_string(),
+        account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+        entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+    };
+    let latest = worker
+        .latest_history_identity(
+            HistorySeriesIdentity {
+                scope: &scope,
+                instrument_id: &context.profile.instrument_id,
+                data_kind: DataKind::Bars,
+                resolution: "1m",
+                source_revision: 1,
+                schema_revision: 1,
+                calendar_revision: 1,
+                adjustment_revision: 1,
+                correction_revision: 1,
+            },
+            now_seconds,
+        )
+        .map_err(|error| error.to_string())?;
+    let provider_state =
+        if context.initial_network == Some(axiusflow_platform_runtime::NetworkEvent::Unavailable) {
+            ProviderConnectionState::Offline
+        } else {
+            ProviderConnectionState::Online
+        };
+    let retained = if let Some(identity) = latest {
+        hydrate_cached_history(
+            worker,
+            &CachedHistoryRequest {
+                identity: &identity,
+                segment_key: context.segment_key,
+                provider_state,
+                now_seconds,
+                received_unix_nanos: now,
+                instrument: context.instrument,
+                bar_definition: context.bar_definition,
+                worker_label: context.worker_label,
+            },
+            model,
+            message_tx,
+        )?
+    } else {
+        if provider_state == ProviderConnectionState::Offline {
+            let _ = message_tx.send(crate::market_worker::MarketWorkerMessage::State {
+                state: crate::market_worker::ChartState::Stale,
+                message: "Coinbase is offline and no retained history is available".to_string(),
+            });
+        }
+        VecDeque::new()
+    };
+    let connection = worker
         .request_connection()
         .map_err(|error| error.to_string())?;
-    Ok(None)
+    if connection.is_some() && !retained.is_empty() {
+        let _ = message_tx.send(crate::market_worker::MarketWorkerMessage::State {
+            state: crate::market_worker::ChartState::Recovering,
+            message: "Showing authenticated local Coinbase history while connecting for a fresh covering snapshot"
+                .to_string(),
+        });
+    }
+    Ok(retained)
 }
 
-fn install_history(
-    worker: &mut CoinbaseDesktopWorker,
+fn hydrate_cached_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    request: &CachedHistoryRequest<'_>,
+    model: &mut MarketBarClientModel,
+    message_tx: &MarketWorkerSender,
+) -> Result<VecDeque<ProvenancedMarketBar>, String> {
+    let outcome = worker
+        .hydrate_visible(
+            HydrationRequest {
+                identity: request.identity,
+                encryption_key: request.segment_key,
+                now_unix_seconds: request.now_seconds,
+                startup_cache_state: StartupCacheState::Cold,
+                provider_state: request.provider_state,
+                control_plane_state: ControlPlaneState::Unavailable,
+                missing_recovery: RecoveryAction::ProviderRefetch,
+            },
+            &mut CoinbaseSegmentDecoder,
+        )
+        .map_err(|error| error.to_string())?;
+    let HydrationOutcome::Ready { publication, .. } = outcome else {
+        let state = if request.provider_state == ProviderConnectionState::Offline {
+            crate::market_worker::ChartState::Stale
+        } else {
+            crate::market_worker::ChartState::Recovering
+        };
+        let _ = message_tx.send(crate::market_worker::MarketWorkerMessage::State {
+            state,
+            message:
+                "Coinbase retained history is unavailable; a covering provider snapshot is required"
+                    .to_string(),
+        });
+        return Ok(VecDeque::new());
+    };
+    let retained = publication
+        .values
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut bar = item.value;
+            bar.source_sequence = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| "Coinbase retained history sequence overflow".to_string())?;
+            cached_history_provenance(bar, publication.generation, request.received_unix_nanos)
+        })
+        .collect::<Result<VecDeque<_>, _>>()?;
+    let snapshot = ReplaySnapshot::try_from_provenanced_values(
+        request.instrument.clone(),
+        ReplayProvenance::LocalCache,
+        request.bar_definition.clone(),
+        model
+            .current_generation()
+            .map_or(1, |current| current.generation().saturating_add(1)),
+        retained.iter().cloned().collect(),
+    )
+    .map_err(|error| error.to_string())?;
+    publish_cached_update(
+        model,
+        ReplayStreamUpdate::Snapshot(snapshot),
+        request.worker_label,
+        message_tx,
+    )?;
+    let _ = message_tx.send(crate::market_worker::MarketWorkerMessage::State {
+        state: crate::market_worker::ChartState::Stale,
+        message:
+            "Showing authenticated local Coinbase history while awaiting a fresh covering snapshot"
+                .to_string(),
+    });
+    Ok(retained)
+}
+
+fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
     generation: SessionGeneration,
     profile: &ProductProfile,
     history: &PreparedHistory,
@@ -307,7 +497,85 @@ fn history_identity(profile: &ProductProfile, start: i64, end: i64) -> SegmentId
 
 #[cfg(test)]
 mod tests {
-    use super::history_installation_time;
+    use super::{
+        InitialHistoryContext, history_identity, history_installation_time, prepare_initial_history,
+    };
+    use crate::{
+        live_market_worker::{
+            composition::{
+                bar_definition, client_model, instrument, nonzero, open_test_worker,
+                product_profile,
+            },
+            lifecycle::apply_initial_network,
+        },
+        market_worker::{ChartState, MarketWorkerMessage, market_worker_channel},
+    };
+    use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
+    use axiusflow_coinbase_market_adapter::{
+        COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseConfig, CoinbaseHistoryCapabilityAdapter,
+        CoinbaseHistoryTransport, CoinbaseProviderDriver, ENTITLEMENT_CLASS,
+        encode_history_segment,
+    };
+    use axiusflow_desktop_storage::{
+        CatalogKey, HistoryStore, PublicationOutcome, PublicationRequest, RecoveryAction,
+        RetentionPolicy, SegmentEncryptionKey,
+    };
+    use axiusflow_platform_runtime::{CredentialVault, NetworkEvent};
+    use axiusflow_provider_history::{
+        DataClass, HistoryPageRequest, HistoryRange, ProviderHistoryAdapter,
+    };
+    use std::{fs, path::PathBuf, thread};
+
+    #[derive(Clone)]
+    struct MemoryVault;
+
+    impl CredentialVault for MemoryVault {
+        type Error = ();
+
+        fn store(&self, _key: &str, _secret: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(None)
+        }
+
+        fn delete(&self, _key: &str) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    struct FixtureTransport;
+
+    impl CoinbaseHistoryTransport for FixtureTransport {
+        fn get(&mut self, _path: &str) -> Result<Vec<u8>, String> {
+            Ok(br#"{"candles":[
+                {"start":"1700000100","low":"37020.00","high":"37080.00","open":"37020.00","close":"37070.00","volume":"0.75000000"},
+                {"start":"1700000040","low":"36950.00","high":"37050.00","open":"37000.00","close":"37020.00","volume":"0.50000000"}
+            ]}"#
+                .to_vec())
+        }
+    }
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn create(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "axiusflow-shipping-cache-{name}-{}-{:?}",
+                std::process::id(),
+                thread::current().id()
+            ));
+            fs::create_dir(&path).expect("test root creates");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn history_installation_rejects_a_crossed_minute_boundary() {
@@ -317,5 +585,170 @@ mod tests {
             Ok(150)
         );
         assert!(history_installation_time(requested_end, requested_end + 60_000_000_000).is_err());
+    }
+
+    #[test]
+    fn shipping_startup_publishes_authenticated_cache_offline_and_rejects_corruption() {
+        for corrupt in [false, true] {
+            assert_offline_cache_startup(corrupt);
+        }
+    }
+
+    fn assert_offline_cache_startup(corrupt: bool) {
+        let profile = product_profile("BTC-USD".to_string()).expect("profile validates");
+        let root = seed_cached_history(&profile, corrupt);
+        let ui_thread = thread::current().id();
+        let path = root.0.clone();
+        thread::spawn(move || {
+            assert_cached_startup_messages(&profile, path, ui_thread, corrupt);
+        })
+        .join()
+        .expect("shipping cache fixture completes");
+    }
+
+    fn seed_cached_history(profile: &super::ProductProfile, corrupt: bool) -> TestRoot {
+        let root = TestRoot::create(if corrupt { "corrupt" } else { "ready" });
+        let end = 1_700_000_160_000_000_000;
+        let identity = history_identity(profile, 1_700_000_040_000_000_000, end);
+        let request = HistoryPageRequest {
+            provider_id: "coinbase".to_string(),
+            account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+            entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+            instrument_id: profile.instrument_id.clone(),
+            data_class: DataClass::Bars,
+            resolution: "1m".to_string(),
+            range: HistoryRange {
+                start_unix_nanos: identity.range_start_unix_nanos,
+                end_unix_nanos: identity.range_end_unix_nanos,
+            },
+            maximum_items: nonzero(2),
+            continuation: None,
+        };
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport)
+            .expect("fixture adapter validates");
+        let page = adapter.fetch_page(&request).expect("fixture page decodes");
+        let payload = encode_history_segment(&page.items).expect("segment encodes");
+        let mut store = HistoryStore::open(&root.0, catalog_key(), 4).expect("store opens");
+        let outcome = store
+            .publish(PublicationRequest {
+                identity: &identity,
+                payload: &payload,
+                encryption_key: &segment_key(),
+                retention: RetentionPolicy::UntilRevoked,
+                recovery: RecoveryAction::ProviderRefetch,
+                now_unix_seconds: 1_700_000_160,
+            })
+            .expect("segment publishes");
+        let PublicationOutcome::Published(receipt) = outcome else {
+            panic!("retained fixture became memory-only");
+        };
+        drop(store);
+        if corrupt {
+            corrupt_file(&root.0.join("segments").join(receipt.file_name));
+        }
+        root
+    }
+
+    fn assert_cached_startup_messages(
+        profile: &super::ProductProfile,
+        path: PathBuf,
+        ui_thread: thread::ThreadId,
+        corrupt: bool,
+    ) {
+        let (driver, _events) = CoinbaseProviderDriver::new(
+            CoinbaseConfig::try_new(vec![profile.product_id.clone()])
+                .expect("provider config validates"),
+            nonzero(8),
+        );
+        let mut worker =
+            open_test_worker(profile, path, ui_thread, MemoryVault, driver, catalog_key())
+                .expect("shipping worker opens");
+        apply_initial_network(&mut worker, Some(NetworkEvent::Unavailable))
+            .expect("offline state applies");
+        let (sender, receiver) = market_worker_channel(nonzero(8));
+        let instrument = instrument(profile).expect("instrument validates");
+        let definition = bar_definition();
+        let mut model = client_model();
+        let retained = prepare_initial_history(
+            &mut worker,
+            &InitialHistoryContext {
+                profile,
+                segment_key: &segment_key(),
+                instrument: &instrument,
+                bar_definition: &definition,
+                worker_label: "Coinbase deterministic shipping cache",
+                initial_network: Some(NetworkEvent::Unavailable),
+            },
+            &mut model,
+            &sender,
+        )
+        .expect("offline cache preparation is redacted and bounded");
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        if corrupt {
+            assert!(retained.is_empty());
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| !matches!(message, MarketWorkerMessage::Update(_)))
+            );
+        } else {
+            assert_eq!(retained.len(), 2);
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|item| item.value().source_sequence)
+                    .collect::<Vec<_>>(),
+                vec![1, 2]
+            );
+            let cached_snapshot = messages.iter().find_map(|message| match message {
+                MarketWorkerMessage::Update(publication) => match &publication.update {
+                    ReplayStreamUpdate::Snapshot(snapshot)
+                        if snapshot.provenance() == ReplayProvenance::LocalCache =>
+                    {
+                        Some(snapshot)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            });
+            let cached_snapshot = cached_snapshot.expect("local cache snapshot publishes");
+            assert_eq!(cached_snapshot.evidence().ownership_epoch, 1);
+            assert_eq!(cached_snapshot.evidence().first_sequence, 1);
+            assert_eq!(cached_snapshot.evidence().last_sequence, 2);
+        }
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            MarketWorkerMessage::State {
+                state: ChartState::Stale,
+                ..
+            }
+        )));
+        worker.stop().expect("offline worker stops");
+    }
+
+    fn catalog_key() -> CatalogKey {
+        CatalogKey::try_new("shipping-cache-catalog".to_string(), [7; 32])
+            .expect("catalog key validates")
+    }
+
+    fn segment_key() -> SegmentEncryptionKey {
+        SegmentEncryptionKey::try_new("shipping-cache-segment".to_string(), [9; 32])
+            .expect("segment key validates")
+    }
+
+    fn corrupt_file(path: &std::path::Path) {
+        let mut permissions = fs::metadata(path)
+            .expect("segment metadata reads")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions).expect("segment becomes writable");
+        fs::write(path, b"corrupt").expect("segment corruption writes");
     }
 }

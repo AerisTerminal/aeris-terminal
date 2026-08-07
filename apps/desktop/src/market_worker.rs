@@ -427,7 +427,7 @@ fn take_covering_snapshot(
 }
 
 impl MarketWorkerReceiver {
-    fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
+    pub(crate) fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
         let mut queue = self
             .mailbox
             .queue

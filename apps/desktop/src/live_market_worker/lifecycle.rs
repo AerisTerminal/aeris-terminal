@@ -31,8 +31,8 @@ pub(super) enum WorkerInboxEvent {
     Command(MarketWorkerCommand),
 }
 
-pub(super) struct InboxDrainContext<'a> {
-    pub(super) worker: &'a mut CoinbaseDesktopWorker,
+pub(super) struct InboxDrainContext<'a, V: axiusflow_platform_runtime::CredentialVault> {
+    pub(super) worker: &'a mut CoinbaseDesktopWorker<V>,
     pub(super) events: &'a CoinbaseProviderEvents,
     pub(super) state: &'a mut LiveLoopState,
     pub(super) message_tx: &'a MarketWorkerSender,
@@ -108,10 +108,10 @@ pub(super) fn forward_commands(
     }
 }
 
-pub(super) fn drain_worker_inbox(
+pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>(
     inbox_rx: &Receiver<WorkerInboxEvent>,
     ready_event: &mut Option<WorkerInboxEvent>,
-    context: &mut InboxDrainContext<'_>,
+    context: &mut InboxDrainContext<'_, V>,
 ) -> Result<bool, String> {
     for _ in 0..INBOX_BATCH {
         let event = ready_event.take().or_else(|| inbox_rx.try_recv().ok());
@@ -197,8 +197,8 @@ pub(super) fn environment_events(
     (network_active.0, network_active.1 && power_active)
 }
 
-pub(super) fn apply_initial_network(
-    worker: &mut CoinbaseDesktopWorker,
+pub(super) fn apply_initial_network<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
     event: Option<NetworkEvent>,
 ) -> Result<(), String> {
     if event == Some(NetworkEvent::Unavailable) {

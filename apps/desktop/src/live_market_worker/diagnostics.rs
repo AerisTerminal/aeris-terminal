@@ -14,8 +14,8 @@ pub(super) fn diagnostics_wait_duration(reconnect: Option<Duration>) -> Duration
     reconnect.map_or(DIAGNOSTICS_CADENCE, |wait| wait.min(DIAGNOSTICS_CADENCE))
 }
 
-pub(super) fn flush_diagnostics(
-    worker: &mut CoinbaseDesktopWorker,
+pub(super) fn flush_diagnostics<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
     feedback_rx: &UiDiagnosticsReceiver,
     message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {

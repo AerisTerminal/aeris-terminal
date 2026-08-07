@@ -237,30 +237,7 @@ pub fn encode_history_segment(items: &[HistoryItem]) -> Result<Vec<u8>, String> 
 ///
 /// Returns an error for a wrong version, invalid size, malformed bar, or discontinuity.
 pub fn decode_history_segment(encoded: &[u8]) -> Result<Vec<SequencedHistory<MarketBar>>, String> {
-    if encoded.len() < HISTORY_SEGMENT_HEADER_BYTES
-        || &encoded[..HISTORY_SEGMENT_MAGIC.len()] != HISTORY_SEGMENT_MAGIC
-    {
-        return Err("unsupported Coinbase history segment".to_string());
-    }
-    let count = u32::from_le_bytes(
-        encoded[HISTORY_SEGMENT_MAGIC.len()..HISTORY_SEGMENT_HEADER_BYTES]
-            .try_into()
-            .map_err(|_| "Coinbase history segment header is truncated".to_string())?,
-    );
-    let count = usize::try_from(count)
-        .ok()
-        .filter(|count| *count != 0 && *count <= MAXIMUM_PAGE_ITEMS)
-        .ok_or_else(|| "Coinbase history segment item count is invalid".to_string())?;
-    let expected = HISTORY_SEGMENT_HEADER_BYTES
-        .checked_add(
-            HISTORY_PAYLOAD_BYTES
-                .checked_mul(count)
-                .ok_or_else(|| "Coinbase history segment size overflow".to_string())?,
-        )
-        .ok_or_else(|| "Coinbase history segment size overflow".to_string())?;
-    if encoded.len() != expected {
-        return Err("Coinbase history segment size is invalid".to_string());
-    }
+    let count = history_segment_item_count(encoded)?;
     let mut values = Vec::with_capacity(count);
     let mut previous_sequence: Option<u64> = None;
     for payload in encoded[HISTORY_SEGMENT_HEADER_BYTES..].chunks_exact(HISTORY_PAYLOAD_BYTES) {
@@ -286,6 +263,39 @@ pub fn decode_history_segment(encoded: &[u8]) -> Result<Vec<SequencedHistory<Mar
         });
     }
     Ok(values)
+}
+
+/// Validates a retained segment envelope and returns its bounded item count without decoding.
+///
+/// # Errors
+///
+/// Returns an error for a wrong version, invalid count, or mismatched encoded size.
+pub fn history_segment_item_count(encoded: &[u8]) -> Result<usize, String> {
+    if encoded.len() < HISTORY_SEGMENT_HEADER_BYTES
+        || &encoded[..HISTORY_SEGMENT_MAGIC.len()] != HISTORY_SEGMENT_MAGIC
+    {
+        return Err("unsupported Coinbase history segment".to_string());
+    }
+    let count = u32::from_le_bytes(
+        encoded[HISTORY_SEGMENT_MAGIC.len()..HISTORY_SEGMENT_HEADER_BYTES]
+            .try_into()
+            .map_err(|_| "Coinbase history segment header is truncated".to_string())?,
+    );
+    let count = usize::try_from(count)
+        .ok()
+        .filter(|count| *count != 0 && *count <= MAXIMUM_PAGE_ITEMS)
+        .ok_or_else(|| "Coinbase history segment item count is invalid".to_string())?;
+    let expected = HISTORY_SEGMENT_HEADER_BYTES
+        .checked_add(
+            HISTORY_PAYLOAD_BYTES
+                .checked_mul(count)
+                .ok_or_else(|| "Coinbase history segment size overflow".to_string())?,
+        )
+        .ok_or_else(|| "Coinbase history segment size overflow".to_string())?;
+    if encoded.len() != expected {
+        return Err("Coinbase history segment size is invalid".to_string());
+    }
+    Ok(count)
 }
 
 fn validate_request(request: &HistoryPageRequest) -> Result<(), String> {

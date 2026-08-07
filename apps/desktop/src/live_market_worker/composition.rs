@@ -42,14 +42,12 @@ pub(super) struct ProductProfile {
     pub(super) symbol: String,
 }
 
-type ProviderWorker = DesktopMarketWorker<MarketBar, NativeCredentialVault, CoinbaseProviderDriver>;
-
-pub(super) struct CoinbaseDesktopWorker {
-    runtime: ProviderWorker,
+pub(super) struct CoinbaseDesktopWorker<V: CredentialVault = NativeCredentialVault> {
+    runtime: DesktopMarketWorker<MarketBar, V, CoinbaseProviderDriver>,
     aggregator: CoinbaseBarAggregator,
 }
 
-impl CoinbaseDesktopWorker {
+impl<V: CredentialVault> CoinbaseDesktopWorker<V> {
     pub(super) fn try_recv_coinbase_aggregated_bar(
         &mut self,
         events: &CoinbaseProviderEvents,
@@ -93,22 +91,22 @@ impl CoinbaseDesktopWorker {
     }
 }
 
-impl Deref for CoinbaseDesktopWorker {
-    type Target = ProviderWorker;
+impl<V: CredentialVault> Deref for CoinbaseDesktopWorker<V> {
+    type Target = DesktopMarketWorker<MarketBar, V, CoinbaseProviderDriver>;
 
     fn deref(&self) -> &Self::Target {
         &self.runtime
     }
 }
 
-impl DerefMut for CoinbaseDesktopWorker {
+impl<V: CredentialVault> DerefMut for CoinbaseDesktopWorker<V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.runtime
     }
 }
 
-pub(super) struct OpenedWorker {
-    pub(super) worker: CoinbaseDesktopWorker,
+pub(super) struct OpenedWorker<V: CredentialVault = NativeCredentialVault> {
+    pub(super) worker: CoinbaseDesktopWorker<V>,
     pub(super) events: CoinbaseProviderEvents,
     pub(super) segment_key: SegmentEncryptionKey,
 }
@@ -173,6 +171,40 @@ pub(super) fn open_worker(
         worker,
         events,
         segment_key,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn open_test_worker<V: CredentialVault>(
+    profile: &ProductProfile,
+    history_root: PathBuf,
+    ui_thread: ThreadId,
+    vault: V,
+    driver: CoinbaseProviderDriver,
+    catalog_key: CatalogKey,
+) -> Result<CoinbaseDesktopWorker<V>, String> {
+    let runtime = DesktopMarketWorker::try_open(
+        vault,
+        driver,
+        "coinbase-public-session",
+        history_root,
+        catalog_key,
+        ui_thread,
+        worker_config(false)?,
+    )
+    .map_err(|error| error.to_string())?;
+    let aggregator = CoinbaseBarAggregator::new(
+        CoinbaseBarAggregatorConfig::try_new(
+            profile.product_id.clone(),
+            2,
+            8,
+            nonzero(MODEL_ITEM_CAPACITY),
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    Ok(CoinbaseDesktopWorker {
+        runtime,
+        aggregator,
     })
 }
 

@@ -4,7 +4,7 @@ mod live_market_worker;
 mod market_worker;
 mod windowed_benchmark;
 
-use axiusflow_application::ReplayStreamUpdate;
+use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_observability::{DiagnosticsQueue, FeedDiagnosticsSnapshot, LocalLatencyMetric};
@@ -728,23 +728,47 @@ fn run_coinbase_live_smoke(
         return Err("Coinbase shipping worker bypassed the loading state".to_string());
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    let mut local_cache_observed = false;
+    let mut last_state = None;
+    let mut last_state_message = None;
+    let mut last_snapshot_provenance = None;
     loop {
         let (messages, disconnected) = worker.drain_messages();
         for message in messages {
             match message {
-                MarketWorkerMessage::Update(publication)
-                    if matches!(publication.update, ReplayStreamUpdate::Snapshot(_)) =>
-                {
-                    drop(worker);
-                    println!(
-                        "coinbase_shipping_live_smoke=passed product={product_id} loading=true covering_snapshot=true clean_shutdown=true"
-                    );
-                    return Ok(());
-                }
+                MarketWorkerMessage::Update(publication) => match publication.update {
+                    ReplayStreamUpdate::Snapshot(snapshot)
+                        if snapshot.provenance() == ReplayProvenance::LiveProvider =>
+                    {
+                        drop(worker);
+                        println!(
+                            "coinbase_shipping_live_smoke=passed product={product_id} loading=true local_cache_observed={local_cache_observed} covering_snapshot=true clean_shutdown=true"
+                        );
+                        return Ok(());
+                    }
+                    ReplayStreamUpdate::Snapshot(snapshot)
+                        if snapshot.provenance() == ReplayProvenance::LocalCache =>
+                    {
+                        local_cache_observed = true;
+                        last_snapshot_provenance = Some(snapshot.provenance());
+                    }
+                    ReplayStreamUpdate::Snapshot(snapshot) => {
+                        last_snapshot_provenance = Some(snapshot.provenance());
+                    }
+                    ReplayStreamUpdate::Delta(_) => {}
+                },
                 MarketWorkerMessage::State {
                     state: ChartState::Error,
                     message,
-                } => return Err(message),
+                } => {
+                    return Err(format!(
+                        "{message} (previous_state_message={last_state_message:?})"
+                    ));
+                }
+                MarketWorkerMessage::State { state, message } => {
+                    last_state = Some(state);
+                    last_state_message = Some(message);
+                }
                 _ => {}
             }
         }
@@ -752,7 +776,9 @@ fn run_coinbase_live_smoke(
             return Err("Coinbase shipping worker disconnected before its snapshot".to_string());
         }
         if std::time::Instant::now() >= deadline {
-            return Err("Coinbase shipping worker timed out before its snapshot".to_string());
+            return Err(format!(
+                "Coinbase shipping worker timed out before its snapshot (local_cache_observed={local_cache_observed}, last_snapshot_provenance={last_snapshot_provenance:?}, last_state={last_state:?}, last_state_message={last_state_message:?})"
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

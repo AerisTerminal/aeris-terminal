@@ -58,8 +58,8 @@ fn publish_recovery_commands(
     true
 }
 
-pub(super) fn publish_update(
-    worker: &mut CoinbaseDesktopWorker,
+pub(super) fn publish_update<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
     provider_generation: SessionGeneration,
     model: &mut MarketBarClientModel,
     update: ReplayStreamUpdate,
@@ -85,6 +85,24 @@ pub(super) fn publish_update(
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: worker_label.to_string(),
             ui_diagnostics: Some(ui_diagnostics),
+        }))
+        .map_err(|()| "desktop market UI channel disconnected".to_string())
+}
+
+pub(super) fn publish_cached_update(
+    model: &mut MarketBarClientModel,
+    update: ReplayStreamUpdate,
+    worker_label: &str,
+    message_tx: &MarketWorkerSender,
+) -> Result<(), String> {
+    let generation = published_generation(model, update.clone())?;
+    message_tx
+        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+            update,
+            generation,
+            subscription_id: SUBSCRIPTION_ID.to_string(),
+            worker_label: worker_label.to_string(),
+            ui_diagnostics: None,
         }))
         .map_err(|()| "desktop market UI channel disconnected".to_string())
 }

@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 27
+**Revision:** 28
 **Last updated:** 2026-08-07
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage A** (`in_progress` — Coinbase shipping desktop gate). **Stage C** is `blocked_external` after deterministic conformance. |
 | Blocked | Stage C authorized Test evidence requires signed R|Trader agreements and vault credentials on the developer machine. |
-| Next | Publish the newest retained Coinbase segment before connecting, then complete shipping-worker corrupt-cache, reconnect, and redaction coverage; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
+| Next | Complete shipping-worker corrupt-cache refetch, reconnect, redaction, and deterministic shutdown coverage; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -67,7 +67,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Stage | Status | Progress |
 |---|---|---|
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
-| A — Stabilize Coinbase | `in_progress` | encrypted history retention/discovery [x]; shipping live smoke [x]; shipping-path recovery coverage [ ] |
+| A — Stabilize Coinbase | `in_progress` | encrypted history retention/discovery [x]; shipping offline startup [x]; shipping live smoke [x]; remaining shipping recovery coverage [ ] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
 | C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
@@ -102,7 +102,7 @@ Full scope policy:
 
 | Area                       | Status        | Current reality                                                                                                                                                                                                                                     |
 | -------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; desktop-live gate incomplete.                                                                                                                                                              |
+| Coinbase reference + chart | `in_progress` | BTC-USD / ETH-USD 1m history and live aggregation exist; authenticated cache-first startup and live replacement pass, while the complete desktop recovery gate remains open.                                                                      |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `ready`       | Rithmic issued R|Protocol kit access and Rithmic Test credentials. Kit is installed locally under `provider_kit/` (see §4.2 and §8). Live login still needs signed Test agreements in R|Trader / R|Trader Pro.                                      |
 | Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized Test evidence remains. |
@@ -259,7 +259,8 @@ unblocked product batch while authorized Rithmic Test evidence remains external.
 - [x] Coalesce state and forming-bar UI updates where safe.
 - [x] Deliver completed bars in order or fence and request one recovery snapshot.
 - [x] Encode validated Coinbase pages into bounded versioned segments, retain them through the worker-owned encrypted store, and discover the newest exact series revision without exposing raw catalog dimensions.
-- [ ] Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity through the shipping worker.
+- [x] Hydrate and publish the newest authenticated retained segment before connecting, normalize it into the live aggregator's bounded sequence space, reject corrupt segments, and replace cached ownership with a fresh live covering snapshot.
+- [ ] Prove bounded launch and shutdown, reconnect, corrupt-cache provider refetch, diagnostics redaction, and deterministic history-to-live continuity through the shipping worker.
 - [x] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
 - [x] Repeat the launch, covering-snapshot, and clean-shutdown path through the shipping desktop worker against the public Coinbase feed for BTC-USD and ETH-USD.
 
