@@ -361,7 +361,7 @@ impl Render for OriginChartView {
 
         div()
             .size_full()
-            .bg(rgb(self.theme.colors.background.rgb_u32()))
+            .bg(rgb(self.theme.colors.card.rgb_u32()))
             .child(
                 canvas(
                     move |bounds: Bounds<gpui::Pixels>, window, cx| {

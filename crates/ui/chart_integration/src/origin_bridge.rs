@@ -10,7 +10,7 @@ use std::num::NonZeroUsize;
 const DEFAULT_CHART_DATA_QUEUE_CAPACITY: usize = 64;
 
 pub(crate) fn apply_theme(engine: &mut ChartEngine, theme: &AxiusflowTheme) {
-    let background = css_color(theme.colors.background);
+    let background = css_color(theme.colors.card);
     let axis_text = css_color(theme.colors.chart_axis_text);
     let border = css_color(theme.colors.border);
     let options = format!(

@@ -785,8 +785,6 @@ impl Render for TerminalApp {
                     .id("primary_chart")
                     .v_flex()
                     .flex_1()
-                    .m(px(12.0))
-                    .rounded(button_radius)
                     .overflow_hidden()
                     .border_1()
                     .border_color(gpui_color(colors.border))
@@ -957,7 +955,7 @@ fn terminal_header(
     let colors = state.theme.colors;
     let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
     let passive_button = ButtonCustomVariant::new(cx)
-        .color(gpui_color(colors.card))
+        .color(gpui_color(colors.background))
         .foreground(gpui_color(colors.muted_foreground))
         .hover(gpui_color(colors.card))
         .active(gpui_color(colors.card));
@@ -1158,15 +1156,15 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
     component.success = gpui_color(colors.profit);
     component.warning = gpui_color(colors.warning);
 
-    component.sidebar = gpui_color(colors.card);
+    component.sidebar = gpui_color(colors.background);
     component.sidebar_foreground = gpui_color(colors.card_foreground);
     component.sidebar_border = gpui_color(colors.border);
     component.table = gpui_color(colors.card);
     component.table_head = gpui_color(colors.muted);
     component.table_row_border = gpui_color(colors.border);
-    component.title_bar = gpui_color(colors.card);
+    component.title_bar = gpui_color(colors.background);
     component.title_bar_border = gpui_color(colors.border);
-    component.status_bar = gpui_color(colors.card);
+    component.status_bar = gpui_color(colors.background);
     component.status_bar_border = gpui_color(colors.border);
     component.tokens = ThemeTokens::from(&component.colors);
 
