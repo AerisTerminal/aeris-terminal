@@ -8,7 +8,9 @@ use axiusflow_desktop_history::{
     ChartId, DesktopHistoryError, HistoryDecoder, HistoryPublication, HistoryWorker,
     HistoryWorkerConfig, HydrationOutcome, HydrationRequest, StartupCacheState, WorkerMetrics,
 };
-use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
+use axiusflow_desktop_storage::{
+    CatalogKey, HistorySeriesIdentity, PublicationRequest, SegmentEncryptionKey, SegmentIdentity,
+};
 use axiusflow_observability::{
     DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
 };
@@ -256,6 +258,33 @@ where
 
     pub const fn history_metrics(&self) -> WorkerMetrics {
         self.history.metrics()
+    }
+
+    /// Persists one validated provider segment through the worker-owned encrypted store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted wrong-thread, identity, rights, bounds, or storage failure.
+    pub fn persist_history_segment(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.history.persist_segment(request).map_err(Into::into)
+    }
+
+    /// Returns the newest retained identity for one exact history series revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted wrong-thread, invalid-dimension, or catalog failure.
+    pub fn latest_history_identity(
+        &self,
+        series: HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<Option<SegmentIdentity>, DesktopMarketWorkerError> {
+        self.history
+            .latest_identity(series, now_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Starts a fresh provider generation.

@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 26
+**Revision:** 27
 **Last updated:** 2026-08-07
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage A** (`in_progress` — Coinbase shipping desktop gate). **Stage C** is `blocked_external` after deterministic conformance. |
 | Blocked | Stage C authorized Test evidence requires signed R|Trader agreements and vault credentials on the developer machine. |
-| Next | Complete Stage A shipping-worker offline, corrupt-cache, reconnect, and redaction coverage; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
+| Next | Publish the newest retained Coinbase segment before connecting, then complete shipping-worker corrupt-cache, reconnect, and redaction coverage; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -67,7 +67,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Stage | Status | Progress |
 |---|---|---|
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
-| A — Stabilize Coinbase | `in_progress` | deterministic component conformance [x]; shipping live smoke [x]; shipping-path recovery coverage [ ] |
+| A — Stabilize Coinbase | `in_progress` | encrypted history retention/discovery [x]; shipping live smoke [x]; shipping-path recovery coverage [ ] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
 | C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
@@ -258,6 +258,7 @@ unblocked product batch while authorized Rithmic Test evidence remains external.
 - [x] Replace front-removal vectors with fixed-capacity `VecDeque` storage.
 - [x] Coalesce state and forming-bar UI updates where safe.
 - [x] Deliver completed bars in order or fence and request one recovery snapshot.
+- [x] Encode validated Coinbase pages into bounded versioned segments, retain them through the worker-owned encrypted store, and discover the newest exact series revision without exposing raw catalog dimensions.
 - [ ] Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity through the shipping worker.
 - [x] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
 - [x] Repeat the launch, covering-snapshot, and clean-shutdown path through the shipping desktop worker against the public Coinbase feed for BTC-USD and ETH-USD.

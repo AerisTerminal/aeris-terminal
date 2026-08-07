@@ -3,6 +3,7 @@ use axiusflow_market_data::MarketBar;
 use axiusflow_provider_history::{
     DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
     HistoryPageRequest, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
+    SequencedHistory,
 };
 use rustls::{ClientConfig, ClientConnection, RootCertStore, Stream};
 use serde::Deserialize;
@@ -33,6 +34,8 @@ const MAXIMUM_PAGE_ITEMS: usize = 350;
 const MAXIMUM_REQUEST_SPAN_NANOS: u64 = ONE_MINUTE_NANOS * MAXIMUM_PAGE_ITEMS as u64;
 const HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXCBH1";
 const HISTORY_PAYLOAD_BYTES: usize = HISTORY_PAYLOAD_MAGIC.len() + 7 * 8;
+const HISTORY_SEGMENT_MAGIC: &[u8; 6] = b"AXCBS1";
+const HISTORY_SEGMENT_HEADER_BYTES: usize = HISTORY_SEGMENT_MAGIC.len() + 4;
 
 type ResolutionResult = io::Result<Vec<SocketAddr>>;
 
@@ -192,6 +195,97 @@ pub fn decode_history_bar(item: &HistoryItem) -> Result<MarketBar, String> {
     }
     bar.validate().map_err(|error| error.to_string())?;
     Ok(bar)
+}
+
+/// Encodes one bounded, contiguous Coinbase history page for encrypted local retention.
+///
+/// # Errors
+///
+/// Returns an error for empty, oversized, malformed, or discontinuous input.
+pub fn encode_history_segment(items: &[HistoryItem]) -> Result<Vec<u8>, String> {
+    if items.is_empty() || items.len() > MAXIMUM_PAGE_ITEMS {
+        return Err("Coinbase history segment item count is invalid".to_string());
+    }
+    let count = u32::try_from(items.len())
+        .map_err(|_| "Coinbase history segment item count overflow".to_string())?;
+    let capacity = HISTORY_SEGMENT_HEADER_BYTES
+        .checked_add(
+            HISTORY_PAYLOAD_BYTES
+                .checked_mul(items.len())
+                .ok_or_else(|| "Coinbase history segment size overflow".to_string())?,
+        )
+        .ok_or_else(|| "Coinbase history segment size overflow".to_string())?;
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(HISTORY_SEGMENT_MAGIC);
+    encoded.extend_from_slice(&count.to_le_bytes());
+    let mut previous_sequence: Option<u64> = None;
+    for item in items {
+        let bar = decode_history_bar(item)?;
+        if previous_sequence.is_some_and(|previous| previous.checked_add(1) != Some(item.sequence))
+        {
+            return Err("Coinbase history segment is not contiguous".to_string());
+        }
+        previous_sequence = Some(bar.source_sequence);
+        encoded.extend_from_slice(&item.payload);
+    }
+    Ok(encoded)
+}
+
+/// Decodes one bounded retained Coinbase history segment into canonical bars.
+///
+/// # Errors
+///
+/// Returns an error for a wrong version, invalid size, malformed bar, or discontinuity.
+pub fn decode_history_segment(encoded: &[u8]) -> Result<Vec<SequencedHistory<MarketBar>>, String> {
+    if encoded.len() < HISTORY_SEGMENT_HEADER_BYTES
+        || &encoded[..HISTORY_SEGMENT_MAGIC.len()] != HISTORY_SEGMENT_MAGIC
+    {
+        return Err("unsupported Coinbase history segment".to_string());
+    }
+    let count = u32::from_le_bytes(
+        encoded[HISTORY_SEGMENT_MAGIC.len()..HISTORY_SEGMENT_HEADER_BYTES]
+            .try_into()
+            .map_err(|_| "Coinbase history segment header is truncated".to_string())?,
+    );
+    let count = usize::try_from(count)
+        .ok()
+        .filter(|count| *count != 0 && *count <= MAXIMUM_PAGE_ITEMS)
+        .ok_or_else(|| "Coinbase history segment item count is invalid".to_string())?;
+    let expected = HISTORY_SEGMENT_HEADER_BYTES
+        .checked_add(
+            HISTORY_PAYLOAD_BYTES
+                .checked_mul(count)
+                .ok_or_else(|| "Coinbase history segment size overflow".to_string())?,
+        )
+        .ok_or_else(|| "Coinbase history segment size overflow".to_string())?;
+    if encoded.len() != expected {
+        return Err("Coinbase history segment size is invalid".to_string());
+    }
+    let mut values = Vec::with_capacity(count);
+    let mut previous_sequence: Option<u64> = None;
+    for payload in encoded[HISTORY_SEGMENT_HEADER_BYTES..].chunks_exact(HISTORY_PAYLOAD_BYTES) {
+        let mut offset = HISTORY_PAYLOAD_MAGIC.len();
+        let sequence = read_u64(payload, &mut offset)?;
+        let timestamp = read_i64(payload, &mut offset)?;
+        let item = HistoryItem {
+            sequence,
+            event_time_unix_nanos: timestamp
+                .checked_mul(ONE_SECOND_NANOS)
+                .ok_or_else(|| "Coinbase history timestamp overflow".to_string())?,
+            payload: payload.to_vec(),
+        };
+        let bar = decode_history_bar(&item)?;
+        if previous_sequence.is_some_and(|previous| previous.checked_add(1) != Some(sequence)) {
+            return Err("Coinbase history segment is not contiguous".to_string());
+        }
+        previous_sequence = Some(sequence);
+        values.push(SequencedHistory {
+            sequence: NonZeroU64::new(sequence)
+                .ok_or_else(|| "Coinbase history segment has a zero sequence".to_string())?,
+            value: bar,
+        });
+    }
+    Ok(values)
 }
 
 fn validate_request(request: &HistoryPageRequest) -> Result<(), String> {
@@ -811,7 +905,8 @@ fn decode_chunked(raw: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::{
         COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-        connect_coinbase_endpoint_cancellable, decode_history_bar,
+        connect_coinbase_endpoint_cancellable, decode_history_bar, decode_history_segment,
+        encode_history_segment,
     };
     use crate::ENTITLEMENT_CLASS;
     use axiusflow_provider_history::{
@@ -997,12 +1092,49 @@ mod tests {
         assert_eq!(bars[0].open, 3_700_000);
         assert_eq!(bars[0].volume, 50_000_000);
         assert_eq!(bars[2].exchange_timestamp_seconds, 1_700_000_160);
+        let encoded = encode_history_segment(&page.items).expect("segment encodes");
+        let retained = decode_history_segment(&encoded).expect("segment decodes");
+        assert_eq!(
+            retained.iter().map(|item| item.value).collect::<Vec<_>>(),
+            bars
+        );
         assert_eq!(
             paths.borrow().as_slice(),
             [
                 "/api/v3/brokerage/market/products/BTC-USD/candles?start=1700000040&end=1700000160&granularity=ONE_MINUTE&limit=3"
             ]
         );
+    }
+
+    #[test]
+    fn retained_segment_rejects_truncation_corruption_and_discontinuity() {
+        let first = super::parse_candle(&super::CandleMessage {
+            start: "1700000040".to_string(),
+            high: "37050.00".to_string(),
+            low: "36950.00".to_string(),
+            open: "37000.00".to_string(),
+            close: "37020.00".to_string(),
+            volume: "0.50000000".to_string(),
+        })
+        .expect("first candle validates");
+        let third = super::parse_candle(&super::CandleMessage {
+            start: "1700000160".to_string(),
+            high: "37100.00".to_string(),
+            low: "37000.00".to_string(),
+            open: "37010.00".to_string(),
+            close: "37090.00".to_string(),
+            volume: "1.25000000".to_string(),
+        })
+        .expect("third candle validates");
+        assert!(encode_history_segment(&[first.clone(), third]).is_err());
+
+        let mut encoded = encode_history_segment(&[first]).expect("single item encodes");
+        encoded.pop();
+        assert!(decode_history_segment(&encoded).is_err());
+        encoded.push(0);
+        let last = encoded.len() - 1;
+        encoded[last] ^= 0xff;
+        assert!(decode_history_segment(&encoded).is_err());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use axiusflow_desktop_provider_runtime::{
     SessionGeneration,
 };
 use axiusflow_desktop_storage::{
-    CatalogKey, DataKind, HistoryScope, HistoryStore, PublicationOutcome, PublicationRequest,
+    CatalogKey, DataKind, HistoryScope, HistorySeriesIdentity, HistoryStore, PublicationRequest,
     RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
 };
 use axiusflow_market_data::MarketBar;
@@ -698,10 +698,15 @@ fn local_hydration_does_not_require_provider_or_control_plane() {
     let root = TestRoot::create("local-hydration");
     let key = segment_key();
     let identity = identity("local-hydration");
-    let mut store = HistoryStore::open(root.path(), catalog_key(), 4).expect("store opens");
-    assert!(matches!(
-        store
-            .publish(PublicationRequest {
+    let newer_identity = SegmentIdentity {
+        range_start_unix_nanos: identity.range_start_unix_nanos + 60_000_000_000,
+        range_end_unix_nanos: identity.range_end_unix_nanos + 60_000_000_000,
+        ..identity.clone()
+    };
+    let mut writer = market_worker(root.path(), 1);
+    for _ in 0..2 {
+        writer
+            .persist_history_segment(PublicationRequest {
                 identity: &identity,
                 payload: b"1,2",
                 encryption_key: &key,
@@ -709,17 +714,44 @@ fn local_hydration_does_not_require_provider_or_control_plane() {
                 recovery: RecoveryAction::ProviderRefetch,
                 now_unix_seconds: 100,
             })
-            .expect("local segment publishes"),
-        PublicationOutcome::Published(_)
-    ));
-    drop(store);
+            .expect("immutable local segment persists idempotently");
+    }
+    writer
+        .persist_history_segment(PublicationRequest {
+            identity: &newer_identity,
+            payload: b"3,4",
+            encryption_key: &key,
+            retention: RetentionPolicy::UntilRevoked,
+            recovery: RecoveryAction::ProviderRefetch,
+            now_unix_seconds: 101,
+        })
+        .expect("newer immutable segment persists");
+    let latest = writer
+        .latest_history_identity(
+            HistorySeriesIdentity {
+                scope: &identity.scope,
+                instrument_id: &identity.instrument_id,
+                data_kind: identity.data_kind,
+                resolution: &identity.resolution,
+                source_revision: identity.source_revision,
+                schema_revision: identity.schema_revision,
+                calendar_revision: identity.calendar_revision,
+                adjustment_revision: identity.adjustment_revision,
+                correction_revision: identity.correction_revision,
+            },
+            102,
+        )
+        .expect("latest retained identity query succeeds")
+        .expect("retained identity exists");
+    assert_eq!(latest, newer_identity);
+    drop(writer);
 
     let mut worker = market_worker(root.path(), 1);
     let mut decoder = SequenceDecoder;
     let outcome = worker
         .hydrate_visible(
             HydrationRequest {
-                identity: &identity,
+                identity: &latest,
                 encryption_key: &key,
                 now_unix_seconds: 101,
                 startup_cache_state: StartupCacheState::Warm,
@@ -733,7 +765,7 @@ fn local_hydration_does_not_require_provider_or_control_plane() {
     let HydrationOutcome::Ready { publication, .. } = outcome else {
         panic!("local segment must hydrate");
     };
-    assert_eq!(publication.watermark, 2);
+    assert_eq!(publication.watermark, 4);
 }
 
 #[test]

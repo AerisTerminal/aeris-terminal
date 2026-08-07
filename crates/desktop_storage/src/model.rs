@@ -88,6 +88,44 @@ impl SegmentIdentity {
     }
 }
 
+/// Plaintext dimensions used to discover the newest retained immutable segment.
+#[derive(Clone, Copy, Debug)]
+pub struct HistorySeriesIdentity<'a> {
+    pub scope: &'a HistoryScope,
+    pub instrument_id: &'a str,
+    pub data_kind: DataKind,
+    pub resolution: &'a str,
+    pub source_revision: u32,
+    pub schema_revision: u32,
+    pub calendar_revision: u32,
+    pub adjustment_revision: u32,
+    pub correction_revision: u64,
+}
+
+impl HistorySeriesIdentity<'_> {
+    pub(crate) fn validate(self) -> Result<(), DesktopStorageError> {
+        self.scope.validate()?;
+        validate_identifier("instrument_id", self.instrument_id)?;
+        validate_identifier("resolution", self.resolution)?;
+        if self.source_revision == 0 {
+            return Err(DesktopStorageError::InvalidIdentity("source_revision"));
+        }
+        if self.schema_revision == 0 {
+            return Err(DesktopStorageError::InvalidIdentity("schema_revision"));
+        }
+        if self.calendar_revision == 0 {
+            return Err(DesktopStorageError::InvalidIdentity("calendar_revision"));
+        }
+        if self.adjustment_revision == 0 {
+            return Err(DesktopStorageError::InvalidIdentity("adjustment_revision"));
+        }
+        if self.correction_revision == 0 || self.correction_revision > i64::MAX as u64 {
+            return Err(DesktopStorageError::InvalidIdentity("correction_revision"));
+        }
+        Ok(())
+    }
+}
+
 /// Provider behavior when retained history is absent or unusable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryAction {

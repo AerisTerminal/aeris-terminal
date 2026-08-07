@@ -380,6 +380,44 @@ impl Catalog {
         }
     }
 
+    pub fn latest_series_range(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        now_unix_seconds: i64,
+    ) -> Result<Option<(i64, i64)>, DesktopStorageError> {
+        self.connection
+            .query_row(
+                "SELECT range_start, range_end FROM history_segment
+                 WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+                   AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+                   AND source_revision=?7 AND schema_revision=?8
+                   AND calendar_revision=?9 AND adjustment_revision=?10
+                   AND correction_revision=?11 AND state=0
+                   AND (retention_until IS NULL OR retention_until>?12)
+                 ORDER BY range_end DESC, created_at DESC LIMIT 1",
+                params![
+                    tokens.provider.as_slice(),
+                    tokens.account.as_slice(),
+                    tokens.entitlement.as_slice(),
+                    tokens.instrument.as_slice(),
+                    dimensions.data_kind,
+                    tokens.resolution.as_slice(),
+                    dimensions.source_revision,
+                    dimensions.schema_revision,
+                    dimensions.calendar_revision,
+                    dimensions.adjustment_revision,
+                    i64::try_from(dimensions.correction_revision).map_err(|_| {
+                        DesktopStorageError::InvalidIdentity("correction_revision")
+                    })?,
+                    now_unix_seconds,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), DesktopStorageError> {
         let transaction = self.connection.transaction()?;
         for record in records {
@@ -497,6 +535,25 @@ impl Catalog {
             .query_map(parameters, map_record)?
             .collect::<Result<Vec<_>, _>>()?)
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SeriesTokens<'a> {
+    pub provider: &'a [u8; 32],
+    pub account: &'a [u8; 32],
+    pub entitlement: &'a [u8; 32],
+    pub instrument: &'a [u8; 32],
+    pub resolution: &'a [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SeriesDimensions {
+    pub data_kind: u8,
+    pub source_revision: u32,
+    pub schema_revision: u32,
+    pub calendar_revision: u32,
+    pub adjustment_revision: u32,
+    pub correction_revision: u64,
 }
 
 fn initialize_metadata(

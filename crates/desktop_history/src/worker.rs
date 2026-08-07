@@ -4,8 +4,9 @@ use crate::{
     cache::SharedHistoryCache,
 };
 use axiusflow_desktop_storage::{
-    AuthorizedHistoryRead, AvailabilityReason, CatalogKey, HistoryStore, MAXIMUM_SEGMENT_BYTES,
-    RecoveryAction, SegmentIdentity,
+    AuthorizedHistoryRead, AvailabilityReason, CatalogKey, DesktopStorageError,
+    HistorySeriesIdentity, HistoryStore, MAXIMUM_SEGMENT_BYTES, PublicationRequest, RecoveryAction,
+    SegmentIdentity,
 };
 use axiusflow_provider_history::{
     HandoffCoordinator, LiveAcceptance, SequencedHistory, VerifiedHistorySnapshot,
@@ -131,6 +132,40 @@ impl<T: Clone> HistoryWorker<T> {
     #[must_use]
     pub const fn metrics(&self) -> WorkerMetrics {
         self.metrics
+    }
+
+    /// Persists one validated provider segment through the worker-owned encrypted store.
+    ///
+    /// An already-present immutable identity is accepted without replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread, identity, rights, bounds, or storage failures.
+    pub fn persist_segment(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<(), DesktopHistoryError> {
+        self.ensure_owner()?;
+        match self.store.publish(request) {
+            Ok(_) | Err(DesktopStorageError::SegmentAlreadyExists) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Returns the newest retained identity for one exact history series revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread, invalid dimensions, or catalog failure.
+    pub fn latest_identity(
+        &self,
+        series: HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<Option<SegmentIdentity>, DesktopHistoryError> {
+        self.ensure_owner()?;
+        self.store
+            .latest_identity(series, now_unix_seconds)
+            .map_err(Into::into)
     }
 
     /// Returns the current bounded cache entry count.

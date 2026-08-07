@@ -9,13 +9,16 @@ use axiusflow_application::{
 };
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, ENTITLEMENT_CLASS,
-    decode_history_bar,
+    decode_history_bar, encode_history_segment,
 };
 use axiusflow_desktop_history::StartupCacheState;
 use axiusflow_desktop_provider_runtime::{
     DesktopProviderState, HistoryCompletionInstall, SessionGeneration,
 };
-use axiusflow_desktop_storage::{DataKind, HistoryScope, SegmentEncryptionKey, SegmentIdentity};
+use axiusflow_desktop_storage::{
+    DataKind, HistoryScope, PublicationRequest, RecoveryAction, RetentionPolicy,
+    SegmentEncryptionKey, SegmentIdentity,
+};
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::{BarDefinition, MarketBar};
 use axiusflow_provider_history::{
@@ -197,6 +200,17 @@ fn install_history(
         segment_key,
         now_seconds,
     )?;
+    let payload = encode_history_segment(&history.completion.page().items)?;
+    worker
+        .persist_history_segment(PublicationRequest {
+            identity: &history.identity,
+            payload: &payload,
+            encryption_key: segment_key,
+            retention: RetentionPolicy::UntilRevoked,
+            recovery: RecoveryAction::ProviderRefetch,
+            now_unix_seconds: now_seconds,
+        })
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

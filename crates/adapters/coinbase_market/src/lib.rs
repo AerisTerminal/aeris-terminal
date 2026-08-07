@@ -35,7 +35,8 @@ pub use fixed_point::FixedPointValue;
 pub use fixture::{CoinbaseFixtureSession, deterministic_fixture_session};
 pub use history::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-    CoinbaseHttpsHistoryTransport, decode_history_bar,
+    CoinbaseHttpsHistoryTransport, decode_history_bar, decode_history_segment,
+    encode_history_segment,
 };
 pub use review::{ENTITLEMENT_CLASS, PROVIDER, PROVIDER_REVIEW, TERMS_REVIEW, WEBSOCKET_ENDPOINT};
 pub use session::{CoinbaseConnection, CoinbaseSession, SessionHealth, SessionOutcome};

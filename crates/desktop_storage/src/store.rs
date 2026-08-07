@@ -1,6 +1,8 @@
 use crate::{
     DesktopStorageError,
-    catalog::{Catalog, CatalogFilter, CatalogRecord, NewCatalogRecord},
+    catalog::{
+        Catalog, CatalogFilter, CatalogRecord, NewCatalogRecord, SeriesDimensions, SeriesTokens,
+    },
     crypto::{
         SEGMENT_FILE_OVERHEAD_BYTES, catalog_key_verifier, checksum, decrypt_segment,
         encode_identity, encrypt_segment, hex, identity_token, instrument_token, resolution_token,
@@ -146,6 +148,58 @@ impl HistoryStore {
             missing_recovery,
             MAXIMUM_SEGMENT_BYTES,
         )
+    }
+
+    /// Returns the newest unexpired active segment for one exact series revision.
+    ///
+    /// The caller supplies the plaintext scope and dimensions; the catalog still
+    /// stores and searches only keyed tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid dimensions or catalog access failure.
+    pub fn latest_identity(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<Option<crate::SegmentIdentity>, DesktopStorageError> {
+        series.validate()?;
+        let scope = scope_tokens(&self.catalog_key, series.scope)?;
+        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
+        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
+        let range = self.catalog.latest_series_range(
+            SeriesTokens {
+                provider: &scope.provider,
+                account: &scope.account,
+                entitlement: &scope.entitlement,
+                instrument: &instrument,
+                resolution: &resolution,
+            },
+            SeriesDimensions {
+                data_kind: series.data_kind.code(),
+                source_revision: series.source_revision,
+                schema_revision: series.schema_revision,
+                calendar_revision: series.calendar_revision,
+                adjustment_revision: series.adjustment_revision,
+                correction_revision: series.correction_revision,
+            },
+            now_unix_seconds,
+        )?;
+        Ok(range.map(
+            |(range_start_unix_nanos, range_end_unix_nanos)| crate::SegmentIdentity {
+                scope: series.scope.clone(),
+                instrument_id: series.instrument_id.to_string(),
+                data_kind: series.data_kind,
+                resolution: series.resolution.to_string(),
+                range_start_unix_nanos,
+                range_end_unix_nanos,
+                source_revision: series.source_revision,
+                schema_revision: series.schema_revision,
+                calendar_revision: series.calendar_revision,
+                adjustment_revision: series.adjustment_revision,
+                correction_revision: series.correction_revision,
+            },
+        ))
     }
 
     /// Reads one exact segment only when its cataloged payload fits the caller's bound.
