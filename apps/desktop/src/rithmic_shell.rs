@@ -108,6 +108,10 @@ impl RithmicSymbolBrowser {
         &self.results
     }
 
+    pub(crate) const fn search_pending(&self) -> bool {
+        self.pending_search_id.is_some()
+    }
+
     pub(crate) fn selected(&self) -> Option<&RithmicSymbolSelection> {
         self.selected.as_ref()
     }
@@ -237,6 +241,7 @@ mod tests {
         assert!(browser.begin_search("E\nS").is_err());
 
         let request = browser.begin_search("ES").expect("query validates");
+        assert!(browser.search_pending());
         assert!(!browser.apply_results(
             request.request_id,
             vec![result("ES"); MAXIMUM_SYMBOL_RESULTS + 1],

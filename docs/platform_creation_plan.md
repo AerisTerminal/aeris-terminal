@@ -492,7 +492,9 @@ The native header now uses GPUI Component dropdown menus for exact contract and
 series selection. The instrument menu includes a compact symbol query input,
 remains available after an empty result, and renders only the bounded,
 generation-fenced catalog result set. The current contract and series are
-checked, so selection no longer relies on opaque click-to-cycle behavior.
+checked, so selection no longer relies on opaque click-to-cycle behavior. Enter
+submits the query, and the Search action is visibly loading/disabled while the
+single bounded provider search is in flight.
 
 
 

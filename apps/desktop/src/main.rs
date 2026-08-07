@@ -25,7 +25,7 @@ use gpui::{
 use gpui_component::{
     Disableable, Root, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
@@ -165,12 +165,29 @@ struct HeaderState {
     selected_instrument: Option<(String, String)>,
     selected_series: Option<rithmic_history::RithmicSeries>,
     symbol_input: Option<Entity<InputState>>,
+    search_activity: SearchActivity,
     controls: HeaderControls,
     dom_visible: bool,
     health_visible: bool,
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SearchActivity {
+    Idle,
+    Pending,
+}
+
+impl SearchActivity {
+    const fn from_pending(pending: bool) -> Self {
+        if pending { Self::Pending } else { Self::Idle }
+    }
+
+    const fn is_pending(self) -> bool {
+        matches!(self, Self::Pending)
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -656,6 +673,9 @@ impl TerminalApp {
     }
 
     fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
+        if self.symbol_browser.search_pending() {
+            return false;
+        }
         let request = match self.symbol_browser.begin_search(query) {
             Ok(request) => request,
             Err(message) => {
@@ -1016,6 +1036,7 @@ impl Render for TerminalApp {
                 }),
                 selected_series: self.series_browser.selected().map(|request| request.series),
                 symbol_input: self.symbol_input.clone(),
+                search_activity: SearchActivity::from_pending(self.symbol_browser.search_pending()),
                 controls: HeaderControls::from_state(
                     self.symbol_input.is_some() || !self.symbol_browser.results().is_empty(),
                     self.symbol_browser.selected().is_some(),
@@ -1119,6 +1140,7 @@ fn terminal_header(
     let selected_instrument = state.selected_instrument;
     let selected_series = state.selected_series;
     let symbol_input = state.symbol_input;
+    let search_activity = state.search_activity;
     let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
     let dom_toggle = panel_toggle(
         "dom_toggle",
@@ -1150,12 +1172,15 @@ fn terminal_header(
     );
     let instrument_selector = instrument_selector(
         app.clone(),
-        state.market_label,
-        instruments,
-        selected_instrument,
-        symbol_input,
+        InstrumentSelectorState {
+            label: state.market_label,
+            instruments,
+            selected: selected_instrument,
+            input: symbol_input,
+            search_activity,
+            enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
+        },
         active_button,
-        state.controls.enabled(HeaderControls::INSTRUMENT),
     );
     TitleBar::new().child(
         div()
@@ -1183,21 +1208,33 @@ fn terminal_header(
 
 fn instrument_selector(
     app: Entity<TerminalApp>,
+    state: InstrumentSelectorState,
+    variant: ButtonCustomVariant,
+) -> impl IntoElement {
+    Button::new("instrument_selector")
+        .label(state.label)
+        .dropdown_caret(true)
+        .custom(variant)
+        .disabled(!state.enabled)
+        .dropdown_menu(move |menu, _, _| {
+            instrument_menu(
+                menu,
+                &app,
+                &state.instruments,
+                state.selected.as_ref(),
+                state.input.as_ref(),
+                state.search_activity.is_pending(),
+            )
+        })
+}
+
+struct InstrumentSelectorState {
     label: String,
     instruments: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
     selected: Option<(String, String)>,
     input: Option<Entity<InputState>>,
-    variant: ButtonCustomVariant,
+    search_activity: SearchActivity,
     enabled: bool,
-) -> impl IntoElement {
-    Button::new("instrument_selector")
-        .label(label)
-        .dropdown_caret(true)
-        .custom(variant)
-        .disabled(!enabled)
-        .dropdown_menu(move |menu, _, _| {
-            instrument_menu(menu, &app, &instruments, selected.as_ref(), input.as_ref())
-        })
 }
 
 fn instrument_menu(
@@ -1206,10 +1243,15 @@ fn instrument_menu(
     instruments: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
     selected: Option<&(String, String)>,
     input: Option<&Entity<InputState>>,
+    search_pending: bool,
 ) -> PopupMenu {
     let menu = match input {
         Some(input) => menu
-            .item(instrument_search_item(input.clone(), app.clone()))
+            .item(instrument_search_item(
+                input.clone(),
+                app.clone(),
+                search_pending,
+            ))
             .separator(),
         None => menu,
     };
@@ -1231,7 +1273,11 @@ fn instrument_menu(
         })
 }
 
-fn instrument_search_item(input: Entity<InputState>, app: Entity<TerminalApp>) -> PopupMenuItem {
+fn instrument_search_item(
+    input: Entity<InputState>,
+    app: Entity<TerminalApp>,
+    search_pending: bool,
+) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| {
         div()
             .flex()
@@ -1242,6 +1288,8 @@ fn instrument_search_item(input: Entity<InputState>, app: Entity<TerminalApp>) -
                 Button::new("rithmic_header_search")
                     .label("Search")
                     .primary()
+                    .loading(search_pending)
+                    .disabled(search_pending)
                     .on_click({
                         let app = app.clone();
                         move |_, _, cx| {
@@ -1754,6 +1802,25 @@ fn desktop_window_options(cx: &mut App) -> WindowOptions {
     }
 }
 
+fn subscribe_symbol_input(
+    input: Option<Entity<InputState>>,
+    terminal: &Entity<TerminalApp>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(input) = input else {
+        return;
+    };
+    let terminal = terminal.clone();
+    window
+        .subscribe(&input, cx, move |_, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                terminal.update(cx, TerminalApp::search_rithmic_input);
+            }
+        })
+        .detach();
+}
+
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -1844,8 +1911,10 @@ fn main() {
 
         cx.open_window(options, move |window, cx| {
             let symbol_input = symbol_input_for_startup(&bootstrap, window, cx);
+            let search_input = symbol_input.clone();
             let terminal =
                 cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker, symbol_input));
+            subscribe_symbol_input(search_input, &terminal, window, cx);
             cx.new(|cx| Root::new(terminal, window, cx))
         })
         .expect("the Axiusflow terminal window opens");
