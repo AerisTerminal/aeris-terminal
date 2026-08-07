@@ -518,7 +518,9 @@ and history requests.
 A later native-vault-only repeat on 2026-08-07 again passed both authenticated
 ticker sessions, the 16-result search, reference, trades, quotes, depth,
 reconnect identity, and clean close, and returned 276 one-minute bars plus seven
-100-trade bars for `MNQU6` on `CME`.
+100-trade bars for `MNQU6` on `CME`. The smoke now also sends an explicit
+protocol heartbeat on each authenticated ticker session and requires both
+responses to be accepted before reporting success.
 
 Windows frame evidence on 2026-08-07: the native display probe identified
 `LG ULTRAGEAR` (`\\.\DISPLAY1`) at 2560x1440, 1.25x scale, and 165,000 mHz.

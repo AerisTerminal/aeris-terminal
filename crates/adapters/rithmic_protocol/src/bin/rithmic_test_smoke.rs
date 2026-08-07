@@ -69,10 +69,33 @@ fn run_ticker(
     println!("rithmic_ticker_login=passed");
     let selected = search_and_reference(&mut ticker)?;
     let rejected = test_subscription(&mut ticker, &selected)?;
+    test_heartbeat(&mut ticker)?;
     ticker
         .close()
         .map_err(|error| format!("ticker_close_failed={error}"))?;
     Ok((selected, rejected))
+}
+
+fn test_heartbeat(
+    ticker: &mut axiusflow_rithmic_protocol_adapter::RithmicTickerConnection,
+) -> Result<(), String> {
+    ticker
+        .send_heartbeat()
+        .map_err(|error| format!("heartbeat_send_failed={error}"))?;
+    loop {
+        if let RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
+            accepted, ..
+        }) = ticker
+            .read_next()
+            .map_err(|error| format!("heartbeat_read_failed={error}"))?
+        {
+            if !accepted {
+                return Err("heartbeat_rejected".to_string());
+            }
+            println!("rithmic_heartbeat=passed");
+            return Ok(());
+        }
+    }
 }
 
 fn search_and_reference(
