@@ -4,6 +4,7 @@ mod live_market_worker;
 mod market_worker;
 mod windowed_benchmark;
 
+use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_observability::{DiagnosticsQueue, FeedDiagnosticsSnapshot, LocalLatencyMetric};
@@ -713,6 +714,65 @@ fn gpui_color(color: ThemeColor) -> Hsla {
     rgb(color.rgb_u32()).into()
 }
 
+fn run_coinbase_live_smoke(
+    product_id: &str,
+    history_root: std::path::PathBuf,
+) -> Result<(), String> {
+    let (startup, mut worker) = MarketDataWorker::start_coinbase(
+        product_id.to_string(),
+        history_root,
+        std::thread::current().id(),
+        false,
+    )?;
+    if !matches!(startup, MarketWorkerStartup::Loading { .. }) {
+        return Err("Coinbase shipping worker bypassed the loading state".to_string());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    loop {
+        let (messages, disconnected) = worker.drain_messages();
+        for message in messages {
+            match message {
+                MarketWorkerMessage::Update(publication)
+                    if matches!(publication.update, ReplayStreamUpdate::Snapshot(_)) =>
+                {
+                    drop(worker);
+                    println!(
+                        "coinbase_shipping_live_smoke=passed product={product_id} loading=true covering_snapshot=true clean_shutdown=true"
+                    );
+                    return Ok(());
+                }
+                MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message,
+                } => return Err(message),
+                _ => {}
+            }
+        }
+        if disconnected {
+            return Err("Coinbase shipping worker disconnected before its snapshot".to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("Coinbase shipping worker timed out before its snapshot".to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn run_coinbase_live_smoke_command(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), String> {
+    let usage = "usage: axiusflow_desktop --coinbase-live-smoke <BTC-USD|ETH-USD> <history-root>";
+    let product = arguments.next().ok_or_else(|| usage.to_string())?;
+    let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
+    if arguments.next().is_some() {
+        return Err(usage.to_string());
+    }
+    run_coinbase_live_smoke(
+        &product.to_string_lossy(),
+        std::path::PathBuf::from(history_root),
+    )
+}
+
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -722,6 +782,11 @@ fn main() {
                 .expect("usage: axiusflow_desktop --windowed-benchmark <report-path>");
             windowed_benchmark::run(std::path::Path::new(&report_path))
                 .expect("the windowed benchmark completes");
+            return;
+        }
+        if argument == "--coinbase-live-smoke" {
+            run_coinbase_live_smoke_command(arguments)
+                .expect("the Coinbase shipping live smoke passes");
             return;
         }
         if argument == "--coinbase-live" {

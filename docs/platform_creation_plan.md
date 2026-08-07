@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage A** (`in_progress` — Coinbase shipping desktop gate). **Stage C** is `blocked_external` after deterministic conformance. |
 | Blocked | Stage C authorized Test evidence requires signed R|Trader agreements and vault credentials on the developer machine. |
-| Next | Complete the Stage A shipping desktop live smoke; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
+| Next | Complete Stage A shipping-worker offline, corrupt-cache, reconnect, and redaction coverage; provision the native vault and run authorized Rithmic Test evidence after R\|Trader agreements are signed |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -67,7 +67,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Stage | Status | Progress |
 |---|---|---|
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
-| A — Stabilize Coinbase | `in_progress` | deterministic desktop conformance [x]; shipping desktop live smoke [ ] |
+| A — Stabilize Coinbase | `in_progress` | deterministic component conformance [x]; shipping live smoke [x]; shipping-path recovery coverage [ ] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
 | C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized Test evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
@@ -77,7 +77,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 ### Remaining focus (ordered)
 
 - [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
-- [ ] **Stage A:** deterministic desktop conformance [x]; shipping desktop live smoke [ ], then freeze (see §6).
+- [ ] **Stage A:** deterministic component conformance [x]; shipping live smoke [x]; shipping-path recovery coverage [ ], then freeze (see §6).
 - [ ] **Stage C:** deterministic headless conformance [x]; authorized Rithmic Test evidence [ ] (see §8).
 
 
@@ -258,9 +258,9 @@ unblocked product batch while authorized Rithmic Test evidence remains external.
 - [x] Replace front-removal vectors with fixed-capacity `VecDeque` storage.
 - [x] Coalesce state and forming-bar UI updates where safe.
 - [x] Deliver completed bars in order or fence and request one recovery snapshot.
-- [x] Deterministic conformance proves bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity.
+- [ ] Prove bounded launch and shutdown, offline startup, reconnect, corrupt-cache recovery, diagnostics redaction, and history-to-live continuity through the shipping worker.
 - [x] Cover BTC-USD and ETH-USD one-minute handoffs without gaps or duplicates.
-- [ ] Repeat the deterministic gate through the shipping desktop path against the public Coinbase feed.
+- [x] Repeat the launch, covering-snapshot, and clean-shutdown path through the shipping desktop worker against the public Coinbase feed for BTC-USD and ETH-USD.
 
 
 
@@ -269,9 +269,13 @@ unblocked product batch while authorized Rithmic Test evidence remains external.
 - [ ] Coinbase shipping desktop path passes deterministic and live smoke coverage with explicit state, bounded event-driven behavior, one recovery owner, nonblocking publication, and no unreviewed warnings.
 - [ ] After this gate, Coinbase receives correctness fixes only—no symbols, timeframes, depth, analytics, or cloud routes.
 
-Deterministic evidence command:
+Component evidence command:
 
 - `tools/run_coinbase_desktop_conformance.sh`
+
+Live shipping-worker evidence command:
+
+- `tools/run_coinbase_desktop_live_smoke.sh`
 
 
 
