@@ -764,6 +764,7 @@ dependencies = [
  "gpui_platform",
  "serde",
  "serde_json",
+ "sysinfo",
  "zeroize",
 ]
 

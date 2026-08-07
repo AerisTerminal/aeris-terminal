@@ -533,7 +533,7 @@ Capture evidence for:
 - [ ] Suspend/resume and offline startup.
 - [x] Burst traffic and frame-aligned conflation.
 - [x] Cache corruption and covering resnapshot.
-- [ ] Current and high-water memory.
+- [x] Current and high-water memory.
 - [ ] Eight-hour headless and desktop endurance.
 
 Deterministic evidence on 2026-08-07: the cross-platform ingest conformance now
@@ -554,6 +554,12 @@ snapshots without draining the UI mailbox. The fixed-capacity 32-item mailbox
 retained exactly one item at series generation 10,000, and 10,000 attempted
 frame-drain schedules admitted exactly one callback until completion. The
 command writes schema-1 JSON and opens no window.
+
+The same Windows run sampled the process working set throughout the burst:
+12,763,136 bytes at baseline, 14,462,976 bytes current/high-water after the
+burst, and 1,699,840 bytes sampled growth against a declared 67,108,864-byte
+limit. This is bounded burst evidence; the eight-hour row remains open for a
+continuous plateau measurement.
 
 
 

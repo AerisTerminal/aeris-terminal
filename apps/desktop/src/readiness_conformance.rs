@@ -3,8 +3,10 @@
 use crate::market_worker::{FixtureMarketWorker, MarketWorkerMessage, market_worker_channel};
 use serde::Serialize;
 use std::{error::Error, fs, num::NonZeroUsize, path::Path};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const BURST_UPDATES: usize = 10_000;
+const MAXIMUM_WORKING_SET_GROWTH_BYTES: u64 = 64 * 1_024 * 1_024;
 
 #[derive(Default)]
 pub(crate) struct FramePollGate {
@@ -39,9 +41,52 @@ struct DesktopBurstEvidence {
     accepted_frame_requests_after_completion: usize,
     bounded_latest_state_conflation: bool,
     single_frame_drain_gate: bool,
+    working_set_baseline_bytes: u64,
+    working_set_current_bytes: u64,
+    working_set_sampled_high_water_bytes: u64,
+    working_set_sampled_growth_bytes: u64,
+    maximum_working_set_growth_bytes: u64,
+    working_set_within_bound: bool,
+}
+
+struct ProcessMemoryProbe {
+    system: System,
+    pid: Pid,
+    baseline_bytes: u64,
+    current_bytes: u64,
+    high_water_bytes: u64,
+}
+
+impl ProcessMemoryProbe {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let pid = sysinfo::get_current_pid()?;
+        let mut probe = Self {
+            system: System::new(),
+            pid,
+            baseline_bytes: 0,
+            current_bytes: 0,
+            high_water_bytes: 0,
+        };
+        probe.sample()?;
+        probe.baseline_bytes = probe.current_bytes;
+        Ok(probe)
+    }
+
+    fn sample(&mut self) -> Result<(), Box<dyn Error>> {
+        self.system
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]));
+        self.current_bytes = self
+            .system
+            .process(self.pid)
+            .ok_or("current process is absent from the system process table")?
+            .memory();
+        self.high_water_bytes = self.high_water_bytes.max(self.current_bytes);
+        Ok(())
+    }
 }
 
 fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
+    let mut memory = ProcessMemoryProbe::new()?;
     let mut fixture = FixtureMarketWorker::try_new()?;
     let snapshot = fixture.publish_snapshot(2)?.snapshot;
     let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
@@ -56,6 +101,9 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
                 snapshot: snapshot.clone(),
             })
             .map_err(|()| "desktop burst mailbox disconnected")?;
+        if generation.get().is_multiple_of(128) {
+            memory.sample()?;
+        }
     }
 
     let (retained_items, mailbox_capacity) = sender.occupancy();
@@ -84,7 +132,15 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
         && retained_series_generation == BURST_UPDATES;
     let single_frame_drain_gate =
         accepted_frame_requests_while_pending == 1 && accepted_frame_requests_after_completion == 1;
-    if !bounded_latest_state_conflation || !single_frame_drain_gate {
+    memory.sample()?;
+    let working_set_within_bound = memory
+        .high_water_bytes
+        .saturating_sub(memory.baseline_bytes)
+        <= MAXIMUM_WORKING_SET_GROWTH_BYTES;
+    let working_set_sampled_growth_bytes = memory
+        .high_water_bytes
+        .saturating_sub(memory.baseline_bytes);
+    if !bounded_latest_state_conflation || !single_frame_drain_gate || !working_set_within_bound {
         return Err("desktop burst/frame conflation contract failed".into());
     }
 
@@ -101,6 +157,12 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
         accepted_frame_requests_after_completion,
         bounded_latest_state_conflation,
         single_frame_drain_gate,
+        working_set_baseline_bytes: memory.baseline_bytes,
+        working_set_current_bytes: memory.current_bytes,
+        working_set_sampled_high_water_bytes: memory.high_water_bytes,
+        working_set_sampled_growth_bytes,
+        maximum_working_set_growth_bytes: MAXIMUM_WORKING_SET_GROWTH_BYTES,
+        working_set_within_bound,
     })
 }
 
@@ -140,5 +202,6 @@ mod tests {
         assert_eq!(evidence.retained_series_generation, BURST_UPDATES);
         assert!(evidence.bounded_latest_state_conflation);
         assert!(evidence.single_frame_drain_gate);
+        assert!(evidence.working_set_within_bound);
     }
 }
