@@ -2,6 +2,7 @@
 
 mod live_market_worker;
 mod market_worker;
+mod readiness_conformance;
 mod rithmic_history;
 mod rithmic_live_chart;
 mod rithmic_market_worker;
@@ -108,7 +109,7 @@ struct TerminalApp {
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     window_active: bool,
-    frame_poll_scheduled: bool,
+    frame_poll_gate: readiness_conformance::FramePollGate,
     feed_diagnostics: Option<Box<FeedDiagnosticsSnapshot>>,
     chart_state: ChartState,
     chart_state_message: String,
@@ -280,7 +281,7 @@ impl TerminalApp {
             dom,
             side_panel: None,
             window_active: true,
-            frame_poll_scheduled: false,
+            frame_poll_gate: readiness_conformance::FramePollGate::default(),
             feed_diagnostics: None,
             chart_state,
             chart_state_message,
@@ -632,14 +633,13 @@ impl TerminalApp {
     }
 
     fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.frame_poll_scheduled || !self.window_active {
+        if !self.frame_poll_gate.try_schedule(self.window_active) {
             return;
         }
-        self.frame_poll_scheduled = true;
         let app = cx.entity();
         window.on_next_frame(move |_, cx| {
             app.update(cx, |app, cx| {
-                app.frame_poll_scheduled = false;
+                app.frame_poll_gate.complete();
                 app.poll_market_worker(cx);
                 cx.notify();
             });
@@ -1587,6 +1587,18 @@ fn parse_rithmic_test_arguments(
     Ok((std::path::PathBuf::from(history_root), detailed_diagnostics))
 }
 
+fn run_desktop_readiness_command(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), String> {
+    let usage = "usage: axiusflow_desktop --desktop-readiness <report-path>";
+    let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
+    if arguments.next().is_some() {
+        return Err(usage.to_string());
+    }
+    readiness_conformance::run(std::path::Path::new(&report_path))
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -1596,6 +1608,10 @@ fn main() {
                 .expect("usage: axiusflow_desktop --windowed-benchmark <report-path>");
             windowed_benchmark::run(std::path::Path::new(&report_path))
                 .expect("the windowed benchmark completes");
+            return;
+        }
+        if argument == "--desktop-readiness" {
+            run_desktop_readiness_command(arguments).expect("desktop readiness conformance passes");
             return;
         }
         if argument == "--coinbase-live-smoke" {

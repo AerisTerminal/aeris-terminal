@@ -531,7 +531,7 @@ Capture evidence for:
 - [ ] Trade, history, and depth gaps.
 - [x] Disconnect, bounded reconnect, and terminal failures.
 - [ ] Suspend/resume and offline startup.
-- [ ] Burst traffic and frame-aligned conflation.
+- [x] Burst traffic and frame-aligned conflation.
 - [x] Cache corruption and covering resnapshot.
 - [ ] Current and high-water memory.
 - [ ] Eight-hour headless and desktop endurance.
@@ -547,6 +547,13 @@ redaction. The message-silence row remains open until the already-passing
 deterministic silent-peer timeout is repeated as authorized Rithmic heartbeat
 loss; the broader gap row remains open for combined trade/history/depth fault
 evidence.
+
+Desktop burst evidence on 2026-08-07: the headless
+`--desktop-readiness` command published 10,000 successively newer Rithmic chart
+snapshots without draining the UI mailbox. The fixed-capacity 32-item mailbox
+retained exactly one item at series generation 10,000, and 10,000 attempted
+frame-drain schedules admitted exactly one callback until completion. The
+command writes schema-1 JSON and opens no window.
 
 
 
