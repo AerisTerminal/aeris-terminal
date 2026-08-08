@@ -63,11 +63,11 @@ pub(crate) enum ChartState {
 impl ChartState {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Loading => "Loading",
-            Self::Ready => "Ready",
-            Self::Stale => "Stale",
-            Self::Recovering => "Recovering",
-            Self::Error => "Error",
+            Self::Loading => "Loading chart",
+            Self::Ready => "Chart ready",
+            Self::Stale => "Chart stale",
+            Self::Recovering => "Reconnecting chart",
+            Self::Error => "Chart unavailable",
         }
     }
 }
@@ -1387,11 +1387,11 @@ mod tests {
 
     #[test]
     fn chart_states_have_explicit_user_facing_labels() {
-        assert_eq!(ChartState::Loading.label(), "Loading");
-        assert_eq!(ChartState::Ready.label(), "Ready");
-        assert_eq!(ChartState::Stale.label(), "Stale");
-        assert_eq!(ChartState::Recovering.label(), "Recovering");
-        assert_eq!(ChartState::Error.label(), "Error");
+        assert_eq!(ChartState::Loading.label(), "Loading chart");
+        assert_eq!(ChartState::Ready.label(), "Chart ready");
+        assert_eq!(ChartState::Stale.label(), "Chart stale");
+        assert_eq!(ChartState::Recovering.label(), "Reconnecting chart");
+        assert_eq!(ChartState::Error.label(), "Chart unavailable");
     }
 
     #[test]

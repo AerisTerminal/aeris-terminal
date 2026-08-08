@@ -506,6 +506,12 @@ primitive rather than a fixed-width container. The chart and rail remain flush,
 the rail is bounded to 240–640 px, and its width persists while switching
 between DOM, health, and the closed state.
 
+The always-mounted empty Origin entity now reports whether a real provider
+snapshot is installed. Empty loading/error surfaces show a centered status;
+stale or reconnecting charts retain their real candles and show only a compact
+top-left notice. Ready charts have no overlay, and the redundant outer chart
+border is removed so the chart remains flush against the resizable rail.
+
 
 
 ### Gate
@@ -604,12 +610,16 @@ recovery, suspend/resume, stale-history rejection, and retry/callback fencing.
 The Stage F row remains open until physical offline and suspend/resume transitions
 are captured as named evidence.
 
-The schema-2 desktop readiness artifact now exercises the production live-chart,
+The schema-3 desktop readiness artifact now exercises the production live-chart,
 history-handoff, and read-only DOM state machines together. It rejects a repeated
 trade sequence without mutating the chart, latches history snapshot-required on
 a sequence discontinuity and accepts only a newer covering generation, and
 clears depth on a sequence gap until a covering complete image restores the
-book. All five named gap/recovery outcomes passed on Windows on 2026-08-07.
+book. It also proves stale chart trades cannot mutate current state, equal or
+retired history snapshots remain rejected until a newer covering generation
+arrives, and retired DOM session/selection events cannot replace the current
+selection. All named gap, recovery, and generation-fence outcomes pass on
+Windows.
 
 Desktop burst evidence on 2026-08-07: the headless
 `--desktop-readiness` command published 10,000 successively newer Rithmic chart
@@ -648,7 +658,7 @@ evidence; the eight-hour row remains open until a qualifying artifact exists.
 
 - [ ] All failure cases recover or fail closed as specified.
 - [ ] Memory and queues remain within declared bounds.
-- [ ] No stale generation reaches the model or UI.
+- [x] No stale generation reaches the model or UI.
 - [ ] Eight-hour run records no unexplained gap, deadlock, secret exposure, or unbounded growth.
 
 

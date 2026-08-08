@@ -202,6 +202,52 @@ enum SidePanel {
     Health,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChartNoticePlacement {
+    Center,
+    TopLeft,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChartNoticeTone {
+    Muted,
+    Warning,
+    Loss,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChartSurfaceNotice {
+    label: &'static str,
+    placement: ChartNoticePlacement,
+    tone: ChartNoticeTone,
+}
+
+fn chart_surface_notice(state: ChartState, has_market_data: bool) -> Option<ChartSurfaceNotice> {
+    let placement = if has_market_data {
+        ChartNoticePlacement::TopLeft
+    } else {
+        ChartNoticePlacement::Center
+    };
+    match state {
+        ChartState::Loading => Some(ChartSurfaceNotice {
+            label: state.label(),
+            placement,
+            tone: ChartNoticeTone::Muted,
+        }),
+        ChartState::Ready => None,
+        ChartState::Stale | ChartState::Recovering => Some(ChartSurfaceNotice {
+            label: state.label(),
+            placement,
+            tone: ChartNoticeTone::Warning,
+        }),
+        ChartState::Error => Some(ChartSurfaceNotice {
+            label: state.label(),
+            placement,
+            tone: ChartNoticeTone::Loss,
+        }),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct HeaderControls(u8);
 
@@ -1092,6 +1138,9 @@ impl Render for TerminalApp {
 
         let workspace = market_workspace(
             self.chart.as_ref(),
+            self.chart
+                .as_ref()
+                .is_some_and(|chart| chart.read(cx).has_market_data()),
             self.dom.clone(),
             self.side_panel,
             self.chart_state,
@@ -1117,6 +1166,7 @@ impl Render for TerminalApp {
 
 fn market_workspace(
     chart: Option<&Entity<OriginChartView>>,
+    chart_has_market_data: bool,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     chart_state: ChartState,
@@ -1124,29 +1174,16 @@ fn market_workspace(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    let notice = chart_surface_notice(chart_state, chart_has_market_data);
     let chart_surface = div()
         .id("primary_chart")
+        .relative()
         .v_flex()
         .flex_1()
         .overflow_hidden()
-        .border_1()
-        .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.background))
-        .child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .children(chart.cloned())
-                .children(chart.is_none().then(|| {
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(gpui_color(colors.muted_foreground))
-                        .child(chart_state.label())
-                })),
-        );
+        .child(div().flex_1().overflow_hidden().children(chart.cloned()))
+        .children(notice.map(|notice| chart_notice(notice, theme)));
     let side_panel_content = resizable_panel()
         .visible(side_panel.is_some())
         .size(px(SIDE_PANEL_INITIAL_WIDTH))
@@ -1165,6 +1202,34 @@ fn market_workspace(
     h_resizable("market_workspace")
         .child(resizable_panel().child(chart_surface))
         .child(side_panel_content)
+}
+
+fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let tone = match notice.tone {
+        ChartNoticeTone::Muted => colors.muted_foreground,
+        ChartNoticeTone::Warning => colors.warning,
+        ChartNoticeTone::Loss => colors.loss,
+    };
+    let label = div()
+        .px_2()
+        .py_1()
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.background.with_alpha(0.94)))
+        .text_xs()
+        .text_color(gpui_color(tone))
+        .child(notice.label);
+    match notice.placement {
+        ChartNoticePlacement::Center => div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(label),
+        ChartNoticePlacement::TopLeft => div().absolute().top_2().left_2().child(label),
+    }
 }
 
 fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
@@ -2023,10 +2088,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, HeaderControls, RithmicReconnectTarget, connection_presentation,
-        default_rithmic_contract_index, duration_label, gpui_color, milli_rate,
-        parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index,
+        ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls, RithmicReconnectTarget,
+        chart_surface_notice, connection_presentation, default_rithmic_contract_index,
+        duration_label, gpui_color, milli_rate, parse_rithmic_test_arguments,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -2166,5 +2231,31 @@ mod tests {
         assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
         assert!(controls.enabled(HeaderControls::LATEST));
+    }
+
+    #[test]
+    fn chart_notice_distinguishes_empty_loading_from_retained_recovery() {
+        let loading = chart_surface_notice(ChartState::Loading, false).expect("loading notice");
+        assert_eq!(loading.label, "Loading chart");
+        assert_eq!(loading.placement, ChartNoticePlacement::Center);
+        assert_eq!(loading.tone, ChartNoticeTone::Muted);
+
+        let recovery = chart_surface_notice(ChartState::Recovering, true).expect("recovery notice");
+        assert_eq!(recovery.label, "Reconnecting chart");
+        assert_eq!(recovery.placement, ChartNoticePlacement::TopLeft);
+        assert_eq!(recovery.tone, ChartNoticeTone::Warning);
+        assert!(chart_surface_notice(ChartState::Ready, true).is_none());
+    }
+
+    #[test]
+    fn chart_error_and_stale_notices_use_truthful_severity() {
+        let stale = chart_surface_notice(ChartState::Stale, true).expect("stale notice");
+        assert_eq!(stale.label, "Chart stale");
+        assert_eq!(stale.tone, ChartNoticeTone::Warning);
+
+        let error = chart_surface_notice(ChartState::Error, false).expect("error notice");
+        assert_eq!(error.label, "Chart unavailable");
+        assert_eq!(error.placement, ChartNoticePlacement::Center);
+        assert_eq!(error.tone, ChartNoticeTone::Loss);
     }
 }

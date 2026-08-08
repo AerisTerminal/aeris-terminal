@@ -185,6 +185,12 @@ impl OriginChartView {
         self.engine.scroll_position().abs() < f64::EPSILON
     }
 
+    /// Returns whether a provider snapshot has populated the chart surface.
+    #[must_use]
+    pub const fn has_market_data(&self) -> bool {
+        self.data_bridge.is_some()
+    }
+
     /// Enqueues one replay update for the next chart frame.
     ///
     /// # Errors
@@ -719,6 +725,7 @@ mod tests {
     #[test]
     fn empty_chart_surface_accepts_its_first_real_snapshot() {
         let mut chart = OriginChartView::empty(AxiusflowTheme::dark());
+        assert!(!chart.has_market_data());
         assert_eq!(chart.queued_replay_update_count(), 0);
         assert_eq!(chart.expected_replay_sequence(), None);
         assert_eq!(chart.replay_bridge_metrics(), ChartBridgeMetrics::default());
@@ -728,6 +735,7 @@ mod tests {
             .execute(LoadEmbeddedReplay { bar_count: 16 })
             .expect("embedded replay validates");
         chart.load_replay(&replay).expect("first snapshot installs");
+        assert!(chart.has_market_data());
         assert_eq!(
             chart.expected_replay_sequence(),
             replay.stream().last_sequence().checked_add(1)

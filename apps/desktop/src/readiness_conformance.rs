@@ -84,6 +84,7 @@ struct DesktopGapRecoveryEvidence {
     trade_ordering_fault_rejected: bool,
     history: HistoryGapRecoveryEvidence,
     depth: DepthGapRecoveryEvidence,
+    generation_fencing: GenerationFencingEvidence,
 }
 
 #[derive(Serialize)]
@@ -96,6 +97,30 @@ struct HistoryGapRecoveryEvidence {
 struct DepthGapRecoveryEvidence {
     depth_gap_clears_book: bool,
     depth_covering_snapshot_recovers: bool,
+}
+
+#[derive(Serialize)]
+struct GenerationFencingEvidence {
+    chart: ChartGenerationFencingEvidence,
+    history: HistoryGenerationFencingEvidence,
+    dom: DomGenerationFencingEvidence,
+}
+
+#[derive(Serialize)]
+struct ChartGenerationFencingEvidence {
+    stale_chart_trade_rejected_without_mutation: bool,
+}
+
+#[derive(Serialize)]
+struct HistoryGenerationFencingEvidence {
+    stale_history_snapshot_rejected: bool,
+    newer_history_snapshot_recovers: bool,
+}
+
+#[derive(Serialize)]
+struct DomGenerationFencingEvidence {
+    retired_dom_selection_ignored_without_mutation: bool,
+    current_dom_selection_recovers: bool,
 }
 
 struct ProcessMemoryProbe {
@@ -228,7 +253,7 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let gap_recovery = collect_gap_recovery_evidence()?;
 
     Ok(DesktopBurstEvidence {
-        schema_version: 2,
+        schema_version: 3,
         evidence_scope: "deterministic_desktop_burst_and_frame_conflation",
         burst_updates: BURST_UPDATES,
         mailbox_capacity,
@@ -255,12 +280,33 @@ fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn
         trade_ordering_fault_rejected: collect_trade_gap_evidence()?,
         history: collect_history_gap_evidence()?,
         depth: collect_depth_gap_evidence()?,
+        generation_fencing: collect_generation_fencing_evidence()?,
     };
     if !evidence.trade_ordering_fault_rejected
         || !evidence.history.history_gap_requires_snapshot
         || !evidence.history.history_covering_snapshot_recovers
         || !evidence.depth.depth_gap_clears_book
         || !evidence.depth.depth_covering_snapshot_recovers
+        || !evidence
+            .generation_fencing
+            .chart
+            .stale_chart_trade_rejected_without_mutation
+        || !evidence
+            .generation_fencing
+            .history
+            .stale_history_snapshot_rejected
+        || !evidence
+            .generation_fencing
+            .history
+            .newer_history_snapshot_recovers
+        || !evidence
+            .generation_fencing
+            .dom
+            .retired_dom_selection_ignored_without_mutation
+        || !evidence
+            .generation_fencing
+            .dom
+            .current_dom_selection_recovers
     {
         return Err("desktop gap recovery contract failed".into());
     }
@@ -283,30 +329,133 @@ fn collect_trade_gap_evidence() -> Result<bool, Box<dyn Error>> {
         .exchange_timestamp_unix_nanos
         .checked_add(1)
         .ok_or("fixture timestamp overflowed")?;
-    let trade = MarketTrade {
-        metadata: EventMetadata {
-            provider_id: seed.provenance().source_id.clone(),
-            instrument_id: snapshot.instrument().instrument_id.as_str().to_string(),
-            entitlement_id: seed.provenance().entitlement_revision.clone(),
-            source_sequence: 100,
-            session_generation: 7,
-            timestamps: QualifiedTimestamp {
-                exchange_unix_nanos: Some(first_trade_timestamp),
-                provider_unix_nanos: Some(first_trade_timestamp),
-                received_unix_nanos: first_trade_timestamp,
-            },
-        },
-        trade_id: "readiness-trade-100".to_string(),
-        price: seed.value().close,
-        quantity: 1,
-        aggressor: AggressorSide::Unknown,
-    };
+    let trade = readiness_trade(&snapshot, 100, first_trade_timestamp)?;
     let mut chart = RithmicLiveChart::from_history(generation, &snapshot)?;
     chart.apply_trade(generation, &trade)?;
     Ok(matches!(
         chart.apply_trade(generation, &trade),
         Err(RithmicLiveChartError::OutOfOrderTrade)
     ))
+}
+
+fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Box<dyn Error>> {
+    let mut fixture = FixtureMarketWorker::try_new()?;
+    let snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let current_generation = RithmicChartGeneration {
+        selection: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+        series: NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN),
+    };
+    let stale_generation = RithmicChartGeneration {
+        selection: NonZeroUsize::MIN,
+        series: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+    };
+    let timestamp = snapshot
+        .bars()
+        .last()
+        .ok_or("fixture snapshot did not contain a chart seed")?
+        .provenance()
+        .exchange_timestamp_unix_nanos
+        .checked_add(1)
+        .ok_or("fixture timestamp overflowed")?;
+    let trade = readiness_trade(&snapshot, 101, timestamp)?;
+    let mut chart = RithmicLiveChart::from_history(current_generation, &snapshot)?;
+    let stale_chart_trade_rejected = matches!(
+        chart.apply_trade(stale_generation, &trade),
+        Err(RithmicLiveChartError::StaleGeneration)
+    );
+    let stale_chart_trade_rejected_without_mutation = stale_chart_trade_rejected
+        && matches!(
+            chart.apply_trade(current_generation, &trade),
+            Ok(publication) if publication.generation == current_generation
+        );
+
+    let mut history = HandoffCoordinator::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    history.install_snapshot(history_snapshot(1, 2)?)?;
+    history.require_snapshot_after(1, 2);
+    let stale_history_snapshot_rejected =
+        history.install_snapshot(history_snapshot(1, 2)?).is_err()
+            && matches!(
+                history.state(),
+                HandoffState::SnapshotRequired {
+                    minimum_generation: 1,
+                    minimum_watermark: 2
+                }
+            );
+    history.install_snapshot(history_snapshot(2, 2)?)?;
+    let newer_history_snapshot_recovers = matches!(
+        history.state(),
+        HandoffState::Live {
+            generation: 2,
+            last_sequence: 2
+        }
+    );
+
+    let maximum_levels = NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN);
+    let mut dom = ReadOnlyDom::new(maximum_levels);
+    dom.select(dom_selection("mnq", 7, 1)?);
+    dom.apply_event(&depth_snapshot_for("mnq", 7, 10))?;
+    dom.select(dom_selection("es", 8, 2)?);
+    let retired_outcome = dom.apply_event(&depth_snapshot_for("mnq", 7, 11))?;
+    let retired_frame = dom
+        .frame()
+        .ok_or("DOM selection disappeared during generation fencing")?;
+    let retired_dom_selection_ignored_without_mutation = retired_outcome
+        == DomUpdateOutcome::Ignored
+        && retired_frame.selection_generation == 2
+        && retired_frame.session_generation == 8
+        && retired_frame.source_watermark == 0
+        && retired_frame.rows.is_empty();
+    let current_dom_selection_recovers = matches!(
+        dom.apply_event(&depth_snapshot_for("es", 8, 1))?,
+        DomUpdateOutcome::Published(frame)
+            if frame.selection_generation == 2
+                && frame.session_generation == 8
+                && frame.source_watermark == 1
+                && !frame.rows.is_empty()
+    );
+
+    Ok(GenerationFencingEvidence {
+        chart: ChartGenerationFencingEvidence {
+            stale_chart_trade_rejected_without_mutation,
+        },
+        history: HistoryGenerationFencingEvidence {
+            stale_history_snapshot_rejected,
+            newer_history_snapshot_recovers,
+        },
+        dom: DomGenerationFencingEvidence {
+            retired_dom_selection_ignored_without_mutation,
+            current_dom_selection_recovers,
+        },
+    })
+}
+
+fn readiness_trade(
+    snapshot: &ReplaySnapshot,
+    source_sequence: u64,
+    timestamp: i64,
+) -> Result<MarketTrade, Box<dyn Error>> {
+    let seed = snapshot
+        .bars()
+        .last()
+        .ok_or("fixture snapshot did not contain a chart seed")?;
+    Ok(MarketTrade {
+        metadata: EventMetadata {
+            provider_id: seed.provenance().source_id.clone(),
+            instrument_id: snapshot.instrument().instrument_id.as_str().to_string(),
+            entitlement_id: seed.provenance().entitlement_revision.clone(),
+            source_sequence,
+            session_generation: 7,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: Some(timestamp),
+                provider_unix_nanos: Some(timestamp),
+                received_unix_nanos: timestamp,
+            },
+        },
+        trade_id: format!("readiness-trade-{source_sequence}"),
+        price: seed.value().close,
+        quantity: 1,
+        aggressor: AggressorSide::Unknown,
+    })
 }
 
 fn collect_history_gap_evidence() -> Result<HistoryGapRecoveryEvidence, Box<dyn Error>> {
@@ -384,12 +533,20 @@ fn history_snapshot(
 }
 
 fn depth_metadata(sequence: u64) -> EventMetadata {
+    depth_metadata_for("mnq", 7, sequence)
+}
+
+fn depth_metadata_for(
+    instrument_id: &str,
+    session_generation: u64,
+    sequence: u64,
+) -> EventMetadata {
     EventMetadata {
         provider_id: "rithmic".to_string(),
-        instrument_id: "mnq".to_string(),
+        instrument_id: instrument_id.to_string(),
         entitlement_id: "test".to_string(),
         source_sequence: sequence,
-        session_generation: 7,
+        session_generation,
         timestamps: QualifiedTimestamp {
             exchange_unix_nanos: Some(i64::try_from(sequence).unwrap_or(i64::MAX)),
             provider_unix_nanos: None,
@@ -399,8 +556,12 @@ fn depth_metadata(sequence: u64) -> EventMetadata {
 }
 
 fn depth_snapshot(sequence: u64) -> MarketEvent {
+    depth_snapshot_for("mnq", 7, sequence)
+}
+
+fn depth_snapshot_for(instrument_id: &str, session_generation: u64, sequence: u64) -> MarketEvent {
     MarketEvent::DepthSnapshot(DepthSnapshot {
-        metadata: depth_metadata(sequence),
+        metadata: depth_metadata_for(instrument_id, session_generation, sequence),
         bids: vec![DepthLevel {
             price: 20_000,
             quantity: 2,
@@ -411,6 +572,21 @@ fn depth_snapshot(sequence: u64) -> MarketEvent {
             quantity: 3,
             order_count: Some(1),
         }],
+    })
+}
+
+fn dom_selection(
+    instrument_id: &str,
+    session_generation: u64,
+    selection_generation: u64,
+) -> Result<DomSelection, Box<dyn Error>> {
+    Ok(DomSelection {
+        provider_id: "rithmic".to_string(),
+        instrument_id: instrument_id.to_string(),
+        entitlement_id: "test".to_string(),
+        session_generation,
+        selection_generation,
+        precision: InstrumentPrecision::try_new(2, 0)?,
     })
 }
 
@@ -728,7 +904,8 @@ mod tests {
         BURST_UPDATES, ENDURANCE_QUALIFICATION_DURATION, EnduranceCompletionState,
         EnduranceCounters, EnduranceEvidenceSnapshot, FramePollGate, ProcessMemoryProbe,
         collect_endurance_with_checkpoints, collect_evidence, collect_gap_recovery_evidence,
-        endurance_evidence, write_endurance_evidence_atomically,
+        collect_generation_fencing_evidence, endurance_evidence,
+        write_endurance_evidence_atomically,
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -758,6 +935,20 @@ mod tests {
                 .history_covering_snapshot_recovers
         );
         assert!(evidence.gap_recovery.depth.depth_covering_snapshot_recovers);
+        assert!(
+            evidence
+                .gap_recovery
+                .generation_fencing
+                .chart
+                .stale_chart_trade_rejected_without_mutation
+        );
+        assert!(
+            evidence
+                .gap_recovery
+                .generation_fencing
+                .dom
+                .retired_dom_selection_ignored_without_mutation
+        );
     }
 
     #[test]
@@ -768,6 +959,47 @@ mod tests {
         assert!(evidence.history.history_covering_snapshot_recovers);
         assert!(evidence.depth.depth_gap_clears_book);
         assert!(evidence.depth.depth_covering_snapshot_recovers);
+        assert!(
+            evidence
+                .generation_fencing
+                .chart
+                .stale_chart_trade_rejected_without_mutation
+        );
+        assert!(
+            evidence
+                .generation_fencing
+                .history
+                .stale_history_snapshot_rejected
+        );
+        assert!(
+            evidence
+                .generation_fencing
+                .history
+                .newer_history_snapshot_recovers
+        );
+        assert!(
+            evidence
+                .generation_fencing
+                .dom
+                .retired_dom_selection_ignored_without_mutation
+        );
+        assert!(
+            evidence
+                .generation_fencing
+                .dom
+                .current_dom_selection_recovers
+        );
+    }
+
+    #[test]
+    fn stale_generations_never_mutate_current_models() {
+        let evidence =
+            collect_generation_fencing_evidence().expect("generation fencing evidence passes");
+        assert!(evidence.chart.stale_chart_trade_rejected_without_mutation);
+        assert!(evidence.history.stale_history_snapshot_rejected);
+        assert!(evidence.history.newer_history_snapshot_recovers);
+        assert!(evidence.dom.retired_dom_selection_ignored_without_mutation);
+        assert!(evidence.dom.current_dom_selection_recovers);
     }
 
     #[test]
