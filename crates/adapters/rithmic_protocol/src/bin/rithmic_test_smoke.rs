@@ -1,23 +1,40 @@
+use axiusflow_desktop_provider_runtime::{
+    AuthenticationState, ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
+    SessionGeneration,
+};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_rithmic_protocol_adapter::{
     CollectionProgress, DecodedCatalogMessage, DecodedControlMessage, DecodedMarketMessage,
     DecodedTimeBarType, HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
     InstrumentReferenceRequest, MarketDataSubscription, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes, RithmicSessionLimits,
-    RithmicSessionMessage, RithmicTestSession, SearchPattern, SubscriptionAction,
-    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
-    TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicAuthorizedSilenceEvidenceFault,
+    RithmicCallbackLimits, RithmicCredentialBytes, RithmicProviderConfig, RithmicProviderDriver,
+    RithmicProviderEvents, RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession,
+    SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
+    SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
+    collect_rithmic_covering_recovery_evidence,
 };
 use std::{
-    num::NonZeroUsize,
-    time::{SystemTime, UNIX_EPOCH},
+    io::{self, Write},
+    num::{NonZeroU64, NonZeroUsize},
+    sync::mpsc::{self, RecvTimeoutError},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroize;
 
 const SYMBOL: &str = "MNQ";
+const AUTHORIZED_SILENCE_RUN_TIMEOUT: Duration = Duration::from_mins(2);
+const HISTORY_LOOKBACK_MINUTES: i32 = 4 * 24 * 60 + 300;
+const MAXIMUM_HISTORY_BARS: usize = 6_063;
 
 fn main() -> Result<(), String> {
+    let authorized_silence_recovery = parse_authorized_silence_recovery(std::env::args().skip(1))?;
     let credentials = load_credentials()?;
+    if authorized_silence_recovery {
+        run_authorized_silence_recovery(&credentials)?;
+        return Ok(());
+    }
     let application = application();
     let (selected, subscription_rejected) = run_ticker(&credentials, application)?;
     run_history(&credentials, application, &selected)?;
@@ -37,6 +54,20 @@ fn main() -> Result<(), String> {
         selected.symbol, selected.exchange
     );
     Ok(())
+}
+
+fn parse_authorized_silence_recovery(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<bool, String> {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [] => Ok(false),
+        [argument] if argument == "--authorized-silence-recovery" => Ok(true),
+        _ => Err(
+            "usage: rithmic_test_smoke [--authorized-silence-recovery] (credentials are loaded only from the native vault)"
+                .to_string(),
+        ),
+    }
 }
 
 #[derive(Clone)]
@@ -73,6 +104,7 @@ fn run_ticker(
     ticker
         .close()
         .map_err(|error| format!("ticker_close_failed={error}"))?;
+    println!("rithmic_ticker_close=passed");
     Ok((selected, rejected))
 }
 
@@ -251,7 +283,9 @@ fn run_history(
         .map_err(|_| "clock_invalid")?
         .as_secs();
     let finish = i32::try_from(now - (now % 60)).map_err(|_| "time_overflow")?;
-    let start = finish.checked_sub(60 * 300).ok_or("time_underflow")?;
+    let start = finish
+        .checked_sub(60 * HISTORY_LOOKBACK_MINUTES)
+        .ok_or("time_underflow")?;
     history
         .replay_time_bars(TimeBarReplayRequest {
             symbol: &selected.symbol,
@@ -260,7 +294,8 @@ fn run_history(
             period: 1,
             start_seconds: start,
             finish_seconds: finish,
-            maximum_bars: 300,
+            maximum_bars: u16::try_from(MAXIMUM_HISTORY_BARS)
+                .map_err(|_| "history_limit_invalid")?,
         })
         .map_err(|error| format!("history_send_failed={error}"))?;
     let mut collector = HistoryCollector::try_new(HistoryCollectionRequest {
@@ -272,7 +307,7 @@ fn run_history(
         },
         start_seconds: start,
         finish_seconds: finish,
-        maximum_bars: NonZeroUsize::new(300).ok_or("history_limit_invalid")?,
+        maximum_bars: NonZeroUsize::new(MAXIMUM_HISTORY_BARS).ok_or("history_limit_invalid")?,
     })
     .map_err(|error| error.to_string())?;
     let collected = loop {
@@ -295,6 +330,9 @@ fn run_history(
     };
     if bar_count == 0 {
         return Err("history_empty".to_string());
+    }
+    if bar_count > MAXIMUM_HISTORY_BARS {
+        return Err("history_bar_bound_exceeded".to_string());
     }
     println!("rithmic_history=passed bars={bar_count}");
     run_tick_history(&mut history, selected, start, finish)?;
@@ -357,6 +395,228 @@ fn run_tick_history(
     Ok(())
 }
 
+fn run_authorized_silence_recovery(credentials: &RithmicCredentialBytes) -> Result<(), String> {
+    let credentials = RithmicCredentialBytes::try_copy_from_vault(credentials.as_bytes())
+        .map_err(|_| "credentials_invalid")?;
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    phase("watchdog_started");
+    let handle = thread::Builder::new()
+        .name("rithmic-authorized-silence-evidence".to_string())
+        .spawn(move || {
+            let result = run_authorized_silence_recovery_inner(&credentials);
+            let _ = result_tx.send(result);
+        })
+        .map_err(|_| "silence_evidence_thread_unavailable")?;
+    match result_rx.recv_timeout(AUTHORIZED_SILENCE_RUN_TIMEOUT) {
+        Ok(result) => {
+            join_evidence_thread(handle)?;
+            result
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            phase("whole_run_deadline_expired");
+            Err("authorized_silence_recovery_deadline")
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            join_evidence_thread(handle)?;
+            Err("authorized_silence_recovery_thread_failed")
+        }
+    }
+    .map_err(str::to_string)
+}
+
+fn join_evidence_thread(handle: JoinHandle<()>) -> Result<(), &'static str> {
+    handle
+        .join()
+        .map_err(|_| "authorized_silence_recovery_thread_panicked")
+}
+
+fn run_authorized_silence_recovery_inner(
+    credentials: &RithmicCredentialBytes,
+) -> Result<(), &'static str> {
+    let generation =
+        |value| SessionGeneration::new(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN));
+    let limits = RithmicSessionLimits {
+        response_timeout: Duration::from_secs(5),
+        ..RithmicSessionLimits::default()
+    };
+    let config = RithmicProviderConfig::try_new(
+        "Axiusflow",
+        env!("CARGO_PKG_VERSION"),
+        limits,
+        Duration::from_secs(10),
+        Vec::new(),
+    )
+    .map_err(|_| "silence_evidence_config_invalid")?
+    .with_authorized_silence_evidence_fault(
+        generation(1),
+        RithmicAuthorizedSilenceEvidenceFault::Message,
+    )
+    .with_authorized_silence_evidence_fault(
+        generation(2),
+        RithmicAuthorizedSilenceEvidenceFault::Heartbeat,
+    );
+    let callback_limits = RithmicCallbackLimits::try_new(
+        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(1_048_576).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
+    )
+    .map_err(|_| "silence_evidence_callback_limits_invalid")?;
+    let (mut driver, events) = RithmicProviderDriver::new(config, callback_limits);
+
+    for (current, expected) in [
+        (generation(1), ProviderInvalidationReason::MessageSilence),
+        (generation(2), ProviderInvalidationReason::HeartbeatSilence),
+    ] {
+        phase(match expected {
+            ProviderInvalidationReason::MessageSilence => "message_silence_login_started",
+            ProviderInvalidationReason::HeartbeatSilence => "heartbeat_silence_login_started",
+            _ => "unexpected_silence_phase",
+        });
+        driver
+            .start_session(current, credentials.as_bytes())
+            .map_err(|_| "silence_evidence_start_failed")?;
+        wait_for_silence_invalidation(&events, current, expected)?;
+        phase(match expected {
+            ProviderInvalidationReason::MessageSilence => "message_silence_invalidated",
+            ProviderInvalidationReason::HeartbeatSilence => "heartbeat_silence_invalidated",
+            _ => "unexpected_silence_phase",
+        });
+        driver
+            .stop_session(current)
+            .map_err(|_| "silence_evidence_stop_failed")?;
+        println!(
+            "rithmic_client_local_inbound_suppression=passed generation={} invalidation={expected:?}",
+            current.get()
+        );
+    }
+
+    let recovered = generation(3);
+    phase("fresh_generation_login_started");
+    driver
+        .start_session(recovered, credentials.as_bytes())
+        .map_err(|_| "silence_reconnect_start_failed")?;
+    wait_for_established(&events, recovered)?;
+    phase("fresh_generation_established");
+    driver
+        .stop_session(recovered)
+        .map_err(|_| "silence_reconnect_stop_failed")?;
+    phase("fresh_generation_stopped");
+    verify_authorized_clean_close(credentials)?;
+    phase("covering_recovery_started");
+    let covering =
+        collect_rithmic_covering_recovery_evidence().map_err(|_| "covering_recovery_failed")?;
+    println!(
+        "rithmic_silence_recovery=passed authorized_client_local_silence=true fresh_generation={} covering_recovery=deterministic_production_state_machine covering_generation={} covering_watermark={} confirmed_driver_stop=true",
+        recovered.get(),
+        covering.recovery_generation,
+        covering.recovered_watermark
+    );
+    phase("complete");
+    Ok(())
+}
+
+fn verify_authorized_clean_close(credentials: &RithmicCredentialBytes) -> Result<(), &'static str> {
+    phase("clean_close_login_started");
+    let borrowed = credentials
+        .credentials()
+        .map_err(|_| "credentials_invalid")?;
+    let ticker = RithmicTestSession::discover_and_login(
+        borrowed,
+        application(),
+        RithmicSessionLimits::default(),
+        None,
+    )
+    .map_err(|_| "silence_close_login_failed")?;
+    ticker.close().map_err(|_| "silence_close_failed")?;
+    phase("clean_close_confirmed");
+    println!("rithmic_silence_clean_close=passed");
+    Ok(())
+}
+
+fn wait_for_silence_invalidation(
+    events: &RithmicProviderEvents,
+    generation: SessionGeneration,
+    expected: ProviderInvalidationReason,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut authenticated = false;
+    let mut instruments_discovered = false;
+    loop {
+        if Instant::now() >= deadline {
+            return Err("silence_invalidation_timeout");
+        }
+        if let Some(callback) = events.try_recv() {
+            match callback.event {
+                ProviderSessionEvent::AuthenticationChanged {
+                    generation: callback_generation,
+                    state: AuthenticationState::Accepted,
+                } if callback_generation == generation => authenticated = true,
+                ProviderSessionEvent::InstrumentsDiscovered {
+                    generation: callback_generation,
+                    ..
+                } if callback_generation == generation => instruments_discovered = true,
+                ProviderSessionEvent::Invalidated {
+                    generation: Some(callback_generation),
+                    reason,
+                } if callback_generation == generation => {
+                    if authenticated
+                        && instruments_discovered
+                        && reason == expected
+                        && callback.retry
+                            == Some(axiusflow_rithmic_protocol_adapter::RetryDisposition::Transient)
+                    {
+                        return Ok(());
+                    }
+                    return Err("silence_invalidation_mismatch");
+                }
+                _ => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+fn wait_for_established(
+    events: &RithmicProviderEvents,
+    generation: SessionGeneration,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut authenticated = false;
+    let mut instruments_discovered = false;
+    while !(authenticated && instruments_discovered) {
+        if Instant::now() >= deadline {
+            return Err("silence_reconnect_timeout");
+        }
+        if let Some(callback) = events.try_recv() {
+            match callback.event {
+                ProviderSessionEvent::AuthenticationChanged {
+                    generation: callback_generation,
+                    state: AuthenticationState::Accepted,
+                } if callback_generation == generation => authenticated = true,
+                ProviderSessionEvent::InstrumentsDiscovered {
+                    generation: callback_generation,
+                    ..
+                } if callback_generation == generation => instruments_discovered = true,
+                ProviderSessionEvent::Invalidated { reason, .. } => {
+                    let _ = reason;
+                    return Err("silence_reconnect_invalidated");
+                }
+                _ => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    Ok(())
+}
+
+fn phase(name: &str) {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "rithmic_authorized_silence_phase={name}");
+    let _ = stderr.flush();
+}
+
 fn load_credentials() -> Result<RithmicCredentialBytes, String> {
     let vault =
         NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE).map_err(|_| "vault_unavailable")?;
@@ -368,4 +628,27 @@ fn load_credentials() -> Result<RithmicCredentialBytes, String> {
         RithmicCredentialBytes::try_copy_from_vault(&stored).map_err(|_| "credentials_invalid");
     stored.zeroize();
     Ok(copied?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_authorized_silence_recovery;
+
+    #[test]
+    fn authorized_silence_recovery_requires_one_exact_nonsecret_flag() {
+        assert_eq!(parse_authorized_silence_recovery(Vec::new()), Ok(false));
+        assert_eq!(
+            parse_authorized_silence_recovery(vec!["--authorized-silence-recovery".to_string()]),
+            Ok(true)
+        );
+        for rejected in [
+            vec!["--unknown".to_string()],
+            vec![
+                "--authorized-silence-recovery".to_string(),
+                "extra".to_string(),
+            ],
+        ] {
+            assert!(parse_authorized_silence_recovery(rejected).is_err());
+        }
+    }
 }

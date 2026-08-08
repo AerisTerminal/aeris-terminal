@@ -72,7 +72,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | C — Rithmic read-only headless | `in_progress` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; resilience evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; bounded symbol/timeframe controls [x]; authorized visible history [x]; live candles [x]; recovering read-only DOM [x]; lifecycle/feed health [x] |
-| F — Readiness / endurance | `ready` | [ ] not started |
+| F — Readiness / endurance | `in_progress` | deterministic failure, burst, memory, and checkpoint evidence [x]; physical transitions and exact eight-hour run [ ] |
 
 ### Remaining focus (ordered)
 
@@ -106,10 +106,10 @@ Full scope policy:
 | Coinbase reference + chart | `verified`    | BTC-USD / ETH-USD 1m cache-first startup, corrupt-cache refetch, reconnect fencing, redaction, history/live continuity, bounded shutdown, and public shipping smoke pass; scope is frozen.                                                           |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `verified`    | The kit is installed locally under `provider_kit/`; native-vault credentials, Test login, search/reference, trades, quotes, depth, and history were exercised successfully on 2026-08-07. |
-| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized resilience/recovery evidence remains. |
+| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented. Authorized authenticated client-local silence injection and clean recovery pass; provider-observed loss evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
-| Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
+| Readiness / endurance      | `in_progress` | Deterministic failure, burst, memory, and atomic checkpoint evidence are implemented; physical environment transitions and the exact eight-hour qualification remain.                                                                                |
 | Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
 
 
@@ -501,6 +501,11 @@ checked, so selection no longer relies on opaque click-to-cycle behavior. Enter
 submits the query, and the Search action is visibly loading/disabled while the
 single bounded provider search is in flight.
 
+The DOM and feed-health rail now uses the GPUI Components resizable-panel
+primitive rather than a fixed-width container. The chart and rail remain flush,
+the rail is bounded to 240–640 px, and its width persists while switching
+between DOM, health, and the closed state.
+
 
 
 ### Gate
@@ -514,6 +519,13 @@ login, reference, and combined subscription cycle also passed. Rithmic depth ima
 and uses the qualified local receive time instead of rejecting the frame. Catalog venues ending
 in `-Delayed` must use the base entitled exchange for reference, subscription,
 and history requests.
+
+Visible time-bar replays add a bounded four-day non-trading envelope, plus 150
+daily session-padding bars, and reject theoretical responses above 10,000 bars.
+Provider output is sorted and only the newest 300 visible bars are resequenced
+and retained. A Saturday regression proves that the one-minute request reaches
+the prior session with a maximum of 6,063 bars. The ordinary native-vault smoke
+uses the same weekend-safe bound.
 
 A later native-vault-only repeat on 2026-08-07 again passed both authenticated
 ticker sessions, the 16-result search, reference, trades, quotes, depth,
@@ -530,6 +542,14 @@ A 256-frame debug-profile Origin replay run after 32 warmup frames reported a
 This does not satisfy the named 60/120/144 release-profile matrix, so the gate
 remains open.
 
+The schema-3 Windows harness now samples the DWM primary-output compositor QPC
+timeline around the real GPUI replay. It records `DwmFlush` boundaries,
+refresh/displayed/completed counter advances, compositor cadence percentiles,
+and late/dropped/missed deltas. It explicitly records
+`physical_presentation_measured=false` and
+`external_scanout_instrumented=false`; DWM evidence is compositor evidence only.
+No named 60/120/144 physical run has been captured, so the gate remains open.
+
 - [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [x] Correct DOM gap recovery.
 - [x] Responsive symbol/timeframe replacement.
@@ -540,7 +560,8 @@ remains open.
 
 ## 11. Stage F — Readiness and endurance
 
-**Status:** `ready` (after the upstream product gates)
+**Status:** `in_progress` (deterministic readiness and checkpoint work is active;
+physical evidence remains downstream of the product gates)
 
 ### Remaining work
 
@@ -563,9 +584,14 @@ event overflow with last-generation retention, bounded reconnect exhaustion and
 fresh-budget recovery, ordered-gap recovery, and corrupt-snapshot rejection.
 The desktop suites separately pass authenticated cache-corruption fallback,
 covering resnapshot after publication overflow, and terminal Rithmic failure
-redaction. The message-silence row remains open until the already-passing
-deterministic silent-peer timeout is repeated as authorized Rithmic heartbeat
-loss.
+redaction. A native-vault-only authorized Test run on 2026-08-08 authenticated
+three fresh generations and proved generation-scoped client-local inbound
+suppression yields `MessageSilence` for generation 1 and `HeartbeatSilence` for
+generation 2, followed by a confirmed stop of healthy generation 3 and a clean
+protocol close. The run also exercised the production covering-history state
+machine deterministically. This is authorized client-local fault injection, not
+provider-observed heartbeat loss (`provider_observed_loss=false`), so the
+heartbeat/message-silence row remains open.
 
 Windows native environment support landed on 2026-08-08. The platform runtime
 registers bounded connectivity-hint and suspend/resume callbacks, and actual
@@ -606,6 +632,15 @@ A two-second Windows qualification run completed 124 frame cycles and 2,122
 updates with one retained mailbox item, zero stale/gapped publications, and a
 14,442,496-byte sampled working-set high water. This qualifies the runner but
 does not replace the required eight-hour execution.
+
+The endurance report is schema 2. It atomically writes an initial `incomplete`
+artifact, then minute `incomplete` checkpoints with sequence and wall-clock
+time, and writes `completed` only on clean termination. `readiness_qualified`
+can be true only for an exact requested 28,800-second run whose elapsed time
+reaches eight hours, memory stays bounded, and `clean_stop` is true. Short runs
+and interrupted checkpoints cannot qualify. The active 2026-08-08 run was
+started from the previous binary and therefore cannot supply schema-2 checkpoint
+evidence; the eight-hour row remains open until a qualifying artifact exists.
 
 
 

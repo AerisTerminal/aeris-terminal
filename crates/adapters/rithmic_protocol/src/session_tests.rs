@@ -104,6 +104,61 @@ fn discovery_closes_before_fresh_ticker_login_over_tls() {
 }
 
 #[test]
+fn authenticated_close_deadline_survives_continuous_control_frames() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-close-deadline-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)?;
+            drop(discovery);
+
+            let (mut ticker, _) = accept_websocket(&listener, &server_config)?;
+            assert_login_request(&read_binary(&mut ticker)?)?;
+            ticker
+                .send(Message::binary(login_response(true, &[])))
+                .map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut ticker)?);
+            let flood_deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < flood_deadline {
+                if ticker.send(Message::Ping(Vec::new().into())).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .expect("spawn close deadline fixture");
+
+    let mut limits = fixture_limits();
+    limits.close_timeout = Duration::from_millis(100);
+    let connection = RithmicTestSession::connect_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        limits,
+        None,
+        client_config,
+    )
+    .expect("discover and log in over local TLS");
+    let started = Instant::now();
+    assert_eq!(connection.close(), Err(RithmicSessionError::Deadline));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    server
+        .join()
+        .expect("close deadline fixture did not panic")
+        .expect("close deadline fixture completed");
+}
+
+#[test]
 fn history_replay_uses_fresh_history_plant_connection_over_tls() {
     let fixture = LocalTlsFixture::bind();
     let endpoint = fixture.endpoint;

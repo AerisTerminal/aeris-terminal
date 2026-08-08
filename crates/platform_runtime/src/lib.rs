@@ -7,6 +7,7 @@ mod clock;
 mod composition;
 mod credential_vault;
 mod display_timing;
+mod io_cancellation;
 mod loopback_callback;
 mod network_notifications;
 mod paths;
@@ -27,6 +28,9 @@ pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredent
 pub use display_timing::{
     DisplayEnvironment, DisplayOutput, DisplayTimingError, NativeDisplayProbe, PresentationClock,
 };
+#[cfg(target_os = "windows")]
+pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
+pub use io_cancellation::cancel_tcp_stream_io;
 pub use loopback_callback::{AuthorizationCode, LoopbackCallbackError, LoopbackRedirectListener};
 pub use network_notifications::{NativeNetworkMonitor, NetworkEvent, NetworkNotificationError};
 pub use paths::RuntimePaths;

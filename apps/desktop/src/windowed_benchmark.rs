@@ -11,6 +11,8 @@ use crate::market_worker::FixtureMarketWorker;
 use axiusflow_chart_integration::OriginChartView;
 use axiusflow_design_system::AxiusflowTheme;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
+#[cfg(target_os = "windows")]
+use axiusflow_platform_runtime::{WindowsCompositionProbe, WindowsCompositionTiming};
 use gpui::{
     App, Bounds, Context, Entity, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     size,
@@ -48,13 +50,43 @@ struct DisplayEvidence {
     probe: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct LatencyEvidence {
     p50: u64,
     p95: u64,
     p99: u64,
     p99_9: u64,
     maximum: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Serialize)]
+struct WindowsCompositionEvidence {
+    availability: &'static str,
+    timeline_observation: &'static str,
+    scope: &'static str,
+    semantics: &'static str,
+    qpc_frequency_hz: Option<u64>,
+    reported_refresh_period_nanos: Option<u64>,
+    samples: usize,
+    initial_flush: &'static str,
+    final_flush: &'static str,
+    first_vblank_qpc: Option<u64>,
+    last_vblank_qpc: Option<u64>,
+    first_compose_qpc: Option<u64>,
+    last_compose_qpc: Option<u64>,
+    first_displayed_frame: Option<u64>,
+    last_displayed_frame: Option<u64>,
+    displayed_frame_advances: u64,
+    displayed_frame_interval: Option<LatencyEvidence>,
+    first_completed_frame: Option<u64>,
+    last_completed_frame: Option<u64>,
+    completed_frame_advances: u64,
+    refresh_advances: u64,
+    refresh_interval: Option<LatencyEvidence>,
+    late_frame_delta: u64,
+    dropped_frame_delta: u64,
+    missed_frame_delta: u64,
 }
 
 #[derive(Serialize)]
@@ -69,10 +101,13 @@ struct WindowedBenchmarkReport {
     update_to_frame_callback: LatencyEvidence,
     frame_callback_interval: LatencyEvidence,
     renderer_submission_performed: bool,
+    compositor_presentation_evidence: &'static str,
+    #[cfg(target_os = "windows")]
+    windows_dwm_composition: WindowsCompositionEvidence,
     physical_presentation_measured: bool,
     presentation_measurement_method: &'static str,
     external_scanout_instrumented: bool,
-    limitations: [&'static str; 4],
+    limitations: [&'static str; 5],
 }
 
 struct FrameSample {
@@ -89,6 +124,14 @@ struct BenchmarkDriver {
     last_callback_at: Instant,
     samples: Vec<FrameSample>,
     report_path: PathBuf,
+    #[cfg(target_os = "windows")]
+    composition_probe: Option<WindowsCompositionProbe>,
+    #[cfg(target_os = "windows")]
+    composition_samples: Vec<WindowsCompositionTiming>,
+    #[cfg(target_os = "windows")]
+    initial_composition_flush_succeeded: bool,
+    #[cfg(target_os = "windows")]
+    final_composition_flush_succeeded: bool,
 }
 
 enum Step {
@@ -99,6 +142,8 @@ enum Step {
 impl BenchmarkDriver {
     fn step(&mut self, window: &mut Window, cx: &mut App) -> Step {
         let callback_at = Instant::now();
+        #[cfg(target_os = "windows")]
+        self.sample_composition();
         if self.iteration > 0 {
             let update_to_frame_callback = callback_at
                 .saturating_duration_since(self.submitted_at)
@@ -139,6 +184,26 @@ impl BenchmarkDriver {
         self.submitted_at = Instant::now();
         Step::Continue
     }
+
+    #[cfg(target_os = "windows")]
+    fn sample_composition(&mut self) {
+        if let Some(sample) = self
+            .composition_probe
+            .as_ref()
+            .and_then(|probe| probe.sample().ok())
+        {
+            self.composition_samples.push(sample);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn finish_composition(&mut self) {
+        self.final_composition_flush_succeeded = self
+            .composition_probe
+            .as_ref()
+            .is_some_and(|probe| probe.flush().is_ok());
+        self.sample_composition();
+    }
 }
 
 struct WindowedBenchmarkApp {
@@ -158,6 +223,8 @@ fn schedule_frame(driver: Rc<RefCell<BenchmarkDriver>>, window: &mut Window, _cx
             matches!(borrowed.step(window, cx), Step::Finish)
         };
         if finished {
+            #[cfg(target_os = "windows")]
+            driver.borrow_mut().finish_composition();
             if let Err(error) = write_report(&driver.borrow()) {
                 eprintln!("windowed benchmark report failed: {error}");
             }
@@ -186,6 +253,170 @@ fn latency_evidence(samples: &[FrameSample], select: fn(&FrameSample) -> u64) ->
         p99_9: percentile(&values, 999, 1_000),
         maximum: values.last().copied().unwrap_or(0),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_composition_evidence(driver: &BenchmarkDriver) -> WindowsCompositionEvidence {
+    let samples = &driver.composition_samples;
+    let first = samples.first().copied();
+    let last = samples.last().copied();
+    let (displayed_intervals, refresh_intervals) = composition_intervals(samples);
+    let displayed_frame_advances = counter_delta(
+        first.map(WindowsCompositionTiming::displayed_frame),
+        last.map(WindowsCompositionTiming::displayed_frame),
+    );
+    let timeline_advanced = counter_delta(
+        first.map(WindowsCompositionTiming::refresh_count),
+        last.map(WindowsCompositionTiming::refresh_count),
+    ) > 0;
+    WindowsCompositionEvidence {
+        availability: if samples.is_empty() {
+            "unavailable"
+        } else {
+            "available"
+        },
+        timeline_observation: if timeline_advanced {
+            "refresh_counter_advanced"
+        } else {
+            "no_refresh_counter_advance_observed"
+        },
+        scope: "windows_dwm_primary_output_compositor_timeline",
+        semantics: "dwm_refresh_displayed_and_completed_counters_are_compositor_evidence_not_physical_scanout",
+        qpc_frequency_hz: first.map(WindowsCompositionTiming::qpc_frequency_hz),
+        reported_refresh_period_nanos: first
+            .and_then(WindowsCompositionTiming::refresh_period_nanos),
+        samples: samples.len(),
+        initial_flush: flush_status(driver.initial_composition_flush_succeeded),
+        final_flush: flush_status(driver.final_composition_flush_succeeded),
+        first_vblank_qpc: first.map(WindowsCompositionTiming::vblank_qpc),
+        last_vblank_qpc: last.map(WindowsCompositionTiming::vblank_qpc),
+        first_compose_qpc: first.map(WindowsCompositionTiming::compose_qpc),
+        last_compose_qpc: last.map(WindowsCompositionTiming::compose_qpc),
+        first_displayed_frame: first.map(WindowsCompositionTiming::displayed_frame),
+        last_displayed_frame: last.map(WindowsCompositionTiming::displayed_frame),
+        displayed_frame_advances,
+        displayed_frame_interval: interval_evidence(&displayed_intervals),
+        first_completed_frame: first.map(WindowsCompositionTiming::completed_frame),
+        last_completed_frame: last.map(WindowsCompositionTiming::completed_frame),
+        completed_frame_advances: counter_delta(
+            first.map(WindowsCompositionTiming::completed_frame),
+            last.map(WindowsCompositionTiming::completed_frame),
+        ),
+        refresh_advances: counter_delta(
+            first.map(WindowsCompositionTiming::refresh_count),
+            last.map(WindowsCompositionTiming::refresh_count),
+        ),
+        refresh_interval: interval_evidence(&refresh_intervals),
+        late_frame_delta: counter_delta(
+            first.map(WindowsCompositionTiming::frames_late),
+            last.map(WindowsCompositionTiming::frames_late),
+        ),
+        dropped_frame_delta: counter_delta(
+            first.map(WindowsCompositionTiming::frames_dropped),
+            last.map(WindowsCompositionTiming::frames_dropped),
+        ),
+        missed_frame_delta: counter_delta(
+            first.map(WindowsCompositionTiming::frames_missed),
+            last.map(WindowsCompositionTiming::frames_missed),
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn composition_intervals(
+    samples: &[WindowsCompositionTiming],
+) -> (Vec<FrameSample>, Vec<FrameSample>) {
+    let mut displayed_intervals = Vec::new();
+    let mut refresh_intervals = Vec::new();
+    for pair in samples.windows(2) {
+        let [previous, current] = pair else {
+            continue;
+        };
+        if let Some(nanos) = displayed_frame_interval_nanos(
+            previous.displayed_frame(),
+            previous.displayed_qpc(),
+            current.displayed_frame(),
+            current.displayed_qpc(),
+            current.qpc_frequency_hz(),
+        ) {
+            displayed_intervals.push(FrameSample {
+                update_to_frame_callback_nanos: nanos,
+                frame_callback_interval_nanos: nanos,
+            });
+        }
+        if let Some(nanos) = counter_interval_nanos(
+            previous.refresh_count(),
+            previous.vblank_qpc(),
+            current.refresh_count(),
+            current.vblank_qpc(),
+            current.qpc_frequency_hz(),
+        ) {
+            refresh_intervals.push(FrameSample {
+                update_to_frame_callback_nanos: nanos,
+                frame_callback_interval_nanos: nanos,
+            });
+        }
+    }
+    (displayed_intervals, refresh_intervals)
+}
+
+#[cfg(target_os = "windows")]
+fn interval_evidence(samples: &[FrameSample]) -> Option<LatencyEvidence> {
+    (!samples.is_empty())
+        .then(|| latency_evidence(samples, |sample| sample.frame_callback_interval_nanos))
+}
+
+#[cfg(target_os = "windows")]
+const fn flush_status(succeeded: bool) -> &'static str {
+    if succeeded {
+        "succeeded"
+    } else {
+        "failed_or_unavailable"
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn counter_delta(first: Option<u64>, last: Option<u64>) -> u64 {
+    last.zip(first)
+        .map_or(0, |(last, first)| last.saturating_sub(first))
+}
+
+#[cfg(target_os = "windows")]
+fn displayed_frame_interval_nanos(
+    previous_frame: u64,
+    previous_qpc: u64,
+    current_frame: u64,
+    current_qpc: u64,
+    qpc_frequency_hz: u64,
+) -> Option<u64> {
+    counter_interval_nanos(
+        previous_frame,
+        previous_qpc,
+        current_frame,
+        current_qpc,
+        qpc_frequency_hz,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn counter_interval_nanos(
+    previous_counter: u64,
+    previous_qpc: u64,
+    current_counter: u64,
+    current_qpc: u64,
+    qpc_frequency_hz: u64,
+) -> Option<u64> {
+    let counter_advance = current_counter.checked_sub(previous_counter)?;
+    let tick_advance = current_qpc.checked_sub(previous_qpc)?;
+    if counter_advance == 0 || tick_advance == 0 || qpc_frequency_hz == 0 {
+        return None;
+    }
+    u64::try_from(
+        u128::from(tick_advance) * 1_000_000_000
+            / u128::from(qpc_frequency_hz)
+            / u128::from(counter_advance),
+    )
+    .ok()
 }
 
 fn display_evidence() -> DisplayEvidence {
@@ -228,9 +459,11 @@ const fn native_probe_name() -> &'static str {
 }
 
 fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
+    #[cfg(target_os = "windows")]
+    let windows_dwm_composition = windows_composition_evidence(driver);
     let report = WindowedBenchmarkReport {
-        schema_version: 2,
-        evidence_scope: "windowed_replay_to_frame_callback",
+        schema_version: 3,
+        evidence_scope: "windowed_replay_to_frame_callback_and_native_compositor_timeline",
         source_revision: env::var("GITHUB_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty()),
@@ -245,11 +478,24 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
             sample.frame_callback_interval_nanos
         }),
         renderer_submission_performed: true,
+        #[cfg(target_os = "windows")]
+        compositor_presentation_evidence: if windows_dwm_composition.timeline_observation
+            == "refresh_counter_advanced"
+        {
+            "windows_dwm_timeline_advanced"
+        } else {
+            "unavailable_or_static"
+        },
+        #[cfg(not(target_os = "windows"))]
+        compositor_presentation_evidence: "unavailable",
+        #[cfg(target_os = "windows")]
+        windows_dwm_composition,
         physical_presentation_measured: false,
-        presentation_measurement_method: "gpui_on_next_frame_after_prior_render",
+        presentation_measurement_method: presentation_measurement_method(),
         external_scanout_instrumented: false,
         limitations: [
-            "frame_callback_cadence_not_physical_scanout",
+            "gpui_frame_callback_cadence_not_physical_scanout",
+            "dwm_displayed_counter_not_physical_panel_scanout",
             "single_named_display_profile",
             "disconnected_fixture_data_source",
             "window_output_attribution_by_compositor_placement",
@@ -266,6 +512,14 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
         driver.report_path.display()
     );
     Ok(())
+}
+
+const fn presentation_measurement_method() -> &'static str {
+    #[cfg(target_os = "windows")]
+    return "gpui_on_next_frame_plus_dwm_composition_timing_and_flush";
+
+    #[cfg(not(target_os = "windows"))]
+    "gpui_on_next_frame_after_prior_render"
 }
 
 /// Runs the windowed benchmark and exits the process when measurement completes.
@@ -290,6 +544,16 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                 let theme = AxiusflowTheme::dark();
                 let chart =
                     cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                #[cfg(target_os = "windows")]
+                let (composition_probe, initial_composition_flush_succeeded, composition_samples) =
+                    match WindowsCompositionProbe::new() {
+                        Ok(probe) => {
+                            let flushed = probe.flush().is_ok();
+                            let samples = probe.sample().into_iter().collect();
+                            (Some(probe), flushed, samples)
+                        }
+                        Err(_) => (None, false, Vec::new()),
+                    };
                 let driver = Rc::new(RefCell::new(BenchmarkDriver {
                     chart: chart.clone(),
                     worker,
@@ -299,6 +563,14 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                     last_callback_at: Instant::now(),
                     samples: Vec::with_capacity(MEASURED_FRAMES),
                     report_path,
+                    #[cfg(target_os = "windows")]
+                    composition_probe,
+                    #[cfg(target_os = "windows")]
+                    composition_samples,
+                    #[cfg(target_os = "windows")]
+                    initial_composition_flush_succeeded,
+                    #[cfg(target_os = "windows")]
+                    final_composition_flush_succeeded: false,
                 }));
                 schedule_frame(driver, window, cx);
                 cx.new(|cx| {
@@ -314,4 +586,21 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
         cx.activate(true);
     });
     Ok(())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::displayed_frame_interval_nanos;
+
+    #[test]
+    fn displayed_interval_normalizes_multi_frame_counter_advances() {
+        assert_eq!(
+            displayed_frame_interval_nanos(100, 10_000, 103, 10_600, 10_000),
+            Some(20_000_000)
+        );
+        assert_eq!(
+            displayed_frame_interval_nanos(100, 10_000, 100, 10_600, 10_000),
+            None
+        );
+    }
 }

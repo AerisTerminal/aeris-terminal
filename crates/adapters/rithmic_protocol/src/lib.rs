@@ -36,8 +36,9 @@ pub use credentials::{
     RithmicCredentialBytes, RithmicCredentialError,
 };
 pub use desktop_driver::{
-    AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
-    RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection, RithmicDesktopEventError,
+    AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
+    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCatalogCallback,
+    RithmicCatalogEvent, RithmicCatalogRejection, RithmicDesktopEventError,
     RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCallback,
     RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderConfigError,
     RithmicProviderDriver, RithmicProviderDriverError, RithmicProviderEvents,
@@ -52,9 +53,10 @@ pub use history::{
 };
 pub use history_adapter::{
     CanonicalRithmicTickBar, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicBarContinuity,
-    RithmicHistoryAdapterError, RithmicHistoryCapabilityAdapter, RithmicHistoryLimits,
-    RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicTimeBarResolution,
-    canonical_rithmic_tick_bar, canonical_rithmic_time_bar, covering_snapshot_from_page,
+    RithmicCoveringRecoveryEvidence, RithmicHistoryAdapterError, RithmicHistoryCapabilityAdapter,
+    RithmicHistoryLimits, RithmicHistorySessionTransport, RithmicHistoryTransport,
+    RithmicTimeBarResolution, canonical_rithmic_tick_bar, canonical_rithmic_time_bar,
+    collect_rithmic_covering_recovery_evidence, covering_snapshot_from_page,
     decode_rithmic_history_bar,
 };
 pub use market::{

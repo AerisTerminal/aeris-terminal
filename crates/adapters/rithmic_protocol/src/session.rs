@@ -6,7 +6,8 @@ use crate::{
     TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
     endpoint::RithmicEndpoint,
     network::{
-        RithmicWebSocket, begin_shutdown, connect_websocket, default_tls_config, set_deadline,
+        ConnectionAbort, RithmicWebSocket, begin_shutdown, connect_websocket, default_tls_config,
+        set_deadline,
     },
 };
 use rustls::ClientConfig;
@@ -18,6 +19,11 @@ use std::{
 use tungstenite::{Bytes, Message};
 
 const TEST_SYSTEM: &str = "Rithmic Test";
+
+struct ConnectionControl<'a> {
+    stop: Option<Arc<AtomicBool>>,
+    abort: Option<&'a ConnectionAbort>,
+}
 
 /// Borrowed credentials used only during one synchronous connection attempt.
 #[derive(Clone, Copy)]
@@ -98,7 +104,7 @@ impl RithmicTestSession {
             credentials,
             application,
             limits,
-            stop,
+            ConnectionControl { stop, abort: None },
             tls_config,
             ReadOnlyPlant::History,
         )
@@ -118,7 +124,30 @@ impl RithmicTestSession {
             credentials,
             application,
             limits,
-            stop,
+            ConnectionControl { stop, abort: None },
+            tls_config,
+            ReadOnlyPlant::Ticker,
+        )
+        .map(RithmicTickerConnection::new)
+    }
+
+    pub(crate) fn discover_and_login_with_abort(
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Arc<AtomicBool>,
+        abort: &ConnectionAbort,
+    ) -> Result<RithmicTickerConnection, RithmicSessionError> {
+        let tls_config = default_tls_config()?;
+        Self::connect_plant_with(
+            RithmicEndpoint::TEST,
+            credentials,
+            application,
+            limits,
+            ConnectionControl {
+                stop: Some(stop),
+                abort: Some(abort),
+            },
             tls_config,
             ReadOnlyPlant::Ticker,
         )
@@ -139,7 +168,7 @@ impl RithmicTestSession {
             credentials,
             application,
             limits,
-            stop,
+            ConnectionControl { stop, abort: None },
             tls_config,
             ReadOnlyPlant::History,
         )
@@ -151,7 +180,7 @@ impl RithmicTestSession {
         credentials: RithmicCredentials<'_>,
         application: RithmicApplication<'_>,
         limits: RithmicSessionLimits,
-        stop: Option<Arc<AtomicBool>>,
+        control: ConnectionControl<'_>,
         tls_config: ClientConfig,
         plant: ReadOnlyPlant,
     ) -> Result<AuthenticatedConnection, RithmicSessionError> {
@@ -162,7 +191,10 @@ impl RithmicTestSession {
             return Err(RithmicSessionError::KitUnavailable);
         }
 
-        let mut discovery = connect_websocket(endpoint, limits, stop.clone(), tls_config.clone())?;
+        let ConnectionControl { stop, abort } = control;
+
+        let mut discovery =
+            connect_websocket(endpoint, limits, stop.clone(), abort, tls_config.clone())?;
         set_deadline(&mut discovery, Instant::now() + limits.response_timeout);
         send_request(&mut discovery, &backend, OutboundRequest::DiscoverSystems)?;
         set_deadline(&mut discovery, Instant::now() + limits.response_timeout);
@@ -183,7 +215,7 @@ impl RithmicTestSession {
         finish_discovery_close(&mut discovery, limits.close_timeout)?;
         drop(discovery);
 
-        let mut socket = connect_websocket(endpoint, limits, stop, tls_config)?;
+        let mut socket = connect_websocket(endpoint, limits, stop, abort, tls_config)?;
         set_deadline(&mut socket, Instant::now() + limits.response_timeout);
         send_request(
             &mut socket,
@@ -254,17 +286,18 @@ impl AuthenticatedConnection {
         deadline: Instant,
     ) -> Result<RithmicSessionMessage, RithmicSessionError> {
         set_deadline(&mut self.socket, deadline);
-        let frame = read_binary(&mut self.socket)?;
+        let frame = read_binary_until(&mut self.socket, deadline)?;
         decode_session_message(&frame)
     }
 
     fn close(mut self) -> Result<(), RithmicSessionError> {
-        begin_shutdown(&mut self.socket, Instant::now() + self.limits.close_timeout);
+        let deadline = Instant::now() + self.limits.close_timeout;
+        begin_shutdown(&mut self.socket, deadline);
         let backend = RithmicProtocolBackend::detected();
         send_request(&mut self.socket, &backend, OutboundRequest::Logout)?;
         let mut acknowledged = false;
         for _ in 0..64 {
-            let frame = read_binary(&mut self.socket)?;
+            let frame = read_binary_until(&mut self.socket, deadline)?;
             let control = match backend.decode_control(&frame) {
                 Ok(control) => control,
                 Err(ProtocolError::UnsupportedTemplate(_)) => continue,
@@ -580,8 +613,14 @@ fn read_control(
     }
 }
 
-fn read_binary(socket: &mut RithmicWebSocket) -> Result<Bytes, RithmicSessionError> {
+fn read_binary_until(
+    socket: &mut RithmicWebSocket,
+    deadline: Instant,
+) -> Result<Bytes, RithmicSessionError> {
     loop {
+        if Instant::now() >= deadline {
+            return Err(RithmicSessionError::Deadline);
+        }
         match socket.read().map_err(map_websocket_error)? {
             Message::Binary(frame) => return Ok(frame),
             Message::Ping(_) | Message::Pong(_) => {
@@ -621,8 +660,12 @@ fn finish_discovery_close(
     socket: &mut RithmicWebSocket,
     timeout: Duration,
 ) -> Result<(), RithmicSessionError> {
-    set_deadline(socket, Instant::now() + timeout);
+    let deadline = Instant::now() + timeout;
+    set_deadline(socket, deadline);
     loop {
+        if Instant::now() >= deadline {
+            return Err(RithmicSessionError::DiscoveryClose);
+        }
         match socket.read() {
             Ok(Message::Close(_)) => {
                 socket

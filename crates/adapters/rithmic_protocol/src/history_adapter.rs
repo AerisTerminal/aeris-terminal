@@ -7,9 +7,9 @@ use crate::{
 use axiusflow_market_data::MarketBar;
 use axiusflow_provider_history::{
     DataClass, DatasetCapability, HandoffBatch, HandoffCoordinator, HandoffState,
-    HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, LiveAcceptance,
-    PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit, SequencedHistory,
-    VerifiedHistorySnapshot,
+    HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
+    LiveAcceptance, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
+    SequencedHistory, VerifiedHistorySnapshot,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -878,6 +878,105 @@ impl RithmicBarContinuity {
     }
 }
 
+/// Named deterministic evidence that a newer covering page restores a gapped handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RithmicCoveringRecoveryEvidence {
+    pub failed_generation: u64,
+    pub recovery_generation: u64,
+    pub recovered_watermark: u64,
+}
+
+/// Exercises the production Rithmic history/live continuity state machine.
+///
+/// # Errors
+///
+/// Returns an error unless a live gap requires recovery and only a newer page
+/// covering the observed watermark restores the handoff.
+pub fn collect_rithmic_covering_recovery_evidence()
+-> Result<RithmicCoveringRecoveryEvidence, RithmicHistoryAdapterError> {
+    fn page(last_sequence: u64) -> HistoryPage {
+        let request = HistoryPageRequest {
+            provider_id: PROVIDER_ID.to_string(),
+            account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
+            entitlement_revision: "deterministic-resilience-evidence-v1".to_string(),
+            instrument_id: "evidence-instrument".to_string(),
+            data_class: DataClass::Bars,
+            resolution: "1m".to_string(),
+            range: HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: i64::try_from(last_sequence)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(NANOS_PER_SECOND_I64),
+            },
+            maximum_items: NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+            continuation: None,
+        };
+        let items = (1..=last_sequence)
+            .map(|sequence| {
+                let timestamp = i64::try_from(sequence).unwrap_or(i64::MAX);
+                let bar = MarketBar {
+                    source_sequence: sequence,
+                    exchange_timestamp_seconds: timestamp,
+                    open: 100,
+                    high: 100,
+                    low: 100,
+                    close: 100,
+                    volume: 1,
+                };
+                HistoryItem {
+                    sequence,
+                    event_time_unix_nanos: timestamp.saturating_mul(NANOS_PER_SECOND_I64),
+                    payload: encode_history_bar(bar),
+                }
+            })
+            .collect();
+        HistoryPage {
+            request,
+            items,
+            next: None,
+        }
+    }
+
+    let mut continuity =
+        RithmicBarContinuity::new(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+    continuity.install_covering_page(NonZeroU64::MIN, &page(2))?;
+    let gap = SequencedHistory {
+        sequence: NonZeroU64::new(4).unwrap_or(NonZeroU64::MIN),
+        value: MarketBar {
+            source_sequence: 4,
+            exchange_timestamp_seconds: 4,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+        },
+    };
+    if continuity.push_live(gap) != Err(RithmicHistoryAdapterError::IncompleteCoverage)
+        || continuity.state()
+            != (HandoffState::SnapshotRequired {
+                minimum_generation: 1,
+                minimum_watermark: 4,
+            })
+    {
+        return Err(RithmicHistoryAdapterError::IncompleteCoverage);
+    }
+    continuity.install_covering_page(NonZeroU64::new(2).unwrap_or(NonZeroU64::MIN), &page(4))?;
+    if continuity.state()
+        != (HandoffState::Live {
+            generation: 2,
+            last_sequence: 4,
+        })
+    {
+        return Err(RithmicHistoryAdapterError::IncompleteCoverage);
+    }
+    Ok(RithmicCoveringRecoveryEvidence {
+        failed_generation: 1,
+        recovery_generation: 2,
+        recovered_watermark: 4,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1281,6 +1380,18 @@ mod tests {
         assert_eq!(
             covering_snapshot_from_page(NonZeroU64::new(1).unwrap(), &empty),
             Err(RithmicHistoryAdapterError::IncompleteCoverage)
+        );
+    }
+
+    #[test]
+    fn named_covering_recovery_evidence_requires_a_newer_complete_generation() {
+        assert_eq!(
+            collect_rithmic_covering_recovery_evidence(),
+            Ok(RithmicCoveringRecoveryEvidence {
+                failed_generation: 1,
+                recovery_generation: 2,
+                recovered_watermark: 4,
+            })
         );
     }
 }

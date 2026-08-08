@@ -1,11 +1,12 @@
 use crate::{RithmicSessionError, RithmicSessionLimits, endpoint::RithmicEndpoint};
+use axiusflow_platform_runtime::cancel_tcp_stream_io;
 use rustls::{ClientConfig, RootCertStore};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::{self, Read, Write},
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -30,6 +31,44 @@ static RESOLVER: OnceLock<Result<mpsc::SyncSender<ResolutionRequest>, ()>> = Onc
 
 pub(crate) type RithmicWebSocket = WebSocket<MaybeTlsStream<DeadlineTcpStream>>;
 
+#[derive(Debug, Default)]
+pub(crate) struct ConnectionAbort {
+    aborted: AtomicBool,
+    stream: Mutex<Option<Arc<TcpStream>>>,
+}
+
+impl ConnectionAbort {
+    pub(crate) fn register(&self, stream: Arc<TcpStream>) -> Result<(), RithmicSessionError> {
+        if self.aborted.load(Ordering::Acquire) {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Err(RithmicSessionError::Cancelled);
+        }
+        let mut registered = self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.aborted.load(Ordering::Acquire) {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Err(RithmicSessionError::Cancelled);
+        }
+        *registered = Some(stream);
+        Ok(())
+    }
+
+    pub(crate) fn abort(&self) {
+        self.aborted.store(true, Ordering::Release);
+        if let Some(stream) = self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = cancel_tcp_stream_io(&stream);
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+}
+
 pub(crate) fn default_tls_config() -> Result<ClientConfig, RithmicSessionError> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -43,10 +82,14 @@ pub(crate) fn connect_websocket(
     endpoint: RithmicEndpoint,
     limits: RithmicSessionLimits,
     stop: Option<Arc<AtomicBool>>,
+    abort: Option<&ConnectionAbort>,
     tls_config: ClientConfig,
 ) -> Result<RithmicWebSocket, RithmicSessionError> {
     let connect_deadline = Instant::now() + limits.connect_timeout;
     let mut tcp = connect_tcp(endpoint.host, endpoint.port, connect_deadline, stop)?;
+    if let Some(abort) = abort {
+        abort.register(Arc::clone(&tcp.stream))?;
+    }
     tcp.set_deadline(Instant::now() + limits.handshake_timeout);
     let websocket_config = WebSocketConfig::default()
         .read_buffer_size(limits.maximum_message_bytes.min(64 * 1024))
@@ -99,7 +142,7 @@ pub(crate) fn begin_shutdown(socket: &mut RithmicWebSocket, deadline: Instant) {
 }
 
 pub(crate) struct DeadlineTcpStream {
-    stream: TcpStream,
+    stream: Arc<TcpStream>,
     deadline: Instant,
     stop: Option<Arc<AtomicBool>>,
 }
@@ -135,7 +178,7 @@ impl Read for DeadlineTcpStream {
         loop {
             self.stream
                 .set_read_timeout(Some(self.operation_timeout()?))?;
-            match self.stream.read(buffer) {
+            match (&*self.stream).read(buffer) {
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -152,7 +195,7 @@ impl Write for DeadlineTcpStream {
         loop {
             self.stream
                 .set_write_timeout(Some(self.operation_timeout()?))?;
-            match self.stream.write(buffer) {
+            match (&*self.stream).write(buffer) {
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -167,7 +210,7 @@ impl Write for DeadlineTcpStream {
         loop {
             self.stream
                 .set_write_timeout(Some(self.operation_timeout()?))?;
-            match self.stream.flush() {
+            match (&*self.stream).flush() {
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -210,7 +253,7 @@ fn connect_tcp(
                         .set_nodelay(true)
                         .map_err(|_| RithmicSessionError::Connect)?;
                     return Ok(DeadlineTcpStream {
-                        stream,
+                        stream: Arc::new(stream),
                         deadline,
                         stop,
                     });

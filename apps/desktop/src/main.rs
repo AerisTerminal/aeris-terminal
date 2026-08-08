@@ -27,6 +27,7 @@ use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+    resizable::{h_resizable, resizable_panel},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_hugeicons::{HugeiconsAssets, IconName as HugeIcon};
@@ -37,6 +38,10 @@ use market_worker::{
     UiDiagnosticsFeedback,
 };
 use std::sync::mpsc::TrySendError;
+
+const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
+const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
+const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 
 fn generation_status(
     worker_label: &str,
@@ -1085,29 +1090,14 @@ impl Render for TerminalApp {
             },
         );
 
-        let chart = div()
-            .id("primary_chart")
-            .v_flex()
-            .flex_1()
-            .overflow_hidden()
-            .border_1()
-            .border_color(gpui_color(colors.border))
-            .bg(gpui_color(colors.background))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .children(self.chart.clone())
-                    .children(self.chart.is_none().then(|| {
-                        div()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(gpui_color(colors.muted_foreground))
-                            .child(self.chart_state.label())
-                    })),
-            );
+        let workspace = market_workspace(
+            self.chart.as_ref(),
+            self.dom.clone(),
+            self.side_panel,
+            self.chart_state,
+            self.feed_diagnostics.as_deref(),
+            &theme,
+        );
 
         div()
             .v_flex()
@@ -1117,26 +1107,64 @@ impl Render for TerminalApp {
             .child(header)
             .child(
                 div()
-                    .id("market_workspace")
-                    .flex()
                     .flex_1()
                     .overflow_hidden()
                     .bg(gpui_color(colors.background))
-                    .child(chart)
-                    .children((self.side_panel == Some(SidePanel::Dom)).then(|| {
-                        div()
-                            .id("depth_panel")
-                            .w(px(320.0))
-                            .h_full()
-                            .flex_none()
-                            .child(self.dom.clone())
-                    }))
-                    .children(
-                        (self.side_panel == Some(SidePanel::Health))
-                            .then(|| feed_health_panel(self.feed_diagnostics.as_deref(), &theme)),
-                    ),
+                    .child(workspace),
             )
     }
+}
+
+fn market_workspace(
+    chart: Option<&Entity<OriginChartView>>,
+    dom: Entity<ReadOnlyDomView>,
+    side_panel: Option<SidePanel>,
+    chart_state: ChartState,
+    diagnostics: Option<&FeedDiagnosticsSnapshot>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let chart_surface = div()
+        .id("primary_chart")
+        .v_flex()
+        .flex_1()
+        .overflow_hidden()
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.background))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .children(chart.cloned())
+                .children(chart.is_none().then(|| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(gpui_color(colors.muted_foreground))
+                        .child(chart_state.label())
+                })),
+        );
+    let side_panel_content = resizable_panel()
+        .visible(side_panel.is_some())
+        .size(px(SIDE_PANEL_INITIAL_WIDTH))
+        .size_range(px(SIDE_PANEL_MINIMUM_WIDTH)..px(SIDE_PANEL_MAXIMUM_WIDTH))
+        .flex_none()
+        .child(
+            div()
+                .size_full()
+                .overflow_hidden()
+                .children((side_panel == Some(SidePanel::Dom)).then_some(dom))
+                .children(
+                    (side_panel == Some(SidePanel::Health))
+                        .then(|| feed_health_panel(diagnostics, theme)),
+                ),
+        );
+    h_resizable("market_workspace")
+        .child(resizable_panel().child(chart_surface))
+        .child(side_panel_content)
 }
 
 fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
@@ -1488,8 +1516,7 @@ fn feed_health_panel(
     let rows = health_rows(snapshot);
     div()
         .id("feed_health_panel")
-        .w(px(320.0))
-        .h_full()
+        .size_full()
         .flex_none()
         .flex()
         .flex_col()

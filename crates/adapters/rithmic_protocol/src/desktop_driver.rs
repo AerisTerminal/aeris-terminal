@@ -1,3 +1,4 @@
+use crate::network::ConnectionAbort;
 use crate::{
     AggregateBookAssembler, AggregateBookLimits, AggregateBookOutcome, CollectedSymbols,
     CollectionProgress, CollectorError, DecodedCatalogMessage, DecodedControlMessage,
@@ -391,6 +392,18 @@ pub struct RithmicProviderConfig {
     session_limits: RithmicSessionLimits,
     message_silence_timeout: Duration,
     instruments: Vec<RithmicProviderInstrument>,
+    authorized_silence_evidence_faults:
+        Vec<(SessionGeneration, RithmicAuthorizedSilenceEvidenceFault)>,
+}
+
+/// Client-local inbound suppression used only by the authorized headless resilience smoke.
+///
+/// This never changes provider behavior and is not evidence of a provider-observed loss.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RithmicAuthorizedSilenceEvidenceFault {
+    Heartbeat,
+    Message,
 }
 
 impl RithmicProviderConfig {
@@ -439,7 +452,36 @@ impl RithmicProviderConfig {
             session_limits,
             message_silence_timeout,
             instruments,
+            authorized_silence_evidence_faults: Vec::new(),
         })
+    }
+
+    /// Suppresses inbound processing after authentication so the
+    /// production silence detector can be exercised without disrupting the
+    /// provider or exposing credentials outside the native-vault process.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn with_authorized_silence_evidence_fault(
+        mut self,
+        generation: SessionGeneration,
+        fault: RithmicAuthorizedSilenceEvidenceFault,
+    ) -> Self {
+        self.authorized_silence_evidence_faults
+            .retain(|(configured, _)| *configured != generation);
+        if self.authorized_silence_evidence_faults.len() < 2 {
+            self.authorized_silence_evidence_faults
+                .push((generation, fault));
+        }
+        self
+    }
+
+    fn silence_evidence_fault(
+        &self,
+        generation: SessionGeneration,
+    ) -> Option<RithmicAuthorizedSilenceEvidenceFault> {
+        self.authorized_silence_evidence_faults
+            .iter()
+            .find_map(|(configured, fault)| (*configured == generation).then_some(*fault))
     }
 
     /// Returns the fixed non-secret Rithmic Test provider profile.
@@ -656,6 +698,7 @@ type SessionTask = dyn Fn(
         SessionGeneration,
         RithmicCredentialBytes,
         Arc<AtomicBool>,
+        Arc<ConnectionAbort>,
         Receiver<RithmicSessionCommand>,
         SessionEmitter,
     ) + Send
@@ -665,6 +708,7 @@ type SessionTask = dyn Fn(
 struct ActiveSession {
     generation: SessionGeneration,
     stop: Arc<AtomicBool>,
+    abort: Arc<ConnectionAbort>,
     handle: JoinHandle<()>,
 }
 
@@ -1007,6 +1051,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             catalog.queued_bytes = 0;
         }
         let stop = Arc::new(AtomicBool::new(false));
+        let abort = Arc::new(ConnectionAbort::default());
         let (command_tx, command_rx) = sync_channel(SESSION_COMMAND_CAPACITY);
         *self
             .callbacks
@@ -1021,6 +1066,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
         };
         let panic_emitter = emitter.clone();
         let task_stop = Arc::clone(&stop);
+        let task_abort = Arc::clone(&abort);
         let handle = thread::Builder::new()
             .name(format!("rithmic-session-{}", generation.get()))
             .spawn(move || {
@@ -1030,6 +1076,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
                         generation,
                         credentials,
                         task_stop,
+                        task_abort,
                         command_rx,
                         emitter,
                     );
@@ -1049,6 +1096,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
         self.active = Some(ActiveSession {
             generation,
             stop,
+            abort,
             handle,
         });
         Ok(())
@@ -1064,6 +1112,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             return Err(RithmicProviderDriverError::StaleGeneration);
         }
         active.stop.store(true, Ordering::Release);
+        active.abort.abort();
         self.clear_commands(generation);
         let _ = active.handle.join();
         Ok(())
@@ -1074,6 +1123,7 @@ impl Drop for RithmicProviderDriver {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
             active.stop.store(true, Ordering::Release);
+            active.abort.abort();
             self.clear_commands(active.generation);
             let _ = active.handle.join();
         }
@@ -1343,7 +1393,7 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
 
 fn direct_session_task() -> Arc<SessionTask> {
     Arc::new(
-        |config, generation, credential_bytes, stop, commands, emitter| {
+        |config, generation, credential_bytes, stop, abort, commands, emitter| {
             if !emitter.send(ProviderSessionEvent::DiscoveryStarted) {
                 return;
             }
@@ -1355,14 +1405,15 @@ fn direct_session_task() -> Arc<SessionTask> {
                     );
                     return;
                 };
-                RithmicTestSession::discover_and_login(
+                RithmicTestSession::discover_and_login_with_abort(
                     credentials,
                     RithmicApplication {
                         name: &config.application_name,
                         version: &config.application_version,
                     },
                     config.session_limits,
-                    Some(Arc::clone(&stop)),
+                    Arc::clone(&stop),
+                    abort.as_ref(),
                 )
             };
             drop(credential_bytes);
@@ -1515,6 +1566,10 @@ fn collect_market(
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let mut canonical = CanonicalSessionState::try_new(config, generation)?;
     let heartbeat_interval = connection.heartbeat_interval();
+    let silence_evidence_fault = config.silence_evidence_fault(generation);
+    if let Some(fault) = silence_evidence_fault {
+        return collect_authorized_silence_evidence(connection, config, stop, fault);
+    }
     let started = Instant::now();
     let mut state = DirectSessionState {
         last_message: started,
@@ -1538,20 +1593,8 @@ fn collect_market(
             )?;
         }
         let now = Instant::now();
-        if now.duration_since(state.last_message) >= config.message_silence_timeout {
-            return Err((
-                ProviderInvalidationReason::MessageSilence,
-                RetryDisposition::Transient,
-            ));
-        }
-        if state
-            .heartbeat_deadline
-            .is_some_and(|deadline| now >= deadline)
-        {
-            return Err((
-                ProviderInvalidationReason::HeartbeatSilence,
-                RetryDisposition::Transient,
-            ));
+        if let Some(invalidation) = silence_invalidation(&state, config, now) {
+            return Err(invalidation);
         }
         if state.heartbeat_deadline.is_none() && now >= state.next_heartbeat {
             connection.send_heartbeat().map_err(session_failure)?;
@@ -1585,6 +1628,67 @@ fn collect_market(
             return Ok(());
         }
     }
+}
+
+fn collect_authorized_silence_evidence(
+    connection: &mut crate::RithmicTickerConnection,
+    config: &RithmicProviderConfig,
+    stop: &AtomicBool,
+    fault: RithmicAuthorizedSilenceEvidenceFault,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    let started = Instant::now();
+    let mut state = DirectSessionState {
+        last_message: started,
+        next_heartbeat: started + config.message_silence_timeout,
+        heartbeat_deadline: None,
+        source_ordinal: 0,
+        catalog: CatalogCommandState::default(),
+    };
+    if fault == RithmicAuthorizedSilenceEvidenceFault::Heartbeat {
+        connection.send_heartbeat().map_err(session_failure)?;
+        state.heartbeat_deadline = Some(started + config.session_limits.response_timeout);
+    }
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if let Some(invalidation) = silence_invalidation(&state, config, now) {
+            return Err(invalidation);
+        }
+        let deadline = match fault {
+            RithmicAuthorizedSilenceEvidenceFault::Heartbeat => state
+                .heartbeat_deadline
+                .unwrap_or(started + config.session_limits.response_timeout),
+            RithmicAuthorizedSilenceEvidenceFault::Message => {
+                started + config.message_silence_timeout
+            }
+        };
+        thread::sleep(deadline.saturating_duration_since(now).min(POLL_INTERVAL));
+    }
+}
+
+fn silence_invalidation(
+    state: &DirectSessionState,
+    config: &RithmicProviderConfig,
+    now: Instant,
+) -> Option<(ProviderInvalidationReason, RetryDisposition)> {
+    if now.duration_since(state.last_message) >= config.message_silence_timeout {
+        return Some((
+            ProviderInvalidationReason::MessageSilence,
+            RetryDisposition::Transient,
+        ));
+    }
+    state
+        .heartbeat_deadline
+        .filter(|deadline| now >= *deadline)
+        .map(|_| {
+            (
+                ProviderInvalidationReason::HeartbeatSilence,
+                RetryDisposition::Transient,
+            )
+        })
 }
 
 fn handle_session_message(
@@ -2422,7 +2526,15 @@ mod tests {
     use axiusflow_desktop_history::HistoryWorkerConfig;
     use axiusflow_desktop_provider_runtime::{DesktopMarketWorkerConfig, DesktopProviderConfig};
     use axiusflow_desktop_storage::CatalogKey;
-    use std::{fs, num::NonZeroU64, path::PathBuf, sync::Barrier, thread};
+    use std::{
+        fs,
+        io::Read,
+        net::{TcpListener, TcpStream},
+        num::NonZeroU64,
+        path::PathBuf,
+        sync::Barrier,
+        thread,
+    };
 
     struct MemoryVault(Vec<u8>);
 
@@ -2514,6 +2626,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn silence_deadlines_select_exact_transient_invalidation_reason() {
+        let config = config();
+        let started = Instant::now();
+        let state = DirectSessionState {
+            last_message: started,
+            next_heartbeat: started + Duration::from_secs(10),
+            heartbeat_deadline: Some(started + Duration::from_secs(5)),
+            source_ordinal: 0,
+            catalog: CatalogCommandState::default(),
+        };
+        assert_eq!(
+            silence_invalidation(&state, &config, started + Duration::from_secs(5)),
+            Some((
+                ProviderInvalidationReason::HeartbeatSilence,
+                RetryDisposition::Transient
+            ))
+        );
+        assert_eq!(
+            silence_invalidation(&state, &config, started + Duration::from_secs(30)),
+            Some((
+                ProviderInvalidationReason::MessageSilence,
+                RetryDisposition::Transient
+            ))
+        );
+    }
+
+    #[test]
+    fn silence_evidence_faults_are_generation_scoped_and_reconnect_stops_cleanly() {
+        let task: Arc<SessionTask> = Arc::new(|config, generation, _, stop, _, _, emitter| {
+            if !emitter.send(ProviderSessionEvent::DiscoveryStarted)
+                || !emitter.send(ProviderSessionEvent::SystemsDiscovered {
+                    environments: vec![RithmicProviderConfig::environment()],
+                })
+                || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
+                    generation,
+                    state: AuthenticationState::Accepted,
+                })
+                || !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
+                    generation,
+                    instruments: Vec::new(),
+                })
+            {
+                return;
+            }
+            if let Some(fault) = config.silence_evidence_fault(generation) {
+                let reason = match fault {
+                    RithmicAuthorizedSilenceEvidenceFault::Heartbeat => {
+                        ProviderInvalidationReason::HeartbeatSilence
+                    }
+                    RithmicAuthorizedSilenceEvidenceFault::Message => {
+                        ProviderInvalidationReason::MessageSilence
+                    }
+                };
+                emitter.invalid(reason, RetryDisposition::Transient);
+                return;
+            }
+            while !stop.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        });
+        let config = config()
+            .with_authorized_silence_evidence_fault(
+                generation(1),
+                RithmicAuthorizedSilenceEvidenceFault::Message,
+            )
+            .with_authorized_silence_evidence_fault(
+                generation(2),
+                RithmicAuthorizedSilenceEvidenceFault::Heartbeat,
+            );
+        let (mut driver, events) =
+            RithmicProviderDriver::with_task(config, callback_limits(16, 64 * 1_024), task);
+        let credentials = credentials();
+
+        for (current, expected) in [
+            (generation(1), ProviderInvalidationReason::MessageSilence),
+            (generation(2), ProviderInvalidationReason::HeartbeatSilence),
+        ] {
+            driver
+                .start_session(current, credentials.as_bytes())
+                .expect("fault generation starts");
+            let terminal = loop {
+                let callback = wait_event(&events);
+                if matches!(callback.event, ProviderSessionEvent::Invalidated { .. }) {
+                    break callback;
+                }
+            };
+            assert_eq!(
+                terminal.event,
+                ProviderSessionEvent::Invalidated {
+                    generation: Some(current),
+                    reason: expected,
+                }
+            );
+            assert_eq!(terminal.retry, Some(RetryDisposition::Transient));
+            driver
+                .stop_session(current)
+                .expect("finished fault generation joins cleanly");
+        }
+
+        let recovered = generation(3);
+        driver
+            .start_session(recovered, credentials.as_bytes())
+            .expect("fresh recovery generation starts");
+        let mut established = false;
+        while !established {
+            established = matches!(
+                wait_event(&events).event,
+                ProviderSessionEvent::InstrumentsDiscovered {
+                    generation: callback_generation,
+                    ..
+                } if callback_generation == recovered
+            );
+        }
+        driver
+            .stop_session(recovered)
+            .expect("recovered generation stops cleanly");
+    }
+
     fn callback_limits(events: usize, bytes: usize) -> RithmicCallbackLimits {
         RithmicCallbackLimits::try_new(nonzero(events), nonzero(bytes), nonzero(32))
             .expect("fixture callback limits validate")
@@ -2536,7 +2767,7 @@ mod tests {
     }
 
     fn runtime_task() -> Arc<SessionTask> {
-        Arc::new(|config, generation, _, _, _, emitter| {
+        Arc::new(|config, generation, _, _, _, _, emitter| {
             if !emitter.send(ProviderSessionEvent::DiscoveryStarted)
                 || !emitter.send(ProviderSessionEvent::SystemsDiscovered {
                     environments: vec![RithmicProviderConfig::environment()],
@@ -2564,7 +2795,7 @@ mod tests {
     }
 
     fn stable_runtime_task() -> Arc<SessionTask> {
-        Arc::new(|config, generation, _, stop, _, emitter| {
+        Arc::new(|config, generation, _, stop, _, _, emitter| {
             if !emitter.send(ProviderSessionEvent::DiscoveryStarted)
                 || !emitter.send(ProviderSessionEvent::SystemsDiscovered {
                     environments: vec![RithmicProviderConfig::environment()],
@@ -2937,7 +3168,7 @@ mod tests {
 
     #[test]
     fn driver_fences_stop_to_the_exact_active_generation() {
-        let task: Arc<SessionTask> = Arc::new(|_, _, _, stop, _, _| {
+        let task: Arc<SessionTask> = Arc::new(|_, _, _, stop, _, _, _| {
             while !stop.load(Ordering::Acquire) {
                 thread::yield_now();
             }
@@ -2959,6 +3190,51 @@ mod tests {
         driver
             .stop_session(generation(1))
             .expect("owning generation stops");
+    }
+
+    #[test]
+    fn driver_stop_aborts_the_active_socket_before_joining() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local abort fixture");
+        let client = TcpStream::connect(listener.local_addr().expect("read fixture address"))
+            .expect("connect local abort fixture");
+        let (server, _) = listener.accept().expect("accept local abort fixture");
+        let server = Arc::new(Mutex::new(Some(server)));
+        let (ready_tx, ready_rx) = sync_channel(1);
+        let task_server = Arc::clone(&server);
+        let task: Arc<SessionTask> = Arc::new(move |_, _, _, _, abort, _, _| {
+            let stream = Arc::new(
+                task_server
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("fixture stream is used once"),
+            );
+            abort
+                .register(Arc::clone(&stream))
+                .expect("register active fixture socket");
+            ready_tx.send(()).expect("publish fixture readiness");
+            let mut byte = [0_u8; 1];
+            let _ = (&*stream).read(&mut byte);
+        });
+        let (mut driver, _events) =
+            RithmicProviderDriver::with_task(config(), callback_limits(4, 4_096), task);
+        let credentials = credentials();
+        driver
+            .start_session(generation(8), credentials.as_bytes())
+            .expect("session starts");
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fixture reaches blocking read");
+
+        let (stopped_tx, stopped_rx) = sync_channel(1);
+        let stopper = thread::spawn(move || {
+            let result = driver.stop_session(generation(8));
+            let _ = stopped_tx.send(result);
+        });
+        let stop_result = stopped_rx.recv_timeout(Duration::from_secs(1));
+        drop(client);
+        stopper.join().expect("stopper thread joins");
+        assert_eq!(stop_result, Ok(Ok(())));
     }
 
     fn search(search_generation: usize) -> RithmicSymbolSearch {
@@ -3043,7 +3319,7 @@ mod tests {
     fn active_session_command_queue_is_bounded_generation_fenced_and_closed_on_stop() {
         let task_started = Arc::new(Barrier::new(2));
         let session_started = Arc::clone(&task_started);
-        let task: Arc<SessionTask> = Arc::new(move |_, _, _, stop, _, _| {
+        let task: Arc<SessionTask> = Arc::new(move |_, _, _, stop, _, _, _| {
             session_started.wait();
             while !stop.load(Ordering::Acquire) {
                 thread::yield_now();
@@ -3101,7 +3377,7 @@ mod tests {
         let task_done = Arc::clone(&producer_done);
         let send_results = Arc::new(Mutex::new(None));
         let task_results = Arc::clone(&send_results);
-        let task: Arc<SessionTask> = Arc::new(move |_, generation, _, _, _, emitter| {
+        let task: Arc<SessionTask> = Arc::new(move |_, generation, _, _, _, _, emitter| {
             let symbols = CollectedSymbols {
                 results: vec![SymbolSearchResult {
                     symbol: "ESM7".to_string(),
@@ -3169,7 +3445,7 @@ mod tests {
 
     #[test]
     fn panicked_session_task_latches_terminal_invalidation() {
-        let task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, _| {
+        let task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, _, _| {
             panic!("controlled session task panic");
         });
         let (mut driver, events) =
@@ -3200,7 +3476,7 @@ mod tests {
         let task_done = Arc::clone(&producer_done);
         let send_results = Arc::new(Mutex::new(None));
         let task_results = Arc::clone(&send_results);
-        let task: Arc<SessionTask> = Arc::new(move |_, _, _, _, _, emitter| {
+        let task: Arc<SessionTask> = Arc::new(move |_, _, _, _, _, _, emitter| {
             let first = emitter.send(ProviderSessionEvent::DiscoveryStarted);
             let second = emitter.send(ProviderSessionEvent::DiscoveryStarted);
             *task_results
@@ -3244,7 +3520,7 @@ mod tests {
 
     #[test]
     fn callback_queue_fails_closed_on_byte_or_generation_bounds() {
-        let byte_task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, emitter| {
+        let byte_task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, _, emitter| {
             assert!(!emitter.send(ProviderSessionEvent::DiscoveryStarted));
         });
         let (mut byte_driver, byte_events) =
@@ -3264,7 +3540,7 @@ mod tests {
             .stop_session(generation(6))
             .expect("finished session is joined");
 
-        let generation_task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, emitter| {
+        let generation_task: Arc<SessionTask> = Arc::new(|_, _, _, _, _, _, emitter| {
             assert!(!emitter.send(ProviderSessionEvent::AuthenticationChanged {
                 generation: generation(8),
                 state: AuthenticationState::Accepted,

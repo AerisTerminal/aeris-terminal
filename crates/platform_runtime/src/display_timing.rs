@@ -244,6 +244,214 @@ impl NativeDisplayProbe {
     }
 }
 
+/// One observation of the Windows Desktop Window Manager composition timeline.
+///
+/// DWM reports these values in the system QPC clock domain. They prove that the
+/// desktop compositor advanced and identify frames it classified as displayed;
+/// they do not prove photons reached a physical panel.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowsCompositionTiming {
+    qpc_frequency_hz: u64,
+    refresh_period_qpc: u64,
+    vblank_qpc: u64,
+    compose_qpc: u64,
+    displayed_frame: u64,
+    displayed_qpc: u64,
+    completed_frame: u64,
+    completed_qpc: u64,
+    refresh_count: u64,
+    frames_late: u64,
+    frames_dropped: u64,
+    frames_missed: u64,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCompositionTiming {
+    /// System QPC frequency used by every timestamp in this sample.
+    #[must_use]
+    pub const fn qpc_frequency_hz(self) -> u64 {
+        self.qpc_frequency_hz
+    }
+
+    /// DWM's current refresh period, converted from QPC ticks to nanoseconds.
+    #[must_use]
+    pub fn refresh_period_nanos(self) -> Option<u64> {
+        qpc_ticks_to_nanos(self.refresh_period_qpc, self.qpc_frequency_hz)
+    }
+
+    /// QPC timestamp of DWM's most recent vertical blank observation.
+    #[must_use]
+    pub const fn vblank_qpc(self) -> u64 {
+        self.vblank_qpc
+    }
+
+    /// QPC timestamp at which DWM began its most recent composition pass.
+    #[must_use]
+    pub const fn compose_qpc(self) -> u64 {
+        self.compose_qpc
+    }
+
+    /// Identifier of the last frame DWM classified as displayed.
+    #[must_use]
+    pub const fn displayed_frame(self) -> u64 {
+        self.displayed_frame
+    }
+
+    /// QPC timestamp of the composition pass that displayed that frame.
+    #[must_use]
+    pub const fn displayed_qpc(self) -> u64 {
+        self.displayed_qpc
+    }
+
+    /// Identifier of the last frame DWM marked complete.
+    #[must_use]
+    pub const fn completed_frame(self) -> u64 {
+        self.completed_frame
+    }
+
+    /// QPC timestamp at which DWM marked that frame complete.
+    #[must_use]
+    pub const fn completed_qpc(self) -> u64 {
+        self.completed_qpc
+    }
+
+    /// DWM vertical refresh counter.
+    #[must_use]
+    pub const fn refresh_count(self) -> u64 {
+        self.refresh_count
+    }
+
+    /// Frames DWM classified as late at the time of this observation.
+    #[must_use]
+    pub const fn frames_late(self) -> u64 {
+        self.frames_late
+    }
+
+    /// Frames DWM classified as dropped at the time of this observation.
+    #[must_use]
+    pub const fn frames_dropped(self) -> u64 {
+        self.frames_dropped
+    }
+
+    /// Refreshes DWM classified as missed at the time of this observation.
+    #[must_use]
+    pub const fn frames_missed(self) -> u64 {
+        self.frames_missed
+    }
+}
+
+/// Windows DWM composition timeline probe.
+///
+/// Windows 8.1 and later require the timing API's window argument to be null,
+/// so samples describe the compositor's primary-output timeline rather than a
+/// particular application window. [`Self::flush`] establishes a compositor
+/// present boundary, but neither API is physical scanout instrumentation.
+#[cfg(target_os = "windows")]
+pub struct WindowsCompositionProbe {
+    qpc_frequency_hz: u64,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCompositionProbe {
+    /// Opens a probe after validating the system QPC clock and DWM timing API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisplayTimingError::Transport`] when QPC or DWM timing is
+    /// unavailable.
+    pub fn new() -> Result<Self, DisplayTimingError> {
+        windows_composition::probe()
+    }
+
+    /// Reads the current DWM composition counters and QPC timestamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisplayTimingError::Transport`] when DWM rejects the sample.
+    pub fn sample(&self) -> Result<WindowsCompositionTiming, DisplayTimingError> {
+        windows_composition::sample(self.qpc_frequency_hz)
+    }
+
+    /// Blocks until DWM's next present has incorporated outstanding DirectX
+    /// surface updates.
+    ///
+    /// This is a compositor synchronization boundary, not a panel scanout
+    /// timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisplayTimingError::Transport`] when DWM rejects the flush.
+    pub fn flush(&self) -> Result<(), DisplayTimingError> {
+        windows_composition::flush()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn qpc_ticks_to_nanos(ticks: u64, frequency_hz: u64) -> Option<u64> {
+    if frequency_hz == 0 {
+        return None;
+    }
+    u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(frequency_hz)).ok()
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod windows_composition {
+    use super::{DisplayTimingError, WindowsCompositionProbe, WindowsCompositionTiming};
+    use std::{mem::size_of, ptr};
+    use windows_sys::Win32::{
+        Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo},
+        System::Performance::QueryPerformanceFrequency,
+    };
+
+    pub(super) fn probe() -> Result<WindowsCompositionProbe, DisplayTimingError> {
+        let mut frequency = 0_i64;
+        if unsafe { QueryPerformanceFrequency(&raw mut frequency) } == 0 || frequency <= 0 {
+            return Err(DisplayTimingError::Transport);
+        }
+        let probe = WindowsCompositionProbe {
+            qpc_frequency_hz: frequency.cast_unsigned(),
+        };
+        probe.sample()?;
+        Ok(probe)
+    }
+
+    pub(super) fn sample(
+        qpc_frequency_hz: u64,
+    ) -> Result<WindowsCompositionTiming, DisplayTimingError> {
+        let mut timing = DWM_TIMING_INFO {
+            cbSize: u32::try_from(size_of::<DWM_TIMING_INFO>())
+                .map_err(|_| DisplayTimingError::Transport)?,
+            ..DWM_TIMING_INFO::default()
+        };
+        if unsafe { DwmGetCompositionTimingInfo(ptr::null_mut(), &raw mut timing) } < 0 {
+            return Err(DisplayTimingError::Transport);
+        }
+        Ok(WindowsCompositionTiming {
+            qpc_frequency_hz,
+            refresh_period_qpc: timing.qpcRefreshPeriod,
+            vblank_qpc: timing.qpcVBlank,
+            compose_qpc: timing.qpcCompose,
+            displayed_frame: timing.cFrameDisplayed,
+            displayed_qpc: timing.qpcFrameDisplayed,
+            completed_frame: timing.cFrameComplete,
+            completed_qpc: timing.qpcFrameComplete,
+            refresh_count: timing.cRefresh,
+            frames_late: timing.cFramesLate,
+            frames_dropped: timing.cFramesDropped,
+            frames_missed: timing.cFramesMissed,
+        })
+    }
+
+    pub(super) fn flush() -> Result<(), DisplayTimingError> {
+        if unsafe { DwmFlush() } < 0 {
+            return Err(DisplayTimingError::Transport);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn probe_windows() -> Result<DisplayEnvironment, DisplayTimingError> {
     let displays = display_info::DisplayInfo::all().map_err(|_| DisplayTimingError::Transport)?;
@@ -632,5 +840,32 @@ mod tests {
                     .is_some_and(|scale| scale > 0)
             );
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn qpc_conversion_preserves_refresh_precision() {
+        assert_eq!(
+            super::qpc_ticks_to_nanos(166_667, 10_000_000),
+            Some(16_666_700)
+        );
+        assert_eq!(super::qpc_ticks_to_nanos(1, 0), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_composition_probe_reports_dwm_timeline() {
+        let probe = super::WindowsCompositionProbe::new()
+            .expect("Windows DWM composition timing is available");
+        let sample = probe.sample().expect("DWM timing sample succeeds");
+        assert!(sample.qpc_frequency_hz() > 0);
+        assert!(
+            sample
+                .refresh_period_nanos()
+                .is_some_and(|period| period > 0)
+        );
+        assert!(sample.vblank_qpc() > 0);
+        assert!(sample.compose_qpc() > 0);
+        assert!(sample.refresh_count() > 0);
     }
 }

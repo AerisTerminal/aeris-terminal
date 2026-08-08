@@ -37,6 +37,9 @@ const REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAXIMUM_CONTROL_MESSAGES: usize = 64;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const TICK_TRADES_PER_BAR: u16 = 100;
+const MAXIMUM_REPLAY_BARS: usize = 10_000;
+const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
+const DAILY_SESSION_PADDING_BARS: usize = 150;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RithmicSeries {
@@ -292,7 +295,7 @@ fn run_history_worker(
 }
 
 fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap, String> {
-    let range = visible_range(request.series, SystemTime::now())?;
+    let replay = replay_envelope(request.series, SystemTime::now())?;
     let connection = connect_history(Arc::clone(&request.stop))?;
     let mut transport = RithmicHistorySessionTransport::try_new(
         connection,
@@ -307,9 +310,9 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
         quotes: true,
         order_book: false,
     };
-    let start_seconds = i32::try_from(range.start_unix_nanos / NANOS_PER_SECOND)
+    let start_seconds = i32::try_from(replay.range.start_unix_nanos / NANOS_PER_SECOND)
         .map_err(|_| "Rithmic history range is invalid".to_string())?;
-    let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND)
+    let finish_seconds = i32::try_from(replay.range.end_unix_nanos / NANOS_PER_SECOND)
         .map_err(|_| "Rithmic history range is invalid".to_string())?;
     let bars = match request.series {
         RithmicSeries::Tick => collect_tick_history(
@@ -317,6 +320,7 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
             &provider_instrument,
             start_seconds,
             finish_seconds,
+            replay.maximum_bars,
         )?,
         series => {
             let resolution = series.resolution()?;
@@ -326,10 +330,11 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
                 &resolution,
                 start_seconds,
                 finish_seconds,
+                replay.maximum_bars,
             )?
         }
     };
-    bootstrap_from_bars(request, bars, unix_nanos_now()?)
+    bootstrap_from_bars(request, latest_visible_bars(bars), unix_nanos_now()?)
 }
 
 #[derive(Clone, Copy)]
@@ -344,6 +349,7 @@ fn collect_time_history(
     resolution: &RithmicTimeBarResolution,
     start_seconds: i32,
     finish_seconds: i32,
+    maximum_bars: NonZeroUsize,
 ) -> Result<Vec<CanonicalHistoryBar>, String> {
     let interval_seconds = i32::try_from(
         resolution
@@ -377,7 +383,7 @@ fn collect_time_history(
         },
         start_seconds: collection_start,
         finish_seconds: collection_finish,
-        maximum_bars: NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
+        maximum_bars,
     })?;
     let HistoryBars::Time(decoded) = collected.bars else {
         return Err("Rithmic history returned the wrong series".to_string());
@@ -409,6 +415,7 @@ fn collect_tick_history(
     instrument: &RithmicProviderInstrument,
     start_seconds: i32,
     finish_seconds: i32,
+    maximum_bars: NonZeroUsize,
 ) -> Result<Vec<CanonicalHistoryBar>, String> {
     let collected = transport.collect_history(HistoryCollectionRequest {
         symbol: instrument.descriptor.provider_symbol.clone(),
@@ -418,7 +425,7 @@ fn collect_tick_history(
         },
         start_seconds,
         finish_seconds,
-        maximum_bars: NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
+        maximum_bars,
     })?;
     let HistoryBars::Tick(decoded) = collected.bars else {
         return Err("Rithmic history returned the wrong series".to_string());
@@ -468,7 +475,13 @@ fn connect_history(
     .map_err(|_| "Rithmic Test history login failed".to_string())
 }
 
-fn visible_range(series: RithmicSeries, now: SystemTime) -> Result<HistoryRange, String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReplayEnvelope {
+    range: HistoryRange,
+    maximum_bars: NonZeroUsize,
+}
+
+fn replay_envelope(series: RithmicSeries, now: SystemTime) -> Result<ReplayEnvelope, String> {
     let now_seconds = now
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is invalid".to_string())?
@@ -479,22 +492,53 @@ fn visible_range(series: RithmicSeries, now: SystemTime) -> Result<HistoryRange,
     } else {
         now_seconds - (now_seconds % interval)
     };
+    let requested_bars = if series == RithmicSeries::Daily {
+        MAXIMUM_VISIBLE_BARS.saturating_add(DAILY_SESSION_PADDING_BARS)
+    } else {
+        MAXIMUM_VISIBLE_BARS
+    };
     let span_seconds = interval
-        .checked_mul(MAXIMUM_VISIBLE_BARS as u64)
+        .checked_mul(requested_bars as u64)
+        .and_then(|span| span.checked_add(MAXIMUM_NON_TRADING_GAP_SECONDS))
         .ok_or_else(|| "Rithmic visible range overflowed".to_string())?;
     let start_seconds = end_seconds
         .checked_sub(span_seconds)
         .ok_or_else(|| "Rithmic visible range underflowed".to_string())?;
-    Ok(HistoryRange {
-        start_unix_nanos: i64::try_from(start_seconds)
+    let theoretical_bars = if series == RithmicSeries::Tick {
+        MAXIMUM_REPLAY_BARS
+    } else {
+        usize::try_from(span_seconds.div_ceil(interval))
             .ok()
-            .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
-            .ok_or_else(|| "Rithmic visible range overflowed".to_string())?,
-        end_unix_nanos: i64::try_from(end_seconds)
-            .ok()
-            .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
-            .ok_or_else(|| "Rithmic visible range overflowed".to_string())?,
+            .and_then(|bars| bars.checked_add(3))
+            .ok_or_else(|| "Rithmic visible range overflowed".to_string())?
+    };
+    if theoretical_bars > MAXIMUM_REPLAY_BARS {
+        return Err("Rithmic visible range exceeds replay capacity".to_string());
+    }
+    Ok(ReplayEnvelope {
+        range: HistoryRange {
+            start_unix_nanos: i64::try_from(start_seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
+                .ok_or_else(|| "Rithmic visible range overflowed".to_string())?,
+            end_unix_nanos: i64::try_from(end_seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
+                .ok_or_else(|| "Rithmic visible range overflowed".to_string())?,
+        },
+        maximum_bars: NonZeroUsize::new(theoretical_bars).unwrap_or(NonZeroUsize::MIN),
     })
+}
+
+fn latest_visible_bars(mut bars: Vec<CanonicalHistoryBar>) -> Vec<CanonicalHistoryBar> {
+    bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
+    if bars.len() > MAXIMUM_VISIBLE_BARS {
+        bars.drain(..bars.len() - MAXIMUM_VISIBLE_BARS);
+    }
+    for (index, bar) in bars.iter_mut().enumerate() {
+        bar.value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+    }
+    bars
 }
 
 fn bootstrap_from_bars(
@@ -656,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_ranges_are_aligned_and_capped_at_three_hundred_bars() {
+    fn replay_envelopes_are_aligned_and_bounded() {
         let now = UNIX_EPOCH + Duration::from_secs(1_800_123_456);
         for series in [
             RithmicSeries::Minute1,
@@ -667,22 +711,74 @@ mod tests {
         ] {
             let interval = i64::try_from(series.interval_seconds().expect("time series"))
                 .expect("interval fits");
-            let range = visible_range(series, now).expect("range validates");
+            let replay = replay_envelope(series, now).expect("range validates");
+            let range = replay.range;
             assert_eq!(range.start_unix_nanos % (interval * NANOS_PER_SECOND), 0);
             assert_eq!(range.end_unix_nanos % (interval * NANOS_PER_SECOND), 0);
-            assert_eq!(
-                range.end_unix_nanos - range.start_unix_nanos,
-                interval
-                    * NANOS_PER_SECOND
-                    * i64::try_from(MAXIMUM_VISIBLE_BARS).expect("visible bound fits")
+            assert!(replay.maximum_bars.get() <= MAXIMUM_REPLAY_BARS);
+            assert!(
+                range.end_unix_nanos - range.start_unix_nanos
+                    >= interval
+                        * NANOS_PER_SECOND
+                        * i64::try_from(MAXIMUM_VISIBLE_BARS).expect("visible bound fits")
             );
         }
-        let tick = visible_range(RithmicSeries::Tick, now).expect("tick envelope validates");
-        assert_eq!(tick.end_unix_nanos, 1_800_123_456 * NANOS_PER_SECOND);
+        let tick = replay_envelope(RithmicSeries::Tick, now).expect("tick envelope validates");
+        assert_eq!(tick.range.end_unix_nanos, 1_800_123_456 * NANOS_PER_SECOND);
+        assert_eq!(tick.maximum_bars.get(), MAXIMUM_REPLAY_BARS);
+    }
+
+    #[test]
+    fn saturday_intraday_envelope_reaches_the_prior_session() {
+        let saturday_seconds = 1_786_190_400;
+        let saturday_noon_utc = UNIX_EPOCH + Duration::from_secs(saturday_seconds);
+        let replay = replay_envelope(RithmicSeries::Minute1, saturday_noon_utc)
+            .expect("weekend replay envelope validates");
+        let tuesday_noon_utc = 1_785_844_800_i64 * NANOS_PER_SECOND;
+        let saturday_noon_utc = 1_786_190_400_i64 * NANOS_PER_SECOND;
+        assert!(replay.range.start_unix_nanos <= tuesday_noon_utc);
+        assert_eq!(replay.range.end_unix_nanos, saturday_noon_utc);
+        assert_eq!(replay.maximum_bars.get(), 6_063);
+    }
+
+    #[test]
+    fn latest_visible_bars_orders_and_caps_an_expanded_replay() {
+        let bars = (1_i64..=400)
+            .rev()
+            .map(|timestamp| CanonicalHistoryBar {
+                value: MarketBar {
+                    source_sequence: u64::try_from(timestamp).expect("timestamp fits"),
+                    exchange_timestamp_seconds: timestamp,
+                    open: timestamp,
+                    high: timestamp,
+                    low: timestamp,
+                    close: timestamp,
+                    volume: 1,
+                },
+                exchange_timestamp_unix_nanos: timestamp * NANOS_PER_SECOND,
+            })
+            .collect();
+        let latest = latest_visible_bars(bars);
+        assert_eq!(latest.len(), MAXIMUM_VISIBLE_BARS);
         assert_eq!(
-            tick.end_unix_nanos - tick.start_unix_nanos,
-            60 * NANOS_PER_SECOND * i64::try_from(MAXIMUM_VISIBLE_BARS).expect("bound fits")
+            latest
+                .first()
+                .expect("latest replay is nonempty")
+                .value
+                .exchange_timestamp_seconds,
+            101
         );
+        assert_eq!(
+            latest
+                .last()
+                .expect("latest replay is nonempty")
+                .value
+                .exchange_timestamp_seconds,
+            400
+        );
+        assert!(latest.iter().enumerate().all(|(index, bar)| {
+            bar.value.source_sequence == u64::try_from(index).unwrap_or(u64::MAX) + 1
+        }));
     }
 
     #[test]
