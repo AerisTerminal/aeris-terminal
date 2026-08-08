@@ -613,6 +613,13 @@ and clears chart/DOM/selection state on network loss or suspend, discards retire
 callbacks, and reconnects only through a fresh session generation after
 restoration. Deterministic shipping-path tests cover offline startup, network
 recovery, suspend/resume, stale-history rejection, and retry/callback fencing.
+The Win32 callback ingress is nonblocking and loss-aware: connectivity bursts
+atomically retain the latest provider-relevant state, while suspend/resume
+bursts always publish a pending suspend before a coalesced resume and let a
+newer final suspend cancel that resume. The history worker likewise conflates
+undrained results to the latest generation and disconnects its command sender
+before joining, so a full command queue cannot deadlock shutdown. Saturation and
+full-queue regressions cover these exact boundaries.
 The Stage F row remains open until physical offline and suspend/resume transitions
 are captured as named evidence.
 
@@ -632,7 +639,7 @@ Desktop burst evidence on 2026-08-07: the headless
 snapshots without draining the UI mailbox. The fixed-capacity 32-item mailbox
 retained exactly one item at series generation 10,000, and 10,000 attempted
 frame-drain schedules admitted exactly one callback until completion. The
-command writes schema-2 JSON and opens no window.
+command writes schema-3 JSON and opens no window.
 
 The same Windows run sampled the process working set throughout the burst:
 12,763,136 bytes at baseline, 14,462,976 bytes current/high-water after the

@@ -21,9 +21,9 @@ use axiusflow_rithmic_protocol_adapter::{
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -32,7 +32,6 @@ use zeroize::Zeroize;
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const HISTORY_COMMAND_CAPACITY: usize = 1;
-const HISTORY_RESULT_CAPACITY: usize = 2;
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAXIMUM_CONTROL_MESSAGES: usize = 64;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
@@ -185,12 +184,32 @@ pub(crate) struct RithmicHistoryResult {
 
 enum HistoryCommand {
     Fetch(HistoryFetchRequest),
-    Shutdown,
+}
+
+#[derive(Default)]
+struct LatestHistoryResult {
+    value: Mutex<Option<RithmicHistoryResult>>,
+}
+
+impl LatestHistoryResult {
+    fn publish(&self, result: RithmicHistoryResult) {
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+    }
+
+    fn take(&self) -> Option<RithmicHistoryResult> {
+        self.value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
 }
 
 pub(crate) struct RithmicHistoryTask {
-    commands: SyncSender<HistoryCommand>,
-    results: Receiver<RithmicHistoryResult>,
+    commands: Option<SyncSender<HistoryCommand>>,
+    results: Arc<LatestHistoryResult>,
     active: Option<(NonZeroUsize, NonZeroUsize, Arc<AtomicBool>)>,
     handle: Option<JoinHandle<()>>,
 }
@@ -198,14 +217,15 @@ pub(crate) struct RithmicHistoryTask {
 impl RithmicHistoryTask {
     pub(crate) fn start() -> Result<Self, String> {
         let (command_tx, command_rx) = mpsc::sync_channel(HISTORY_COMMAND_CAPACITY);
-        let (result_tx, result_rx) = mpsc::sync_channel(HISTORY_RESULT_CAPACITY);
+        let results = Arc::new(LatestHistoryResult::default());
+        let worker_results = Arc::clone(&results);
         let handle = thread::Builder::new()
             .name("axiusflow-rithmic-history-worker".to_string())
-            .spawn(move || run_history_worker(&command_rx, &result_tx))
+            .spawn(move || run_history_worker(&command_rx, &worker_results))
             .map_err(|_| "Rithmic history worker is unavailable".to_string())?;
         Ok(Self {
-            commands: command_tx,
-            results: result_rx,
+            commands: Some(command_tx),
+            results,
             active: None,
             handle: Some(handle),
         })
@@ -230,6 +250,8 @@ impl RithmicHistoryTask {
             stop: Arc::clone(&stop),
         });
         self.commands
+            .as_ref()
+            .ok_or_else(|| "Rithmic history worker stopped".to_string())?
             .try_send(command)
             .map_err(|error| match error {
                 TrySendError::Full(_) => "Rithmic history worker is busy".to_string(),
@@ -244,20 +266,18 @@ impl RithmicHistoryTask {
     }
 
     pub(crate) fn try_recv(&mut self) -> Option<RithmicHistoryResult> {
-        match self.results.try_recv() {
-            Ok(result) => {
-                if self.active.as_ref().is_some_and(
-                    |(selection_generation, series_generation, _)| {
-                        *selection_generation == result.selection_generation
-                            && *series_generation == result.series_generation
-                    },
-                ) {
-                    self.active = None;
-                }
-                Some(result)
-            }
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        let result = self.results.take()?;
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|(selection_generation, series_generation, _)| {
+                *selection_generation == result.selection_generation
+                    && *series_generation == result.series_generation
+            })
+        {
+            self.active = None;
         }
+        Some(result)
     }
 
     pub(crate) fn cancel(&mut self) {
@@ -270,23 +290,18 @@ impl RithmicHistoryTask {
 impl Drop for RithmicHistoryTask {
     fn drop(&mut self) {
         self.cancel();
-        let _ = self.commands.try_send(HistoryCommand::Shutdown);
+        self.commands.take();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
 }
 
-fn run_history_worker(
-    commands: &Receiver<HistoryCommand>,
-    results: &SyncSender<RithmicHistoryResult>,
-) {
+fn run_history_worker(commands: &Receiver<HistoryCommand>, results: &LatestHistoryResult) {
     while let Ok(command) = commands.recv() {
-        let HistoryCommand::Fetch(request) = command else {
-            return;
-        };
+        let HistoryCommand::Fetch(request) = command;
         let result = fetch_history(&request).map(Box::new);
-        let _ = results.try_send(RithmicHistoryResult {
+        results.publish(RithmicHistoryResult {
             selection_generation: request.selection_generation,
             series_generation: request.series_generation,
             result,
@@ -784,35 +799,99 @@ mod tests {
     #[test]
     fn stale_result_does_not_release_newer_cancellation_owner() {
         let (command_tx, _command_rx) = mpsc::sync_channel(HISTORY_COMMAND_CAPACITY);
-        let (result_tx, result_rx) = mpsc::sync_channel(HISTORY_RESULT_CAPACITY);
+        let results = Arc::new(LatestHistoryResult::default());
         let selection = NonZeroUsize::MIN;
         let stale = NonZeroUsize::MIN;
         let latest = NonZeroUsize::new(2).expect("generation is nonzero");
         let stop = Arc::new(AtomicBool::new(false));
         let mut task = RithmicHistoryTask {
-            commands: command_tx,
-            results: result_rx,
+            commands: Some(command_tx),
+            results: Arc::clone(&results),
             active: Some((selection, latest, Arc::clone(&stop))),
             handle: None,
         };
-        result_tx
-            .send(RithmicHistoryResult {
-                selection_generation: selection,
-                series_generation: stale,
-                result: Err("cancelled".to_string()),
-            })
-            .expect("stale result sends");
+        results.publish(RithmicHistoryResult {
+            selection_generation: selection,
+            series_generation: stale,
+            result: Err("cancelled".to_string()),
+        });
         assert!(task.try_recv().is_some());
         assert!(task.active.is_some());
         assert!(!stop.load(Ordering::Acquire));
-        result_tx
-            .send(RithmicHistoryResult {
-                selection_generation: selection,
-                series_generation: latest,
-                result: Err("latest failed".to_string()),
-            })
-            .expect("latest result sends");
+        results.publish(RithmicHistoryResult {
+            selection_generation: selection,
+            series_generation: latest,
+            result: Err("latest failed".to_string()),
+        });
         assert!(task.try_recv().is_some());
         assert!(task.active.is_none());
+    }
+
+    #[test]
+    fn result_mailbox_replaces_an_unconsumed_older_generation() {
+        let results = LatestHistoryResult::default();
+        let selection = NonZeroUsize::MIN;
+        let older = NonZeroUsize::MIN;
+        let latest = NonZeroUsize::new(2).expect("generation is nonzero");
+        results.publish(RithmicHistoryResult {
+            selection_generation: selection,
+            series_generation: older,
+            result: Err("older".to_string()),
+        });
+        results.publish(RithmicHistoryResult {
+            selection_generation: selection,
+            series_generation: latest,
+            result: Err("latest".to_string()),
+        });
+        let retained = results.take().expect("latest result is retained");
+        assert_eq!(retained.series_generation, latest);
+        assert!(results.take().is_none());
+    }
+
+    #[test]
+    fn drop_disconnects_a_full_command_queue_before_joining() {
+        use std::sync::Barrier;
+
+        let (command_tx, command_rx) = mpsc::sync_channel(HISTORY_COMMAND_CAPACITY);
+        let release_worker = Arc::new(Barrier::new(2));
+        let worker_release = Arc::clone(&release_worker);
+        let handle = thread::spawn(move || {
+            worker_release.wait();
+            assert!(command_rx.recv().is_ok());
+            assert!(command_rx.recv().is_err());
+        });
+        command_tx
+            .send(HistoryCommand::Fetch(HistoryFetchRequest {
+                selection_generation: NonZeroUsize::MIN,
+                series_generation: NonZeroUsize::MIN,
+                series: RithmicSeries::Minute1,
+                instrument: InstalledRithmicInstrument {
+                    selection_generation: NonZeroUsize::MIN,
+                    descriptor: InstrumentDescriptor {
+                        instrument_id: "MNQ.CME".to_string(),
+                        provider_symbol: "MNQU6".to_string(),
+                        display_symbol: "MNQU6".to_string(),
+                        venue_id: "CME".to_string(),
+                        price_scale: 2,
+                        quantity_scale: 0,
+                    },
+                    entitlement_id: "test".to_string(),
+                },
+                stop: Arc::new(AtomicBool::new(false)),
+            }))
+            .expect("command queue accepts one request");
+        let task = RithmicHistoryTask {
+            commands: Some(command_tx),
+            results: Arc::new(LatestHistoryResult::default()),
+            active: None,
+            handle: Some(handle),
+        };
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drop(task);
+            let _ = dropped_tx.send(());
+        });
+        release_worker.wait();
+        assert!(dropped_rx.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 }

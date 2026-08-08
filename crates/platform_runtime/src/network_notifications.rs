@@ -4,7 +4,11 @@ use crate::CapabilityAvailability;
 use std::{error::Error, fmt};
 
 #[cfg(target_os = "windows")]
-use std::sync::mpsc::Receiver;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+    mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
+};
 
 #[cfg(target_os = "linux")]
 use zbus::{
@@ -37,20 +41,104 @@ const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
 const NAME_OWNER_CHANGED_SIGNAL: &str = "NameOwnerChanged";
 
 #[cfg(target_os = "windows")]
-const MAX_QUEUED_NETWORK_EVENTS: usize = 16;
+struct NetworkEventPublisher {
+    latest: Arc<AtomicU8>,
+    wake: SyncSender<()>,
+}
+
+#[cfg(target_os = "windows")]
+impl NetworkEventPublisher {
+    fn publish(&self, event: NetworkEvent) {
+        self.latest
+            .store(encode_network_event(event), Ordering::Release);
+        match self.wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct NetworkEventInbox {
+    latest: Arc<AtomicU8>,
+    wake: Receiver<()>,
+}
+
+#[cfg(target_os = "windows")]
+impl NetworkEventInbox {
+    fn channel() -> (Arc<NetworkEventPublisher>, Self) {
+        let latest = Arc::new(AtomicU8::new(0));
+        let (wake, receiver) = sync_channel(1);
+        (
+            Arc::new(NetworkEventPublisher {
+                latest: Arc::clone(&latest),
+                wake,
+            }),
+            Self {
+                latest,
+                wake: receiver,
+            },
+        )
+    }
+
+    fn recv(&self) -> Result<NetworkEvent, NetworkNotificationError> {
+        loop {
+            if let Some(event) = self.take_latest() {
+                return Ok(event);
+            }
+            self.wake
+                .recv()
+                .map_err(|_| NetworkNotificationError::StreamClosed)?;
+        }
+    }
+
+    fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<NetworkEvent, NetworkNotificationError> {
+        if let Some(event) = self.take_latest() {
+            return Ok(event);
+        }
+        match self.wake.recv_timeout(timeout) {
+            Ok(()) => self
+                .take_latest()
+                .ok_or(NetworkNotificationError::InitialNotificationTimedOut),
+            Err(RecvTimeoutError::Timeout) => {
+                Err(NetworkNotificationError::InitialNotificationTimedOut)
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(NetworkNotificationError::StreamClosed),
+        }
+    }
+
+    fn take_latest(&self) -> Option<NetworkEvent> {
+        decode_network_event(self.latest.swap(0, Ordering::AcqRel))
+    }
+}
+
+#[cfg(target_os = "windows")]
+const fn encode_network_event(event: NetworkEvent) -> u8 {
+    match event {
+        NetworkEvent::Unavailable => 1,
+        NetworkEvent::Available => 2,
+    }
+}
+
+#[cfg(target_os = "windows")]
+const fn decode_network_event(value: u8) -> Option<NetworkEvent> {
+    match value {
+        1 => Some(NetworkEvent::Unavailable),
+        2 => Some(NetworkEvent::Available),
+        _ => None,
+    }
+}
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod windows {
-    // The callback context is a pinned Box kept alive until Win32 confirms
-    // cancellation. Failed cancellation leaks that Box deliberately so a late
+    // The callback context is an Arc kept alive until Win32 confirms
+    // cancellation. Failed cancellation leaks that Arc deliberately so a late
     // operating-system callback can never dereference freed memory.
-    use super::{MAX_QUEUED_NETWORK_EVENTS, NetworkEvent, NetworkNotificationError};
-    use std::{
-        ffi::c_void,
-        sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
-        time::Duration,
-    };
+    use super::{NetworkEvent, NetworkEventInbox, NetworkEventPublisher, NetworkNotificationError};
+    use std::{ffi::c_void, sync::Arc, time::Duration};
     use windows_sys::Win32::{
         Foundation::{ERROR_SUCCESS, HANDLE},
         NetworkManagement::IpHelper::{
@@ -63,21 +151,21 @@ mod windows {
 
     pub(super) struct Registration {
         handle: usize,
-        context: Option<Box<SyncSender<NetworkEvent>>>,
+        context: Option<Arc<NetworkEventPublisher>>,
     }
 
     impl Registration {
         pub(super) fn connect()
-        -> Result<(Self, Receiver<NetworkEvent>, NetworkEvent), NetworkNotificationError> {
-            let (sender, receiver) = sync_channel(MAX_QUEUED_NETWORK_EVENTS);
-            let mut context = Box::new(sender);
+        -> Result<(Self, NetworkEventInbox, NetworkEvent), NetworkNotificationError> {
+            let (publisher, events) = NetworkEventInbox::channel();
+            let context = publisher;
             let mut handle: HANDLE = std::ptr::null_mut();
-            // SAFETY: the boxed context remains valid for the notification
+            // SAFETY: the Arc allocation remains valid for the notification
             // lifetime, and the callback matches Win32's documented ABI.
             let result = unsafe {
                 NotifyNetworkConnectivityHintChange(
                     Some(network_callback),
-                    (&raw mut *context).cast(),
+                    Arc::as_ptr(&context).cast(),
                     true,
                     &raw mut handle,
                 )
@@ -92,16 +180,8 @@ mod windows {
                 handle: handle as usize,
                 context: Some(context),
             };
-            let current = match receiver.recv_timeout(INITIAL_NOTIFICATION_TIMEOUT) {
-                Ok(event) => event,
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(NetworkNotificationError::InitialNotificationTimedOut);
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(NetworkNotificationError::StreamClosed);
-                }
-            };
-            Ok((registration, receiver, current))
+            let current = events.recv_timeout(INITIAL_NOTIFICATION_TIMEOUT)?;
+            Ok((registration, events, current))
         }
     }
 
@@ -112,7 +192,7 @@ mod windows {
             if result != ERROR_SUCCESS
                 && let Some(context) = self.context.take()
             {
-                let _ = Box::leak(context);
+                let _ = Arc::into_raw(context);
             }
         }
     }
@@ -123,8 +203,8 @@ mod windows {
     ) {
         // SAFETY: registration pins this sender until cancellation succeeds;
         // on failure it is leaked. The callback only takes a shared reference.
-        let sender = unsafe { &*context.cast::<SyncSender<NetworkEvent>>() };
-        let _ = sender.try_send(NetworkEvent::from_windows_connectivity_level(
+        let events = unsafe { &*context.cast::<NetworkEventPublisher>() };
+        events.publish(NetworkEvent::from_windows_connectivity_level(
             hint.ConnectivityLevel,
         ));
     }
@@ -208,7 +288,8 @@ impl NetworkEvent {
 /// Blocking native network-event listener.
 ///
 /// On Linux this subscribes to `NetworkManager`'s `StateChanged` signal on the
-/// system bus. On Windows it subscribes to native connectivity-hint changes.
+/// system bus. On Windows it subscribes to native connectivity-hint changes and
+/// atomically coalesces callback bursts to the latest availability.
 /// Callers must run [`Self::next_event`] outside async executors and UI threads
 /// because it blocks until availability changes.
 pub struct NativeNetworkMonitor {
@@ -222,7 +303,7 @@ pub struct NativeNetworkMonitor {
     #[cfg(target_os = "linux")]
     owner_rule: MatchRule<'static>,
     #[cfg(target_os = "windows")]
-    events: Receiver<NetworkEvent>,
+    events: NetworkEventInbox,
     #[cfg(target_os = "windows")]
     _registration: windows::Registration,
 }
@@ -396,10 +477,7 @@ impl NativeNetworkMonitor {
 
         #[cfg(target_os = "windows")]
         loop {
-            let current = self
-                .events
-                .recv()
-                .map_err(|_| NetworkNotificationError::StreamClosed)?;
+            let current = self.events.recv()?;
             if let Some(event) = self.transitions.accept(current) {
                 return Ok(event);
             }
@@ -475,6 +553,8 @@ impl Error for NetworkNotificationError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::NetworkEventInbox;
     use super::{NativeNetworkMonitor, NetworkEvent, NetworkTransitionFilter};
     use crate::CapabilityAvailability;
 
@@ -529,6 +609,21 @@ mod tests {
         }
         assert_eq!(
             NetworkEvent::from_windows_connectivity_level(3),
+            NetworkEvent::Available
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_mailbox_retains_the_latest_state_under_callback_bursts() {
+        let (publisher, events) = NetworkEventInbox::channel();
+        for _ in 0..64 {
+            publisher.publish(NetworkEvent::Available);
+            publisher.publish(NetworkEvent::Unavailable);
+        }
+        publisher.publish(NetworkEvent::Available);
+        assert_eq!(
+            events.recv().expect("latest network state is retained"),
             NetworkEvent::Available
         );
     }

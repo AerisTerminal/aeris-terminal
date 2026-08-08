@@ -4,7 +4,11 @@ use crate::CapabilityAvailability;
 use std::{error::Error, fmt};
 
 #[cfg(target_os = "windows")]
-use std::sync::mpsc::Receiver;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+    mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+};
 
 #[cfg(target_os = "linux")]
 use zbus::{
@@ -25,20 +29,99 @@ const PREPARE_FOR_SLEEP_SIGNAL: &str = "PrepareForSleep";
 const MAX_QUEUED_POWER_EVENTS: usize = 16;
 
 #[cfg(target_os = "windows")]
-const MAX_QUEUED_POWER_EVENTS: usize = 16;
+struct PowerEventPublisher {
+    pending: Arc<AtomicU8>,
+    wake: SyncSender<()>,
+}
+
+#[cfg(target_os = "windows")]
+impl PowerEventPublisher {
+    fn publish(&self, event: PowerEvent) {
+        match event {
+            PowerEvent::Suspending => self.pending.store(SUSPEND_PENDING, Ordering::Release),
+            PowerEvent::Resumed => {
+                self.pending.fetch_or(RESUME_PENDING, Ordering::AcqRel);
+            }
+        }
+        match self.wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct PowerEventInbox {
+    pending: Arc<AtomicU8>,
+    wake: Receiver<()>,
+}
+
+#[cfg(target_os = "windows")]
+impl PowerEventInbox {
+    fn channel() -> (Arc<PowerEventPublisher>, Self) {
+        let pending = Arc::new(AtomicU8::new(0));
+        let (wake, receiver) = sync_channel(1);
+        (
+            Arc::new(PowerEventPublisher {
+                pending: Arc::clone(&pending),
+                wake,
+            }),
+            Self {
+                pending,
+                wake: receiver,
+            },
+        )
+    }
+
+    fn recv(&self) -> Result<PowerEvent, PowerNotificationError> {
+        loop {
+            if let Some(event) = self.take_next() {
+                return Ok(event);
+            }
+            self.wake
+                .recv()
+                .map_err(|_| PowerNotificationError::StreamClosed)?;
+        }
+    }
+
+    #[cfg(test)]
+    fn try_recv(&self) -> Option<PowerEvent> {
+        self.take_next()
+    }
+
+    fn take_next(&self) -> Option<PowerEvent> {
+        loop {
+            let pending = self.pending.load(Ordering::Acquire);
+            let (event, retained) = if pending & SUSPEND_PENDING != 0 {
+                (PowerEvent::Suspending, pending & !SUSPEND_PENDING)
+            } else if pending & RESUME_PENDING != 0 {
+                (PowerEvent::Resumed, pending & !RESUME_PENDING)
+            } else {
+                return None;
+            };
+            if self
+                .pending
+                .compare_exchange(pending, retained, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(event);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+const SUSPEND_PENDING: u8 = 1;
+#[cfg(target_os = "windows")]
+const RESUME_PENDING: u8 = 2;
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod windows {
-    // The callback context is a pinned Box kept alive until Win32 confirms
-    // unregistration. Failed unregistration leaks that Box deliberately so a
+    // The callback context is an Arc kept alive until Win32 confirms
+    // unregistration. Failed unregistration leaks that Arc deliberately so a
     // late operating-system callback can never dereference freed memory.
-    use super::{MAX_QUEUED_POWER_EVENTS, PowerEvent, PowerNotificationError};
-    use std::{
-        ffi::c_void,
-        ptr,
-        sync::mpsc::{Receiver, SyncSender, sync_channel},
-    };
+    use super::{PowerEvent, PowerEventInbox, PowerEventPublisher, PowerNotificationError};
+    use std::{ffi::c_void, ptr, sync::Arc};
     use windows_sys::Win32::{
         Foundation::{ERROR_SUCCESS, HANDLE},
         System::Power::{
@@ -51,19 +134,19 @@ mod windows {
     pub(super) struct Registration {
         handle: isize,
         parameters: usize,
-        context: Option<Box<SyncSender<PowerEvent>>>,
+        context: Option<Arc<PowerEventPublisher>>,
     }
 
     impl Registration {
-        pub(super) fn connect() -> Result<(Self, Receiver<PowerEvent>), PowerNotificationError> {
-            let (sender, receiver) = sync_channel(MAX_QUEUED_POWER_EVENTS);
-            let mut context = Box::new(sender);
+        pub(super) fn connect() -> Result<(Self, PowerEventInbox), PowerNotificationError> {
+            let (publisher, events) = PowerEventInbox::channel();
+            let context = publisher;
             let mut parameters = Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
                 Callback: Some(power_callback),
-                Context: (&raw mut *context).cast(),
+                Context: Arc::as_ptr(&context).cast_mut().cast(),
             });
             let mut handle = ptr::null_mut();
-            // SAFETY: parameters and its boxed context remain valid for the
+            // SAFETY: parameters and its Arc context remain valid for the
             // registration lifetime, and the callback matches Win32's ABI.
             let result = unsafe {
                 PowerRegisterSuspendResumeNotification(
@@ -84,7 +167,7 @@ mod windows {
                     parameters: Box::into_raw(parameters).addr(),
                     context: Some(context),
                 },
-                receiver,
+                events,
             ))
         }
     }
@@ -100,7 +183,7 @@ mod windows {
                     Box::from_raw(self.parameters as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS)
                 });
             } else if let Some(context) = self.context.take() {
-                let _ = Box::leak(context);
+                let _ = Arc::into_raw(context);
             }
         }
     }
@@ -115,8 +198,8 @@ mod windows {
         };
         // SAFETY: registration pins this sender until unregistration succeeds;
         // on failure it is leaked. The callback only takes a shared reference.
-        let sender = unsafe { &*context.cast::<SyncSender<PowerEvent>>() };
-        let _ = sender.try_send(event);
+        let events = unsafe { &*context.cast::<PowerEventPublisher>() };
+        events.publish(event);
         ERROR_SUCCESS
     }
 
@@ -175,13 +258,14 @@ impl PowerEvent {
 ///
 /// On Linux this subscribes to systemd-logind's `PrepareForSleep` signal on the
 /// system bus. On Windows it registers a suspend/resume callback with the power
-/// manager. Callers must run [`Self::next_event`] outside async executors and UI
-/// threads because it blocks until a transition arrives.
+/// manager and coalesces callback bursts while preserving suspend before resume.
+/// Callers must run [`Self::next_event`] outside async executors and UI threads
+/// because it blocks until a transition arrives.
 pub struct NativePowerMonitor {
     #[cfg(target_os = "linux")]
     messages: MessageIterator,
     #[cfg(target_os = "windows")]
-    events: Receiver<PowerEvent>,
+    events: PowerEventInbox,
     #[cfg(target_os = "windows")]
     _registration: windows::Registration,
 }
@@ -260,9 +344,7 @@ impl NativePowerMonitor {
 
         #[cfg(target_os = "windows")]
         {
-            self.events
-                .recv()
-                .map_err(|_| PowerNotificationError::StreamClosed)
+            self.events.recv()
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -323,6 +405,8 @@ impl Error for PowerNotificationError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::PowerEventInbox;
     use super::{NativePowerMonitor, PowerEvent};
     use crate::CapabilityAvailability;
 
@@ -351,6 +435,33 @@ mod tests {
         for event_type in [0, 6, 7, 8, u32::MAX] {
             assert_eq!(PowerEvent::from_windows_event_type(event_type), None);
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_mailbox_preserves_suspend_before_a_coalesced_resume() {
+        let (publisher, events) = PowerEventInbox::channel();
+        for _ in 0..64 {
+            publisher.publish(PowerEvent::Suspending);
+            publisher.publish(PowerEvent::Resumed);
+        }
+        assert_eq!(
+            events.recv().expect("suspend is retained"),
+            PowerEvent::Suspending
+        );
+        assert_eq!(
+            events.recv().expect("resume is retained"),
+            PowerEvent::Resumed
+        );
+        assert_eq!(events.try_recv(), None);
+
+        publisher.publish(PowerEvent::Resumed);
+        publisher.publish(PowerEvent::Suspending);
+        assert_eq!(
+            events.recv().expect("final suspend wins"),
+            PowerEvent::Suspending
+        );
+        assert_eq!(events.try_recv(), None);
     }
 
     #[test]
