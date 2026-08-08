@@ -57,8 +57,8 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Field | Value |
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
-| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The first exact eight-hour attempt ended incomplete when its interactive process boundary disappeared. |
-| Next | Start the detached supervised eight-hour rerun, then capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
+| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The replacement exact eight-hour run is active but an actual Windows user logoff would invalidate it. |
+| Next | Preserve the active endurance run and capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -745,6 +745,13 @@ qualification predicates. `tools/test_evidence_verifiers.ps1` covers supervised
 and recovered finalization plus active-process, script/log/report tamper,
 incomplete-run, and DWM-only failures. The eight-hour row remains open until the
 replacement process exits cleanly with a completed, qualified artifact.
+
+The replacement run started at `2026-08-08T23:46:21Z` from full revision
+`1784268e44e865ce00b927d6976fa368575130c2` under
+`local-data/evidence/desktop-endurance-1784268-20260808T234550Z`. Its WMI-parented
+supervisor and headless child are active, system sleep is inhibited, and the
+initial schema-2 report is correctly `incomplete`. These checkpoints remain
+provisional until the child exits and the frozen finalizer verifies the result.
 
 
 
