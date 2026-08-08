@@ -23,7 +23,7 @@ use gpui::{
     prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Disableable, Icon, Root, StyledExt, TitleBar,
+    Disableable, Icon, Root, Selectable, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
@@ -200,6 +200,29 @@ impl SearchActivity {
 enum SidePanel {
     Dom,
     Health,
+}
+
+impl SidePanel {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Dom => "Order book",
+            Self::Health => "Feed health",
+        }
+    }
+
+    const fn toggle_label(self) -> &'static str {
+        match self {
+            Self::Dom => "DOM",
+            Self::Health => "Health",
+        }
+    }
+
+    const fn toggle_tooltip(self) -> &'static str {
+        match self {
+            Self::Dom => "Toggle read-only depth panel",
+            Self::Health => "Toggle feed health panel",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1068,6 +1091,12 @@ impl TerminalApp {
         }
     }
 
+    fn close_side_panel(&mut self, cx: &mut Context<Self>) {
+        if self.side_panel.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn reset_chart_view(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -1136,17 +1165,19 @@ impl Render for TerminalApp {
             },
         );
 
-        let workspace = market_workspace(
-            self.chart.as_ref(),
-            self.chart
+        let workspace = market_workspace(MarketWorkspaceState {
+            app,
+            chart: self.chart.as_ref(),
+            chart_has_market_data: self
+                .chart
                 .as_ref()
                 .is_some_and(|chart| chart.read(cx).has_market_data()),
-            self.dom.clone(),
-            self.side_panel,
-            self.chart_state,
-            self.feed_diagnostics.as_deref(),
-            &theme,
-        );
+            dom: self.dom.clone(),
+            side_panel: self.side_panel,
+            chart_state: self.chart_state,
+            diagnostics: self.feed_diagnostics.as_deref(),
+            theme: &theme,
+        });
 
         div()
             .v_flex()
@@ -1164,15 +1195,28 @@ impl Render for TerminalApp {
     }
 }
 
-fn market_workspace(
-    chart: Option<&Entity<OriginChartView>>,
+struct MarketWorkspaceState<'a> {
+    app: Entity<TerminalApp>,
+    chart: Option<&'a Entity<OriginChartView>>,
     chart_has_market_data: bool,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     chart_state: ChartState,
-    diagnostics: Option<&FeedDiagnosticsSnapshot>,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement + use<> {
+    diagnostics: Option<&'a FeedDiagnosticsSnapshot>,
+    theme: &'a AxiusflowTheme,
+}
+
+fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<> {
+    let MarketWorkspaceState {
+        app,
+        chart,
+        chart_has_market_data,
+        dom,
+        side_panel,
+        chart_state,
+        diagnostics,
+        theme,
+    } = state;
     let colors = theme.colors;
     let notice = chart_surface_notice(chart_state, chart_has_market_data);
     let chart_surface = div()
@@ -1192,16 +1236,53 @@ fn market_workspace(
         .child(
             div()
                 .size_full()
+                .v_flex()
                 .overflow_hidden()
-                .children((side_panel == Some(SidePanel::Dom)).then_some(dom))
-                .children(
-                    (side_panel == Some(SidePanel::Health))
-                        .then(|| feed_health_panel(diagnostics, theme)),
+                .children(side_panel.map(|panel| side_panel_header(panel, app, theme)))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .children((side_panel == Some(SidePanel::Dom)).then_some(dom))
+                        .children(
+                            (side_panel == Some(SidePanel::Health))
+                                .then(|| feed_health_panel(diagnostics, theme)),
+                        ),
                 ),
         );
     h_resizable("market_workspace")
         .child(resizable_panel().child(chart_surface))
         .child(side_panel_content)
+}
+
+fn side_panel_header(
+    panel: SidePanel,
+    app: Entity<TerminalApp>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    div()
+        .h(px(30.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px_2()
+        .border_l_1()
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .text_color(gpui_color(colors.muted_foreground))
+        .child(div().flex_1().child(panel.title().to_uppercase()))
+        .child(
+            Button::new("close_side_panel")
+                .icon(header_icon(HugeIcon::CancelIcon01))
+                .ghost()
+                .compact()
+                .tooltip("Close side panel")
+                .on_click(move |_, _, cx| {
+                    app.update(cx, TerminalApp::close_side_panel);
+                }),
+        )
 }
 
 fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -1277,36 +1358,33 @@ fn header_controls(
     state: HeaderState,
     active_button: ButtonCustomVariant,
 ) -> impl IntoElement + use<> {
-    let chart_icon = HugeIcon::ChartIcon01;
+    let dom_panel = SidePanel::Dom;
     let dom_toggle = panel_toggle(
-        "dom_toggle",
-        if state.dom_visible { "Chart" } else { "DOM" },
-        if state.dom_visible {
-            chart_icon
-        } else {
-            HugeIcon::SidebarRightIcon01
+        PanelToggleState {
+            id: "dom_toggle",
+            label: dom_panel.toggle_label(),
+            icon: HugeIcon::SidebarRightIcon01,
+            enabled: state.controls.enabled(HeaderControls::DOM),
+            selected: state.dom_visible,
+            tooltip: dom_panel.toggle_tooltip(),
+            toggle: TerminalApp::toggle_dom,
         },
         active_button,
-        state.controls.enabled(HeaderControls::DOM),
         app.clone(),
-        TerminalApp::toggle_dom,
     );
+    let health_panel = SidePanel::Health;
     let health_toggle = panel_toggle(
-        "health_toggle",
-        if state.health_visible {
-            "Chart"
-        } else {
-            "Health"
-        },
-        if state.health_visible {
-            chart_icon
-        } else {
-            HugeIcon::ActivityIcon01
+        PanelToggleState {
+            id: "health_toggle",
+            label: health_panel.toggle_label(),
+            icon: HugeIcon::ActivityIcon01,
+            enabled: state.controls.enabled(HeaderControls::HEALTH),
+            selected: state.health_visible,
+            tooltip: health_panel.toggle_tooltip(),
+            toggle: TerminalApp::toggle_health,
         },
         active_button,
-        state.controls.enabled(HeaderControls::HEALTH),
         app.clone(),
-        TerminalApp::toggle_health,
     );
     div()
         .h_full()
@@ -1333,22 +1411,30 @@ fn header_controls(
             state.controls.enabled(HeaderControls::SERIES),
         ))
         .child(panel_toggle(
-            "latest_chart",
-            "Latest",
-            HugeIcon::ArrowRightDouble,
+            PanelToggleState {
+                id: "latest_chart",
+                label: "Latest",
+                icon: HugeIcon::ArrowRightDouble,
+                enabled: state.controls.enabled(HeaderControls::LATEST),
+                selected: false,
+                tooltip: "Return to the latest bar (End)",
+                toggle: TerminalApp::scroll_chart_to_latest,
+            },
             active_button,
-            state.controls.enabled(HeaderControls::LATEST),
             app.clone(),
-            TerminalApp::scroll_chart_to_latest,
         ))
         .child(panel_toggle(
-            "fit_chart",
-            "Fit",
-            HugeIcon::FitToScreen,
+            PanelToggleState {
+                id: "fit_chart",
+                label: "Fit",
+                icon: HugeIcon::FitToScreen,
+                enabled: state.controls.enabled(HeaderControls::FIT),
+                selected: false,
+                tooltip: "Fit chart and reset price scales (Home)",
+                toggle: TerminalApp::reset_chart_view,
+            },
             active_button,
-            state.controls.enabled(HeaderControls::FIT),
             app.clone(),
-            TerminalApp::reset_chart_view,
         ))
         .child(dom_toggle)
         .child(health_toggle)
@@ -1362,6 +1448,7 @@ fn instrument_selector(
 ) -> impl IntoElement {
     Button::new("instrument_selector")
         .label(state.label)
+        .tooltip("Search or select a Rithmic contract")
         .dropdown_caret(true)
         .custom(variant)
         .disabled(!state.enabled)
@@ -1437,6 +1524,7 @@ fn instrument_search_item(
                 Button::new("rithmic_header_search")
                     .icon(header_icon(HugeIcon::SearchIcon01))
                     .label("Search")
+                    .tooltip("Search the Rithmic Test catalog")
                     .primary()
                     .loading(search_pending)
                     .disabled(search_pending)
@@ -1471,22 +1559,31 @@ fn connection_badge(
         .child(label)
 }
 
-fn panel_toggle(
+#[derive(Clone, Copy)]
+struct PanelToggleState {
     id: &'static str,
     label: &'static str,
     icon: HugeIcon,
-    variant: ButtonCustomVariant,
     enabled: bool,
-    app: Entity<TerminalApp>,
+    selected: bool,
+    tooltip: &'static str,
     toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+}
+
+fn panel_toggle(
+    state: PanelToggleState,
+    variant: ButtonCustomVariant,
+    app: Entity<TerminalApp>,
 ) -> impl IntoElement {
-    Button::new(id)
-        .icon(header_icon(icon))
-        .label(label)
+    Button::new(state.id)
+        .icon(header_icon(state.icon))
+        .label(state.label)
         .custom(variant)
-        .disabled(!enabled)
+        .selected(state.selected)
+        .tooltip(state.tooltip)
+        .disabled(!state.enabled)
         .on_click(move |_, _, cx| {
-            app.update(cx, toggle);
+            app.update(cx, state.toggle);
         })
 }
 
@@ -1503,6 +1600,7 @@ fn theme_toggle(
     Button::new("theme_toggle")
         .icon(header_icon(icon))
         .label(next.label())
+        .tooltip(format!("Switch to {} theme", next.label()))
         .custom(variant)
         .on_click(move |_, window, cx| {
             app.update(cx, |app, cx| app.toggle_theme(window, cx));
@@ -1522,6 +1620,7 @@ fn series_selector(
 ) -> impl IntoElement {
     Button::new("series_selector")
         .label(label)
+        .tooltip("Select chart series")
         .dropdown_caret(true)
         .custom(variant)
         .disabled(!enabled)
@@ -1588,19 +1687,6 @@ fn feed_health_panel(
         .border_l_1()
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.background))
-        .child(
-            div()
-                .h(px(30.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .px_2()
-                .border_b_1()
-                .border_color(gpui_color(colors.border))
-                .text_xs()
-                .text_color(gpui_color(colors.muted_foreground))
-                .child("FEED HEALTH"),
-        )
         .children(rows.into_iter().map(move |(label, value)| {
             div()
                 .h(px(28.0))
@@ -2089,7 +2175,7 @@ fn main() {
 mod tests {
     use super::{
         ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls, RithmicReconnectTarget,
-        chart_surface_notice, connection_presentation, default_rithmic_contract_index,
+        SidePanel, chart_surface_notice, connection_presentation, default_rithmic_contract_index,
         duration_label, gpui_color, milli_rate, parse_rithmic_test_arguments,
         publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
     };
@@ -2231,6 +2317,18 @@ mod tests {
         assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
         assert!(controls.enabled(HeaderControls::LATEST));
+    }
+
+    #[test]
+    fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
+        assert_eq!(SidePanel::Dom.toggle_label(), "DOM");
+        assert_eq!(SidePanel::Dom.title(), "Order book");
+        assert_eq!(SidePanel::Health.toggle_label(), "Health");
+        assert_eq!(SidePanel::Health.title(), "Feed health");
+        assert_ne!(
+            SidePanel::Dom.toggle_tooltip(),
+            SidePanel::Health.toggle_tooltip()
+        );
     }
 
     #[test]

@@ -506,6 +506,12 @@ primitive rather than a fixed-width container. The chart and rail remain flush,
 the rail is bounded to 240–640 px, and its width persists while switching
 between DOM, health, and the closed state.
 
+The header keeps separate DOM and Health controls with explicit selected states
+instead of renaming an open panel to an ambiguous Chart action. Each selector,
+chart action, theme action, and rail action exposes a concise tooltip, including
+the Home and End chart shortcuts. The open rail has its own flush title and
+close control while preserving the chart-to-rail seam.
+
 The always-mounted empty Origin entity now reports whether a real provider
 snapshot is installed. Empty loading/error surfaces show a centered status;
 stale or reconnecting charts retain their real candles and show only a compact
