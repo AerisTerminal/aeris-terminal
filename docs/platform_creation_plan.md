@@ -57,8 +57,8 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Field | Value |
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
-| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The exact eight-hour run is active. |
-| Next | Capture the remaining provider-path, physical pacing, and physical lifecycle artifacts, then qualify the active eight-hour run |
+| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The first exact eight-hour attempt ended incomplete when its interactive process boundary disappeared. |
+| Next | Start the detached supervised eight-hour rerun, then capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -576,6 +576,13 @@ captures tied to one full source revision and measured-binary hash, validates
 each capture hash and percentile/counter shape, and explicitly rejects DWM,
 GPUI callback, or compositor-only reports.
 
+The operator workflow prepares one clean, locked release build and freezes its
+executable plus `Cargo.lock`, emits exact external-capture templates, runs the
+same binary once at each required display mode, and retains schema-3 DWM
+diagnostics only as supporting mode evidence. Finalization pins every external
+and supporting artifact by SHA-256 before invoking the matrix verifier. External
+scanout instrumentation is still required; these tools do not synthesize it.
+
 - [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [x] Correct DOM gap recovery.
 - [x] Responsive symbol/timeframe replacement.
@@ -631,6 +638,12 @@ negotiated timing or external incident evidence proves it can win the timeout
 race. No real provider-path silence artifact has been captured, so the row
 remains open.
 
+The passive heartbeat observation uses the shipping two-minute message-silence
+window and a five-second heartbeat-response deadline. The observed Rithmic Test
+ten-second negotiated heartbeat can therefore reach `HeartbeatSilence` before
+the broader message timeout; a regression locks that ordering without changing
+production behavior or claiming provider causation.
+
 Windows native environment support landed on 2026-08-08. The platform runtime
 registers bounded connectivity-hint and suspend/resume callbacks, and actual
 registration plus initial-network probes pass on Windows. The shipping Rithmic
@@ -663,6 +676,12 @@ artifacts, revalidates source/binary/lockfile provenance after the operator run,
 and invokes a strict artifact verifier. Deterministic recorder and verifier tests
 pass; no physical transition capture has been performed, so the row remains
 open.
+
+Qualification also requires the application to start from an actual native
+`Unavailable` network result. The operator then restores connectivity, waits for
+full readiness, performs a separate online-ready loss/recovery cycle, and finally
+performs suspend/resume. The initial state is one-shot: a later loss cannot be
+relabelled as offline startup.
 
 The schema-3 desktop readiness artifact now exercises the production live-chart,
 history-handoff, and read-only DOM state machines together. It rejects a repeated
@@ -702,18 +721,30 @@ artifact, then minute `incomplete` checkpoints with sequence and wall-clock
 time, and writes `completed` only on clean termination. `readiness_qualified`
 can be true only for an exact requested 28,800-second run whose elapsed time
 reaches eight hours, memory stays bounded, and `clean_stop` is true. Short runs
-and interrupted checkpoints cannot qualify. An immutable schema-2 binary from
-commit `462ce39` is running the exact 28,800-second qualification under
-`local-data/evidence/desktop-endurance-462ce39-20260808T0300`; its minute
-checkpoints are provisional evidence only. The eight-hour row remains open until
-that process exits cleanly with a completed, qualified artifact.
+and interrupted checkpoints cannot qualify. The first immutable schema-2 attempt
+from commit `462ce39` stopped at checkpoint 96 after 5,760,806 ms. Its artifact
+correctly remains `incomplete`, with `clean_stop=false` and
+`readiness_qualified=false`; it is retained only as failed-attempt evidence.
+Windows session events occurred immediately after its final checkpoint, and the
+attempt had no captured stdout/stderr or supervisor exit record, so no
+application crash is claimed.
 
-`tools/verify_desktop_endurance.ps1` verifies the final immutable-binary and
-report hashes, process exit, exact duration, wall/monotonic chronology, mailbox
-and memory arithmetic, continuity, clean stop, and qualification predicates.
-The active manifest intentionally cannot pass until the process exits and its
-final report hash is recorded. `tools/test_evidence_verifiers.ps1` covers valid
-fixtures plus active-process, hash-tamper, incomplete-run, and DWM-only failures.
+The replacement workflow freezes the binary, `Cargo.lock`, supervisor, finalizer,
+and verifier into a new evidence directory, captures stdout/stderr, and launches
+the supervisor through WMI so it is detached from the invoking tool host. The
+supervisor records the exact child exit and holds a nonpersistent Windows
+system-sleep request while the runner is active. WMI detachment does not survive
+an actual user logoff, and the manifest states that limitation explicitly. A
+completed report can be recovered after supervisor loss without inventing an
+exit code.
+
+`tools/verify_desktop_endurance.ps1` verifies the frozen artifact hashes, process
+exit evidence, exact duration, at least 480 minute checkpoints, wall/monotonic
+chronology, mailbox and memory arithmetic, continuity, clean stop, and
+qualification predicates. `tools/test_evidence_verifiers.ps1` covers supervised
+and recovered finalization plus active-process, script/log/report tamper,
+incomplete-run, and DWM-only failures. The eight-hour row remains open until the
+replacement process exits cleanly with a completed, qualified artifact.
 
 
 

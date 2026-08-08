@@ -32,6 +32,8 @@ use provider_silence_evidence::{
 
 const SYMBOL: &str = "MNQ";
 const AUTHORIZED_SILENCE_RUN_TIMEOUT: Duration = Duration::from_mins(2);
+const PROVIDER_OBSERVED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT: Duration = Duration::from_mins(2);
 const HISTORY_LOOKBACK_MINUTES: i32 = 4 * 24 * 60 + 300;
 const MAXIMUM_HISTORY_BARS: usize = 6_063;
 const MINIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 30;
@@ -540,14 +542,14 @@ fn collect_provider_observed_silence(
     let generation =
         |value| SessionGeneration::new(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN));
     let limits = RithmicSessionLimits {
-        response_timeout: Duration::from_secs(5),
+        response_timeout: PROVIDER_OBSERVED_RESPONSE_TIMEOUT,
         ..RithmicSessionLimits::default()
     };
     let Ok(config) = RithmicProviderConfig::try_new(
         "Axiusflow",
         env!("CARGO_PKG_VERSION"),
         limits,
-        Duration::from_secs(10),
+        PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT,
         Vec::new(),
     ) else {
         evidence.failure = Some(EvidenceFailure::ObservationStart);
@@ -955,8 +957,23 @@ fn load_credentials() -> Result<RithmicCredentialBytes, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceProvenance, ExpectedSilence, RunMode, parse_run_mode};
+    use super::{
+        EvidenceProvenance, ExpectedSilence, MINIMUM_PROVIDER_OBSERVATION_SECONDS,
+        PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT, PROVIDER_OBSERVED_RESPONSE_TIMEOUT, RunMode,
+        parse_run_mode,
+    };
     use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[test]
+    fn passive_heartbeat_observation_has_time_to_reach_its_deadline() {
+        let negotiated_rithmic_test_heartbeat = Duration::from_secs(10);
+        let heartbeat_deadline =
+            negotiated_rithmic_test_heartbeat + PROVIDER_OBSERVED_RESPONSE_TIMEOUT;
+
+        assert!(heartbeat_deadline < PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT);
+        assert!(heartbeat_deadline < Duration::from_secs(MINIMUM_PROVIDER_OBSERVATION_SECONDS));
+    }
 
     #[test]
     fn run_modes_require_exact_nonsecret_arguments() {

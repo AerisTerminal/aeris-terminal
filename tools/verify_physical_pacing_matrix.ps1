@@ -90,6 +90,31 @@ Assert-True (Test-Path -LiteralPath $binaryPath -PathType Leaf) "Measured binary
 $actualBinaryHash = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash
 Assert-True ($actualBinaryHash -ieq $binaryHash) "Measured binary SHA-256 does not match the manifest."
 
+$captureSessionPathProperty = $manifest.PSObject.Properties["capture_session_path"]
+$captureSessionHashProperty = $manifest.PSObject.Properties["capture_session_sha256"]
+Assert-True (($null -eq $captureSessionPathProperty) -eq ($null -eq $captureSessionHashProperty)) "capture_session_path and capture_session_sha256 must either both be present or both be absent."
+if ($null -ne $captureSessionPathProperty) {
+    $captureSessionPath = Resolve-ArtifactPath ([string]$captureSessionPathProperty.Value) $manifestDirectory
+    $captureSessionHash = [string]$captureSessionHashProperty.Value
+    Assert-True ($captureSessionHash -match '^[0-9a-fA-F]{64}$') "capture_session_sha256 must be a SHA-256 digest."
+    Assert-True (Test-Path -LiteralPath $captureSessionPath -PathType Leaf) "Capture session does not exist: $captureSessionPath"
+    Assert-True ((Get-FileHash -LiteralPath $captureSessionPath -Algorithm SHA256).Hash -ieq $captureSessionHash) "Capture session SHA-256 does not match the manifest."
+    $captureSession = Read-JsonArtifact $captureSessionPath "Physical-pacing capture session"
+    Assert-True ((Get-RequiredProperty $captureSession "schema_version") -eq 1) "Capture session schema_version must be 1."
+    Assert-True ((Get-RequiredProperty $captureSession "evidence_scope") -eq "external_physical_scanout_pacing_preparation") "Capture session has the wrong evidence_scope."
+    Assert-True ((Get-RequiredProperty $captureSession "preparation_state") -eq "prepared") "Capture session is not prepared."
+    Assert-JsonTrue (Get-RequiredProperty $captureSession "source_worktree_clean") "Capture session source_worktree_clean"
+    Assert-True (([string](Get-RequiredProperty $captureSession "source_revision")) -ieq $sourceRevision) "Capture session source revision does not match the matrix."
+    Assert-True (([string](Get-RequiredProperty $captureSession "binary_sha256")) -ieq $binaryHash) "Capture session binary hash does not match the matrix."
+    $cargoLockHash = [string](Get-RequiredProperty $captureSession "cargo_lock_sha256")
+    Assert-True ($cargoLockHash -match '^[0-9a-fA-F]{64}$') "Capture session cargo_lock_sha256 must be a SHA-256 digest."
+    $cargoLockPath = Resolve-ArtifactPath ([string](Get-RequiredProperty $captureSession "cargo_lock_path")) (Split-Path -Parent $captureSessionPath)
+    Assert-True (Test-Path -LiteralPath $cargoLockPath -PathType Leaf) "Capture session Cargo.lock does not exist: $cargoLockPath"
+    Assert-True ((Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash -ieq $cargoLockHash) "Capture session Cargo.lock SHA-256 does not match."
+    $requiredProfiles = @((Get-RequiredProperty $captureSession "required_profiles_hz") | ForEach-Object { [int]$_ } | Sort-Object)
+    Assert-True (($requiredProfiles -join ',') -eq '60,120,144') "Capture session required_profiles_hz must be exactly 60, 120, and 144."
+}
+
 $profiles = @(Get-RequiredProperty $manifest "profiles")
 Assert-True ($profiles.Count -eq 3) "Physical-pacing manifest must contain exactly three profiles."
 $requiredTargets = @(60, 120, 144)
@@ -137,7 +162,9 @@ foreach ($profile in $profiles) {
     Assert-True ([Math]::Abs([int64]$configuredMillihertz - [int64]$targetMillihertz) -le [int64]$tolerance) "$target Hz configured refresh is outside the one-percent naming tolerance."
     Assert-True ([Math]::Abs([int64]$measuredMillihertz - [int64]$targetMillihertz) -le [int64]$tolerance) "$target Hz measured refresh is outside the one-percent naming tolerance."
 
-    Assert-NonnegativeInteger (Get-RequiredProperty $evidence "warmup_frames") "$target Hz warmup_frames"
+    $warmupFrames = Get-RequiredProperty $evidence "warmup_frames"
+    Assert-NonnegativeInteger $warmupFrames "$target Hz warmup_frames"
+    Assert-True ([uint64]$warmupFrames -ge 32) "$target Hz evidence must include at least 32 warmup frames."
     $sampleCount = Get-RequiredProperty $evidence "sample_count"
     Assert-NonnegativeInteger $sampleCount "$target Hz sample_count"
     Assert-True ([uint64]$sampleCount -ge 256) "$target Hz evidence must include at least 256 measured frames."
@@ -153,6 +180,29 @@ foreach ($profile in $profiles) {
     $counters = Get-RequiredProperty $evidence "loss_recovery_counters"
     foreach ($name in @("late_frames", "dropped_frames", "missed_frames", "recovery_events")) {
         Assert-NonnegativeInteger (Get-RequiredProperty $counters $name) "$target Hz loss_recovery_counters.$name"
+    }
+
+    $supportingPathProperty = $profile.PSObject.Properties["supporting_diagnostics_path"]
+    $supportingHashProperty = $profile.PSObject.Properties["supporting_diagnostics_sha256"]
+    Assert-True (($null -eq $supportingPathProperty) -eq ($null -eq $supportingHashProperty)) "$target Hz supporting_diagnostics_path and supporting_diagnostics_sha256 must either both be present or both be absent."
+    if ($null -ne $supportingPathProperty) {
+        $supportingPath = Resolve-ArtifactPath ([string]$supportingPathProperty.Value) $manifestDirectory
+        $supportingHash = [string]$supportingHashProperty.Value
+        Assert-True ($supportingHash -match '^[0-9a-fA-F]{64}$') "$target Hz supporting_diagnostics_sha256 must be a SHA-256 digest."
+        Assert-True (Test-Path -LiteralPath $supportingPath -PathType Leaf) "$target Hz supporting diagnostics do not exist: $supportingPath"
+        Assert-True ((Get-FileHash -LiteralPath $supportingPath -Algorithm SHA256).Hash -ieq $supportingHash) "$target Hz supporting diagnostics SHA-256 does not match the manifest."
+        $supporting = Read-JsonArtifact $supportingPath "$target Hz supporting diagnostics"
+        Assert-True ((Get-RequiredProperty $supporting "schema_version") -eq 3) "$target Hz supporting diagnostics schema_version must be 3."
+        Assert-True ((Get-RequiredProperty $supporting "evidence_scope") -eq "windowed_replay_to_frame_callback_and_native_compositor_timeline") "$target Hz supporting diagnostics have the wrong evidence_scope."
+        Assert-True (([string](Get-RequiredProperty $supporting "source_revision")) -ieq $sourceRevision) "$target Hz supporting diagnostics source revision does not match the matrix."
+        Assert-True ((Get-RequiredProperty $supporting "physical_presentation_measured") -is [bool] -and -not (Get-RequiredProperty $supporting "physical_presentation_measured")) "$target Hz supporting diagnostics must remain labeled as non-physical evidence."
+        Assert-True ((Get-RequiredProperty $supporting "external_scanout_instrumented") -is [bool] -and -not (Get-RequiredProperty $supporting "external_scanout_instrumented")) "$target Hz supporting diagnostics must remain labeled as non-external evidence."
+        $supportingOutputs = @((Get-RequiredProperty (Get-RequiredProperty $supporting "display") "outputs"))
+        $matchingSupportingOutput = @($supportingOutputs | Where-Object {
+            $refresh = $_.PSObject.Properties["refresh_millihertz"]
+            $null -ne $refresh -and $null -ne $refresh.Value -and [Math]::Abs([int64]$refresh.Value - [int64]$targetMillihertz) -le [int64]$tolerance
+        })
+        Assert-True ($matchingSupportingOutput.Count -gt 0) "$target Hz supporting diagnostics do not name an observed output within one percent of the target refresh."
     }
 }
 

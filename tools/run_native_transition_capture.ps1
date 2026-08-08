@@ -3,11 +3,13 @@
 Builds and launches one provenance-bound physical native-transition capture.
 
 .DESCRIPTION
-This launcher never changes network or power state. After the Rithmic Test chart
-is fully ready, the operator performs one physical online-to-offline-to-online
-cycle and one physical suspend/resume cycle. The existing shipping worker loads
-credentials only from the native vault. Close the application normally after
-both scenarios rehydrate; the worker then records its clean final stop.
+This launcher never changes network or power state. It builds while online, then
+pauses so the operator can disconnect before the application starts. After the
+application records the real offline initial probe, reconnect, wait for the chart
+and DOM to become ready, perform a separate physical online-to-offline-to-online
+cycle, then perform one physical suspend/resume cycle. Close the application
+normally only after both later scenarios rehydrate. The existing shipping worker
+loads credentials only from the native vault.
 #>
 [CmdletBinding()]
 param(
@@ -69,6 +71,11 @@ if ($LASTEXITCODE -ne 0) {
 $executablePath = Join-Path $repoRoot "target\release\axiusflow_desktop.exe"
 $executablePath = (Resolve-Path -LiteralPath $executablePath).Path
 $cargoLockPath = (Resolve-Path -LiteralPath $cargoLockPath).Path
+
+Write-Output "native_transition_operator_step=disconnect_network_before_start"
+Write-Output "native_transition_operator_sequence=launch_offline,reconnect_until_ready,separate_offline_recovery_until_ready,suspend_resume_until_ready,close_normally"
+$null = Read-Host "Physically disconnect all network access, then press Enter to launch the application offline"
+
 $manifest = [ordered]@{
     schema_version = 1
     evidence_scope = "rithmic_test_native_transition_capture_manifest"
@@ -87,6 +94,8 @@ $manifest = [ordered]@{
 }
 Write-JsonAtomically $manifestPath $manifest
 
+Write-Output "native_transition_operator_step=launching_offline reconnect only after the application shows its offline startup state"
+Write-Output "native_transition_operator_step=after_first_ready perform a separate network loss/recovery, then suspend/resume, waiting for full chart and DOM recovery after each"
 $arguments = @(
     "--rithmic-test",
     $resolvedHistoryRoot,
@@ -128,4 +137,4 @@ $verifier = Join-Path $PSScriptRoot "verify_native_transition_capture.ps1"
 if ($LASTEXITCODE -ne 0) {
     throw "Native-transition capture artifacts failed final verification."
 }
-Write-Output "native_transition_capture_process=completed report=$resolvedReportPath manifest=$manifestPath"
+Write-Output "native_transition_capture_process=completed physical_offline_startup=true physical_network_offline=true physical_suspend_resume=true report=$resolvedReportPath manifest=$manifestPath"

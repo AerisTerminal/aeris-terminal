@@ -165,6 +165,20 @@ try {
     $report.completion_state = "completed"
     $report.readiness_qualified = $true
 
+    $report.initial_network_state = "available"
+    Write-Json $artifact $report
+    $manifest.final_report_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+    Write-Json $manifestPath $manifest
+    Invoke-ExpectedFailure
+    $report.initial_network_state = "unavailable"
+
+    $report.offline_startup_observed = $false
+    Write-Json $artifact $report
+    $manifest.final_report_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+    Write-Json $manifestPath $manifest
+    Invoke-ExpectedFailure
+    $report.offline_startup_observed = $true
+
     $report.suspend_resume.provider_invalidation_preceded_fence = $true
     Write-Json $artifact $report
     $manifest.final_report_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
@@ -179,7 +193,7 @@ try {
     Write-Json $manifestPath $manifest
     Invoke-ExpectedFailure
 
-    Write-Output "native_transition_verifier_self_tests=passed valid=true artifact_tamper_rejected=true incomplete_rejected=true provider_invalidation_precedence_rejected=true observer_overflow_rejected=true offline_startup_not_substituted=true"
+    Write-Output "native_transition_verifier_self_tests=passed valid=true artifact_tamper_rejected=true incomplete_rejected=true online_startup_rejected=true offline_startup_flag_required=true provider_invalidation_precedence_rejected=true observer_overflow_rejected=true"
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

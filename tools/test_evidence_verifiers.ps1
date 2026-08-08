@@ -78,6 +78,101 @@ try {
     }
     Write-Json $enduranceManifestPath $enduranceManifest
     Invoke-ExpectedSuccess $enduranceVerifier $enduranceManifestPath
+
+    $cargoLockPath = Join-Path $testRoot "Cargo.lock"
+    $stdoutPath = Join-Path $testRoot "stdout.log"
+    $stderrPath = Join-Path $testRoot "stderr.log"
+    $supervisorPath = Join-Path $testRoot "supervisor.ps1"
+    $finalizerPath = Join-Path $testRoot "finalizer.ps1"
+    $verifierPath = Join-Path $testRoot "verifier.ps1"
+    [IO.File]::WriteAllText($cargoLockPath, "fixture-lock")
+    [IO.File]::WriteAllText($stdoutPath, "completed")
+    [IO.File]::WriteAllText($stderrPath, "")
+    [IO.File]::WriteAllText($supervisorPath, "fixture-supervisor")
+    [IO.File]::WriteAllText($finalizerPath, "fixture-finalizer")
+    [IO.File]::WriteAllText($verifierPath, "fixture-verifier")
+    $enduranceManifest.schema_version = 2
+    $enduranceManifest.evidence_scope = "desktop_endurance_capture_manifest"
+    $enduranceManifest.clean_worktree = $true
+    $enduranceManifest.cargo_lock_path = "Cargo.lock"
+    $enduranceManifest.cargo_lock_sha256 = (Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash
+    $enduranceManifest.supervisor_script_path = "supervisor.ps1"
+    $enduranceManifest.supervisor_script_sha256 = (Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash
+    $enduranceManifest.finalizer_script_path = "finalizer.ps1"
+    $enduranceManifest.finalizer_script_sha256 = (Get-FileHash -LiteralPath $finalizerPath -Algorithm SHA256).Hash
+    $enduranceManifest.verifier_script_path = "verifier.ps1"
+    $enduranceManifest.verifier_script_sha256 = (Get-FileHash -LiteralPath $verifierPath -Algorithm SHA256).Hash
+    $enduranceManifest.stdout_path = "stdout.log"
+    $enduranceManifest.stdout_sha256 = (Get-FileHash -LiteralPath $stdoutPath -Algorithm SHA256).Hash
+    $enduranceManifest.stderr_path = "stderr.log"
+    $enduranceManifest.stderr_sha256 = (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash
+    $enduranceManifest.process_exit_code = 0
+    $enduranceManifest.process_exit_evidence = "supervisor_observed_zero"
+    $enduranceManifest.finalization_mode = "supervised"
+    $enduranceManifest.launch_mode = "foreground_supervisor"
+    $enduranceManifest.logoff_resilient = $false
+    $enduranceManifest.system_sleep_inhibited = $true
+    $enduranceManifest.system_sleep_inhibition_released = $true
+    $enduranceManifest.sleep_inhibition_release_evidence = "explicit_es_continuous"
+    $enduranceManifest.finalized = $true
+    $enduranceManifest.finalized_utc = $startedUtc.AddHours(8).ToString("O")
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedSuccess $enduranceVerifier $enduranceManifestPath
+    [IO.File]::AppendAllText($finalizerPath, "tampered")
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    [IO.File]::WriteAllText($finalizerPath, "fixture-finalizer")
+    $enduranceManifest.finalizer_script_sha256 = (Get-FileHash -LiteralPath $finalizerPath -Algorithm SHA256).Hash
+    Write-Json $enduranceManifestPath $enduranceManifest
+    [IO.File]::AppendAllText($stderrPath, "tampered")
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    [IO.File]::WriteAllText($stderrPath, "")
+    $enduranceManifest.stderr_sha256 = (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash
+    $enduranceManifest.finalized = $false
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.finalized = $true
+    $enduranceManifest.process_exit_code = 1
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.process_exit_code = 0
+    Write-Json $enduranceManifestPath $enduranceManifest
+    $enduranceManifest.process_exit_code = $null
+    $enduranceManifest.process_exit_evidence = "completed_report_recovery"
+    $enduranceManifest.finalization_mode = "recovered_after_supervisor_loss"
+    $enduranceManifest.sleep_inhibition_release_evidence = "supervisor_thread_terminated"
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedSuccess $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.process_exit_code = 0
+    $enduranceManifest.process_exit_evidence = "supervisor_observed_zero"
+    $enduranceManifest.finalization_mode = "supervised"
+    $enduranceManifest.sleep_inhibition_release_evidence = "explicit_es_continuous"
+    $enduranceManifest.launch_mode = "wmi_detached_interactive_session"
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedSuccess $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.launch_mode = "unknown_detached_mode"
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.launch_mode = "foreground_supervisor"
+    Write-Json $enduranceManifestPath $enduranceManifest
+    $enduranceManifest.logoff_resilient = $true
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.logoff_resilient = $false
+    Write-Json $enduranceManifestPath $enduranceManifest
+    $enduranceManifest.system_sleep_inhibited = $false
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $enduranceManifest.system_sleep_inhibited = $true
+    Write-Json $enduranceManifestPath $enduranceManifest
+    $report.checkpoint_sequence = 479
+    Write-Json $reportPath $report
+    $enduranceManifest.report_sha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $report.checkpoint_sequence = 481
+    Write-Json $reportPath $report
+    $enduranceManifest.report_sha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash
+    Write-Json $enduranceManifestPath $enduranceManifest
     [IO.File]::AppendAllText($reportPath, " ")
     Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
     Write-Json $reportPath $report
@@ -168,7 +263,7 @@ try {
     Write-Json $pacingManifestPath $pacingManifest
     Invoke-ExpectedFailure $pacingVerifier $pacingManifestPath
 
-    Write-Output "evidence_verifier_self_tests=passed endurance_valid=true endurance_active_rejected=true endurance_binary_hash_mismatch_rejected=true endurance_report_tamper_rejected=true endurance_incomplete_rejected=true physical_matrix_valid=true dwm_only_rejected=true"
+    Write-Output "evidence_verifier_self_tests=passed endurance_valid=true endurance_supervised_manifest_valid=true endurance_recovery_manifest_valid=true endurance_wmi_detached_manifest_valid=true endurance_unknown_launch_mode_rejected=true endurance_logoff_resilience_overclaim_rejected=true endurance_sleep_inhibition_required=true endurance_minute_checkpoint_floor_required=true endurance_frozen_script_tamper_rejected=true endurance_log_tamper_rejected=true endurance_unfinalized_rejected=true endurance_unclean_exit_rejected=true endurance_active_rejected=true endurance_binary_hash_mismatch_rejected=true endurance_report_tamper_rejected=true endurance_incomplete_rejected=true physical_matrix_valid=true dwm_only_rejected=true"
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

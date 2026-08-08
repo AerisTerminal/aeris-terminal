@@ -1,14 +1,15 @@
 <#
 .SYNOPSIS
-Verifies a completed physical Windows network-offline and suspend/resume capture.
+Verifies completed physical Windows offline-startup, network-offline, and suspend/resume evidence.
 
 .DESCRIPTION
 The capture is produced only by the committed launcher and opt-in Rithmic Test
 shipping worker. This verifier checks its finalized provenance manifest, typed native callback ordinals,
 confirmed generation retirement, complete state clearing, strictly newer native-
-vault reconnection, authentication, and restored chart/DOM/selection state. An
-offline initial probe is reported separately and never substitutes for the online
-loss sequence. The verifier never changes network or power state.
+vault reconnection, authentication, and restored chart/DOM/selection state. A real
+initial NativeNetworkMonitor Unavailable result is required in addition to the
+later online-ready loss/recovery sequence. The verifier never changes network or
+power state.
 
 .EXAMPLE
 powershell -File tools/verify_native_transition_capture.ps1 -ArtifactPath local-data/evidence/native-transitions.json -ManifestPath local-data/evidence/native-transitions.json.manifest.json
@@ -171,8 +172,8 @@ Assert-NonnegativeInteger $received "callbacks_received"
 Assert-NonnegativeInteger $applied "callbacks_applied"
 Assert-True ([uint64]$received -ge 4 -and $received -eq $applied) "Every received native callback must be applied and at least four are required."
 $initialNetwork = [string](Get-RequiredProperty $report "initial_network_state")
-Assert-True ($initialNetwork -in @("available", "unavailable", "unavailable_probe")) "initial_network_state is invalid."
-Assert-True ((Get-RequiredProperty $report "offline_startup_observed") -is [bool]) "offline_startup_observed must be a JSON boolean and is not used as online-loss evidence."
+Assert-True ($initialNetwork -eq "unavailable") "Native-transition evidence requires an initial NativeNetworkMonitor Unavailable result."
+Assert-JsonTrue (Get-RequiredProperty $report "offline_startup_observed") "offline_startup_observed"
 $created = [uint64](Get-RequiredProperty $report "created_unix_milliseconds")
 $checkpoint = [uint64](Get-RequiredProperty $report "checkpoint_unix_milliseconds")
 Assert-True ($checkpoint -ge $created) "Final checkpoint predates capture creation."
@@ -183,4 +184,4 @@ Assert-JsonTrue (Get-RequiredProperty $report "worker_clean_stop") "worker_clean
 Assert-JsonTrue (Get-RequiredProperty $report "finalized") "report.finalized"
 Assert-JsonTrue (Get-RequiredProperty $report "readiness_qualified") "readiness_qualified"
 
-Write-Output "native_transition_capture=verified physical_network_offline=true physical_suspend_resume=true source_ordinals=true native_vault=true artifact_sha256=$($actualHash.ToUpperInvariant()) artifact=$resolvedPath"
+Write-Output "native_transition_capture=verified physical_offline_startup=true physical_network_offline=true physical_suspend_resume=true source_ordinals=true native_vault=true artifact_sha256=$($actualHash.ToUpperInvariant()) artifact=$resolvedPath"

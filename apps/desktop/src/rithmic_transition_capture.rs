@@ -310,6 +310,9 @@ impl NativeTransitionCapture {
         &mut self,
         initial: Option<NetworkEvent>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.report.initial_network_state != "unknown" {
+            return Err("native transition initial network state was already observed".into());
+        }
         self.report.initial_network_state = match initial {
             Some(NetworkEvent::Available) => "available",
             Some(NetworkEvent::Unavailable) => "unavailable",
@@ -443,6 +446,7 @@ impl NativeTransitionCapture {
     fn recompute_and_checkpoint(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.report.scenario_requirements_met = (self.report.callback_application_failures == 0
             && !self.report.observer_overflow.is_true()
+            && self.report.offline_startup_observed.is_true()
             && self.report.network_offline.completed.is_true()
             && self.report.suspend_resume.completed.is_true())
         .into();
@@ -661,6 +665,9 @@ mod tests {
         ));
         let mut capture = start_capture(&report_path);
         capture
+            .observe_initial_network(Some(NetworkEvent::Unavailable))
+            .expect("physical offline startup checkpoints");
+        capture
             .observe_environment_applied(AppliedEnvironmentEvidence {
                 event: RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
                 source_ordinal: 1,
@@ -725,6 +732,8 @@ mod tests {
                 .expect("completed report is JSON");
         assert_eq!(completed["completion_state"], "completed");
         assert_eq!(completed["readiness_qualified"], true);
+        assert_eq!(completed["initial_network_state"], "unavailable");
+        assert_eq!(completed["offline_startup_observed"], true);
         assert_eq!(completed["transitions_triggered_by_capture"], false);
         assert_eq!(completed["credentials_embedded"], false);
         assert_eq!(completed["network_offline"]["retired_generation"], 1);
@@ -740,6 +749,38 @@ mod tests {
         );
         let encoded = serde_json::to_string(&completed).expect("completed report serializes");
         assert!(!encoded.to_ascii_lowercase().contains("password"));
+        cleanup(&report_path);
+    }
+
+    #[test]
+    fn otherwise_qualified_capture_requires_real_offline_startup() {
+        let report_path = std::env::temp_dir().join(format!(
+            "axiusflow-native-transitions-online-startup-{}-{}.json",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        let mut capture = start_capture(&report_path);
+        capture
+            .observe_initial_network(Some(NetworkEvent::Available))
+            .expect("online initial state checkpoints");
+        assert!(
+            capture
+                .observe_initial_network(Some(NetworkEvent::Unavailable))
+                .is_err(),
+            "a later network loss cannot be relabeled as offline startup"
+        );
+        capture.report.network_offline.completed = true.into();
+        capture.report.suspend_resume.completed = true.into();
+        capture.finalize(true).expect("capture finalizes");
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report_path).expect("report is readable"))
+                .expect("report is JSON");
+        assert_eq!(report["initial_network_state"], "available");
+        assert_eq!(report["offline_startup_observed"], false);
+        assert_eq!(report["scenario_requirements_met"], false);
+        assert_eq!(report["completion_state"], "incomplete");
+        assert_eq!(report["readiness_qualified"], false);
         cleanup(&report_path);
     }
 
