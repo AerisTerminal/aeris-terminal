@@ -57,8 +57,8 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Field | Value |
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
-| Blocked | None. The remaining Stage C work is authorized resilience evidence, not credential or agreement access. |
-| Next | Capture named 60/120/144 Hz evidence and extend authorized Test evidence through heartbeat loss |
+| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The exact eight-hour run is active. |
+| Next | Finish contextual UI status and strict evidence verifiers, then capture the remaining provider/physical artifacts and qualify the active eight-hour run |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -79,7 +79,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 - [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
 - [x] **Stage A:** deterministic shipping conformance [x]; BTC/ETH shipping live smoke [x]; frozen after verification (see §6).
 - [ ] **Stage C:** deterministic headless conformance [x]; authorized core-path evidence [x]; resilience/recovery evidence [ ] (see §8).
-- [ ] **Stage E:** build the main Rithmic UI vertical from the verified deterministic Stage C/D contracts (see §10).
+- [x] **Stage E implementation:** the main Rithmic UI vertical is integrated from the verified deterministic Stage C/D contracts; named physical pacing remains an open Stage E gate (see §10).
 
 
 
@@ -512,6 +512,14 @@ chart action, theme action, and rail action exposes a concise tooltip, including
 the Home and End chart shortcuts. The open rail has its own flush title and
 close control while preserving the chart-to-rail seam.
 
+Contract and series selectors now keep exact contract/venue identity, expose
+their existing bounded search/selection/history status in the relevant dropdown,
+and visibly gate duplicate single-flight requests. Sanitized authentication and
+recovery context appears only in the existing empty/stale/error chart notice;
+Ready remains overlay-free. Reconnect, stop, channel loss, and catalog-session
+invalidation clear pending interaction state, and chart focus is marked by a
+flush square theme-ring border for keyboard navigation.
+
 The always-mounted empty Origin entity now reports whether a real provider
 snapshot is installed. Empty loading/error surfaces show a centered status;
 stale or reconnecting charts retain their real candles and show only a compact
@@ -562,6 +570,12 @@ and late/dropped/missed deltas. It explicitly records
 `external_scanout_instrumented=false`; DWM evidence is compositor evidence only.
 No named 60/120/144 physical run has been captured, so the gate remains open.
 
+`tools/verify_physical_pacing_matrix.ps1` is the fail-closed acceptance boundary
+for that gate. It requires distinct externally instrumented 60/120/144 Hz
+captures tied to one full source revision and measured-binary hash, validates
+each capture hash and percentile/counter shape, and explicitly rejects DWM,
+GPUI callback, or compositor-only reports.
+
 - [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [x] Correct DOM gap recovery.
 - [x] Responsive symbol/timeframe replacement.
@@ -580,7 +594,7 @@ physical evidence remains downstream of the product gates)
 Capture evidence for:
 
 - [x] Slow consumers and publication overflow.
-- [ ] Heartbeat and message-silence loss.
+- [ ] Provider-observed heartbeat and message-silence loss.
 - [x] Trade, history, and depth gaps.
 - [x] Disconnect, bounded reconnect, and terminal failures.
 - [ ] Suspend/resume and offline startup.
@@ -661,9 +675,18 @@ artifact, then minute `incomplete` checkpoints with sequence and wall-clock
 time, and writes `completed` only on clean termination. `readiness_qualified`
 can be true only for an exact requested 28,800-second run whose elapsed time
 reaches eight hours, memory stays bounded, and `clean_stop` is true. Short runs
-and interrupted checkpoints cannot qualify. The active 2026-08-08 run was
-started from the previous binary and therefore cannot supply schema-2 checkpoint
-evidence; the eight-hour row remains open until a qualifying artifact exists.
+and interrupted checkpoints cannot qualify. An immutable schema-2 binary from
+commit `462ce39` is running the exact 28,800-second qualification under
+`local-data/evidence/desktop-endurance-462ce39-20260808T0300`; its minute
+checkpoints are provisional evidence only. The eight-hour row remains open until
+that process exits cleanly with a completed, qualified artifact.
+
+`tools/verify_desktop_endurance.ps1` verifies the final immutable-binary and
+report hashes, process exit, exact duration, wall/monotonic chronology, mailbox
+and memory arithmetic, continuity, clean stop, and qualification predicates.
+The active manifest intentionally cannot pass until the process exits and its
+final report hash is recorded. `tools/test_evidence_verifiers.ps1` covers valid
+fixtures plus active-process, hash-tamper, incomplete-run, and DWM-only failures.
 
 
 
@@ -735,11 +758,11 @@ understand feed health without exposing credentials or licensed data.
 - [ ] View tick and supported time-based charts.
 - [ ] Inspect a recovering read-only DOM.
 - [ ] Understand feed health without exposing credentials or licensed data.
-- [ ] Deterministic replay evidence.
-- [ ] Authorized Test evidence.
+- [x] Deterministic replay evidence.
+- [x] Authorized Test core-path evidence.
 - [ ] Bounded queues and memory.
-- [ ] Generation-fenced recovery.
-- [ ] Clean shutdown.
+- [x] Generation-fenced recovery.
+- [x] Clean shutdown.
 - [ ] Responsive frame pacing.
 - [ ] Endurance gate.
 - [ ] Finding-free local review and pushed `main` commit.

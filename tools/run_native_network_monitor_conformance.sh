@@ -5,9 +5,23 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 cargo test --locked --package axiusflow_platform_runtime network_notifications::tests::
+cargo test --locked --package axiusflow_platform_runtime power_notifications::tests::
 
 live_probe="not_available"
-if [[ "$(uname -s)" == "Linux" ]] && command -v busctl >/dev/null 2>&1 \
+platform="$(uname -s)"
+linux_backend="not_current_platform"
+windows_network_backend="not_current_platform"
+windows_power_backend="not_current_platform"
+
+if [[ "$platform" == "Linux" ]]; then
+    linux_backend="implemented"
+fi
+if [[ "$platform" == MINGW* || "$platform" == MSYS* || "$platform" == CYGWIN* ]]; then
+    windows_network_backend="implemented_and_registered"
+    windows_power_backend="implemented_and_registered"
+fi
+
+if [[ "$platform" == "Linux" ]] && command -v busctl >/dev/null 2>&1 \
     && busctl --system get-property \
         org.freedesktop.NetworkManager \
         /org/freedesktop/NetworkManager \
@@ -20,5 +34,13 @@ if [[ "$(uname -s)" == "Linux" ]] && command -v busctl >/dev/null 2>&1 \
     )"
     live_probe="passed:${probe_output#native_network_monitor_current=}"
 fi
+if [[ "$platform" == MINGW* || "$platform" == MSYS* || "$platform" == CYGWIN* ]]; then
+    probe_output="$(
+        cargo run --quiet --locked \
+            --package axiusflow_platform_runtime \
+            --example native_network_monitor_probe
+    )"
+    live_probe="passed:${probe_output#native_network_monitor_current=}"
+fi
 
-echo "native_network_monitor=passed cases=4 linux_network_manager=true state_and_owner_match_rules=true global_state_available=true non_global_states_unavailable=true duplicate_states_coalesced=true compiled_backend_capability=true live_connect_and_current=${live_probe} next_event_integration=not_proven daemon_restart_integration=not_proven windows_backend=not_implemented macos_backend=not_implemented"
+echo "native_environment_monitor=passed linux_backend=${linux_backend} windows_network_backend=${windows_network_backend} windows_power_backend=${windows_power_backend} state_mapping=true duplicate_states_coalesced=true callback_burst_latest_network_retained=true suspend_before_resume_retained=true compiled_backend_capability=true live_connect_and_current=${live_probe} physical_network_transition=not_run physical_suspend_resume=not_run linux_daemon_restart=not_run macos_backend=not_implemented"

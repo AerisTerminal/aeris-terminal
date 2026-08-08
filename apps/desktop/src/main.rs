@@ -42,6 +42,7 @@ use std::sync::mpsc::TrySendError;
 const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
+const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 
 fn generation_status(
     worker_label: &str,
@@ -132,6 +133,7 @@ struct TerminalApp {
     connection_message: Option<String>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
+    symbol_selection_pending: bool,
     series_browser: rithmic_history::RithmicSeriesBrowser,
     series_message: String,
     rithmic_autoload_started: bool,
@@ -165,19 +167,28 @@ impl RithmicReconnectState {
 
 struct HeaderState {
     theme: AxiusflowTheme,
-    market_label: String,
+    instrument_label: String,
     series_label: String,
     instruments: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
     selected_instrument: Option<(String, String)>,
     selected_series: Option<rithmic_history::RithmicSeries>,
     symbol_input: Option<Entity<InputState>>,
+    symbol_message: String,
     search_activity: SearchActivity,
+    series_message: String,
+    pending: HeaderPendingState,
     controls: HeaderControls,
     dom_visible: bool,
     health_visible: bool,
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HeaderPendingState {
+    symbol_selection: bool,
+    series: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -238,37 +249,95 @@ enum ChartNoticeTone {
     Loss,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ChartSurfaceNotice {
     label: &'static str,
+    detail: Option<String>,
     placement: ChartNoticePlacement,
     tone: ChartNoticeTone,
 }
 
-fn chart_surface_notice(state: ChartState, has_market_data: bool) -> Option<ChartSurfaceNotice> {
+fn chart_surface_notice(
+    state: ChartState,
+    has_market_data: bool,
+    detail: &str,
+) -> Option<ChartSurfaceNotice> {
     let placement = if has_market_data {
         ChartNoticePlacement::TopLeft
     } else {
         ChartNoticePlacement::Center
     };
+    let detail = bounded_status_detail(detail, state.label());
     match state {
         ChartState::Loading => Some(ChartSurfaceNotice {
             label: state.label(),
+            detail,
             placement,
             tone: ChartNoticeTone::Muted,
         }),
         ChartState::Ready => None,
         ChartState::Stale | ChartState::Recovering => Some(ChartSurfaceNotice {
             label: state.label(),
+            detail,
             placement,
             tone: ChartNoticeTone::Warning,
         }),
         ChartState::Error => Some(ChartSurfaceNotice {
             label: state.label(),
+            detail,
             placement,
             tone: ChartNoticeTone::Loss,
         }),
     }
+}
+
+fn bounded_status_detail(detail: &str, generic_label: &str) -> Option<String> {
+    let detail = detail.trim();
+    if detail.is_empty() || detail.eq_ignore_ascii_case(generic_label) {
+        return None;
+    }
+    let mut bounded: String = detail.chars().take(MAXIMUM_STATUS_CHARACTERS).collect();
+    if detail.chars().count() > MAXIMUM_STATUS_CHARACTERS {
+        bounded.push('…');
+    }
+    Some(bounded)
+}
+
+fn chart_status_detail<'a>(
+    chart_state: ChartState,
+    connection_state: FeedConnectionState,
+    chart_message: &'a str,
+    connection_message: Option<&'a str>,
+) -> &'a str {
+    if chart_state != ChartState::Ready && connection_state != FeedConnectionState::Streaming {
+        connection_message.unwrap_or(chart_message)
+    } else {
+        chart_message
+    }
+}
+
+fn instrument_selector_label(selected: Option<(&str, &str)>, selection_pending: bool) -> String {
+    if selection_pending {
+        return "Selecting…".to_string();
+    }
+    selected.map_or_else(
+        || "Contract".to_string(),
+        |(symbol, exchange)| format!("{symbol} / {exchange}"),
+    )
+}
+
+fn series_selector_label(
+    selected: Option<rithmic_history::RithmicSeries>,
+    pending: Option<rithmic_history::RithmicSeries>,
+) -> String {
+    pending.map_or_else(
+        || {
+            selected
+                .map_or("Series", rithmic_history::RithmicSeries::label)
+                .to_string()
+        },
+        |series| format!("Loading {}…", series.label()),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -405,6 +474,7 @@ impl TerminalApp {
             connection_message,
             symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
             symbol_message: "Search for an entitled Rithmic Test symbol".to_string(),
+            symbol_selection_pending: false,
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
             rithmic_autoload_started: false,
@@ -643,6 +713,7 @@ impl TerminalApp {
             }
         }
         if disconnected && self.connection_state.is_some() {
+            self.invalidate_rithmic_interaction_state();
             self.connection_state = Some(FeedConnectionState::Stopped);
             self.connection_message = Some("Rithmic market worker stopped".to_string());
             cx.notify();
@@ -684,6 +755,8 @@ impl TerminalApp {
     ) {
         if state == FeedConnectionState::Recovering {
             self.begin_rithmic_reconnect();
+        } else if state == FeedConnectionState::Stopped {
+            self.invalidate_rithmic_interaction_state();
         }
         self.connection_state = Some(state);
         let ready_for_search = state == FeedConnectionState::Authenticating
@@ -757,7 +830,7 @@ impl TerminalApp {
     }
 
     fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
-        if self.symbol_browser.search_pending() {
+        if self.symbol_browser.search_pending() || self.symbol_selection_pending {
             return false;
         }
         let request = match self.symbol_browser.begin_search(query) {
@@ -805,28 +878,37 @@ impl TerminalApp {
     }
 
     fn begin_rithmic_reconnect(&mut self) {
-        if self.rithmic_reconnect != RithmicReconnectState::Idle {
-            return;
+        if self.rithmic_reconnect == RithmicReconnectState::Idle
+            && let Some(selection) = self.symbol_browser.selected().cloned()
+        {
+            let series = self
+                .series_browser
+                .selected()
+                .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
+                    request.series
+                });
+            self.rithmic_reconnect =
+                RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
+                    symbol: selection.instrument.symbol,
+                    exchange: selection.instrument.exchange,
+                    series,
+                });
         }
-        let Some(selection) = self.symbol_browser.selected().cloned() else {
-            return;
-        };
-        let series = self
-            .series_browser
-            .selected()
-            .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
-                request.series
-            });
-        self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
-            symbol: selection.instrument.symbol,
-            exchange: selection.instrument.exchange,
-            series,
-        });
+        self.invalidate_rithmic_interaction_state();
+    }
+
+    fn invalidate_rithmic_interaction_state(&mut self) {
+        self.symbol_selection_pending = false;
         self.symbol_browser.invalidate_session();
         self.series_browser.reset();
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.symbol_selection_pending {
+            self.symbol_message = "A contract selection is already in progress".to_string();
+            cx.notify();
+            return;
+        }
         let Some(selection) = self.symbol_browser.select(index) else {
             return;
         };
@@ -852,6 +934,7 @@ impl TerminalApp {
             return;
         };
         if self.market_worker.try_select_rithmic(request).is_ok() {
+            self.symbol_selection_pending = true;
             self.symbol_message = format!(
                 "Selecting {} · {}",
                 selection.instrument.symbol, selection.instrument.exchange
@@ -905,6 +988,7 @@ impl TerminalApp {
                 ..
             } => {
                 if self.symbol_browser.confirm_selection(selection_generation) {
+                    self.symbol_selection_pending = false;
                     let recovered_series = self
                         .rithmic_reconnect
                         .target()
@@ -932,10 +1016,11 @@ impl TerminalApp {
                 ..
             } => {
                 if self.symbol_browser.reject_command(command_generation) {
+                    self.symbol_selection_pending = false;
                     self.symbol_message = catalog_rejection_message(reason).to_string();
                     if let Some(target) = self.rithmic_reconnect.target().cloned() {
                         self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
-                        self.symbol_browser.invalidate_session();
+                        self.invalidate_rithmic_interaction_state();
                     }
                 }
             }
@@ -948,6 +1033,11 @@ impl TerminalApp {
         series: rithmic_history::RithmicSeries,
         cx: &mut Context<Self>,
     ) {
+        if self.series_browser.pending().is_some() {
+            self.series_message = "A chart series is already loading".to_string();
+            cx.notify();
+            return;
+        }
         let Some(selection) = self.symbol_browser.selected() else {
             self.series_message = "Select a symbol before choosing a series".to_string();
             cx.notify();
@@ -1129,12 +1219,19 @@ impl Render for TerminalApp {
             &app,
             HeaderState {
                 theme,
-                market_label: self.subscription_id.clone(),
-                series_label: self
-                    .series_browser
-                    .selected()
-                    .map_or("1m", |request| request.series.label())
-                    .to_string(),
+                instrument_label: instrument_selector_label(
+                    self.symbol_browser.selected().map(|selection| {
+                        (
+                            selection.instrument.symbol.as_str(),
+                            selection.instrument.exchange.as_str(),
+                        )
+                    }),
+                    self.symbol_selection_pending,
+                ),
+                series_label: series_selector_label(
+                    self.series_browser.selected().map(|request| request.series),
+                    self.series_browser.pending().map(|request| request.series),
+                ),
                 instruments: self.symbol_browser.results().to_vec(),
                 selected_instrument: self.symbol_browser.selected().map(|selection| {
                     (
@@ -1144,7 +1241,13 @@ impl Render for TerminalApp {
                 }),
                 selected_series: self.series_browser.selected().map(|request| request.series),
                 symbol_input: self.symbol_input.clone(),
+                symbol_message: self.symbol_message.clone(),
                 search_activity: SearchActivity::from_pending(self.symbol_browser.search_pending()),
+                series_message: self.series_message.clone(),
+                pending: HeaderPendingState {
+                    symbol_selection: self.symbol_selection_pending,
+                    series: self.series_browser.pending().is_some(),
+                },
                 controls: HeaderControls::from_state(
                     self.symbol_input.is_some() || !self.symbol_browser.results().is_empty(),
                     self.symbol_browser.selected().is_some(),
@@ -1175,6 +1278,14 @@ impl Render for TerminalApp {
             dom: self.dom.clone(),
             side_panel: self.side_panel,
             chart_state: self.chart_state,
+            chart_status_detail: chart_status_detail(
+                self.chart_state,
+                self.connection_state
+                    .unwrap_or(FeedConnectionState::Disconnected),
+                &self.chart_state_message,
+                self.connection_message.as_deref(),
+            )
+            .to_string(),
             diagnostics: self.feed_diagnostics.as_deref(),
             theme: &theme,
         });
@@ -1202,6 +1313,7 @@ struct MarketWorkspaceState<'a> {
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     chart_state: ChartState,
+    chart_status_detail: String,
     diagnostics: Option<&'a FeedDiagnosticsSnapshot>,
     theme: &'a AxiusflowTheme,
 }
@@ -1214,11 +1326,12 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         dom,
         side_panel,
         chart_state,
+        chart_status_detail,
         diagnostics,
         theme,
     } = state;
     let colors = theme.colors;
-    let notice = chart_surface_notice(chart_state, chart_has_market_data);
+    let notice = chart_surface_notice(chart_state, chart_has_market_data, &chart_status_detail);
     let chart_surface = div()
         .id("primary_chart")
         .relative()
@@ -1293,6 +1406,8 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
         ChartNoticeTone::Loss => colors.loss,
     };
     let label = div()
+        .v_flex()
+        .gap_1()
         .px_2()
         .py_1()
         .border_1()
@@ -1300,7 +1415,12 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
         .bg(gpui_color(colors.background.with_alpha(0.94)))
         .text_xs()
         .text_color(gpui_color(tone))
-        .child(notice.label);
+        .child(notice.label)
+        .children(notice.detail.map(|detail| {
+            div()
+                .text_color(gpui_color(colors.muted_foreground))
+                .child(detail)
+        }));
     match notice.placement {
         ChartNoticePlacement::Center => div()
             .absolute()
@@ -1394,11 +1514,13 @@ fn header_controls(
         .child(instrument_selector(
             app.clone(),
             InstrumentSelectorState {
-                label: state.market_label,
+                label: state.instrument_label,
                 instruments: state.instruments,
                 selected: state.selected_instrument,
                 input: state.symbol_input,
+                message: state.symbol_message,
                 search_activity: state.search_activity,
+                selection_pending: state.pending.symbol_selection,
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
             },
             active_button,
@@ -1407,6 +1529,8 @@ fn header_controls(
             app.clone(),
             state.series_label,
             state.selected_series,
+            state.series_message,
+            state.pending.series,
             active_button,
             state.controls.enabled(HeaderControls::SERIES),
         ))
@@ -1447,21 +1571,12 @@ fn instrument_selector(
     variant: ButtonCustomVariant,
 ) -> impl IntoElement {
     Button::new("instrument_selector")
-        .label(state.label)
+        .label(state.label.clone())
         .tooltip("Search or select a Rithmic contract")
         .dropdown_caret(true)
         .custom(variant)
         .disabled(!state.enabled)
-        .dropdown_menu(move |menu, _, _| {
-            instrument_menu(
-                menu,
-                &app,
-                &state.instruments,
-                state.selected.as_ref(),
-                state.input.as_ref(),
-                state.search_activity.is_pending(),
-            )
-        })
+        .dropdown_menu(move |menu, _, _| instrument_menu(menu, &app, &state))
 }
 
 struct InstrumentSelectorState {
@@ -1469,39 +1584,41 @@ struct InstrumentSelectorState {
     instruments: Vec<axiusflow_rithmic_protocol_adapter::SymbolSearchResult>,
     selected: Option<(String, String)>,
     input: Option<Entity<InputState>>,
+    message: String,
     search_activity: SearchActivity,
+    selection_pending: bool,
     enabled: bool,
 }
 
 fn instrument_menu(
     menu: PopupMenu,
     app: &Entity<TerminalApp>,
-    instruments: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
-    selected: Option<&(String, String)>,
-    input: Option<&Entity<InputState>>,
-    search_pending: bool,
+    state: &InstrumentSelectorState,
 ) -> PopupMenu {
-    let menu = match input {
+    let menu = match state.input.as_ref() {
         Some(input) => menu
             .item(instrument_search_item(
                 input.clone(),
                 app.clone(),
-                search_pending,
+                state.search_activity.is_pending() || state.selection_pending,
             ))
+            .item(PopupMenuItem::label(state.message.clone()))
             .separator(),
         None => menu,
     };
-    instruments
+    state
+        .instruments
         .iter()
         .enumerate()
         .fold(menu.scrollable(true), |menu, (index, instrument)| {
-            let checked = selected.is_some_and(|(symbol, exchange)| {
+            let checked = state.selected.as_ref().is_some_and(|(symbol, exchange)| {
                 symbol == &instrument.symbol && exchange == &instrument.exchange
             });
             let app = app.clone();
             menu.item(
                 PopupMenuItem::new(instrument_menu_label(instrument))
                     .checked(checked)
+                    .disabled(state.selection_pending)
                     .on_click(move |_, _, cx| {
                         app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
                     }),
@@ -1615,6 +1732,8 @@ fn series_selector(
     app: Entity<TerminalApp>,
     label: String,
     selected: Option<rithmic_history::RithmicSeries>,
+    message: String,
+    pending: bool,
     variant: ButtonCustomVariant,
     enabled: bool,
 ) -> impl IntoElement {
@@ -1625,19 +1744,21 @@ fn series_selector(
         .custom(variant)
         .disabled(!enabled)
         .dropdown_menu(move |menu, _, _| {
-            rithmic_history::RithmicSeries::ALL
-                .iter()
-                .fold(menu, |menu, series| {
+            rithmic_history::RithmicSeries::ALL.iter().fold(
+                menu.item(PopupMenuItem::label(message.clone())).separator(),
+                |menu, series| {
                     let series = *series;
                     let app = app.clone();
                     menu.item(
                         PopupMenuItem::new(series.label())
                             .checked(selected == Some(series))
+                            .disabled(pending)
                             .on_click(move |_, _, cx| {
                                 app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
                             }),
                     )
-                })
+                },
+            )
         })
 }
 
@@ -2175,9 +2296,11 @@ fn main() {
 mod tests {
     use super::{
         ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls, RithmicReconnectTarget,
-        SidePanel, chart_surface_notice, connection_presentation, default_rithmic_contract_index,
-        duration_label, gpui_color, milli_rate, parse_rithmic_test_arguments,
+        SidePanel, bounded_status_detail, chart_status_detail, chart_surface_notice,
+        connection_presentation, default_rithmic_contract_index, duration_label, gpui_color,
+        instrument_selector_label, milli_rate, parse_rithmic_test_arguments,
         publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        series_selector_label,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -2333,27 +2456,110 @@ mod tests {
 
     #[test]
     fn chart_notice_distinguishes_empty_loading_from_retained_recovery() {
-        let loading = chart_surface_notice(ChartState::Loading, false).expect("loading notice");
+        let loading = chart_surface_notice(
+            ChartState::Loading,
+            false,
+            "discovering Rithmic Test systems",
+        )
+        .expect("loading notice");
         assert_eq!(loading.label, "Loading chart");
+        assert_eq!(
+            loading.detail.as_deref(),
+            Some("discovering Rithmic Test systems")
+        );
         assert_eq!(loading.placement, ChartNoticePlacement::Center);
         assert_eq!(loading.tone, ChartNoticeTone::Muted);
 
-        let recovery = chart_surface_notice(ChartState::Recovering, true).expect("recovery notice");
+        let recovery = chart_surface_notice(
+            ChartState::Recovering,
+            true,
+            "Rithmic Test session will retry",
+        )
+        .expect("recovery notice");
         assert_eq!(recovery.label, "Reconnecting chart");
         assert_eq!(recovery.placement, ChartNoticePlacement::TopLeft);
         assert_eq!(recovery.tone, ChartNoticeTone::Warning);
-        assert!(chart_surface_notice(ChartState::Ready, true).is_none());
+        assert!(chart_surface_notice(ChartState::Ready, true, "current").is_none());
     }
 
     #[test]
     fn chart_error_and_stale_notices_use_truthful_severity() {
-        let stale = chart_surface_notice(ChartState::Stale, true).expect("stale notice");
+        let stale = chart_surface_notice(ChartState::Stale, true, "trade stream is silent")
+            .expect("stale notice");
         assert_eq!(stale.label, "Chart stale");
         assert_eq!(stale.tone, ChartNoticeTone::Warning);
 
-        let error = chart_surface_notice(ChartState::Error, false).expect("error notice");
+        let error = chart_surface_notice(
+            ChartState::Error,
+            false,
+            "Rithmic Test authentication was rejected",
+        )
+        .expect("error notice");
         assert_eq!(error.label, "Chart unavailable");
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("Rithmic Test authentication was rejected")
+        );
         assert_eq!(error.placement, ChartNoticePlacement::Center);
         assert_eq!(error.tone, ChartNoticeTone::Loss);
+    }
+
+    #[test]
+    fn contextual_labels_keep_contract_and_pending_series_truthful() {
+        assert_eq!(instrument_selector_label(None, false), "Contract");
+        assert_eq!(
+            instrument_selector_label(Some(("MNQU6", "CME")), false),
+            "MNQU6 / CME"
+        );
+        assert_eq!(
+            instrument_selector_label(Some(("MNQU6", "CME")), true),
+            "Selecting…"
+        );
+        assert_eq!(series_selector_label(None, None), "Series");
+        assert_eq!(
+            series_selector_label(Some(crate::rithmic_history::RithmicSeries::Minute1), None),
+            "1m"
+        );
+        assert_eq!(
+            series_selector_label(
+                Some(crate::rithmic_history::RithmicSeries::Minute1),
+                Some(crate::rithmic_history::RithmicSeries::Minute5),
+            ),
+            "Loading 5m…"
+        );
+    }
+
+    #[test]
+    fn chart_detail_prefers_connection_context_until_streaming() {
+        assert_eq!(
+            chart_status_detail(
+                ChartState::Loading,
+                FeedConnectionState::Authenticating,
+                "waiting for chart",
+                Some("Rithmic Test agreements require attention"),
+            ),
+            "Rithmic Test agreements require attention"
+        );
+        assert_eq!(
+            chart_status_detail(
+                ChartState::Recovering,
+                FeedConnectionState::Streaming,
+                "history is covering a gap",
+                Some("feed is streaming"),
+            ),
+            "history is covering a gap"
+        );
+    }
+
+    #[test]
+    fn chart_detail_is_bounded_and_suppresses_generic_duplicates() {
+        assert_eq!(
+            bounded_status_detail(" Chart unavailable ", "Chart unavailable"),
+            None
+        );
+        let detail = bounded_status_detail(&"x".repeat(200), "Chart unavailable")
+            .expect("long detail remains visible");
+        assert_eq!(detail.chars().count(), 161);
+        assert!(detail.ends_with('…'));
     }
 }

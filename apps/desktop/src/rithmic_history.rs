@@ -159,6 +159,10 @@ impl RithmicSeriesBrowser {
     pub(crate) const fn selected(&self) -> Option<RithmicSeriesRequest> {
         self.selected
     }
+
+    pub(crate) const fn pending(&self) -> Option<RithmicSeriesRequest> {
+        self.pending
+    }
 }
 
 #[derive(Clone)]
@@ -696,9 +700,12 @@ mod tests {
         let mut browser = RithmicSeriesBrowser::default();
         let selection = NonZeroUsize::MIN;
         let first = browser.select(selection, RithmicSeries::Minute1);
+        assert_eq!(browser.pending(), Some(first));
         let second = browser.select(selection, RithmicSeries::Minute5);
+        assert_eq!(browser.pending(), Some(second));
         assert!(!browser.accept(first.selection_generation, first.series_generation));
         assert!(browser.accept(second.selection_generation, second.series_generation));
+        assert_eq!(browser.pending(), None);
         assert_eq!(browser.selected(), Some(second));
         let replacement = browser.select(
             NonZeroUsize::new(2).expect("selection generation is nonzero"),
@@ -711,6 +718,7 @@ mod tests {
         ));
         assert_eq!(browser.selected(), Some(replacement));
         browser.reset();
+        assert_eq!(browser.pending(), None);
         assert_eq!(browser.selected(), None);
     }
 
