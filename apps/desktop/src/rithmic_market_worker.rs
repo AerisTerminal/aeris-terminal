@@ -20,11 +20,15 @@ use axiusflow_desktop_storage::CatalogKey;
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::FeedConnectionState;
-use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
+use axiusflow_platform_runtime::{
+    CredentialVault, NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent,
+    PowerEvent,
+};
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicProviderConfig,
-    RithmicProviderDriver, RithmicRetryScheduler, RithmicSessionLimits, try_recv_rithmic_event,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicEnvironmentEvent,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicRetryScheduler, RithmicSessionLimits,
+    apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use std::{
@@ -42,6 +46,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
+const ENVIRONMENT_CAPACITY: usize = 8;
+const ENVIRONMENT_BATCH: usize = 8;
 const CALLBACK_CAPACITY: usize = 256;
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const MAXIMUM_DEPTH: usize = 256;
@@ -127,6 +133,8 @@ fn run(
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
 ) {
+    let (environment_tx, environment_rx) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
+    let initial_network = start_environment_monitors(environment_tx);
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = wake_tx.try_send(());
@@ -141,7 +149,15 @@ fn run(
         wait_for_shutdown(commands);
         return;
     };
-    run_connected(messages, commands, worker, &events, &wake_rx);
+    run_connected(
+        messages,
+        commands,
+        worker,
+        &events,
+        &wake_rx,
+        &environment_rx,
+        initial_network,
+    );
 }
 
 fn run_connected(
@@ -150,12 +166,35 @@ fn run_connected(
     mut worker: RithmicWorker,
     events: &RithmicEvents,
     wake_rx: &Receiver<()>,
+    environment_rx: &Receiver<RithmicEnvironmentEvent>,
+    initial_network: Option<NetworkEvent>,
 ) {
     send_connection(
         messages,
         FeedConnectionState::Discovering,
         "discovering Rithmic Test systems",
     );
+    let mut retries = RithmicRetryScheduler::default();
+    let mut state = RithmicRuntimeState::new();
+    if initial_network == Some(NetworkEvent::Unavailable) {
+        if apply_rithmic_environment_event(
+            &mut worker,
+            events,
+            &mut retries,
+            RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
+        )
+        .is_err()
+        {
+            send_connection(
+                messages,
+                FeedConnectionState::Recovering,
+                "Rithmic Test could not apply native network state",
+            );
+        } else {
+            let (connection, message) = initial_offline_status();
+            send_connection(messages, connection, message);
+        }
+    }
     if worker.request_connection().is_err() {
         send_connection(
             messages,
@@ -164,12 +203,18 @@ fn run_connected(
         );
     }
 
-    let mut retries = RithmicRetryScheduler::default();
-    let mut state = RithmicRuntimeState::new();
     loop {
         if process_command(commands, &worker, events, messages, &mut state) {
             break;
         }
+        drain_environment_events(
+            environment_rx,
+            &mut worker,
+            events,
+            &mut retries,
+            messages,
+            &mut state,
+        );
         drain_events(&mut worker, events, &mut retries, messages, &mut state);
         if let Some(result) = state
             .history
@@ -183,12 +228,7 @@ fn run_connected(
             .retry_due(&mut worker, Instant::now())
             .is_ok_and(|generation| generation.is_some())
         {
-            state.selection_installed = false;
-            state.installed_instrument = None;
-            state.live_chart = None;
-            state.pending_live_request = None;
-            state.buffered_history_trades.clear();
-            state.history_trade_overflow = false;
+            reset_live_state(&mut state);
             send_connection(
                 messages,
                 FeedConnectionState::Discovering,
@@ -225,6 +265,97 @@ fn run_connected(
     );
 }
 
+fn start_environment_monitors(
+    sender: mpsc::SyncSender<RithmicEnvironmentEvent>,
+) -> Option<NetworkEvent> {
+    let initial_network = NativeNetworkMonitor::connect().ok().map(|mut monitor| {
+        let initial = monitor.current();
+        let network_sender = sender.clone();
+        let _ = thread::Builder::new()
+            .name("axiusflow-rithmic-network-monitor".to_string())
+            .spawn(move || {
+                while let Ok(event) = monitor.next_event() {
+                    if network_sender
+                        .send(RithmicEnvironmentEvent::Network(event))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        initial
+    });
+    if let Ok(mut monitor) = NativePowerMonitor::connect() {
+        let _ = thread::Builder::new()
+            .name("axiusflow-rithmic-power-monitor".to_string())
+            .spawn(move || {
+                while let Ok(event) = monitor.next_event() {
+                    if sender.send(RithmicEnvironmentEvent::Power(event)).is_err() {
+                        break;
+                    }
+                }
+            });
+    }
+    initial_network
+}
+
+fn drain_environment_events(
+    receiver: &Receiver<RithmicEnvironmentEvent>,
+    worker: &mut RithmicWorker,
+    events: &RithmicEvents,
+    retries: &mut RithmicRetryScheduler,
+    messages: &crate::market_worker::MarketWorkerSender,
+    state: &mut RithmicRuntimeState,
+) {
+    for _ in 0..ENVIRONMENT_BATCH {
+        let Ok(event) = receiver.try_recv() else {
+            break;
+        };
+        match apply_rithmic_environment_event(worker, events, retries, event) {
+            Ok(generation) => {
+                reset_live_state(state);
+                let (connection, message) = match (event, generation) {
+                    (_, Some(_)) => (
+                        FeedConnectionState::Discovering,
+                        "native environment restored; reconnecting to Rithmic Test",
+                    ),
+                    (RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable), None) => (
+                        FeedConnectionState::Disconnected,
+                        "Rithmic Test paused while the network is unavailable",
+                    ),
+                    (RithmicEnvironmentEvent::Power(PowerEvent::Suspending), None) => (
+                        FeedConnectionState::Disconnected,
+                        "Rithmic Test paused while the system is suspended",
+                    ),
+                    _ => (
+                        FeedConnectionState::Recovering,
+                        "Rithmic Test is waiting for native environment recovery",
+                    ),
+                };
+                send_connection(messages, connection, message);
+            }
+            Err(_) => send_connection(
+                messages,
+                FeedConnectionState::Recovering,
+                "Rithmic Test native environment transition failed closed",
+            ),
+        }
+    }
+}
+
+fn reset_live_state(state: &mut RithmicRuntimeState) {
+    if let Some(history) = state.history.as_mut() {
+        history.cancel();
+    }
+    state.selection_installed = false;
+    state.installed_instrument = None;
+    state.live_chart = None;
+    state.pending_live_request = None;
+    state.buffered_history_trades.clear();
+    state.history_trade_overflow = false;
+    state.dom.clear();
+}
+
 fn apply_history_result(
     messages: &crate::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
@@ -234,15 +365,18 @@ fn apply_history_result(
         selection: result.selection_generation,
         series: result.series_generation,
     };
+    let matching_request = state.pending_live_request.is_some_and(|request| {
+        request.selection_generation == generation.selection
+            && request.series_generation == generation.series
+    });
+    if !matching_request {
+        return false;
+    }
     let mut chart =
         result.result.as_ref().ok().and_then(|bootstrap| {
             RithmicLiveChart::from_history(generation, &bootstrap.snapshot).ok()
         });
     let _ = messages.send(history_message(result));
-    let matching_request = state.pending_live_request.is_some_and(|request| {
-        request.selection_generation == generation.selection
-            && request.series_generation == generation.series
-    });
     if matching_request && !state.history_trade_overflow {
         let mut valid = true;
         if let Some(active_chart) = chart.as_mut() {
@@ -269,6 +403,13 @@ fn apply_history_result(
     state.history_trade_overflow = false;
     state.live_chart = chart;
     false
+}
+
+const fn initial_offline_status() -> (FeedConnectionState, &'static str) {
+    (
+        FeedConnectionState::Disconnected,
+        "Rithmic Test is offline; connection will start when the network returns",
+    )
 }
 
 fn reschedule_history(state: &mut RithmicRuntimeState) -> bool {
@@ -801,6 +942,36 @@ mod tests {
 
     fn generation() -> SessionGeneration {
         SessionGeneration::new(NonZeroU64::MIN)
+    }
+
+    #[test]
+    fn initial_offline_state_is_explicit_and_not_discovering() {
+        let (state, message) = initial_offline_status();
+        assert_eq!(state, FeedConnectionState::Disconnected);
+        assert!(message.contains("offline"));
+        assert!(!message.contains("discover"));
+    }
+
+    #[test]
+    fn environment_reset_fences_stale_history_results_before_publication() {
+        let (messages, receiver) = market_worker_channel(nonzero(4));
+        let mut state = RithmicRuntimeState::new();
+        state.pending_live_request = Some(RithmicSeriesRequest {
+            selection_generation: nonzero(2),
+            series_generation: nonzero(3),
+            series: crate::rithmic_history::RithmicSeries::Minute1,
+        });
+        reset_live_state(&mut state);
+        assert!(!apply_history_result(
+            &messages,
+            &mut state,
+            RithmicHistoryResult {
+                selection_generation: nonzero(2),
+                series_generation: nonzero(3),
+                result: Err("stale environment result".to_string()),
+            },
+        ));
+        assert!(receiver.drain().0.is_empty());
     }
 
     #[test]

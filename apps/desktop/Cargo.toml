@@ -29,6 +29,7 @@ axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
+gpui-hugeicons.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

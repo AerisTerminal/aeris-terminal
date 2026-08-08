@@ -106,9 +106,9 @@ Full scope policy:
 | Coinbase reference + chart | `verified`    | BTC-USD / ETH-USD 1m cache-first startup, corrupt-cache refetch, reconnect fencing, redaction, history/live continuity, bounded shutdown, and public shipping smoke pass; scope is frozen.                                                           |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `verified`    | The kit is installed locally under `provider_kit/`; native-vault credentials, Test login, search/reference, trades, quotes, depth, and history were exercised successfully on 2026-08-07. |
-| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized resilience/recovery evidence remains. |
+| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented; authorized resilience/recovery evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
-| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. After session invalidation the exact contract and timeframe are re-discovered and reinstalled before history, candles, and depth resume. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
+| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
 | Readiness / endurance      | `ready`       | Stage F.                                                                                                                                                                                                                                            |
 | Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
 
@@ -566,6 +566,17 @@ covering resnapshot after publication overflow, and terminal Rithmic failure
 redaction. The message-silence row remains open until the already-passing
 deterministic silent-peer timeout is repeated as authorized Rithmic heartbeat
 loss.
+
+Windows native environment support landed on 2026-08-08. The platform runtime
+registers bounded connectivity-hint and suspend/resume callbacks, and actual
+registration plus initial-network probes pass on Windows. The shipping Rithmic
+worker applies initial offline state before connection, cancels in-flight history
+and clears chart/DOM/selection state on network loss or suspend, discards retired
+callbacks, and reconnects only through a fresh session generation after
+restoration. Deterministic shipping-path tests cover offline startup, network
+recovery, suspend/resume, stale-history rejection, and retry/callback fencing.
+The Stage F row remains open until physical offline and suspend/resume transitions
+are captured as named evidence.
 
 The schema-2 desktop readiness artifact now exercises the production live-chart,
 history-handoff, and read-only DOM state machines together. It rejects a repeated

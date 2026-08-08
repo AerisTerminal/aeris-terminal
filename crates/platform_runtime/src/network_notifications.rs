@@ -3,6 +3,9 @@
 use crate::CapabilityAvailability;
 use std::{error::Error, fmt};
 
+#[cfg(target_os = "windows")]
+use std::sync::mpsc::Receiver;
+
 #[cfg(target_os = "linux")]
 use zbus::{
     MatchRule,
@@ -32,6 +35,100 @@ const DBUS_PATH: &str = "/org/freedesktop/DBus";
 const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
 #[cfg(target_os = "linux")]
 const NAME_OWNER_CHANGED_SIGNAL: &str = "NameOwnerChanged";
+
+#[cfg(target_os = "windows")]
+const MAX_QUEUED_NETWORK_EVENTS: usize = 16;
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod windows {
+    // The callback context is a pinned Box kept alive until Win32 confirms
+    // cancellation. Failed cancellation leaks that Box deliberately so a late
+    // operating-system callback can never dereference freed memory.
+    use super::{MAX_QUEUED_NETWORK_EVENTS, NetworkEvent, NetworkNotificationError};
+    use std::{
+        ffi::c_void,
+        sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
+        time::Duration,
+    };
+    use windows_sys::Win32::{
+        Foundation::{ERROR_SUCCESS, HANDLE},
+        NetworkManagement::IpHelper::{
+            CancelMibChangeNotify2, NotifyNetworkConnectivityHintChange,
+        },
+        Networking::WinSock::NL_NETWORK_CONNECTIVITY_HINT,
+    };
+
+    const INITIAL_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub(super) struct Registration {
+        handle: usize,
+        context: Option<Box<SyncSender<NetworkEvent>>>,
+    }
+
+    impl Registration {
+        pub(super) fn connect()
+        -> Result<(Self, Receiver<NetworkEvent>, NetworkEvent), NetworkNotificationError> {
+            let (sender, receiver) = sync_channel(MAX_QUEUED_NETWORK_EVENTS);
+            let mut context = Box::new(sender);
+            let mut handle: HANDLE = std::ptr::null_mut();
+            // SAFETY: the boxed context remains valid for the notification
+            // lifetime, and the callback matches Win32's documented ABI.
+            let result = unsafe {
+                NotifyNetworkConnectivityHintChange(
+                    Some(network_callback),
+                    (&raw mut *context).cast(),
+                    true,
+                    &raw mut handle,
+                )
+            };
+            if result != ERROR_SUCCESS {
+                return Err(NetworkNotificationError::WindowsPlatform {
+                    operation: "NotifyNetworkConnectivityHintChange",
+                    code: result,
+                });
+            }
+            let registration = Self {
+                handle: handle as usize,
+                context: Some(context),
+            };
+            let current = match receiver.recv_timeout(INITIAL_NOTIFICATION_TIMEOUT) {
+                Ok(event) => event,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(NetworkNotificationError::InitialNotificationTimedOut);
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(NetworkNotificationError::StreamClosed);
+                }
+            };
+            Ok((registration, receiver, current))
+        }
+    }
+
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            // SAFETY: handle was returned by the matching notification call.
+            let result = unsafe { CancelMibChangeNotify2(self.handle as _) };
+            if result != ERROR_SUCCESS
+                && let Some(context) = self.context.take()
+            {
+                let _ = Box::leak(context);
+            }
+        }
+    }
+
+    unsafe extern "system" fn network_callback(
+        context: *const c_void,
+        hint: NL_NETWORK_CONNECTIVITY_HINT,
+    ) {
+        // SAFETY: registration pins this sender until cancellation succeeds;
+        // on failure it is leaked. The callback only takes a shared reference.
+        let sender = unsafe { &*context.cast::<SyncSender<NetworkEvent>>() };
+        let _ = sender.try_send(NetworkEvent::from_windows_connectivity_level(
+            hint.ConnectivityLevel,
+        ));
+    }
+}
 
 #[cfg(any(target_os = "linux", test))]
 const NETWORK_MANAGER_STATE_CONNECTED_GLOBAL: u32 = 70;
@@ -73,12 +170,12 @@ struct NetworkTransitionFilter {
 }
 
 impl NetworkTransitionFilter {
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     const fn new(current: NetworkEvent) -> Self {
         Self { current }
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     fn accept(&mut self, event: NetworkEvent) -> Option<NetworkEvent> {
         if event == self.current {
             return None;
@@ -97,13 +194,23 @@ impl NetworkEvent {
             Self::Unavailable
         }
     }
+
+    #[cfg(any(target_os = "windows", test))]
+    const fn from_windows_connectivity_level(level: i32) -> Self {
+        if level == 3 {
+            Self::Available
+        } else {
+            Self::Unavailable
+        }
+    }
 }
 
 /// Blocking native network-event listener.
 ///
 /// On Linux this subscribes to `NetworkManager`'s `StateChanged` signal on the
-/// system bus. Callers must run [`Self::next_event`] outside async executors and
-/// UI threads because it blocks until availability changes.
+/// system bus. On Windows it subscribes to native connectivity-hint changes.
+/// Callers must run [`Self::next_event`] outside async executors and UI threads
+/// because it blocks until availability changes.
 pub struct NativeNetworkMonitor {
     transitions: NetworkTransitionFilter,
     #[cfg(target_os = "linux")]
@@ -114,6 +221,10 @@ pub struct NativeNetworkMonitor {
     state_rule: MatchRule<'static>,
     #[cfg(target_os = "linux")]
     owner_rule: MatchRule<'static>,
+    #[cfg(target_os = "windows")]
+    events: Receiver<NetworkEvent>,
+    #[cfg(target_os = "windows")]
+    _registration: windows::Registration,
 }
 
 #[cfg(target_os = "linux")]
@@ -185,10 +296,10 @@ impl NativeNetworkMonitor {
     /// Reports whether this crate implements a native network-event source.
     #[must_use]
     pub const fn availability() -> CapabilityAvailability {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         return CapabilityAvailability::Available;
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         CapabilityAvailability::Unavailable
     }
 
@@ -199,9 +310,9 @@ impl NativeNetworkMonitor {
     ///
     /// # Errors
     ///
-    /// Returns an error when the target is unsupported or a Linux system-bus,
-    /// subscription, stable-owner, or property operation fails. An absent
-    /// `NetworkManager` owner is represented as [`NetworkEvent::Unavailable`].
+    /// Returns an error when the target is unsupported or a native subscription
+    /// or state read fails. An absent Linux `NetworkManager` owner is represented
+    /// as [`NetworkEvent::Unavailable`].
     pub fn connect() -> Result<Self, NetworkNotificationError> {
         #[cfg(target_os = "linux")]
         {
@@ -229,7 +340,17 @@ impl NativeNetworkMonitor {
             })
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let (registration, events, current) = windows::Registration::connect()?;
+            Ok(Self {
+                transitions: NetworkTransitionFilter::new(current),
+                events,
+                _registration: registration,
+            })
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Err(NetworkNotificationError::UnsupportedPlatform)
     }
 
@@ -241,14 +362,13 @@ impl NativeNetworkMonitor {
 
     /// Blocks until provider-relevant availability changes.
     ///
-    /// Each matching signal triggers a fresh owner/property read, so queued stale
-    /// signals, daemon restarts, intermediate states, and duplicates are reconciled
-    /// to the current `Available`/`Unavailable` condition.
+    /// On Linux each matching signal triggers a fresh owner/property read. Both
+    /// native backends suppress duplicate provider-availability states.
     ///
     /// # Errors
     ///
-    /// Returns an error when the native stream closes or a bus/property operation
-    /// fails while `NetworkManager` still owns its service name.
+    /// Returns an error when the native stream closes or a native state operation
+    /// fails.
     pub fn next_event(&mut self) -> Result<NetworkEvent, NetworkNotificationError> {
         #[cfg(target_os = "linux")]
         loop {
@@ -274,7 +394,18 @@ impl NativeNetworkMonitor {
             }
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        loop {
+            let current = self
+                .events
+                .recv()
+                .map_err(|_| NetworkNotificationError::StreamClosed)?;
+            if let Some(event) = self.transitions.accept(current) {
+                return Ok(event);
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Err(NetworkNotificationError::UnsupportedPlatform)
     }
 }
@@ -294,6 +425,13 @@ impl fmt::Debug for NativeNetworkMonitor {
 pub enum NetworkNotificationError {
     #[cfg(target_os = "linux")]
     Platform(zbus::Error),
+    #[cfg(target_os = "windows")]
+    WindowsPlatform {
+        operation: &'static str,
+        code: u32,
+    },
+    #[cfg(target_os = "windows")]
+    InitialNotificationTimedOut,
     OwnerChangedRepeatedly,
     StreamClosed,
     UnsupportedPlatform,
@@ -306,6 +444,15 @@ impl fmt::Display for NetworkNotificationError {
             Self::Platform(error) => {
                 write!(formatter, "native network notification failed: {error}")
             }
+            #[cfg(target_os = "windows")]
+            Self::WindowsPlatform { operation, code } => write!(
+                formatter,
+                "native network notification operation {operation} failed with Windows error {code}"
+            ),
+            #[cfg(target_os = "windows")]
+            Self::InitialNotificationTimedOut => formatter.write_str(
+                "native network notification did not deliver its initial Windows state in time",
+            ),
             Self::OwnerChangedRepeatedly => formatter
                 .write_str("native network notification owner changed repeatedly during sampling"),
             Self::StreamClosed => formatter.write_str("native network notification stream closed"),
@@ -372,6 +519,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_windows_internet_access_is_provider_available() {
+        for level in [0, 1, 2, 4, 5, i32::MAX] {
+            assert_eq!(
+                NetworkEvent::from_windows_connectivity_level(level),
+                NetworkEvent::Unavailable
+            );
+        }
+        assert_eq!(
+            NetworkEvent::from_windows_connectivity_level(3),
+            NetworkEvent::Available
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_match_rule_is_specific_to_network_manager_state_changes() {
@@ -389,15 +550,26 @@ mod tests {
 
     #[test]
     fn availability_matches_the_implemented_native_backend() {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         assert_eq!(
             NativeNetworkMonitor::availability(),
             CapabilityAvailability::Available
         );
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         assert_eq!(
             NativeNetworkMonitor::availability(),
             CapabilityAvailability::Unavailable
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_network_monitor_receives_bounded_initial_state() {
+        let monitor = NativeNetworkMonitor::connect()
+            .expect("Windows network callback provides its initial state");
+        assert!(matches!(
+            monitor.current(),
+            NetworkEvent::Available | NetworkEvent::Unavailable
+        ));
     }
 }

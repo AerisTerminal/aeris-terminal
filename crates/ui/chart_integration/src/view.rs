@@ -24,6 +24,7 @@ use origin_render_gpui::{GpuiChartRenderer, OriginViewport, PreparedOriginFrame}
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
+const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChartDrag {
@@ -476,15 +477,34 @@ impl OriginChartView {
     }
 
     fn clear_pointer(&mut self, cx: &mut Context<Self>) {
+        self.cancel_gesture();
+        cx.notify();
+    }
+
+    fn cancel_gesture(&mut self) {
         self.end_drag(-1.0, -1.0);
         self.engine.crosshair = None;
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
-        cx.notify();
+    }
+
+    fn move_pointer(&mut self, pane_x: f64, y: f64, dragging: bool) {
+        if self.drag.is_some() {
+            if dragging {
+                self.drag_to(pane_x, y);
+            } else {
+                self.end_drag(pane_x, y);
+            }
+        } else {
+            self.update_cursor(pane_x, y);
+            self.update_crosshair(pane_x, y);
+        }
     }
 
     fn apply_key(&mut self, key: &str, accelerated: bool) -> bool {
         let step = if accelerated { 10.0 } else { 1.0 };
+        let page =
+            (self.engine.pane_w / self.engine.bar_spacing() * KEYBOARD_PAGE_FRACTION).max(1.0);
         let center = self.engine.pane_w / 2.0;
         match key {
             "left" => self
@@ -493,14 +513,17 @@ impl OriginChartView {
             "right" => self
                 .engine
                 .scroll_to_position(self.engine.scroll_position() + step),
+            "pageup" => self
+                .engine
+                .scroll_to_position(self.engine.scroll_position() - page),
+            "pagedown" => self
+                .engine
+                .scroll_to_position(self.engine.scroll_position() + page),
             "+" | "=" => self.engine.time_scale.zoom(center, 0.5),
             "-" | "_" => self.engine.time_scale.zoom(center, -0.5),
             "home" => self.reset_view(),
             "end" => self.scroll_to_latest(),
-            "escape" => {
-                self.end_drag(-1.0, -1.0);
-                self.engine.crosshair = None;
-            }
+            "escape" => self.cancel_gesture(),
             _ => return false,
         }
         self.invalidate_series_frame();
@@ -540,12 +563,7 @@ impl OriginChartView {
         cx: &mut Context<Self>,
     ) {
         let (pane_x, y) = self.local_position(event.position);
-        if self.drag.is_some() && event.dragging() {
-            self.drag_to(pane_x, y);
-        } else {
-            self.update_cursor(pane_x, y);
-            self.update_crosshair(pane_x, y);
-        }
+        self.move_pointer(pane_x, y, event.dragging());
         cx.notify();
     }
 
@@ -827,6 +845,13 @@ mod tests {
         assert!(chart.apply_key("left", true));
         assert!((chart.engine.scroll_position() - offset + 9.0).abs() < f64::EPSILON);
 
+        let page = chart.engine.pane_w / chart.engine.bar_spacing() * KEYBOARD_PAGE_FRACTION;
+        let before_page = chart.engine.scroll_position();
+        assert!(chart.apply_key("pageup", false));
+        assert!((chart.engine.scroll_position() - before_page + page).abs() < f64::EPSILON);
+        assert!(chart.apply_key("pagedown", false));
+        assert!((chart.engine.scroll_position() - before_page).abs() < f64::EPSILON);
+
         let spacing = chart.engine.bar_spacing();
         assert!(chart.apply_key("+", false));
         assert!((chart.engine.bar_spacing() - spacing).abs() > f64::EPSILON);
@@ -841,6 +866,32 @@ mod tests {
         assert!(chart.apply_key("end", false));
         assert!(chart.is_at_latest());
         assert!(!chart.apply_key("a", false));
+    }
+
+    #[test]
+    fn native_pointer_state_ends_a_drag_when_mouse_up_was_lost() {
+        let mut chart = interactive_chart();
+        chart.begin_drag(300.0, 200.0, 1);
+        assert_eq!(chart.drag, Some(ChartDrag::Pane));
+
+        chart.move_pointer(340.0, 200.0, false);
+
+        assert!(chart.drag.is_none());
+        assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+        assert_eq!(chart.engine.crosshair, Some((340.0, 200.0)));
+    }
+
+    #[test]
+    fn escape_cancels_every_active_gesture_and_clears_pointer_state() {
+        let mut chart = interactive_chart();
+        chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1);
+        assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
+
+        assert!(chart.apply_key("escape", false));
+
+        assert!(chart.drag.is_none());
+        assert!(chart.engine.crosshair.is_none());
+        assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
     }
 
     #[test]

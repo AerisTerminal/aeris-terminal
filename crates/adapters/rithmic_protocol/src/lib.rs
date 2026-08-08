@@ -38,10 +38,11 @@ pub use credentials::{
 pub use desktop_driver::{
     AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
     RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection, RithmicDesktopEventError,
-    RithmicInstrumentSelection, RithmicProviderCallback, RithmicProviderCommandError,
-    RithmicProviderConfig, RithmicProviderConfigError, RithmicProviderDriver,
-    RithmicProviderDriverError, RithmicProviderEvents, RithmicProviderInstrument,
-    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicRetryTicket, RithmicSymbolSearch,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCallback,
+    RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderConfigError,
+    RithmicProviderDriver, RithmicProviderDriverError, RithmicProviderEvents,
+    RithmicProviderInstrument, RithmicReadOnlySubscription, RithmicRetryScheduler,
+    RithmicRetryTicket, RithmicSymbolSearch, apply_rithmic_environment_event,
     try_recv_rithmic_event,
 };
 pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};

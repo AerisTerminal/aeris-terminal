@@ -381,11 +381,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "border",
-                mode_source(
-                    dark,
-                    "rgba(20, 20, 20, 0.078)",
-                    "rgba(240, 240, 240, 0.075)",
-                ),
+                mode_source(dark, "rgba(20, 20, 20, 0.078)", "#202020"),
                 colors.border,
             ),
             ColorToken::new(
@@ -500,7 +496,7 @@ fn dark_colors() -> ThemeColors {
         ThemeColor::from_rgb8(240, 240, 240).with_alpha(153.0 / 255.0),
         ThemeColor::from_rgb8(240, 240, 240),
         ThemeColor::from_rgb8(227, 70, 113),
-        ThemeColor::from_rgb8(240, 240, 240).with_alpha(19.0 / 255.0),
+        ThemeColor::from_rgb8(32, 32, 32),
         ThemeColor::from_rgb8(240, 240, 240).with_alpha(38.0 / 255.0),
     )
 }
@@ -641,6 +637,7 @@ mod tests {
         assert_eq!(light.foreground, ThemeColor::from_rgb8(20, 20, 20));
         assert_eq!(dark.background, ThemeColor::from_rgb8(20, 20, 20));
         assert_eq!(dark.card, ThemeColor::from_rgb8(24, 24, 24));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(32, 32, 32));
         assert_eq!(dark.foreground, ThemeColor::from_rgb8(240, 240, 240));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));

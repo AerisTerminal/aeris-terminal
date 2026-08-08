@@ -26,6 +26,17 @@ keyring.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 display-info.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_Power",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

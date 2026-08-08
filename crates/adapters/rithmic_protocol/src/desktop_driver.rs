@@ -10,14 +10,15 @@ use crate::{
 };
 use axiusflow_desktop_provider_runtime::{
     AuthenticationState, ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerError,
-    DesktopProviderState, InstrumentDescriptor, ProviderEnvironment, ProviderInvalidationReason,
-    ProviderSessionDriver, ProviderSessionEvent, RecoveryReason, SessionGeneration,
+    DesktopProviderState, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
+    ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent, RecoveryReason,
+    SessionGeneration,
 };
 use axiusflow_market_data::{
     AggressorSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
     QualifiedTimestamp, TopOfBookQuote,
 };
-use axiusflow_platform_runtime::CredentialVault;
+use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -1165,6 +1166,59 @@ impl RithmicRetryScheduler {
         self.ticket = None;
         exact_recovery
     }
+}
+
+/// One native environmental transition delivered to the Rithmic worker owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RithmicEnvironmentEvent {
+    Network(NetworkEvent),
+    Power(PowerEvent),
+}
+
+/// Applies one native environmental transition and fences adapter-local work.
+///
+/// Any pending transport retry belongs to the retired environment and is cleared.
+/// Provider and catalog callbacks are discarded only after the shared runtime has
+/// synchronously stopped the old session, so no stale callback can race the drain.
+///
+/// # Errors
+///
+/// Returns a redacted source, lifecycle, vault, driver, or history-retirement failure.
+pub fn apply_rithmic_environment_event<T: Clone, V: CredentialVault>(
+    worker: &mut DesktopMarketWorker<T, V, RithmicProviderDriver>,
+    events: &RithmicProviderEvents,
+    retries: &mut RithmicRetryScheduler,
+    event: RithmicEnvironmentEvent,
+) -> Result<Option<SessionGeneration>, RithmicDesktopEventError> {
+    if !worker.callback_source_matches(|driver| driver.owns_events(events))? {
+        return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
+    }
+    retries.clear();
+    let discard = || {
+        while events.try_recv().is_some() {}
+        while events.try_recv_catalog().is_some() {}
+    };
+    let generation = match event {
+        RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable) => {
+            let generation = worker.handle_network_event(NetworkEvent::Unavailable)?;
+            discard();
+            generation
+        }
+        RithmicEnvironmentEvent::Power(PowerEvent::Suspending) => {
+            let generation = worker.handle_power_event(PowerEvent::Suspending)?;
+            discard();
+            generation
+        }
+        RithmicEnvironmentEvent::Network(NetworkEvent::Available) => {
+            discard();
+            worker.handle_network_event(NetworkEvent::Available)?
+        }
+        RithmicEnvironmentEvent::Power(PowerEvent::Resumed) => {
+            discard();
+            worker.handle_power_event(PowerEvent::Resumed)?
+        }
+    };
+    Ok(generation)
 }
 
 /// One callback after shared lifecycle state has been updated.
@@ -2509,6 +2563,37 @@ mod tests {
         })
     }
 
+    fn stable_runtime_task() -> Arc<SessionTask> {
+        Arc::new(|config, generation, _, stop, _, emitter| {
+            if !emitter.send(ProviderSessionEvent::DiscoveryStarted)
+                || !emitter.send(ProviderSessionEvent::SystemsDiscovered {
+                    environments: vec![RithmicProviderConfig::environment()],
+                })
+                || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
+                    generation,
+                    state: AuthenticationState::Accepted,
+                })
+                || !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
+                    generation,
+                    instruments: config
+                        .instruments
+                        .iter()
+                        .map(|instrument| instrument.descriptor.clone())
+                        .collect(),
+                })
+                || !emitter.send(ProviderSessionEvent::Heartbeat {
+                    generation,
+                    received_unix_nanos: 1,
+                })
+            {
+                return;
+            }
+            while !stop.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        })
+    }
+
     fn open_worker(
         driver: RithmicProviderDriver,
     ) -> (
@@ -3344,6 +3429,124 @@ mod tests {
                 reason: RecoveryReason::TransportInvalid,
             }
         );
+        drop(worker);
+        fs::remove_dir_all(root).expect("history fixture removes");
+    }
+
+    #[test]
+    fn native_environment_fences_callbacks_retries_and_reconnects_fresh() {
+        let (driver, events) = RithmicProviderDriver::with_task(
+            config(),
+            callback_limits(16, 64 * 1_024),
+            stable_runtime_task(),
+        );
+        let (mut worker, root) = open_worker(driver);
+        let mut retries = RithmicRetryScheduler::default();
+        let first = worker
+            .request_connection()
+            .expect("connection intent starts")
+            .expect("initial generation starts");
+        let now = Instant::now();
+        for _ in 0..4 {
+            let _ = wait_applied(&mut worker, &events, &mut retries, now);
+        }
+        assert_eq!(
+            worker.provider_state().expect("state reads"),
+            DesktopProviderState::Streaming { generation: first }
+        );
+        retries.record_invalid(first, RetryDisposition::Transient, now);
+
+        assert_eq!(
+            apply_rithmic_environment_event(
+                &mut worker,
+                &events,
+                &mut retries,
+                RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
+            )
+            .expect("network loss fences the session"),
+            None
+        );
+        assert_eq!(retries.ticket(), None);
+        assert_eq!(events.try_recv(), None);
+        assert_eq!(events.try_recv_catalog(), None);
+        assert_eq!(
+            worker.provider_state().expect("state reads"),
+            DesktopProviderState::NetworkUnavailable
+        );
+
+        let second = apply_rithmic_environment_event(
+            &mut worker,
+            &events,
+            &mut retries,
+            RithmicEnvironmentEvent::Network(NetworkEvent::Available),
+        )
+        .expect("network restoration is applied")
+        .expect("network restoration starts a fresh generation");
+        assert!(second > first);
+        for _ in 0..4 {
+            let _ = wait_applied(&mut worker, &events, &mut retries, now);
+        }
+
+        assert_eq!(
+            apply_rithmic_environment_event(
+                &mut worker,
+                &events,
+                &mut retries,
+                RithmicEnvironmentEvent::Power(PowerEvent::Suspending),
+            )
+            .expect("suspend fences the replacement session"),
+            None
+        );
+        let third = apply_rithmic_environment_event(
+            &mut worker,
+            &events,
+            &mut retries,
+            RithmicEnvironmentEvent::Power(PowerEvent::Resumed),
+        )
+        .expect("resume is applied")
+        .expect("resume starts a fresh generation");
+        assert!(third > second);
+
+        drop(worker);
+        fs::remove_dir_all(root).expect("history fixture removes");
+    }
+
+    #[test]
+    fn offline_startup_waits_for_native_restoration_before_loading_vault() {
+        let (driver, events) = RithmicProviderDriver::with_task(
+            config(),
+            callback_limits(16, 64 * 1_024),
+            stable_runtime_task(),
+        );
+        let (mut worker, root) = open_worker(driver);
+        let mut retries = RithmicRetryScheduler::default();
+        apply_rithmic_environment_event(
+            &mut worker,
+            &events,
+            &mut retries,
+            RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
+        )
+        .expect("initial offline state is applied");
+        assert_eq!(
+            worker
+                .request_connection()
+                .expect("offline connection intent is retained"),
+            None
+        );
+        assert_eq!(
+            worker.provider_state().expect("state reads"),
+            DesktopProviderState::NetworkUnavailable
+        );
+        let restored_generation = apply_rithmic_environment_event(
+            &mut worker,
+            &events,
+            &mut retries,
+            RithmicEnvironmentEvent::Network(NetworkEvent::Available),
+        )
+        .expect("network restoration is applied")
+        .expect("restoration starts the requested session");
+        assert_eq!(restored_generation, generation(1));
+
         drop(worker);
         fs::remove_dir_all(root).expect("history fixture removes");
     }

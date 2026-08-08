@@ -761,6 +761,7 @@ dependencies = [
  "getrandom 0.4.3",
  "gpui",
  "gpui-component",
+ "gpui-hugeicons",
  "gpui_platform",
  "serde",
  "serde_json",
@@ -914,6 +915,7 @@ dependencies = [
  "thread-priority",
  "wayland-client",
  "wayland-protocols",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 
@@ -3107,6 +3109,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gpui-hugeicons"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21f4b11211cfe4423caa92db21304f840a800e4f3ccfe10d6e60934deaa0acf3"
+dependencies = [
+ "anyhow",
+ "gpui",
 ]
 
 [[package]]

@@ -69,6 +69,7 @@ wayland-protocols = { version = "=0.32.13", default-features = false, features =
     "client",
     "unstable",
 ] }
+windows-sys = { version = "=0.61.2", default-features = false }
 tungstenite = { version = "=0.30.0", default-features = false, features = [
     "handshake",
     "rustls-tls-webpki-roots",
@@ -93,6 +94,7 @@ protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland", "x11"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704", version = "=0.5.2" }
+gpui-hugeicons = { version = "=0.1.0", default-features = false }
 origin_engine = { git = "https://github.com/TradeAion/Origin_charts.git", rev = "8753b071aed2f01ae6c61ad9fbc2a4d4a0506531", version = "=0.1.0" }
 origin_render = { git = "https://github.com/TradeAion/Origin_charts.git", rev = "8753b071aed2f01ae6c61ad9fbc2a4d4a0506531", version = "=0.1.0" }
 origin_render_gpui = { git = "https://github.com/TradeAion/Origin_charts.git", rev = "8753b071aed2f01ae6c61ad9fbc2a4d4a0506531", version = "=0.1.0", features = ["gpui-backend"] }

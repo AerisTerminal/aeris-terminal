@@ -23,12 +23,13 @@ use gpui::{
     prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Disableable, Root, StyledExt, TitleBar,
+    Disableable, Icon, Root, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
+use gpui_hugeicons::{HugeiconsAssets, IconName as HugeIcon};
 use gpui_platform::application;
 use market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
@@ -1164,15 +1165,34 @@ fn terminal_header(
         .active(gpui_color(colors.muted));
     let (connection_label, connection_color) =
         connection_presentation(state.connection_state, state.chart_state, state.delayed);
-    let instruments = state.instruments;
-    let selected_instrument = state.selected_instrument;
-    let selected_series = state.selected_series;
-    let symbol_input = state.symbol_input;
-    let search_activity = state.search_activity;
     let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
+    TitleBar::new().child(
+        div()
+            .h_full()
+            .flex()
+            .flex_1()
+            .gap_4()
+            .items_center()
+            .child(div().text_sm().child("Axiusflow"))
+            .child(connection)
+            .child(header_controls(app, state, active_button)),
+    )
+}
+
+fn header_controls(
+    app: &Entity<TerminalApp>,
+    state: HeaderState,
+    active_button: ButtonCustomVariant,
+) -> impl IntoElement + use<> {
+    let chart_icon = HugeIcon::ChartIcon01;
     let dom_toggle = panel_toggle(
         "dom_toggle",
         if state.dom_visible { "Chart" } else { "DOM" },
+        if state.dom_visible {
+            chart_icon
+        } else {
+            HugeIcon::SidebarRightIcon01
+        },
         active_button,
         state.controls.enabled(HeaderControls::DOM),
         app.clone(),
@@ -1185,71 +1205,61 @@ fn terminal_header(
         } else {
             "Health"
         },
+        if state.health_visible {
+            chart_icon
+        } else {
+            HugeIcon::ActivityIcon01
+        },
         active_button,
         state.controls.enabled(HeaderControls::HEALTH),
         app.clone(),
         TerminalApp::toggle_health,
     );
-    let theme_toggle = theme_toggle(app.clone(), &state.theme, active_button);
-    let fit_chart = panel_toggle(
-        "fit_chart",
-        "Fit",
-        active_button,
-        state.controls.enabled(HeaderControls::FIT),
-        app.clone(),
-        TerminalApp::reset_chart_view,
-    );
-    let latest_chart = panel_toggle(
-        "latest_chart",
-        "Latest",
-        active_button,
-        state.controls.enabled(HeaderControls::LATEST),
-        app.clone(),
-        TerminalApp::scroll_chart_to_latest,
-    );
-    let series_selector = series_selector(
-        app.clone(),
-        state.series_label,
-        selected_series,
-        active_button,
-        state.controls.enabled(HeaderControls::SERIES),
-    );
-    let instrument_selector = instrument_selector(
-        app.clone(),
-        InstrumentSelectorState {
-            label: state.market_label,
-            instruments,
-            selected: selected_instrument,
-            input: symbol_input,
-            search_activity,
-            enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
-        },
-        active_button,
-    );
-    TitleBar::new().child(
-        div()
-            .h_full()
-            .flex()
-            .flex_1()
-            .gap_4()
-            .items_center()
-            .child(div().text_sm().child("Axiusflow"))
-            .child(connection)
-            .child(
-                div()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(instrument_selector)
-                    .child(series_selector)
-                    .child(latest_chart)
-                    .child(fit_chart)
-                    .child(dom_toggle)
-                    .child(health_toggle)
-                    .child(theme_toggle),
-            ),
-    )
+    div()
+        .h_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(instrument_selector(
+            app.clone(),
+            InstrumentSelectorState {
+                label: state.market_label,
+                instruments: state.instruments,
+                selected: state.selected_instrument,
+                input: state.symbol_input,
+                search_activity: state.search_activity,
+                enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
+            },
+            active_button,
+        ))
+        .child(series_selector(
+            app.clone(),
+            state.series_label,
+            state.selected_series,
+            active_button,
+            state.controls.enabled(HeaderControls::SERIES),
+        ))
+        .child(panel_toggle(
+            "latest_chart",
+            "Latest",
+            HugeIcon::ArrowRightDouble,
+            active_button,
+            state.controls.enabled(HeaderControls::LATEST),
+            app.clone(),
+            TerminalApp::scroll_chart_to_latest,
+        ))
+        .child(panel_toggle(
+            "fit_chart",
+            "Fit",
+            HugeIcon::FitToScreen,
+            active_button,
+            state.controls.enabled(HeaderControls::FIT),
+            app.clone(),
+            TerminalApp::reset_chart_view,
+        ))
+        .child(dom_toggle)
+        .child(health_toggle)
+        .child(theme_toggle(app.clone(), &state.theme, active_button))
 }
 
 fn instrument_selector(
@@ -1332,6 +1342,7 @@ fn instrument_search_item(
             .child(Input::new(&input).w(px(220.0)))
             .child(
                 Button::new("rithmic_header_search")
+                    .icon(header_icon(HugeIcon::SearchIcon01))
                     .label("Search")
                     .primary()
                     .loading(search_pending)
@@ -1370,12 +1381,14 @@ fn connection_badge(
 fn panel_toggle(
     id: &'static str,
     label: &'static str,
+    icon: HugeIcon,
     variant: ButtonCustomVariant,
     enabled: bool,
     app: Entity<TerminalApp>,
     toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
 ) -> impl IntoElement {
     Button::new(id)
+        .icon(header_icon(icon))
         .label(label)
         .custom(variant)
         .disabled(!enabled)
@@ -1389,12 +1402,22 @@ fn theme_toggle(
     theme: &AxiusflowTheme,
     variant: ButtonCustomVariant,
 ) -> impl IntoElement + use<> {
+    let next = theme.mode.toggled();
+    let icon = match next {
+        axiusflow_design_system::ThemeMode::Light => HugeIcon::SunIcon03,
+        axiusflow_design_system::ThemeMode::Dark => HugeIcon::MoonIcon02,
+    };
     Button::new("theme_toggle")
-        .label(theme.mode.toggled().label())
+        .icon(header_icon(icon))
+        .label(next.label())
         .custom(variant)
         .on_click(move |_, window, cx| {
             app.update(cx, |app, cx| app.toggle_theme(window, cx));
         })
+}
+
+fn header_icon(name: HugeIcon) -> Icon {
+    Icon::default().path(name.path())
 }
 
 fn series_selector(
@@ -1950,22 +1973,24 @@ fn main() {
         MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps")
     };
     let (bootstrap, market_worker) = worker;
-    application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        sync_component_theme(&AxiusflowTheme::dark(), None, cx);
-        let options = desktop_window_options(cx);
+    application()
+        .with_assets(HugeiconsAssets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            sync_component_theme(&AxiusflowTheme::dark(), None, cx);
+            let options = desktop_window_options(cx);
 
-        cx.open_window(options, move |window, cx| {
-            let symbol_input = symbol_input_for_startup(&bootstrap, window, cx);
-            let search_input = symbol_input.clone();
-            let terminal =
-                cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker, symbol_input));
-            subscribe_symbol_input(search_input, &terminal, window, cx);
-            cx.new(|cx| Root::new(terminal, window, cx))
-        })
-        .expect("the Axiusflow terminal window opens");
-        cx.activate(true);
-    });
+            cx.open_window(options, move |window, cx| {
+                let symbol_input = symbol_input_for_startup(&bootstrap, window, cx);
+                let search_input = symbol_input.clone();
+                let terminal =
+                    cx.new(move |cx| TerminalApp::new(cx, bootstrap, market_worker, symbol_input));
+                subscribe_symbol_input(search_input, &terminal, window, cx);
+                cx.new(|cx| Root::new(terminal, window, cx))
+            })
+            .expect("the Axiusflow terminal window opens");
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]
