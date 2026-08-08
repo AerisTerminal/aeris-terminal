@@ -9,6 +9,10 @@ use crate::{
     },
     rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart},
     rithmic_shell::RithmicShellState,
+    rithmic_transition_capture::{
+        AppliedEnvironmentEvidence, EvidenceFlag, NativeTransitionCapture,
+        RithmicRuntimeStateEvidence,
+    },
 };
 use axiusflow_application::ProvenancedMarketBar;
 use axiusflow_desktop_history::HistoryWorkerConfig;
@@ -37,6 +41,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     },
     thread::{self, ThreadId},
@@ -59,6 +64,18 @@ const MAXIMUM_BUFFERED_HISTORY_TRADES: usize = 4_096;
 type RithmicWorker =
     DesktopMarketWorker<ProvenancedMarketBar, NativeCredentialVault, RithmicProviderDriver>;
 type RithmicEvents = axiusflow_rithmic_protocol_adapter::RithmicProviderEvents;
+
+#[derive(Clone, Copy)]
+struct ObservedEnvironmentEvent {
+    source_ordinal: u64,
+    event: RithmicEnvironmentEvent,
+}
+
+struct TransitionCaptureContext<'a> {
+    events: &'a Receiver<ObservedEnvironmentEvent>,
+    overflow: &'a AtomicU64,
+    capture: &'a mut Option<NativeTransitionCapture>,
+}
 
 struct RithmicRuntimeState {
     selection_installed: bool,
@@ -84,12 +101,30 @@ impl RithmicRuntimeState {
             dom: ReadOnlyDom::new(nonzero(20)),
         }
     }
+
+    fn evidence(&self) -> RithmicRuntimeStateEvidence {
+        RithmicRuntimeStateEvidence {
+            selection_installed: EvidenceFlag::from(self.selection_installed),
+            instrument_installed: EvidenceFlag::from(self.installed_instrument.is_some()),
+            history_request_active: EvidenceFlag::from(
+                self.history
+                    .as_ref()
+                    .is_some_and(RithmicHistoryTask::has_active_request),
+            ),
+            live_chart_installed: EvidenceFlag::from(self.live_chart.is_some()),
+            pending_live_request: EvidenceFlag::from(self.pending_live_request.is_some()),
+            buffered_history_trades: self.buffered_history_trades.len(),
+            history_trade_overflow: EvidenceFlag::from(self.history_trade_overflow),
+            depth_selection_installed: EvidenceFlag::from(self.dom.selection().is_some()),
+        }
+    }
 }
 
 pub(crate) fn start(
     history_root: PathBuf,
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
+    native_transition_report: Option<PathBuf>,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let shell = RithmicShellState::local()?;
     spawn_worker(shell, move |message_tx, command_rx| {
@@ -99,6 +134,7 @@ pub(crate) fn start(
             history_root,
             ui_thread,
             detailed_diagnostics,
+            native_transition_report,
         );
     })
 }
@@ -132,9 +168,30 @@ fn run(
     history_root: PathBuf,
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
+    native_transition_report: Option<PathBuf>,
 ) {
+    let mut transition_capture = match native_transition_report {
+        Some(report_path) => {
+            let Ok(capture) = NativeTransitionCapture::start(report_path) else {
+                send_connection(
+                    messages,
+                    FeedConnectionState::Recovering,
+                    "native transition evidence could not start",
+                );
+                wait_for_shutdown(commands);
+                return;
+            };
+            Some(capture)
+        }
+        None => None,
+    };
+    let capture_enabled = transition_capture.is_some();
     let (environment_tx, environment_rx) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
-    let initial_network = start_environment_monitors(environment_tx);
+    let (initial_network, environment_overflow) =
+        start_environment_monitors(environment_tx, capture_enabled);
+    apply_capture(&mut transition_capture, |capture| {
+        capture.observe_initial_network(initial_network)
+    });
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = wake_tx.try_send(());
@@ -149,14 +206,19 @@ fn run(
         wait_for_shutdown(commands);
         return;
     };
+    let mut transitions = TransitionCaptureContext {
+        events: &environment_rx,
+        overflow: &environment_overflow,
+        capture: &mut transition_capture,
+    };
     run_connected(
         messages,
         commands,
         worker,
         &events,
         &wake_rx,
-        &environment_rx,
         initial_network,
+        &mut transitions,
     );
 }
 
@@ -166,8 +228,8 @@ fn run_connected(
     mut worker: RithmicWorker,
     events: &RithmicEvents,
     wake_rx: &Receiver<()>,
-    environment_rx: &Receiver<RithmicEnvironmentEvent>,
     initial_network: Option<NetworkEvent>,
+    transitions: &mut TransitionCaptureContext<'_>,
 ) {
     send_connection(
         messages,
@@ -176,25 +238,7 @@ fn run_connected(
     );
     let mut retries = RithmicRetryScheduler::default();
     let mut state = RithmicRuntimeState::new();
-    if initial_network == Some(NetworkEvent::Unavailable) {
-        if apply_rithmic_environment_event(
-            &mut worker,
-            events,
-            &mut retries,
-            RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
-        )
-        .is_err()
-        {
-            send_connection(
-                messages,
-                FeedConnectionState::Recovering,
-                "Rithmic Test could not apply native network state",
-            );
-        } else {
-            let (connection, message) = initial_offline_status();
-            send_connection(messages, connection, message);
-        }
-    }
+    apply_initial_network_state(&mut worker, events, &mut retries, messages, initial_network);
     if worker.request_connection().is_err() {
         send_connection(
             messages,
@@ -204,18 +248,32 @@ fn run_connected(
     }
 
     loop {
+        let overflow_count = transitions.overflow.swap(0, Ordering::AcqRel);
+        if overflow_count > 0 {
+            apply_capture(transitions.capture, |capture| {
+                capture.observe_overflow(overflow_count)
+            });
+        }
         if process_command(commands, &worker, events, messages, &mut state) {
             break;
         }
         drain_environment_events(
-            environment_rx,
+            transitions.events,
             &mut worker,
             events,
             &mut retries,
             messages,
             &mut state,
+            transitions.capture,
         );
-        drain_events(&mut worker, events, &mut retries, messages, &mut state);
+        drain_events(
+            &mut worker,
+            events,
+            &mut retries,
+            messages,
+            &mut state,
+            transitions.capture,
+        );
         if let Some(result) = state
             .history
             .as_mut()
@@ -235,6 +293,7 @@ fn run_connected(
                 "reconnecting to Rithmic Test",
             );
         }
+        observe_capture_runtime(transitions.capture, &worker, &state);
         if let Ok(Some(snapshot)) = worker.try_diagnostics_snapshot() {
             let _ = messages.send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)));
         }
@@ -250,6 +309,7 @@ fn run_connected(
         }
     }
     let stopped = worker.stop().is_ok();
+    apply_capture(transitions.capture, |capture| capture.finalize(stopped));
     send_connection(
         messages,
         if stopped {
@@ -265,20 +325,66 @@ fn run_connected(
     );
 }
 
+fn apply_initial_network_state(
+    worker: &mut RithmicWorker,
+    events: &RithmicEvents,
+    retries: &mut RithmicRetryScheduler,
+    messages: &crate::market_worker::MarketWorkerSender,
+    initial_network: Option<NetworkEvent>,
+) {
+    if initial_network != Some(NetworkEvent::Unavailable) {
+        return;
+    }
+    if apply_rithmic_environment_event(
+        worker,
+        events,
+        retries,
+        RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
+    )
+    .is_err()
+    {
+        send_connection(
+            messages,
+            FeedConnectionState::Recovering,
+            "Rithmic Test could not apply native network state",
+        );
+    } else {
+        let (connection, message) = initial_offline_status();
+        send_connection(messages, connection, message);
+    }
+}
+
 fn start_environment_monitors(
-    sender: mpsc::SyncSender<RithmicEnvironmentEvent>,
-) -> Option<NetworkEvent> {
+    sender: mpsc::SyncSender<ObservedEnvironmentEvent>,
+    fail_capture_on_overflow: bool,
+) -> (Option<NetworkEvent>, Arc<AtomicU64>) {
+    let source_ordinal = Arc::new(AtomicU64::new(0));
+    let overflow = Arc::new(AtomicU64::new(0));
     let initial_network = NativeNetworkMonitor::connect().ok().map(|mut monitor| {
         let initial = monitor.current();
         let network_sender = sender.clone();
+        let network_ordinal = Arc::clone(&source_ordinal);
+        let network_overflow = Arc::clone(&overflow);
         let _ = thread::Builder::new()
             .name("axiusflow-rithmic-network-monitor".to_string())
             .spawn(move || {
                 while let Ok(event) = monitor.next_event() {
-                    if network_sender
-                        .send(RithmicEnvironmentEvent::Network(event))
-                        .is_err()
-                    {
+                    let source_ordinal = network_ordinal
+                        .fetch_add(1, Ordering::AcqRel)
+                        .saturating_add(1);
+                    let observed = ObservedEnvironmentEvent {
+                        source_ordinal,
+                        event: RithmicEnvironmentEvent::Network(event),
+                    };
+                    if fail_capture_on_overflow {
+                        match network_sender.try_send(observed) {
+                            Ok(()) => {}
+                            Err(mpsc::TrySendError::Full(_)) => {
+                                network_overflow.fetch_add(1, Ordering::AcqRel);
+                            }
+                            Err(mpsc::TrySendError::Disconnected(_)) => break,
+                        }
+                    } else if network_sender.send(observed).is_err() {
                         break;
                     }
                 }
@@ -286,60 +392,105 @@ fn start_environment_monitors(
         initial
     });
     if let Ok(mut monitor) = NativePowerMonitor::connect() {
+        let power_ordinal = Arc::clone(&source_ordinal);
+        let power_overflow = Arc::clone(&overflow);
         let _ = thread::Builder::new()
             .name("axiusflow-rithmic-power-monitor".to_string())
             .spawn(move || {
                 while let Ok(event) = monitor.next_event() {
-                    if sender.send(RithmicEnvironmentEvent::Power(event)).is_err() {
+                    let source_ordinal = power_ordinal
+                        .fetch_add(1, Ordering::AcqRel)
+                        .saturating_add(1);
+                    let observed = ObservedEnvironmentEvent {
+                        source_ordinal,
+                        event: RithmicEnvironmentEvent::Power(event),
+                    };
+                    if fail_capture_on_overflow {
+                        match sender.try_send(observed) {
+                            Ok(()) => {}
+                            Err(mpsc::TrySendError::Full(_)) => {
+                                power_overflow.fetch_add(1, Ordering::AcqRel);
+                            }
+                            Err(mpsc::TrySendError::Disconnected(_)) => break,
+                        }
+                    } else if sender.send(observed).is_err() {
                         break;
                     }
                 }
             });
     }
-    initial_network
+    (initial_network, overflow)
 }
 
 fn drain_environment_events(
-    receiver: &Receiver<RithmicEnvironmentEvent>,
+    receiver: &Receiver<ObservedEnvironmentEvent>,
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
     messages: &crate::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
+    transition_capture: &mut Option<NativeTransitionCapture>,
 ) {
     for _ in 0..ENVIRONMENT_BATCH {
-        let Ok(event) = receiver.try_recv() else {
+        let Ok(observed) = receiver.try_recv() else {
             break;
         };
-        match apply_rithmic_environment_event(worker, events, retries, event) {
-            Ok(generation) => {
-                reset_live_state(state);
-                let (connection, message) = match (event, generation) {
-                    (_, Some(_)) => (
-                        FeedConnectionState::Discovering,
-                        "native environment restored; reconnecting to Rithmic Test",
-                    ),
-                    (RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable), None) => (
-                        FeedConnectionState::Disconnected,
-                        "Rithmic Test paused while the network is unavailable",
-                    ),
-                    (RithmicEnvironmentEvent::Power(PowerEvent::Suspending), None) => (
-                        FeedConnectionState::Disconnected,
-                        "Rithmic Test paused while the system is suspended",
-                    ),
-                    _ => (
-                        FeedConnectionState::Recovering,
-                        "Rithmic Test is waiting for native environment recovery",
-                    ),
-                };
-                send_connection(messages, connection, message);
-            }
-            Err(_) => send_connection(
+        let event = observed.event;
+        let retired_generation = active_generation(worker)
+            .ok()
+            .flatten()
+            .map(axiusflow_desktop_provider_runtime::SessionGeneration::get);
+        let before = state.evidence();
+        let Ok(generation) = apply_rithmic_environment_event(worker, events, retries, event) else {
+            apply_capture(transition_capture, |capture| {
+                capture.observe_environment_failure()
+            });
+            send_connection(
                 messages,
                 FeedConnectionState::Recovering,
                 "Rithmic Test native environment transition failed closed",
+            );
+            continue;
+        };
+        reset_live_state(state);
+        let fresh_generation =
+            generation.map(axiusflow_desktop_provider_runtime::SessionGeneration::get);
+        let session_stop_confirmed = retired_generation.is_some()
+            && matches!(
+                event,
+                RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable)
+                    | RithmicEnvironmentEvent::Power(PowerEvent::Suspending)
+            );
+        apply_capture(transition_capture, |capture| {
+            capture.observe_environment_applied(AppliedEnvironmentEvidence {
+                event,
+                source_ordinal: observed.source_ordinal,
+                retired_generation,
+                fresh_generation,
+                session_stop_confirmed,
+                before,
+                after: state.evidence(),
+            })
+        });
+        let (connection, message) = match (event, generation) {
+            (_, Some(_)) => (
+                FeedConnectionState::Discovering,
+                "native environment restored; reconnecting to Rithmic Test",
             ),
-        }
+            (RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable), None) => (
+                FeedConnectionState::Disconnected,
+                "Rithmic Test paused while the network is unavailable",
+            ),
+            (RithmicEnvironmentEvent::Power(PowerEvent::Suspending), None) => (
+                FeedConnectionState::Disconnected,
+                "Rithmic Test paused while the system is suspended",
+            ),
+            _ => (
+                FeedConnectionState::Recovering,
+                "Rithmic Test is waiting for native environment recovery",
+            ),
+        };
+        send_connection(messages, connection, message);
     }
 }
 
@@ -485,6 +636,7 @@ fn drain_events(
     retries: &mut RithmicRetryScheduler,
     messages: &crate::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
+    transition_capture: &mut Option<NativeTransitionCapture>,
 ) {
     while events.has_ready() {
         while let Some(callback) = events.try_recv_catalog() {
@@ -537,6 +689,9 @@ fn drain_events(
         }
         match try_recv_rithmic_event(worker, events, retries, Instant::now()) {
             Ok(Some(event)) => {
+                apply_capture(transition_capture, |capture| {
+                    capture.observe_provider_event(&event)
+                });
                 if matches!(
                     event,
                     AppliedRithmicEvent::RetryScheduled(_)
@@ -570,6 +725,36 @@ fn drain_events(
                 break;
             }
         }
+    }
+}
+
+fn observe_capture_runtime(
+    transition_capture: &mut Option<NativeTransitionCapture>,
+    worker: &RithmicWorker,
+    state: &RithmicRuntimeState,
+) {
+    let generation = active_generation(worker)
+        .ok()
+        .flatten()
+        .map(axiusflow_desktop_provider_runtime::SessionGeneration::get);
+    let evidence = state.evidence();
+    apply_capture(transition_capture, |capture| {
+        capture.observe_runtime(generation, &evidence)
+    });
+}
+
+fn apply_capture(
+    transition_capture: &mut Option<NativeTransitionCapture>,
+    operation: impl FnOnce(
+        &mut NativeTransitionCapture,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+) {
+    let failed = transition_capture
+        .as_mut()
+        .is_some_and(|capture| operation(capture).is_err());
+    if failed {
+        eprintln!("native transition evidence checkpoint failed");
+        *transition_capture = None;
     }
 }
 
@@ -785,10 +970,7 @@ fn reduce_event(
             FeedConnectionState::Streaming,
             "Rithmic Test instrument selection is installed",
         ),
-        AppliedRithmicEvent::RetryScheduled(_) => (
-            FeedConnectionState::Recovering,
-            "Rithmic Test session will retry",
-        ),
+        AppliedRithmicEvent::RetryScheduled(ticket) => retry_presentation(ticket.reason),
         AppliedRithmicEvent::TerminalFailure { reason, .. } => terminal_failure(*reason),
         AppliedRithmicEvent::Semantic(ProviderSessionEvent::Stopped) => {
             (FeedConnectionState::Stopped, "Rithmic Test session stopped")
@@ -885,6 +1067,30 @@ fn terminal_failure(reason: ProviderInvalidationReason) -> (FeedConnectionState,
             "Rithmic Test session cannot continue",
         ),
     }
+}
+
+fn retry_presentation(reason: ProviderInvalidationReason) -> (FeedConnectionState, &'static str) {
+    let message = match reason {
+        ProviderInvalidationReason::HeartbeatSilence => {
+            "Rithmic heartbeat response timed out; reconnecting"
+        }
+        ProviderInvalidationReason::MessageSilence => {
+            "Rithmic market data became silent; reconnecting"
+        }
+        ProviderInvalidationReason::SequenceGap => {
+            "Rithmic market data sequence gap detected; reconnecting"
+        }
+        ProviderInvalidationReason::QueueOverflow => {
+            "Rithmic market data queue overflowed; reconnecting"
+        }
+        ProviderInvalidationReason::Transport
+        | ProviderInvalidationReason::Authentication
+        | ProviderInvalidationReason::AgreementRequired
+        | ProviderInvalidationReason::UnsupportedSystem
+        | ProviderInvalidationReason::SchemaMismatch
+        | ProviderInvalidationReason::MalformedMessage => "Rithmic Test session will retry",
+    };
+    (FeedConnectionState::Recovering, message)
 }
 
 fn send_connection(
@@ -1044,6 +1250,19 @@ mod tests {
             assert!(!message.contains("user"));
             assert!(!message.contains("password"));
         }
+    }
+
+    #[test]
+    fn transient_silence_reasons_remain_visible_at_the_shipping_boundary() {
+        let (heartbeat_state, heartbeat_message) =
+            retry_presentation(ProviderInvalidationReason::HeartbeatSilence);
+        assert_eq!(heartbeat_state, FeedConnectionState::Recovering);
+        assert!(heartbeat_message.contains("heartbeat"));
+
+        let (message_state, message) =
+            retry_presentation(ProviderInvalidationReason::MessageSilence);
+        assert_eq!(message_state, FeedConnectionState::Recovering);
+        assert!(message.contains("silent"));
     }
 
     #[test]

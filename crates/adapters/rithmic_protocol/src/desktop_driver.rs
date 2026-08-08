@@ -1134,6 +1134,7 @@ impl Drop for RithmicProviderDriver {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RithmicRetryTicket {
     pub failed_generation: SessionGeneration,
+    pub reason: ProviderInvalidationReason,
     pub due_at: Instant,
 }
 
@@ -1153,6 +1154,7 @@ impl RithmicRetryScheduler {
     pub fn record_invalid(
         &mut self,
         generation: SessionGeneration,
+        reason: ProviderInvalidationReason,
         retry: RetryDisposition,
         now: Instant,
     ) -> Option<RithmicRetryTicket> {
@@ -1167,6 +1169,7 @@ impl RithmicRetryScheduler {
             .min(RETRY_DELAYS.len() - 1);
         let ticket = RithmicRetryTicket {
             failed_generation: generation,
+            reason,
             due_at: now + delay,
         };
         self.ticket = Some(ticket);
@@ -1366,12 +1369,12 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
             if *reason == ProviderInvalidationReason::QueueOverflow {
                 worker.session_callback_queue_overflow(*generation)?;
             } else {
-                worker.session_invalid(*generation)?;
+                worker.session_invalid_for_provider(*generation, *reason)?;
             }
             let retry = callback
                 .retry
                 .ok_or(RithmicDesktopEventError::MissingRetryDisposition)?;
-            return if let Some(ticket) = retries.record_invalid(*generation, retry, now) {
+            return if let Some(ticket) = retries.record_invalid(*generation, *reason, retry, now) {
                 Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket)))
             } else {
                 Ok(Some(AppliedRithmicEvent::TerminalFailure {
@@ -3572,23 +3575,44 @@ mod tests {
         let now = Instant::now();
         for expected in RETRY_DELAYS {
             let ticket = retries
-                .record_invalid(generation(9), RetryDisposition::Transient, now)
+                .record_invalid(
+                    generation(9),
+                    ProviderInvalidationReason::Transport,
+                    RetryDisposition::Transient,
+                    now,
+                )
                 .expect("transient failure schedules retry");
+            assert_eq!(ticket.reason, ProviderInvalidationReason::Transport);
             assert_eq!(ticket.due_at.duration_since(now), expected);
         }
         let capped = retries
-            .record_invalid(generation(9), RetryDisposition::Transient, now)
+            .record_invalid(
+                generation(9),
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Transient,
+                now,
+            )
             .expect("capped retry remains scheduled");
         assert_eq!(capped.due_at.duration_since(now), Duration::from_secs(8));
         assert_eq!(
-            retries.record_invalid(generation(9), RetryDisposition::Terminal, now),
+            retries.record_invalid(
+                generation(9),
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Terminal,
+                now,
+            ),
             None
         );
         assert_eq!(retries.ticket(), None);
 
         retries.established();
         let reset = retries
-            .record_invalid(generation(9), RetryDisposition::Transient, now)
+            .record_invalid(
+                generation(9),
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Transient,
+                now,
+            )
             .expect("established session resets the delay");
         assert_eq!(reset.due_at.duration_since(now), Duration::from_millis(250));
         assert!(!retries.take_due(
@@ -3602,7 +3626,12 @@ mod tests {
 
         retries.established();
         let exact = retries
-            .record_invalid(generation(9), RetryDisposition::Transient, now)
+            .record_invalid(
+                generation(9),
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Transient,
+                now,
+            )
             .expect("retry schedules");
         assert!(retries.take_due(
             DesktopProviderState::RecoveryRequired {
@@ -3662,6 +3691,7 @@ mod tests {
             panic!("transient invalidation must schedule a retry");
         };
         assert_eq!(ticket.failed_generation, first);
+        assert_eq!(ticket.reason, ProviderInvalidationReason::Transport);
         assert_eq!(
             ticket.due_at.duration_since(now),
             Duration::from_millis(250)
@@ -3730,7 +3760,12 @@ mod tests {
             worker.provider_state().expect("state reads"),
             DesktopProviderState::Streaming { generation: first }
         );
-        retries.record_invalid(first, RetryDisposition::Transient, now);
+        retries.record_invalid(
+            first,
+            ProviderInvalidationReason::Transport,
+            RetryDisposition::Transient,
+            now,
+        );
 
         assert_eq!(
             apply_rithmic_environment_event(

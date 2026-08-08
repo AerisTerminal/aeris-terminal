@@ -7,6 +7,7 @@ mod rithmic_history;
 mod rithmic_live_chart;
 mod rithmic_market_worker;
 mod rithmic_shell;
+mod rithmic_transition_capture;
 mod windowed_benchmark;
 
 use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
@@ -2103,20 +2104,38 @@ fn run_coinbase_live_smoke_command(
     )
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct RithmicTestArguments {
+    history_root: std::path::PathBuf,
+    detailed_diagnostics: bool,
+    native_transition_report: Option<std::path::PathBuf>,
+}
+
 fn parse_rithmic_test_arguments(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
-) -> Result<(std::path::PathBuf, bool), String> {
-    let usage = "usage: axiusflow_desktop --rithmic-test <history-root> [--detailed-diagnostics]";
+) -> Result<RithmicTestArguments, String> {
+    let usage = "usage: axiusflow_desktop --rithmic-test <history-root> [--detailed-diagnostics] [--capture-native-transitions <report-path>]";
     let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
-    let detailed_diagnostics = match arguments.next() {
-        Some(flag) if flag == "--detailed-diagnostics" => true,
-        Some(_) => return Err(usage.to_string()),
-        None => false,
-    };
-    if arguments.next().is_some() {
-        return Err(usage.to_string());
+    let mut detailed_diagnostics = false;
+    let mut native_transition_report = None;
+    while let Some(flag) = arguments.next() {
+        if flag == "--detailed-diagnostics" && !detailed_diagnostics {
+            detailed_diagnostics = true;
+        } else if flag == "--capture-native-transitions" && native_transition_report.is_none() {
+            let report = arguments.next().ok_or_else(|| usage.to_string())?;
+            if report.is_empty() {
+                return Err(usage.to_string());
+            }
+            native_transition_report = Some(std::path::PathBuf::from(report));
+        } else {
+            return Err(usage.to_string());
+        }
     }
-    Ok((std::path::PathBuf::from(history_root), detailed_diagnostics))
+    Ok(RithmicTestArguments {
+        history_root: std::path::PathBuf::from(history_root),
+        detailed_diagnostics,
+        native_transition_report,
+    })
 }
 
 fn run_desktop_readiness_command(
@@ -2214,15 +2233,15 @@ fn main() {
             return;
         }
         if argument == "--rithmic-test" {
-            let (history_root, detailed_diagnostics) = parse_rithmic_test_arguments(arguments)
-                .unwrap_or_else(|usage| {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                });
+            let parsed = parse_rithmic_test_arguments(arguments).unwrap_or_else(|usage| {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            });
             MarketDataWorker::start_rithmic(
-                history_root,
+                parsed.history_root,
                 std::thread::current().id(),
-                detailed_diagnostics,
+                parsed.detailed_diagnostics,
+                parsed.native_transition_report,
             )
             .unwrap_or_else(|error| {
                 eprintln!("Rithmic Test shell could not start: {error}");
@@ -2384,19 +2403,42 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_test_cli_requires_one_history_root_and_only_the_diagnostics_flag() {
-        let (root, detailed) = parse_rithmic_test_arguments(
-            ["cache", "--detailed-diagnostics"]
-                .into_iter()
-                .map(OsString::from),
+    fn rithmic_test_cli_bounds_diagnostics_and_native_transition_capture() {
+        let parsed = parse_rithmic_test_arguments(
+            [
+                "cache",
+                "--capture-native-transitions",
+                "evidence/transitions.json",
+                "--detailed-diagnostics",
+            ]
+            .into_iter()
+            .map(OsString::from),
         )
         .expect("valid Rithmic Test arguments parse");
-        assert_eq!(root, std::path::PathBuf::from("cache"));
-        assert!(detailed);
+        assert_eq!(parsed.history_root, std::path::PathBuf::from("cache"));
+        assert!(parsed.detailed_diagnostics);
+        assert_eq!(
+            parsed.native_transition_report,
+            Some(std::path::PathBuf::from("evidence/transitions.json"))
+        );
         assert!(parse_rithmic_test_arguments(std::iter::empty()).is_err());
         assert!(
             parse_rithmic_test_arguments(
                 [OsString::from("cache"), OsString::from("--unknown")].into_iter()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_rithmic_test_arguments(
+                [
+                    "cache",
+                    "--capture-native-transitions",
+                    "first.json",
+                    "--capture-native-transitions",
+                    "second.json",
+                ]
+                .into_iter()
+                .map(OsString::from)
             )
             .is_err()
         );

@@ -14,6 +14,9 @@ axiusflow_provider_history = { path = "../../provider_history" }
 prost.workspace = true
 rustls.workspace = true
 rpassword.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 socket2 = { version = "=0.6.5", default-features = false }
 tungstenite.workspace = true
 webpki-roots.workspace = true

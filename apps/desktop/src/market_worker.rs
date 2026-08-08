@@ -936,8 +936,14 @@ impl MarketDataWorker {
         history_root: PathBuf,
         ui_thread: thread::ThreadId,
         detailed_diagnostics: bool,
+        native_transition_report: Option<PathBuf>,
     ) -> Result<(MarketWorkerStartup, Self), String> {
-        crate::rithmic_market_worker::start(history_root, ui_thread, detailed_diagnostics)
+        crate::rithmic_market_worker::start(
+            history_root,
+            ui_thread,
+            detailed_diagnostics,
+            native_transition_report,
+        )
     }
 
     pub(crate) const fn from_channels(

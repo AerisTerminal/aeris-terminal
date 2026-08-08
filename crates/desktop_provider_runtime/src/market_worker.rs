@@ -1,7 +1,7 @@
 use crate::{
     ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderEvent,
     DesktopProviderMetrics, DesktopProviderRuntime, DesktopProviderState, NetworkEvent,
-    ProviderSessionDriver, SessionGeneration,
+    ProviderInvalidationReason, ProviderSessionDriver, SessionGeneration,
 };
 use axiusflow_application::MarketStreamPublication;
 use axiusflow_desktop_history::{
@@ -473,6 +473,34 @@ where
                 if active == generation
         );
         let provider_result = self.provider.session_invalid(generation);
+        let history_result = if active {
+            self.retire_handoffs()
+        } else {
+            Ok(())
+        };
+        Self::finish_fence(provider_result, history_result)
+    }
+
+    /// Fences an invalid provider generation while retaining its coarse,
+    /// non-secret invalidation reason in diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted provider or history-retirement failure.
+    pub fn session_invalid_for_provider(
+        &mut self,
+        generation: SessionGeneration,
+        reason: ProviderInvalidationReason,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        let active = matches!(
+            self.provider.state()?,
+            DesktopProviderState::Connecting { generation: active, .. }
+                | DesktopProviderState::Streaming { generation: active }
+                if active == generation
+        );
+        let provider_result = self
+            .provider
+            .session_invalid_for_provider(generation, reason);
         let history_result = if active {
             self.retire_handoffs()
         } else {

@@ -58,7 +58,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
 | Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The exact eight-hour run is active. |
-| Next | Finish contextual UI status and strict evidence verifiers, then capture the remaining provider/physical artifacts and qualify the active eight-hour run |
+| Next | Capture the remaining provider-path, physical pacing, and physical lifecycle artifacts, then qualify the active eight-hour run |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -619,6 +619,18 @@ machine deterministically. This is authorized client-local fault injection, not
 provider-observed heartbeat loss (`provider_observed_loss=false`), so the
 heartbeat/message-silence row remains open.
 
+A schema-2 passive provider-path recorder now runs the unmodified production
+receive loop from an immutable, clean-worktree binary, loads credentials only
+from the native vault, and writes a no-overwrite artifact bound to the full
+source revision, executable hash, and `Cargo.lock` hash. It requires an exact
+raw invalidation, transient retry, confirmed generation stop, strictly newer
+authenticated recovery, and clean protocol close. It never claims provider
+causation: a client-side observation cannot distinguish Rithmic from a network
+middlebox. `MessageSilence` also remains structurally unqualified until
+negotiated timing or external incident evidence proves it can win the timeout
+race. No real provider-path silence artifact has been captured, so the row
+remains open.
+
 Windows native environment support landed on 2026-08-08. The platform runtime
 registers bounded connectivity-hint and suspend/resume callbacks, and actual
 registration plus initial-network probes pass on Windows. The shipping Rithmic
@@ -636,6 +648,21 @@ before joining, so a full command queue cannot deadlock shutdown. Saturation and
 full-queue regressions cover these exact boundaries.
 The Stage F row remains open until physical offline and suspend/resume transitions
 are captured as named evidence.
+
+The shipping Rithmic retry ticket and feed-health diagnostics now preserve the
+exact coarse invalidation reason, including `HeartbeatSilence` and
+`MessageSilence`, rather than collapsing every transient failure into generic
+transport recovery. A provenance-bound native-transition capture mode observes
+the ordinary Rithmic Test worker and never triggers network or power changes.
+Its fail-closed report requires ready state before each physical loss, native
+callback ordering, successful synchronous generation retirement, cleared
+chart/history/DOM/selection state, strictly newer native-vault authentication and
+full rehydration after both offline recovery and suspend/resume, zero observer
+overflow, and a final clean worker stop. The committed launcher rejects existing
+artifacts, revalidates source/binary/lockfile provenance after the operator run,
+and invokes a strict artifact verifier. Deterministic recorder and verifier tests
+pass; no physical transition capture has been performed, so the row remains
+open.
 
 The schema-3 desktop readiness artifact now exercises the production live-chart,
 history-handoff, and read-only DOM state machines together. It rejects a repeated

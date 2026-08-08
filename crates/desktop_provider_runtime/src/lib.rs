@@ -803,7 +803,22 @@ where
         &mut self,
         generation: SessionGeneration,
     ) -> Result<(), DesktopProviderError> {
-        self.session_invalid_with_reason(generation, RecoveryReason::TransportInvalid)
+        self.session_invalid_with_reason(generation, RecoveryReason::TransportInvalid, None)
+    }
+
+    /// Invalidates an active generation while retaining the provider's coarse,
+    /// non-secret reason in feed diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale callback, invalid lifecycle state, wrong
+    /// thread, provider stop failure, or a full semantic queue.
+    pub fn session_invalid_for_provider(
+        &mut self,
+        generation: SessionGeneration,
+        reason: ProviderInvalidationReason,
+    ) -> Result<(), DesktopProviderError> {
+        self.session_invalid_with_reason(generation, RecoveryReason::TransportInvalid, Some(reason))
     }
 
     /// Invalidates a generation whose bounded provider callback queue overflowed.
@@ -816,13 +831,14 @@ where
         &mut self,
         generation: SessionGeneration,
     ) -> Result<(), DesktopProviderError> {
-        self.session_invalid_with_reason(generation, RecoveryReason::SemanticQueueOverflow)
+        self.session_invalid_with_reason(generation, RecoveryReason::SemanticQueueOverflow, None)
     }
 
     fn session_invalid_with_reason(
         &mut self,
         generation: SessionGeneration,
         reason: RecoveryReason,
+        provider_reason: Option<ProviderInvalidationReason>,
     ) -> Result<(), DesktopProviderError> {
         self.ensure_owner()?;
         if self.active_generation() != Some(generation) {
@@ -832,7 +848,11 @@ where
             generation: Some(generation),
             reason,
         };
-        self.diagnostics_require_recovery(reason)?;
+        if let Some(provider_reason) = provider_reason {
+            self.diagnostics_observe_invalidation(generation, provider_reason)?;
+        } else {
+            self.diagnostics_require_recovery(reason)?;
+        }
         let stop_failed = self.driver.stop_session(generation).is_err();
         if stop_failed {
             self.metrics.provider_stop_failures =
@@ -1110,6 +1130,28 @@ where
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 
+    fn diagnostics_observe_invalidation(
+        &mut self,
+        generation: SessionGeneration,
+        reason: ProviderInvalidationReason,
+    ) -> Result<(), DesktopProviderError> {
+        let Some(timestamp) = self.diagnostics_now() else {
+            return Ok(());
+        };
+        self.diagnostics
+            .as_mut()
+            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .feed
+            .observe_event(
+                &ProviderSessionEvent::Invalidated {
+                    generation: Some(generation),
+                    reason,
+                },
+                timestamp,
+            )
+            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+    }
+
     fn diagnostics_require_recorded_queue_recovery(&mut self) -> Result<(), DesktopProviderError> {
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(());
@@ -1328,8 +1370,8 @@ mod tests {
     use super::{
         ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderEvent,
         DesktopProviderRuntime, DesktopProviderState, MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
-        NetworkEvent, ProviderContractError, ProviderEnvironment, ProviderSessionDriver,
-        RecoveryReason, SessionGeneration,
+        NetworkEvent, ProviderContractError, ProviderEnvironment, ProviderInvalidationReason,
+        ProviderSessionDriver, RecoveryReason, SessionGeneration,
     };
     use axiusflow_application::{
         EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
@@ -1604,6 +1646,40 @@ mod tests {
         assert_eq!(
             snapshot.recovery_reason,
             Some(FeedRecoveryReason::Authentication)
+        );
+    }
+
+    #[test]
+    fn provider_invalidation_retains_exact_silence_diagnostics() {
+        let mut runtime = DesktopProviderRuntime::try_new(
+            MemoryVault {
+                secret: Some(b"device-only-provider-token".to_vec()),
+                fail_load: false,
+            },
+            RecordingDriver::default(),
+            "provider-session",
+            config(4, 64)
+                .with_diagnostics(diagnostics_environment(), None)
+                .expect("diagnostics environment validates"),
+        )
+        .expect("diagnostics runtime opens");
+        let generation = runtime
+            .connect(ConnectTrigger::Initial)
+            .expect("session starts");
+        runtime
+            .session_established(generation)
+            .expect("session streams");
+
+        runtime
+            .session_invalid_for_provider(generation, ProviderInvalidationReason::HeartbeatSilence)
+            .expect("provider silence fences the session");
+        let snapshot = runtime
+            .try_diagnostics_snapshot()
+            .expect("snapshot succeeds")
+            .expect("recovery snapshot publishes");
+        assert_eq!(
+            snapshot.recovery_reason,
+            Some(FeedRecoveryReason::HeartbeatSilence)
         );
     }
 

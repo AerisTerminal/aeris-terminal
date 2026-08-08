@@ -765,6 +765,7 @@ dependencies = [
  "gpui_platform",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sysinfo",
  "zeroize",
 ]
@@ -972,6 +973,9 @@ dependencies = [
  "rcgen",
  "rpassword",
  "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "socket2",
  "tungstenite",
  "webpki-roots 1.0.5",

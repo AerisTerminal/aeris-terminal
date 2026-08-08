@@ -23,17 +23,74 @@ use std::{
 };
 use zeroize::Zeroize;
 
+mod provider_silence_evidence;
+
+use provider_silence_evidence::{
+    EvidenceFailure, EvidenceProvenance, EvidenceStatus, ExpectedSilence, ObservedRetry,
+    ProviderSilenceEvidence,
+};
+
 const SYMBOL: &str = "MNQ";
 const AUTHORIZED_SILENCE_RUN_TIMEOUT: Duration = Duration::from_mins(2);
 const HISTORY_LOOKBACK_MINUTES: i32 = 4 * 24 * 60 + 300;
 const MAXIMUM_HISTORY_BARS: usize = 6_063;
+const MINIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 30;
+const MAXIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 24 * 60 * 60;
+
+#[derive(Debug, Eq, PartialEq)]
+enum RunMode {
+    Smoke,
+    AuthorizedClientLocalSilence,
+    ProviderObservedSilence {
+        expected: ExpectedSilence,
+        observation_seconds: u64,
+        output: std::path::PathBuf,
+        provenance: EvidenceProvenance,
+    },
+    VerifyProviderObservedSilence {
+        input: std::path::PathBuf,
+        provenance: EvidenceProvenance,
+    },
+}
 
 fn main() -> Result<(), String> {
-    let authorized_silence_recovery = parse_authorized_silence_recovery(std::env::args().skip(1))?;
-    let credentials = load_credentials()?;
-    if authorized_silence_recovery {
-        run_authorized_silence_recovery(&credentials)?;
+    let mode = parse_run_mode(std::env::args().skip(1))?;
+    if let RunMode::VerifyProviderObservedSilence { input, provenance } = &mode {
+        let evidence = provider_silence_evidence::verify(input, provenance)?;
+        println!(
+            "rithmic_provider_path_silence_evidence=passed expected={:?} observed={:?} observation_generation={} recovery_generation={} provider_causation_claimed=false clean_close=true",
+            evidence.expected_invalidation,
+            evidence.observed_invalidation,
+            evidence.observation_generation,
+            evidence.recovery_generation
+        );
         return Ok(());
+    }
+    if let RunMode::ProviderObservedSilence { provenance, .. } = &mode {
+        provenance.verify_current_executable()?;
+    }
+    let credentials = load_credentials()?;
+    match mode {
+        RunMode::AuthorizedClientLocalSilence => {
+            run_authorized_silence_recovery(&credentials)?;
+            return Ok(());
+        }
+        RunMode::ProviderObservedSilence {
+            expected,
+            observation_seconds,
+            output,
+            provenance,
+        } => {
+            return run_provider_observed_silence(
+                &credentials,
+                expected,
+                Duration::from_secs(observation_seconds),
+                &output,
+                provenance,
+            );
+        }
+        RunMode::Smoke => {}
+        RunMode::VerifyProviderObservedSilence { .. } => unreachable!(),
     }
     let application = application();
     let (selected, subscription_rejected) = run_ticker(&credentials, application)?;
@@ -56,18 +113,57 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_authorized_silence_recovery(
-    arguments: impl IntoIterator<Item = String>,
-) -> Result<bool, String> {
+fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode, String> {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     match arguments.as_slice() {
-        [] => Ok(false),
-        [argument] if argument == "--authorized-silence-recovery" => Ok(true),
-        _ => Err(
-            "usage: rithmic_test_smoke [--authorized-silence-recovery] (credentials are loaded only from the native vault)"
-                .to_string(),
-        ),
+        [] => Ok(RunMode::Smoke),
+        [argument] if argument == "--authorized-silence-recovery" => {
+            Ok(RunMode::AuthorizedClientLocalSilence)
+        }
+        [
+            flag,
+            expected,
+            observation_seconds,
+            output,
+            source_revision,
+            executable_sha256,
+            cargo_lock_sha256,
+        ] if flag == "--provider-observed-silence-evidence" => {
+            let expected = ExpectedSilence::parse(expected).ok_or_else(usage)?;
+            let observation_seconds = observation_seconds.parse::<u64>().map_err(|_| usage())?;
+            if !(MINIMUM_PROVIDER_OBSERVATION_SECONDS..=MAXIMUM_PROVIDER_OBSERVATION_SECONDS)
+                .contains(&observation_seconds)
+            {
+                return Err(usage());
+            }
+            Ok(RunMode::ProviderObservedSilence {
+                expected,
+                observation_seconds,
+                output: output.into(),
+                provenance: EvidenceProvenance::try_new(
+                    source_revision,
+                    executable_sha256,
+                    cargo_lock_sha256,
+                )?,
+            })
+        }
+        [flag, input, source_revision, cargo_lock_sha256]
+            if flag == "--verify-provider-observed-silence-evidence" =>
+        {
+            Ok(RunMode::VerifyProviderObservedSilence {
+                input: input.into(),
+                provenance: EvidenceProvenance::for_current_executable(
+                    source_revision,
+                    cargo_lock_sha256,
+                )?,
+            })
+        }
+        _ => Err(usage()),
     }
+}
+
+fn usage() -> String {
+    "usage: rithmic_test_smoke [--authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
 }
 
 #[derive(Clone)]
@@ -395,6 +491,233 @@ fn run_tick_history(
     Ok(())
 }
 
+fn run_provider_observed_silence(
+    credentials: &RithmicCredentialBytes,
+    expected: ExpectedSilence,
+    observation_limit: Duration,
+    output: &std::path::Path,
+    provenance: EvidenceProvenance,
+) -> Result<(), String> {
+    if output.exists() {
+        return Err("provider_silence_evidence_path_invalid".to_string());
+    }
+    let observation_limit_ms = u64::try_from(observation_limit.as_millis())
+        .map_err(|_| "provider_silence_observation_limit_invalid")?;
+    let mut evidence =
+        ProviderSilenceEvidence::incomplete(expected, observation_limit_ms, provenance);
+    collect_provider_observed_silence(credentials, observation_limit, &mut evidence);
+    if !evidence.qualified
+        && evidence.failure.is_none()
+        && evidence.qualification_limitation.is_some()
+    {
+        evidence.failure = Some(EvidenceFailure::TimingMetadataInsufficient);
+    }
+    if !evidence.qualified && evidence.failure != Some(EvidenceFailure::ObservationTimeout) {
+        evidence.status = EvidenceStatus::Failed;
+    }
+    provider_silence_evidence::write_new_atomically(output, &evidence)?;
+    if !evidence.qualified {
+        return Err(format!(
+            "provider_observed_silence_evidence_failed={:?}",
+            evidence.failure
+        ));
+    }
+    println!(
+        "rithmic_provider_path_silence=passed expected={:?} observed={:?} observation_generation={} recovery_generation={} provider_causation_claimed=false client_local_suppression=false local_fault_injection=false clean_close=true",
+        evidence.expected_invalidation,
+        evidence.observed_invalidation,
+        evidence.observation_generation,
+        evidence.recovery_generation
+    );
+    Ok(())
+}
+
+fn collect_provider_observed_silence(
+    credentials: &RithmicCredentialBytes,
+    observation_limit: Duration,
+    evidence: &mut ProviderSilenceEvidence,
+) {
+    let generation =
+        |value| SessionGeneration::new(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN));
+    let limits = RithmicSessionLimits {
+        response_timeout: Duration::from_secs(5),
+        ..RithmicSessionLimits::default()
+    };
+    let Ok(config) = RithmicProviderConfig::try_new(
+        "Axiusflow",
+        env!("CARGO_PKG_VERSION"),
+        limits,
+        Duration::from_secs(10),
+        Vec::new(),
+    ) else {
+        evidence.failure = Some(EvidenceFailure::ObservationStart);
+        return;
+    };
+    let Ok(callback_limits) = RithmicCallbackLimits::try_new(
+        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(1_048_576).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN),
+    ) else {
+        evidence.failure = Some(EvidenceFailure::ObservationStart);
+        return;
+    };
+    let (mut driver, events) = RithmicProviderDriver::new(config, callback_limits);
+    let observation = generation(evidence.observation_generation);
+    if driver
+        .start_session(observation, credentials.as_bytes())
+        .is_err()
+    {
+        evidence.failure = Some(EvidenceFailure::ObservationStart);
+        return;
+    }
+    let started = Instant::now();
+    let observation_result = wait_for_provider_observed_silence(
+        &events,
+        observation,
+        evidence.expected_invalidation,
+        observation_limit,
+        evidence,
+    );
+    evidence.observation_elapsed_ms =
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    evidence.observation.stopped = driver.stop_session(observation).is_ok();
+    if !evidence.observation.stopped {
+        evidence.failure = Some(EvidenceFailure::ObservationStop);
+        return;
+    }
+    if let Err(failure) = observation_result {
+        evidence.failure = Some(failure);
+        return;
+    }
+
+    let recovery = generation(evidence.recovery_generation);
+    if driver
+        .start_session(recovery, credentials.as_bytes())
+        .is_err()
+    {
+        evidence.failure = Some(EvidenceFailure::RecoveryStart);
+        return;
+    }
+    let recovery_result = wait_for_provider_recovery(&events, recovery, evidence);
+    evidence.recovery.stopped = driver.stop_session(recovery).is_ok();
+    if !evidence.recovery.stopped {
+        evidence.failure = Some(EvidenceFailure::RecoveryStop);
+        return;
+    }
+    if let Err(failure) = recovery_result {
+        evidence.failure = Some(failure);
+        return;
+    }
+    evidence.clean_protocol_close = verify_authorized_clean_close(credentials).is_ok();
+    if !evidence.clean_protocol_close {
+        evidence.failure = Some(EvidenceFailure::CleanClose);
+        return;
+    }
+    evidence.status = EvidenceStatus::Passed;
+    evidence.failure = None;
+    evidence.qualify();
+}
+
+fn wait_for_provider_observed_silence(
+    events: &RithmicProviderEvents,
+    generation: SessionGeneration,
+    expected: ExpectedSilence,
+    observation_limit: Duration,
+    evidence: &mut ProviderSilenceEvidence,
+) -> Result<(), EvidenceFailure> {
+    let deadline = Instant::now() + observation_limit;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(EvidenceFailure::ObservationTimeout);
+        }
+        if let Some(callback) = events.try_recv() {
+            match callback.event {
+                ProviderSessionEvent::AuthenticationChanged {
+                    generation: callback_generation,
+                    state: AuthenticationState::Accepted,
+                } if callback_generation == generation => evidence.observation.authenticated = true,
+                ProviderSessionEvent::InstrumentsDiscovered {
+                    generation: callback_generation,
+                    ..
+                } if callback_generation == generation => {
+                    evidence.observation.instruments_discovered = true;
+                }
+                ProviderSessionEvent::Invalidated {
+                    generation: Some(callback_generation),
+                    reason,
+                } if callback_generation == generation => {
+                    evidence.observed_invalidation_generation = Some(callback_generation.get());
+                    evidence.observed_invalidation = match reason {
+                        ProviderInvalidationReason::HeartbeatSilence => {
+                            Some(ExpectedSilence::HeartbeatSilence)
+                        }
+                        ProviderInvalidationReason::MessageSilence => {
+                            Some(ExpectedSilence::MessageSilence)
+                        }
+                        _ => None,
+                    };
+                    evidence.observed_retry = callback.retry.and_then(|retry| {
+                        (retry == axiusflow_rithmic_protocol_adapter::RetryDisposition::Transient)
+                            .then_some(ObservedRetry::Transient)
+                    });
+                    evidence.observation_method.provider_path_observed =
+                        evidence.observed_invalidation.is_some();
+                    return if evidence.observation.authenticated
+                        && evidence.observation.instruments_discovered
+                        && evidence.observed_invalidation == Some(expected)
+                        && callback.retry
+                            == Some(axiusflow_rithmic_protocol_adapter::RetryDisposition::Transient)
+                    {
+                        Ok(())
+                    } else {
+                        Err(EvidenceFailure::ObservationInvalidationMismatch)
+                    };
+                }
+                _ => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+fn wait_for_provider_recovery(
+    events: &RithmicProviderEvents,
+    generation: SessionGeneration,
+    evidence: &mut ProviderSilenceEvidence,
+) -> Result<(), EvidenceFailure> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while !(evidence.recovery.authenticated && evidence.recovery.instruments_discovered) {
+        if Instant::now() >= deadline {
+            return Err(EvidenceFailure::RecoveryTimeout);
+        }
+        if let Some(callback) = events.try_recv() {
+            match callback.event {
+                ProviderSessionEvent::AuthenticationChanged {
+                    generation: callback_generation,
+                    state: AuthenticationState::Accepted,
+                } if callback_generation == generation => evidence.recovery.authenticated = true,
+                ProviderSessionEvent::InstrumentsDiscovered {
+                    generation: callback_generation,
+                    ..
+                } if callback_generation == generation => {
+                    evidence.recovery.instruments_discovered = true;
+                }
+                ProviderSessionEvent::Invalidated {
+                    generation: Some(callback_generation),
+                    ..
+                } if callback_generation == generation => {
+                    return Err(EvidenceFailure::RecoveryInvalidated);
+                }
+                _ => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    Ok(())
+}
+
 fn run_authorized_silence_recovery(credentials: &RithmicCredentialBytes) -> Result<(), String> {
     let credentials = RithmicCredentialBytes::try_copy_from_vault(credentials.as_bytes())
         .map_err(|_| "credentials_invalid")?;
@@ -632,14 +955,52 @@ fn load_credentials() -> Result<RithmicCredentialBytes, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_authorized_silence_recovery;
+    use super::{EvidenceProvenance, ExpectedSilence, RunMode, parse_run_mode};
+    use std::path::PathBuf;
 
     #[test]
-    fn authorized_silence_recovery_requires_one_exact_nonsecret_flag() {
-        assert_eq!(parse_authorized_silence_recovery(Vec::new()), Ok(false));
+    fn run_modes_require_exact_nonsecret_arguments() {
+        let revision = "a".repeat(40);
+        let executable = "b".repeat(64);
+        let cargo_lock = "c".repeat(64);
+        let provider_provenance = EvidenceProvenance::try_new(&revision, &executable, &cargo_lock)
+            .expect("provider provenance is valid");
+        let verifier_provenance =
+            EvidenceProvenance::for_current_executable(&revision, &cargo_lock)
+                .expect("verifier provenance is valid");
+        assert_eq!(parse_run_mode(Vec::new()), Ok(RunMode::Smoke));
         assert_eq!(
-            parse_authorized_silence_recovery(vec!["--authorized-silence-recovery".to_string()]),
-            Ok(true)
+            parse_run_mode(vec!["--authorized-silence-recovery".to_string()]),
+            Ok(RunMode::AuthorizedClientLocalSilence)
+        );
+        assert_eq!(
+            parse_run_mode(vec![
+                "--provider-observed-silence-evidence".to_string(),
+                "message-silence".to_string(),
+                "3600".to_string(),
+                "evidence.json".to_string(),
+                revision.clone(),
+                executable.clone(),
+                cargo_lock.clone(),
+            ]),
+            Ok(RunMode::ProviderObservedSilence {
+                expected: ExpectedSilence::MessageSilence,
+                observation_seconds: 3_600,
+                output: PathBuf::from("evidence.json"),
+                provenance: provider_provenance,
+            })
+        );
+        assert_eq!(
+            parse_run_mode(vec![
+                "--verify-provider-observed-silence-evidence".to_string(),
+                "evidence.json".to_string(),
+                revision.clone(),
+                cargo_lock.clone(),
+            ]),
+            Ok(RunMode::VerifyProviderObservedSilence {
+                input: PathBuf::from("evidence.json"),
+                provenance: verifier_provenance,
+            })
         );
         for rejected in [
             vec!["--unknown".to_string()],
@@ -647,8 +1008,26 @@ mod tests {
                 "--authorized-silence-recovery".to_string(),
                 "extra".to_string(),
             ],
+            vec![
+                "--provider-observed-silence-evidence".to_string(),
+                "message-silence".to_string(),
+                "29".to_string(),
+                "evidence.json".to_string(),
+                revision.clone(),
+                executable.clone(),
+                cargo_lock.clone(),
+            ],
+            vec![
+                "--provider-observed-silence-evidence".to_string(),
+                "unknown".to_string(),
+                "3600".to_string(),
+                "evidence.json".to_string(),
+                revision,
+                executable,
+                cargo_lock,
+            ],
         ] {
-            assert!(parse_authorized_silence_recovery(rejected).is_err());
+            assert!(parse_run_mode(rejected).is_err());
         }
     }
 }
