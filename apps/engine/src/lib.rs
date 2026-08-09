@@ -41,6 +41,7 @@ const WORKSPACE_SCHEMA_REVISION: u32 = 1;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
 type SelectionCallback = Arc<dyn Fn(WorkspaceState) + Send + Sync>;
+type ProviderCommandCallback = Arc<dyn Fn(envelope::Payload) + Send + Sync>;
 
 /// Bounded latest-state fan-out shared by the engine runtime and authenticated clients.
 #[derive(Clone, Default)]
@@ -180,6 +181,7 @@ pub struct EngineState {
     workspace: Arc<Mutex<WorkspaceState>>,
     workspace_root: Option<Arc<PathBuf>>,
     selection_callback: Arc<Mutex<Option<SelectionCallback>>>,
+    provider_command_callback: Arc<Mutex<Option<ProviderCommandCallback>>>,
     selection_generation: Arc<AtomicU64>,
 }
 
@@ -189,6 +191,7 @@ impl Default for EngineState {
             workspace: Arc::new(Mutex::new(default_workspace())),
             workspace_root: None,
             selection_callback: Arc::new(Mutex::new(None)),
+            provider_command_callback: Arc::new(Mutex::new(None)),
             selection_generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -218,6 +221,7 @@ impl EngineState {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
             selection_callback: Arc::new(Mutex::new(None)),
+            provider_command_callback: Arc::new(Mutex::new(None)),
             selection_generation: Arc::new(AtomicU64::new(0)),
         };
         if state.workspace().workspace_revision == 0 || migrated {
@@ -251,6 +255,25 @@ impl EngineState {
             .selection_callback
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(callback);
+    }
+
+    /// Installs the resident provider runtime's nonblocking command callback.
+    pub fn set_provider_command_callback(&self, callback: ProviderCommandCallback) {
+        *self
+            .provider_command_callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(callback);
+    }
+
+    fn dispatch_provider_command(&self, command: envelope::Payload) {
+        if let Some(callback) = self
+            .provider_command_callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            callback(command);
+        }
     }
 
     fn apply_selection(&self, selection: SetSelection) -> Result<WorkspaceState, String> {
@@ -908,6 +931,42 @@ impl EngineClient {
         self.receive_workspace()
     }
 
+    /// Sends one validated Rithmic search intent to the resident provider owner.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated command connection fails.
+    pub fn search_rithmic(
+        &mut self,
+        search: axiusflow_local_engine_protocol::RithmicSearch,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::RithmicSearch(search))
+    }
+
+    /// Sends one Rithmic read-only selection to the resident provider owner.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated command connection fails.
+    pub fn select_rithmic(
+        &mut self,
+        selection: axiusflow_local_engine_protocol::RithmicSelect,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::RithmicSelect(selection))
+    }
+
+    /// Requests one Rithmic chart series from the resident provider owner.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated command connection fails.
+    pub fn request_rithmic_history(
+        &mut self,
+        request: axiusflow_local_engine_protocol::RithmicHistory,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::RithmicHistory(request))
+    }
+
     /// Converts this authenticated connection into a blocking view stream.
     ///
     /// Use a separate client connection for commands so live publications can never
@@ -1184,6 +1243,11 @@ fn serve_authenticated_session_with_publications(
             }
             envelope::Payload::SetViewport(viewport) => {
                 apply_viewport(state, viewport, connection)?;
+            }
+            command @ (envelope::Payload::RithmicSearch(_)
+            | envelope::Payload::RithmicSelect(_)
+            | envelope::Payload::RithmicHistory(_)) => {
+                state.dispatch_provider_command(command);
             }
             envelope::Payload::SubscribeView(subscription) => {
                 let view = ViewKind::try_from(subscription.view)

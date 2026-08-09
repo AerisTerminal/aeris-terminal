@@ -17,7 +17,6 @@ use axiusflow_coinbase_coordinator::market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
     UiDiagnosticsFeedback,
 };
-use axiusflow_coinbase_coordinator::rithmic_market_worker;
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
@@ -4056,17 +4055,11 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
             return None;
         }
         if argument == "--rithmic-test" {
-            let parsed = parse_rithmic_test_arguments(arguments).unwrap_or_else(|usage| {
+            let _parsed = parse_rithmic_test_arguments(arguments).unwrap_or_else(|usage| {
                 eprintln!("{usage}");
                 std::process::exit(2);
             });
-            rithmic_market_worker::start(
-                parsed.history_root,
-                std::thread::current().id(),
-                parsed.detailed_diagnostics,
-                parsed.native_transition_report,
-            )
-            .unwrap_or_else(|error| {
+            resident_market_worker::start_rithmic().unwrap_or_else(|error| {
                 eprintln!("Rithmic Test shell could not start: {error}");
                 std::process::exit(1);
             })

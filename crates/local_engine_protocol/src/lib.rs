@@ -18,7 +18,8 @@ pub use messages::{
     ActivateExistingUi, CatalogEntry, CatalogSnapshot, ChartDelta, ChartProvenance, ChartSnapshot,
     ClientHello, ClientKind, DomBookState, DomLevel, DomRecoveryReason, DomRow, DomSnapshot,
     EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, HotSeries, ProviderConnectionState,
-    ProviderState, ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist,
+    ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog, RithmicChart, RithmicHistory,
+    RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection, SetViewport, SetWatchlist,
     SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, envelope,
 };
 

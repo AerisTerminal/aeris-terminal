@@ -3,7 +3,8 @@ use axiusflow_local_engine_protocol::{
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomBookState, DomLevel, DomRow,
     DomSnapshot, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye,
     HotSeries, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, ProviderConnectionState,
-    ProviderState, ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist,
+    ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog, RithmicChart, RithmicHistory,
+    RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection, SetViewport, SetWatchlist,
     SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
     split_catalog,
 };
@@ -11,7 +12,7 @@ use axiusflow_transport::encode_binary_frame;
 use std::num::NonZeroUsize;
 
 fn all_payloads() -> Vec<envelope::Payload> {
-    vec![
+    let mut payloads = vec![
         envelope::Payload::ClientHello(ClientHello {
             protocol_version: PROTOCOL_VERSION,
             installation_token: vec![1, 2, 3, 4],
@@ -98,6 +99,14 @@ fn all_payloads() -> Vec<envelope::Payload> {
             provenance: ChartProvenance::LiveProvider as i32,
         }),
         dom_payload(),
+    ];
+    payloads.extend(lifecycle_payloads());
+    payloads.extend(rithmic_payloads());
+    payloads
+}
+
+fn lifecycle_payloads() -> Vec<envelope::Payload> {
+    vec![
         envelope::Payload::ProviderState(ProviderState {
             state: ProviderConnectionState::Connected as i32,
             generation: 3,
@@ -109,6 +118,62 @@ fn all_payloads() -> Vec<envelope::Payload> {
         envelope::Payload::ActivateExistingUi(ActivateExistingUi {}),
         envelope::Payload::Goodbye(Goodbye {
             reason: "engine shutting down".to_string(),
+        }),
+    ]
+}
+
+fn rithmic_payloads() -> Vec<envelope::Payload> {
+    vec![
+        envelope::Payload::RithmicSearch(RithmicSearch {
+            generation: 11,
+            query: "MNQ".to_string(),
+            exchange: Some("CME".to_string()),
+            product_code: None,
+            instrument_type: Some("FUTURE".to_string()),
+            contains: true,
+            maximum_results: 24,
+        }),
+        envelope::Payload::RithmicSelect(RithmicSelect {
+            selection_generation: 12,
+            search_generation: 11,
+            symbol: "MNQU6".to_string(),
+            exchange: "CME".to_string(),
+            entitlement_id: "test".to_string(),
+            trades: true,
+            quotes: true,
+            order_book: true,
+        }),
+        envelope::Payload::RithmicHistory(RithmicHistory {
+            selection_generation: 12,
+            series_generation: 13,
+            series: "1m".to_string(),
+        }),
+        envelope::Payload::RithmicCatalog(RithmicCatalog {
+            kind: 0,
+            session_generation: Some(4),
+            command_generation: 11,
+            symbols: vec![RithmicSymbol {
+                symbol: "MNQU6".to_string(),
+                exchange: "CME".to_string(),
+                name: Some("Micro E-mini Nasdaq-100".to_string()),
+                product_code: Some("MNQ".to_string()),
+                instrument_type: Some("FUTURE".to_string()),
+                expiration_date: Some("2026-09-18".to_string()),
+            }],
+            instrument_id: None,
+            provider_symbol: None,
+            display_symbol: None,
+            venue_id: None,
+            price_scale: None,
+            quantity_scale: None,
+            entitlement_id: None,
+            rejection: None,
+        }),
+        envelope::Payload::RithmicChart(RithmicChart {
+            selection_generation: 12,
+            series_generation: 13,
+            live: false,
+            payload: vec![7, 8, 9],
         }),
     ]
 }

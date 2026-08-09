@@ -1,5 +1,5 @@
 use std::{
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicU64, mpsc},
     thread,
@@ -18,7 +18,8 @@ use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument
 use axiusflow_engine::{EngineClient, connect_or_start_engine, sibling_engine_executable};
 use axiusflow_local_engine_protocol::{
     CatalogReassembler, ChartProvenance, DomBookState, DomRecoveryReason, DomSnapshot,
-    ProviderConnectionState, ViewKind, WorkspaceState, envelope,
+    ProviderConnectionState, RithmicHistory, RithmicSearch, RithmicSelect, ViewKind,
+    WorkspaceState, envelope,
 };
 use axiusflow_market_data::{
     ChartAggregation, ChartInterval, DomColumnLevel, DomFrame, DomRow, OrderBookRecoveryReason,
@@ -26,6 +27,10 @@ use axiusflow_market_data::{
 };
 use axiusflow_market_protocol_adapter::{BinaryMarketBarStreamDecoder, DecimalConvention};
 use axiusflow_observability::FeedConnectionState;
+use axiusflow_rithmic_protocol_adapter::{
+    CollectedSymbols, RithmicCatalogEvent, RithmicCatalogRejection, SymbolSearchResult,
+};
+use axiusflow_rithmic_protocol_adapter::{InstrumentType, SearchPattern};
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
@@ -36,9 +41,48 @@ const WORKER_LABEL: &str = "Resident Coinbase market engine";
 const SUBSCRIPTION_ID: &str = "resident_coinbase_market_bars";
 const VIEWPORT_PERSIST_DELAY: Duration = Duration::from_millis(250);
 
+#[derive(Clone, Copy)]
+enum ResidentProvider {
+    Coinbase,
+    Rithmic,
+}
+
 type LatestSnapshot = Arc<Mutex<Option<MarketWorkerBootstrap>>>;
 
 pub(super) fn start() -> (
+    axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
+    MarketDataWorker,
+) {
+    start_provider(
+        ResidentProvider::Coinbase,
+        axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup::Loading(Box::new(
+            CoinbaseWorkerStartup {
+                coinbase_product: placeholder_product("BTC-USD"),
+                subscription_id: SUBSCRIPTION_ID.to_string(),
+                worker_label: WORKER_LABEL.to_string(),
+            },
+        )),
+    )
+}
+
+pub(super) fn start_rithmic() -> Result<
+    (
+        axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
+        MarketDataWorker,
+    ),
+    String,
+> {
+    let shell = axiusflow_coinbase_coordinator::rithmic_shell::RithmicShellState::local()?;
+    Ok(start_provider(
+        ResidentProvider::Rithmic,
+        axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup::Shell(shell),
+    ))
+}
+
+fn start_provider(
+    provider: ResidentProvider,
+    startup: axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
+) -> (
     axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
     MarketDataWorker,
 ) {
@@ -49,24 +93,21 @@ pub(super) fn start() -> (
     thread::Builder::new()
         .name("axiusflow-resident-engine-bridge".to_string())
         .spawn(move || {
-            run_bridge(&message_tx, &command_rx);
+            run_bridge(&message_tx, &command_rx, provider);
             let _ = shutdown_tx.send(());
         })
         .expect("resident engine bridge thread starts");
 
-    let startup = axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup::Loading(
-        Box::new(CoinbaseWorkerStartup {
-            coinbase_product: placeholder_product("BTC-USD"),
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: WORKER_LABEL.to_string(),
-        }),
-    );
     let worker =
         MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, Some(sequence));
     (startup, worker)
 }
 
-fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<MarketWorkerCommand>) {
+fn run_bridge(
+    message_tx: &MarketWorkerSender,
+    command_rx: &mpsc::Receiver<MarketWorkerCommand>,
+    provider: ResidentProvider,
+) {
     let executable = match sibling_engine_executable() {
         Ok(executable) => executable,
         Err(error) => {
@@ -78,6 +119,10 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
     else {
         return;
     };
+    if let Err(error) = select_initial_provider(&mut commands, &mut workspace, provider) {
+        send_error(message_tx, error);
+        return;
+    }
     let latest_snapshot = Arc::new(Mutex::new(None));
     spawn_session_stream(
         message_tx.clone(),
@@ -92,32 +137,14 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
 
     let mut pending_viewport: Option<ChartViewportUpdate> = None;
     let mut viewport_deadline: Option<Instant> = None;
-    loop {
-        let command = if let Some(deadline) = viewport_deadline {
-            match command_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(command) => command,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    viewport_deadline = None;
-                    if let Some(viewport) = pending_viewport.take()
-                        && let Err(error) = set_viewport_reconnecting(
-                            &mut commands,
-                            &mut workspace,
-                            &executable,
-                            viewport,
-                        )
-                    {
-                        eprintln!("resident viewport was not persisted: {error}");
-                    }
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            let Ok(command) = command_rx.recv() else {
-                break;
-            };
-            command
-        };
+    while let Some(command) = receive_bridge_command(
+        command_rx,
+        &mut pending_viewport,
+        &mut viewport_deadline,
+        &mut commands,
+        &mut workspace,
+        &executable,
+    ) {
         match command {
             MarketWorkerCommand::CoinbaseSelect(request) => {
                 pending_viewport = None;
@@ -162,11 +189,143 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
                 }
                 break;
             }
-            MarketWorkerCommand::RithmicSearch(_)
+            command @ (MarketWorkerCommand::RithmicSearch(_)
             | MarketWorkerCommand::RithmicSelect(_)
-            | MarketWorkerCommand::RithmicHistory(_) => {}
+            | MarketWorkerCommand::RithmicHistory(_)) => {
+                if let Err(error) = dispatch_rithmic_command(&mut commands, &mut workspace, command)
+                {
+                    send_error(message_tx, error);
+                }
+            }
         }
     }
+}
+
+fn receive_bridge_command(
+    commands_rx: &mpsc::Receiver<MarketWorkerCommand>,
+    pending_viewport: &mut Option<ChartViewportUpdate>,
+    viewport_deadline: &mut Option<Instant>,
+    commands: &mut EngineClient,
+    workspace: &mut WorkspaceState,
+    executable: &Path,
+) -> Option<MarketWorkerCommand> {
+    loop {
+        let Some(deadline) = *viewport_deadline else {
+            return commands_rx.recv().ok();
+        };
+        match commands_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(command) => return Some(command),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                *viewport_deadline = None;
+                if let Some(viewport) = pending_viewport.take()
+                    && let Err(error) =
+                        set_viewport_reconnecting(commands, workspace, executable, viewport)
+                {
+                    eprintln!("resident viewport was not persisted: {error}");
+                }
+            }
+        }
+    }
+}
+
+fn select_initial_provider(
+    commands: &mut EngineClient,
+    workspace: &mut WorkspaceState,
+    provider: ResidentProvider,
+) -> Result<(), String> {
+    if matches!(provider, ResidentProvider::Rithmic) {
+        *workspace = commands.set_provider_selection(
+            "rithmic".to_string(),
+            workspace.market.clone(),
+            workspace.interval_seconds,
+            workspace.workspace_revision,
+            1,
+        )?;
+    }
+    Ok(())
+}
+
+fn dispatch_rithmic_command(
+    commands: &mut EngineClient,
+    workspace: &mut WorkspaceState,
+    command: MarketWorkerCommand,
+) -> Result<(), String> {
+    match command {
+        MarketWorkerCommand::RithmicSearch(search) => commands.search_rithmic(RithmicSearch {
+            generation: usize_to_u64(search.generation().get()),
+            query: search.query().to_string(),
+            exchange: search.exchange().map(str::to_string),
+            product_code: search.product_code().map(str::to_string),
+            instrument_type: search.instrument_type().map(instrument_type_name),
+            contains: search.pattern() == SearchPattern::Contains,
+            maximum_results: usize_to_u32(search.maximum_results().get()),
+        }),
+        MarketWorkerCommand::RithmicSelect(selection) => {
+            let subscription = selection.subscription();
+            let request = RithmicSelect {
+                selection_generation: usize_to_u64(selection.generation().get()),
+                search_generation: usize_to_u64(selection.search_generation().get()),
+                symbol: selection.symbol().to_string(),
+                exchange: selection.exchange().to_string(),
+                entitlement_id: selection.entitlement_id().to_string(),
+                trades: subscription.trades(),
+                quotes: subscription.quotes(),
+                order_book: subscription.order_book(),
+            };
+            *workspace = commands.set_provider_selection(
+                "rithmic".to_string(),
+                request.symbol.clone(),
+                workspace.interval_seconds,
+                workspace.workspace_revision,
+                request.selection_generation,
+            )?;
+            commands.select_rithmic(request)
+        }
+        MarketWorkerCommand::RithmicHistory(request) => {
+            if let Some(interval_seconds) = request.series.interval_seconds()
+                && let Ok(interval_seconds) = u32::try_from(interval_seconds)
+            {
+                *workspace = commands.set_provider_selection(
+                    "rithmic".to_string(),
+                    workspace.market.clone(),
+                    interval_seconds,
+                    workspace.workspace_revision,
+                    usize_to_u64(request.selection_generation.get()),
+                )?;
+            }
+            commands.request_rithmic_history(RithmicHistory {
+                selection_generation: usize_to_u64(request.selection_generation.get()),
+                series_generation: usize_to_u64(request.series_generation.get()),
+                series: request.series.label().to_string(),
+            })
+        }
+        _ => Err("resident bridge received a non-Rithmic provider command".to_string()),
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn instrument_type_name(instrument_type: InstrumentType) -> String {
+    match instrument_type {
+        InstrumentType::Future => "FUTURE",
+        InstrumentType::FutureOption => "FUTURE_OPTION",
+        InstrumentType::FutureStrategy => "FUTURE_STRATEGY",
+        InstrumentType::Equity => "EQUITY",
+        InstrumentType::EquityOption => "EQUITY_OPTION",
+        InstrumentType::EquityStrategy => "EQUITY_STRATEGY",
+        InstrumentType::Index => "INDEX",
+        InstrumentType::IndexOption => "INDEX_OPTION",
+        InstrumentType::Spread => "SPREAD",
+        InstrumentType::Synthetic => "SYNTHETIC",
+    }
+    .to_string()
 }
 
 fn publish_recovery(
@@ -249,6 +408,8 @@ fn run_session_stream(
     let mut decoder = chart_decoder(&convention, ReplayProvenance::LiveProvider)?;
     let mut provenance = ReplayProvenance::LiveProvider;
     let mut model = MarketBarClientModel::new(nonzero(MODEL_ITEM_CAPACITY));
+    let mut rithmic_decoder = chart_decoder(&convention, ReplayProvenance::LiveProvider)?;
+    let mut rithmic_model = MarketBarClientModel::new(nonzero(MODEL_ITEM_CAPACITY));
     let mut catalog = CatalogReassembler::new();
     loop {
         let publication = stream.receive()?;
@@ -265,6 +426,20 @@ fn run_session_stream(
                 if let Some(entries) = catalog.push(snapshot).map_err(|error| error.to_string())? {
                     publish_catalog(message_tx, entries)?;
                 }
+                continue;
+            }
+            envelope::Payload::RithmicCatalog(catalog) => {
+                publish_rithmic_catalog(message_tx, catalog)?;
+                continue;
+            }
+            envelope::Payload::RithmicChart(chart) => {
+                publish_rithmic_chart(
+                    message_tx,
+                    latest_snapshot,
+                    &mut rithmic_decoder,
+                    &mut rithmic_model,
+                    &chart,
+                )?;
                 continue;
             }
             envelope::Payload::ProviderState(provider) => {
@@ -332,6 +507,141 @@ fn publish_chart_payload(
             .map_err(|_| "desktop market mailbox disconnected".to_string())?;
     }
     Ok(())
+}
+
+fn publish_rithmic_chart(
+    message_tx: &MarketWorkerSender,
+    latest_snapshot: &LatestSnapshot,
+    decoder: &mut BinaryMarketBarStreamDecoder,
+    model: &mut MarketBarClientModel,
+    chart: &axiusflow_local_engine_protocol::RithmicChart,
+) -> Result<(), String> {
+    let selection_generation = nonzero_usize(chart.selection_generation)?;
+    let series_generation = nonzero_usize(chart.series_generation)?;
+    for projected in decoder
+        .push(&chart.payload)
+        .map_err(|error| error.to_string())?
+    {
+        let MarketBarModelOutcome::Published(generation) = model
+            .apply_update(projected.update.clone())
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let ReplayStreamUpdate::Snapshot(snapshot) = projected.update else {
+            continue;
+        };
+        let bootstrap = MarketWorkerBootstrap {
+            snapshot: snapshot.clone(),
+            subscription_id: projected.subscription_id,
+            generation,
+            worker_label: "Resident Rithmic market engine".to_string(),
+        };
+        *latest_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clone_bootstrap(&bootstrap));
+        let message = if chart.live {
+            MarketWorkerMessage::RithmicLive {
+                selection_generation,
+                series_generation,
+                snapshot,
+            }
+        } else {
+            MarketWorkerMessage::RithmicHistory {
+                selection_generation,
+                series_generation,
+                result: Ok(Box::new(bootstrap)),
+            }
+        };
+        message_tx
+            .send(message)
+            .map_err(|_| "desktop market mailbox disconnected".to_string())?;
+    }
+    Ok(())
+}
+
+fn publish_rithmic_catalog(
+    message_tx: &MarketWorkerSender,
+    catalog: axiusflow_local_engine_protocol::RithmicCatalog,
+) -> Result<(), String> {
+    let command_generation = nonzero_usize(catalog.command_generation)?;
+    let event = match catalog.kind {
+        0 => RithmicCatalogEvent::search_completed(
+            nonzero_u64(catalog.session_generation)?,
+            command_generation,
+            CollectedSymbols {
+                results: catalog
+                    .symbols
+                    .into_iter()
+                    .map(|symbol| SymbolSearchResult {
+                        symbol: symbol.symbol,
+                        exchange: symbol.exchange,
+                        name: symbol.name,
+                        product_code: symbol.product_code,
+                        instrument_type: symbol.instrument_type,
+                        expiration_date: symbol.expiration_date,
+                    })
+                    .collect(),
+                duplicate_count: 0,
+            },
+        ),
+        1 => RithmicCatalogEvent::selection_installed(
+            nonzero_u64(catalog.session_generation)?,
+            command_generation,
+            required(catalog.instrument_id)?,
+            required(catalog.provider_symbol)?,
+            required(catalog.display_symbol)?,
+            required(catalog.venue_id)?,
+            u8::try_from(required(catalog.price_scale)?)
+                .map_err(|_| "Rithmic price scale is invalid".to_string())?,
+            u8::try_from(required(catalog.quantity_scale)?)
+                .map_err(|_| "Rithmic quantity scale is invalid".to_string())?,
+            required(catalog.entitlement_id)?,
+        )
+        .map_err(|_| "Rithmic installed selection is invalid".to_string())?,
+        2 => RithmicCatalogEvent::command_rejected(
+            catalog
+                .session_generation
+                .map(|value| NonZeroU64::new(value).ok_or(()))
+                .transpose()
+                .map_err(|()| "Rithmic session generation is invalid".to_string())?,
+            command_generation,
+            rithmic_rejection(required(catalog.rejection)?)?,
+        ),
+        _ => return Err("Rithmic catalog publication kind is invalid".to_string()),
+    };
+    message_tx
+        .send(MarketWorkerMessage::RithmicCatalog(event))
+        .map_err(|_| "desktop market mailbox disconnected".to_string())
+}
+
+fn required<T>(value: Option<T>) -> Result<T, String> {
+    value.ok_or_else(|| "Rithmic catalog publication is incomplete".to_string())
+}
+
+fn nonzero_u64(value: Option<u64>) -> Result<NonZeroU64, String> {
+    value
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| "Rithmic session generation is invalid".to_string())
+}
+
+fn nonzero_usize(value: u64) -> Result<NonZeroUsize, String> {
+    usize::try_from(value)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| "Rithmic command generation is invalid".to_string())
+}
+
+fn rithmic_rejection(value: u32) -> Result<RithmicCatalogRejection, String> {
+    match value {
+        0 => Ok(RithmicCatalogRejection::SearchRejected),
+        1 => Ok(RithmicCatalogRejection::SupersededSearch),
+        2 => Ok(RithmicCatalogRejection::InstrumentUnavailable),
+        3 => Ok(RithmicCatalogRejection::SubscriptionRejected),
+        4 => Ok(RithmicCatalogRejection::SearchDispatchUnavailable),
+        5 => Ok(RithmicCatalogRejection::SelectionDispatchUnavailable),
+        _ => Err("Rithmic command rejection is invalid".to_string()),
+    }
 }
 
 fn connect_commands(executable: &Path) -> Result<(EngineClient, WorkspaceState), String> {
@@ -438,8 +748,8 @@ fn publish_provider_state(message_tx: &MarketWorkerSender, provider: i32) -> Res
         .send(MarketWorkerMessage::Connection {
             state,
             message: match state {
-                FeedConnectionState::Streaming => "Resident Coinbase stream is live".to_string(),
-                _ => "Resident Coinbase stream is reconnecting".to_string(),
+                FeedConnectionState::Streaming => "Resident provider stream is live".to_string(),
+                _ => "Resident provider stream is reconnecting".to_string(),
             },
         })
         .map_err(|_| "desktop market mailbox disconnected".to_string())
@@ -476,18 +786,24 @@ fn publish_dom(message_tx: &MarketWorkerSender, snapshot: DomSnapshot) -> Result
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let rithmic = snapshot.provider_id == "rithmic";
+    let frame = DomFrame {
+        provider_id: snapshot.provider_id,
+        instrument_id: snapshot.instrument_id,
+        entitlement_id: snapshot.entitlement_id,
+        session_generation: snapshot.provider_generation,
+        selection_generation: snapshot.selection_generation,
+        revision: snapshot.revision,
+        source_watermark: snapshot.source_watermark,
+        state,
+        rows,
+    };
     message_tx
-        .send(MarketWorkerMessage::CoinbaseDom(DomFrame {
-            provider_id: snapshot.provider_id,
-            instrument_id: snapshot.instrument_id,
-            entitlement_id: snapshot.entitlement_id,
-            session_generation: snapshot.provider_generation,
-            selection_generation: snapshot.selection_generation,
-            revision: snapshot.revision,
-            source_watermark: snapshot.source_watermark,
-            state,
-            rows,
-        }))
+        .send(if rithmic {
+            MarketWorkerMessage::RithmicDom(frame)
+        } else {
+            MarketWorkerMessage::CoinbaseDom(frame)
+        })
         .map_err(|_| "desktop market mailbox disconnected".to_string())
 }
 

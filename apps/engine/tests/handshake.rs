@@ -3,7 +3,11 @@ use std::{
     fs,
     io::{Read, Write},
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
 };
 
@@ -15,8 +19,8 @@ use axiusflow_engine::{
 };
 use axiusflow_local_engine_protocol::{
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, EngineFaultCode, Envelope,
-    EnvelopeDecoder, PROTOCOL_VERSION, ResourceMode, ViewKind, WorkspaceState, encode_envelope,
-    envelope,
+    EnvelopeDecoder, PROTOCOL_VERSION, ResourceMode, RithmicHistory, RithmicSearch, RithmicSelect,
+    ViewKind, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::CredentialVault;
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
@@ -171,6 +175,70 @@ fn authenticated_client_restores_engine_owned_workspace() {
     assert_eq!(workspace.market, "BTC-USD");
     assert_eq!(workspace.interval_seconds, 60);
     drop(client);
+    server.join().expect("join server");
+}
+
+#[test]
+fn authenticated_rithmic_commands_reach_only_the_resident_owner() {
+    let name = unique_name();
+    let listener = bind_listener(&name).expect("bind engine listener");
+    let token = [10_u8; 32];
+    let state = EngineState::default();
+    let publications = EnginePublicationHub::default();
+    let (commands_tx, commands_rx) = mpsc::sync_channel(3);
+    state.set_provider_command_callback(Arc::new(move |command| {
+        commands_tx.send(command).expect("capture provider command");
+    }));
+    let server = thread::spawn(move || {
+        let stream = listener.accept().expect("accept client");
+        serve_client_with_publications(stream, &token, 74, &state, &publications)
+            .expect("serve client");
+    });
+    let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
+    let search = RithmicSearch {
+        generation: 1,
+        query: "MNQ".to_string(),
+        exchange: Some("CME".to_string()),
+        product_code: None,
+        instrument_type: Some("FUTURE".to_string()),
+        contains: true,
+        maximum_results: 24,
+    };
+    let selection = RithmicSelect {
+        selection_generation: 2,
+        search_generation: 1,
+        symbol: "MNQU6".to_string(),
+        exchange: "CME".to_string(),
+        entitlement_id: "test".to_string(),
+        trades: true,
+        quotes: true,
+        order_book: true,
+    };
+    let history = RithmicHistory {
+        selection_generation: 2,
+        series_generation: 3,
+        series: "1m".to_string(),
+    };
+    client.search_rithmic(search.clone()).expect("send search");
+    client
+        .select_rithmic(selection.clone())
+        .expect("send selection");
+    client
+        .request_rithmic_history(history.clone())
+        .expect("send history");
+    drop(client);
+    assert_eq!(
+        commands_rx.recv().expect("receive search"),
+        envelope::Payload::RithmicSearch(search)
+    );
+    assert_eq!(
+        commands_rx.recv().expect("receive selection"),
+        envelope::Payload::RithmicSelect(selection)
+    );
+    assert_eq!(
+        commands_rx.recv().expect("receive history"),
+        envelope::Payload::RithmicHistory(history)
+    );
     server.join().expect("join server");
 }
 

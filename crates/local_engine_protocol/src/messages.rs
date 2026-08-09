@@ -468,16 +468,126 @@ pub struct Goodbye {
     pub reason: String,
 }
 
+/// Rithmic symbol-search command routed to the resident provider owner.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct RithmicSearch {
+    #[prost(uint64, tag = "1")]
+    pub generation: u64,
+    #[prost(string, tag = "2")]
+    pub query: String,
+    #[prost(string, optional, tag = "3")]
+    pub exchange: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    pub product_code: Option<String>,
+    #[prost(string, optional, tag = "5")]
+    pub instrument_type: Option<String>,
+    #[prost(bool, tag = "6")]
+    pub contains: bool,
+    #[prost(uint32, tag = "7")]
+    pub maximum_results: u32,
+}
+
+/// Rithmic read-only instrument selection routed to the resident owner.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct RithmicSelect {
+    #[prost(uint64, tag = "1")]
+    pub selection_generation: u64,
+    #[prost(uint64, tag = "2")]
+    pub search_generation: u64,
+    #[prost(string, tag = "3")]
+    pub symbol: String,
+    #[prost(string, tag = "4")]
+    pub exchange: String,
+    #[prost(string, tag = "5")]
+    pub entitlement_id: String,
+    #[prost(bool, tag = "6")]
+    pub trades: bool,
+    #[prost(bool, tag = "7")]
+    pub quotes: bool,
+    #[prost(bool, tag = "8")]
+    pub order_book: bool,
+}
+
+/// Rithmic chart-series request routed to the resident owner.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct RithmicHistory {
+    #[prost(uint64, tag = "1")]
+    pub selection_generation: u64,
+    #[prost(uint64, tag = "2")]
+    pub series_generation: u64,
+    #[prost(string, tag = "3")]
+    pub series: String,
+}
+
+/// One bounded Rithmic symbol-search result.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct RithmicSymbol {
+    #[prost(string, tag = "1")]
+    pub symbol: String,
+    #[prost(string, tag = "2")]
+    pub exchange: String,
+    #[prost(string, optional, tag = "3")]
+    pub name: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    pub product_code: Option<String>,
+    #[prost(string, optional, tag = "5")]
+    pub instrument_type: Option<String>,
+    #[prost(string, optional, tag = "6")]
+    pub expiration_date: Option<String>,
+}
+
+/// Resident Rithmic catalog result. `kind` is search=0, selection=1, rejection=2.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct RithmicCatalog {
+    #[prost(uint32, tag = "1")]
+    pub kind: u32,
+    #[prost(uint64, optional, tag = "2")]
+    pub session_generation: Option<u64>,
+    #[prost(uint64, tag = "3")]
+    pub command_generation: u64,
+    #[prost(message, repeated, tag = "4")]
+    pub symbols: Vec<RithmicSymbol>,
+    #[prost(string, optional, tag = "5")]
+    pub instrument_id: Option<String>,
+    #[prost(string, optional, tag = "6")]
+    pub provider_symbol: Option<String>,
+    #[prost(string, optional, tag = "7")]
+    pub display_symbol: Option<String>,
+    #[prost(string, optional, tag = "8")]
+    pub venue_id: Option<String>,
+    #[prost(uint32, optional, tag = "9")]
+    pub price_scale: Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    pub quantity_scale: Option<u32>,
+    #[prost(string, optional, tag = "11")]
+    pub entitlement_id: Option<String>,
+    #[prost(uint32, optional, tag = "12")]
+    pub rejection: Option<u32>,
+}
+
+/// Resident Rithmic history or live chart publication.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct RithmicChart {
+    #[prost(uint64, tag = "1")]
+    pub selection_generation: u64,
+    #[prost(uint64, tag = "2")]
+    pub series_generation: u64,
+    #[prost(bool, tag = "3")]
+    pub live: bool,
+    #[prost(bytes = "vec", tag = "4")]
+    pub payload: Vec<u8>,
+}
+
 /// Versioned wrapper carried in every frame.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Envelope {
     /// Protocol version of this envelope; must equal [`crate::PROTOCOL_VERSION`]. Tag 1.
     #[prost(uint32, tag = "1")]
     pub protocol_version: u32,
-    /// Versioned message payload. Tags 2 through 18.
+    /// Versioned message payload. Tags 2 through 23.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -538,5 +648,20 @@ pub mod envelope {
         /// Stable chart viewport update. Tag 18.
         #[prost(message, tag = "18")]
         SetViewport(super::SetViewport),
+        /// Rithmic symbol search. Tag 19.
+        #[prost(message, tag = "19")]
+        RithmicSearch(super::RithmicSearch),
+        /// Rithmic instrument selection. Tag 20.
+        #[prost(message, tag = "20")]
+        RithmicSelect(super::RithmicSelect),
+        /// Rithmic series request. Tag 21.
+        #[prost(message, tag = "21")]
+        RithmicHistory(super::RithmicHistory),
+        /// Rithmic catalog result. Tag 22.
+        #[prost(message, tag = "22")]
+        RithmicCatalog(super::RithmicCatalog),
+        /// Rithmic chart publication. Tag 23.
+        #[prost(message, tag = "23")]
+        RithmicChart(super::RithmicChart),
     }
 }

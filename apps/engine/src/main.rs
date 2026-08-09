@@ -11,7 +11,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, TrySendError},
     },
     thread,
 };
@@ -20,6 +20,7 @@ use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate
 use axiusflow_coinbase_coordinator::market_worker::{
     ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
 };
+use axiusflow_coinbase_coordinator::{rithmic_market_worker, rithmic_series::RithmicSeries};
 use axiusflow_coinbase_market_adapter::{
     CoinbaseHttpsHistoryTransport, CoinbaseProductCatalog, CoinbaseSpotProduct,
 };
@@ -31,7 +32,8 @@ use axiusflow_engine::{
 use axiusflow_local_engine_protocol::{
     CatalogEntry, ChartDelta, ChartProvenance, ChartSnapshot, DomBookState, DomLevel,
     DomRecoveryReason, DomRow as WireDomRow, DomSnapshot, EngineFaultCode, Fault,
-    ProviderConnectionState, ProviderState, ResourceMode, ViewKind, envelope, split_catalog,
+    ProviderConnectionState, ProviderState, ResourceMode, RithmicCatalog, RithmicChart,
+    RithmicSymbol, ViewKind, envelope, split_catalog,
 };
 use axiusflow_market_data::{
     ChartAggregation, ChartInterval, DomColumnLevel, OrderBookRecoveryReason, OrderBookState,
@@ -39,6 +41,10 @@ use axiusflow_market_data::{
 use axiusflow_market_protocol_adapter::{
     DecimalConvention, encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
     try_encode_replay_snapshot_chunk_envelopes,
+};
+use axiusflow_rithmic_protocol_adapter::{
+    InstrumentType, RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
+    RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
 };
 use interprocess::local_socket::traits::Listener as _;
 
@@ -224,6 +230,7 @@ fn start_market_runtime(
     state_root: PathBuf,
 ) -> Result<Arc<dyn Fn(ResourceMode) + Send + Sync>, String> {
     let (selection_tx, selection_rx) = mpsc::channel();
+    let (provider_command_tx, provider_command_rx) = mpsc::sync_channel(16);
     let (resource_mode_tx, resource_mode_rx) = mpsc::sync_channel(4);
     let resource_state = state.clone();
     let handle = thread::Builder::new()
@@ -235,12 +242,24 @@ fn start_market_runtime(
                     market_thread.unpark();
                 }
             }));
+            let command_thread = thread::current();
+            let command_faults = publications.clone();
+            state.set_provider_command_callback(Arc::new(move |command| match provider_command_tx
+                .try_send(command)
+            {
+                Ok(()) => command_thread.unpark(),
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => publish_fault(
+                    &command_faults,
+                    "Resident provider command queue is unavailable",
+                ),
+            }));
             run_market_runtime(
                 &state,
                 &publications,
                 engine_epoch,
                 &state_root,
                 &selection_rx,
+                &provider_command_rx,
                 &resource_mode_rx,
             );
         })
@@ -260,6 +279,40 @@ fn run_market_runtime(
     engine_epoch: u64,
     state_root: &std::path::Path,
     selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
+    provider_commands: &Receiver<envelope::Payload>,
+    resource_modes: &Receiver<ResourceMode>,
+) {
+    loop {
+        if state.workspace().provider == "rithmic" {
+            run_rithmic_market_runtime(
+                state,
+                publications,
+                engine_epoch,
+                selections,
+                provider_commands,
+                resource_modes,
+            );
+        } else {
+            run_coinbase_market_runtime(
+                state,
+                publications,
+                engine_epoch,
+                state_root,
+                selections,
+                provider_commands,
+                resource_modes,
+            );
+        }
+    }
+}
+
+fn run_coinbase_market_runtime(
+    state: &EngineState,
+    publications: &EnginePublicationHub,
+    engine_epoch: u64,
+    state_root: &std::path::Path,
+    selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
+    provider_commands: &Receiver<envelope::Payload>,
     resource_modes: &Receiver<ResourceMode>,
 ) {
     let workspace = state.workspace();
@@ -337,18 +390,18 @@ fn run_market_runtime(
             thread::park();
             continue;
         };
-        let (messages, disconnected) = active_worker.drain_messages();
-        for message in messages {
-            publish_market_message(
-                publications,
-                engine_epoch,
-                &convention,
-                &mut chart_context,
-                &mut products,
-                message,
-            );
+        let disconnected = drain_market_messages(
+            active_worker,
+            publications,
+            engine_epoch,
+            &convention,
+            &mut chart_context,
+            &mut products,
+        );
+        if apply_selections(selections, active_worker, &products, &mut active) {
+            return;
         }
-        apply_selections(selections, active_worker, &products, &mut active);
+        reject_non_coinbase_commands(provider_commands, publications);
         apply_catalog_refresh(
             catalog_refresh.as_ref(),
             state_root,
@@ -362,13 +415,253 @@ fn run_market_runtime(
     }
 }
 
+fn drain_market_messages(
+    worker: &mut MarketDataWorker,
+    publications: &EnginePublicationHub,
+    engine_epoch: u64,
+    convention: &DecimalConvention,
+    chart_context: &mut Option<ReplaySnapshot>,
+    products: &mut BTreeMap<String, CoinbaseSpotProduct>,
+) -> bool {
+    let (messages, disconnected) = worker.drain_messages();
+    for message in messages {
+        publish_market_message(
+            publications,
+            engine_epoch,
+            convention,
+            chart_context,
+            products,
+            message,
+        );
+    }
+    disconnected
+}
+
+fn reject_non_coinbase_commands(
+    commands: &Receiver<envelope::Payload>,
+    publications: &EnginePublicationHub,
+) {
+    for command in commands.try_iter() {
+        let command_name = match command {
+            envelope::Payload::RithmicSearch(_) => "rithmic-search",
+            envelope::Payload::RithmicSelect(_) => "rithmic-selection",
+            envelope::Payload::RithmicHistory(_) => "rithmic-history",
+            _ => "unknown",
+        };
+        publish_fault(
+            publications,
+            &format!("Provider command is unavailable for workspace provider {command_name}"),
+        );
+    }
+}
+
+fn run_rithmic_market_runtime(
+    state: &EngineState,
+    publications: &EnginePublicationHub,
+    engine_epoch: u64,
+    selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
+    provider_commands: &Receiver<envelope::Payload>,
+    resource_modes: &Receiver<ResourceMode>,
+) {
+    let history_root = default_rithmic_history_root();
+    let mut worker = match start_rithmic_worker(&history_root) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            publish_fault(
+                publications,
+                &format!("Rithmic resident runtime could not start: {error}"),
+            );
+            thread::park();
+            return;
+        }
+    };
+    let Ok(convention) = DecimalConvention::try_new("price_mantissa", "quantity_mantissa") else {
+        return;
+    };
+    let mut chart_context = None;
+    let mut empty_catalog = BTreeMap::new();
+    loop {
+        if selections
+            .try_iter()
+            .last()
+            .is_some_and(|selection| selection.provider != "rithmic")
+        {
+            return;
+        }
+        if let Some(mode) = resource_modes.try_iter().last() {
+            match resource_transition(mode, worker.is_some()) {
+                ResourceTransition::KeepRunning => {}
+                ResourceTransition::Suspend => {
+                    drop(worker.take());
+                    chart_context = None;
+                }
+                ResourceTransition::Resume => match start_rithmic_worker(&history_root) {
+                    Ok(resumed) => worker = Some(resumed),
+                    Err(error) => {
+                        publish_fault(
+                            publications,
+                            &format!("Rithmic resident runtime could not resume: {error}"),
+                        );
+                    }
+                },
+            }
+        }
+        if let Some(active_worker) = worker.as_mut() {
+            for command in provider_commands.try_iter() {
+                if let Err(error) = dispatch_rithmic_command(active_worker, command) {
+                    publish_fault(publications, &error);
+                }
+            }
+            let (messages, disconnected) = active_worker.drain_messages();
+            for message in messages {
+                publish_market_message(
+                    publications,
+                    engine_epoch,
+                    &convention,
+                    &mut chart_context,
+                    &mut empty_catalog,
+                    message,
+                );
+            }
+            if disconnected {
+                publish_fault(publications, "Rithmic resident runtime disconnected");
+                return;
+            }
+        } else {
+            for _ in provider_commands.try_iter() {
+                publish_fault(publications, "Rithmic provider is offline-suspended");
+            }
+        }
+        if state.workspace().provider != "rithmic" {
+            return;
+        }
+        thread::park();
+    }
+}
+
+fn start_rithmic_worker(history_root: &std::path::Path) -> Result<MarketDataWorker, String> {
+    let (_startup, worker) = rithmic_market_worker::start(
+        history_root.to_path_buf(),
+        thread::current().id(),
+        false,
+        None,
+    )?;
+    let market_thread = thread::current();
+    worker.set_message_wake(Arc::new(move || market_thread.unpark()));
+    Ok(worker)
+}
+
+fn dispatch_rithmic_command(
+    worker: &MarketDataWorker,
+    command: envelope::Payload,
+) -> Result<(), String> {
+    match command {
+        envelope::Payload::RithmicSearch(search) => worker
+            .try_search_rithmic(parse_rithmic_search(search)?)
+            .map_err(|_| "Rithmic search command queue is unavailable".to_string()),
+        envelope::Payload::RithmicSelect(selection) => worker
+            .try_select_rithmic(parse_rithmic_selection(selection)?)
+            .map_err(|_| "Rithmic selection command queue is unavailable".to_string()),
+        envelope::Payload::RithmicHistory(request) => worker
+            .try_request_rithmic_history(parse_rithmic_history(&request)?)
+            .map_err(|_| "Rithmic history command queue is unavailable".to_string()),
+        _ => Err("Unsupported resident provider command".to_string()),
+    }
+}
+
+fn parse_rithmic_search(
+    search: axiusflow_local_engine_protocol::RithmicSearch,
+) -> Result<RithmicSymbolSearch, String> {
+    RithmicSymbolSearch::try_new(
+        nonzero_usize(search.generation)?,
+        search.query,
+        search.exchange,
+        search.product_code,
+        search
+            .instrument_type
+            .as_deref()
+            .map(parse_instrument_type)
+            .transpose()?,
+        if search.contains {
+            SearchPattern::Contains
+        } else {
+            SearchPattern::Equals
+        },
+        NonZeroUsize::new(search.maximum_results as usize)
+            .ok_or_else(|| "Rithmic search result bound is invalid".to_string())?,
+    )
+    .map_err(|_| "Rithmic search command is invalid".to_string())
+}
+
+fn parse_rithmic_selection(
+    selection: axiusflow_local_engine_protocol::RithmicSelect,
+) -> Result<RithmicInstrumentSelection, String> {
+    let subscription = RithmicReadOnlySubscription::try_new(
+        selection.trades,
+        selection.quotes,
+        selection.order_book,
+    )
+    .map_err(|_| "Rithmic subscription is invalid".to_string())?;
+    RithmicInstrumentSelection::try_new(
+        nonzero_usize(selection.selection_generation)?,
+        nonzero_usize(selection.search_generation)?,
+        selection.symbol,
+        selection.exchange,
+        selection.entitlement_id,
+        subscription,
+    )
+    .map_err(|_| "Rithmic selection command is invalid".to_string())
+}
+
+fn parse_rithmic_history(
+    request: &axiusflow_local_engine_protocol::RithmicHistory,
+) -> Result<axiusflow_coinbase_coordinator::rithmic_series::RithmicSeriesRequest, String> {
+    let series = RithmicSeries::ALL
+        .into_iter()
+        .find(|series| series.label() == request.series)
+        .ok_or_else(|| "Rithmic chart series is unsupported".to_string())?;
+    Ok(
+        axiusflow_coinbase_coordinator::rithmic_series::RithmicSeriesRequest {
+            selection_generation: nonzero_usize(request.selection_generation)?,
+            series_generation: nonzero_usize(request.series_generation)?,
+            series,
+        },
+    )
+}
+
+fn nonzero_usize(value: u64) -> Result<NonZeroUsize, String> {
+    usize::try_from(value)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| "Rithmic command generation is invalid".to_string())
+}
+
+fn parse_instrument_type(value: &str) -> Result<InstrumentType, String> {
+    match value {
+        "FUTURE" => Ok(InstrumentType::Future),
+        "FUTURE_OPTION" => Ok(InstrumentType::FutureOption),
+        "FUTURE_STRATEGY" => Ok(InstrumentType::FutureStrategy),
+        "EQUITY" => Ok(InstrumentType::Equity),
+        "EQUITY_OPTION" => Ok(InstrumentType::EquityOption),
+        "EQUITY_STRATEGY" => Ok(InstrumentType::EquityStrategy),
+        "INDEX" => Ok(InstrumentType::Index),
+        "INDEX_OPTION" => Ok(InstrumentType::IndexOption),
+        "SPREAD" => Ok(InstrumentType::Spread),
+        "SYNTHETIC" => Ok(InstrumentType::Synthetic),
+        _ => Err("Rithmic instrument type is invalid".to_string()),
+    }
+}
+
 fn apply_selections(
     selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
     worker: &MarketDataWorker,
     products: &BTreeMap<String, CoinbaseSpotProduct>,
     active: &mut ActiveSelection,
-) {
+) -> bool {
     for selection in selections.try_iter() {
+        if selection.provider != "coinbase" {
+            return true;
+        }
         if selection.market == active.market
             && selection.interval_seconds == active.interval_seconds
         {
@@ -390,6 +683,7 @@ fn apply_selections(
             active.interval_seconds = selection.interval_seconds;
         }
     }
+    false
 }
 
 fn apply_resource_mode(
@@ -578,44 +872,210 @@ fn publish_market_message(
                     || frame.instrument_id.clone(),
                     |product| product.product_id.clone(),
                 );
-            let (state, recovery_reason) = dom_wire_state(frame.state);
-            let rows = frame
-                .rows
-                .into_iter()
-                .map(|row| WireDomRow {
-                    bid: row.bid.map(dom_wire_level),
-                    ask: row.ask.map(dom_wire_level),
-                })
-                .collect();
-            publications.publish(
-                ViewKind::Dom,
-                &envelope::Payload::DomSnapshot(DomSnapshot {
-                    market,
-                    engine_epoch,
-                    selection_generation: frame.selection_generation,
-                    provider_generation: frame.session_generation,
-                    payload: Vec::new(),
-                    provider_id: frame.provider_id,
-                    instrument_id: frame.instrument_id,
-                    entitlement_id: frame.entitlement_id,
-                    revision: frame.revision,
-                    source_watermark: frame.source_watermark,
-                    state: state as i32,
-                    recovery_reason,
-                    rows,
-                }),
-            );
+            publish_dom_frame_with_market(publications, engine_epoch, market, frame);
+        }
+        MarketWorkerMessage::RithmicCatalog(event) => publish_rithmic_catalog(publications, event),
+        MarketWorkerMessage::RithmicHistory {
+            selection_generation,
+            series_generation,
+            result,
+        } => match result {
+            Ok(bootstrap) => publish_rithmic_snapshot(
+                publications,
+                convention,
+                selection_generation,
+                series_generation,
+                false,
+                &bootstrap.snapshot,
+            ),
+            Err(error) => publish_fault(publications, &error),
+        },
+        MarketWorkerMessage::RithmicLive {
+            selection_generation,
+            series_generation,
+            snapshot,
+        } => publish_rithmic_snapshot(
+            publications,
+            convention,
+            selection_generation,
+            series_generation,
+            true,
+            &snapshot,
+        ),
+        MarketWorkerMessage::RithmicDom(frame) => {
+            let market = frame.instrument_id.clone();
+            publish_dom_frame_with_market(publications, engine_epoch, market, frame);
         }
         MarketWorkerMessage::Diagnostics(_)
         | MarketWorkerMessage::Recovery { .. }
-        | MarketWorkerMessage::RithmicCatalog(_)
-        | MarketWorkerMessage::RithmicHistory { .. }
-        | MarketWorkerMessage::RithmicLive { .. }
-        | MarketWorkerMessage::RithmicDom(_)
         | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
         | MarketWorkerMessage::ChartViewport { .. }
         | MarketWorkerMessage::CoinbaseCatalog(Err(_)) => {}
     }
+}
+
+fn publish_dom_frame_with_market(
+    publications: &EnginePublicationHub,
+    engine_epoch: u64,
+    market: String,
+    frame: axiusflow_market_data::DomFrame,
+) {
+    let (state, recovery_reason) = dom_wire_state(frame.state);
+    let rows = frame
+        .rows
+        .into_iter()
+        .map(|row| WireDomRow {
+            bid: row.bid.map(dom_wire_level),
+            ask: row.ask.map(dom_wire_level),
+        })
+        .collect();
+    publications.publish(
+        ViewKind::Dom,
+        &envelope::Payload::DomSnapshot(DomSnapshot {
+            market,
+            engine_epoch,
+            selection_generation: frame.selection_generation,
+            provider_generation: frame.session_generation,
+            payload: Vec::new(),
+            provider_id: frame.provider_id,
+            instrument_id: frame.instrument_id,
+            entitlement_id: frame.entitlement_id,
+            revision: frame.revision,
+            source_watermark: frame.source_watermark,
+            state: state as i32,
+            recovery_reason,
+            rows,
+        }),
+    );
+}
+
+fn publish_rithmic_catalog(publications: &EnginePublicationHub, event: RithmicCatalogEvent) {
+    let catalog = match event {
+        RithmicCatalogEvent::SearchCompleted {
+            session_generation,
+            search_generation,
+            symbols,
+        } => RithmicCatalog {
+            kind: 0,
+            session_generation: Some(session_generation.get()),
+            command_generation: usize_to_u64(search_generation.get()),
+            symbols: symbols
+                .results
+                .into_iter()
+                .map(|symbol| RithmicSymbol {
+                    symbol: symbol.symbol,
+                    exchange: symbol.exchange,
+                    name: symbol.name,
+                    product_code: symbol.product_code,
+                    instrument_type: symbol.instrument_type,
+                    expiration_date: symbol.expiration_date,
+                })
+                .collect(),
+            instrument_id: None,
+            provider_symbol: None,
+            display_symbol: None,
+            venue_id: None,
+            price_scale: None,
+            quantity_scale: None,
+            entitlement_id: None,
+            rejection: None,
+        },
+        RithmicCatalogEvent::SelectionInstalled {
+            session_generation,
+            selection_generation,
+            instrument,
+            entitlement_id,
+        } => RithmicCatalog {
+            kind: 1,
+            session_generation: Some(session_generation.get()),
+            command_generation: usize_to_u64(selection_generation.get()),
+            symbols: Vec::new(),
+            instrument_id: Some(instrument.instrument_id),
+            provider_symbol: Some(instrument.provider_symbol),
+            display_symbol: Some(instrument.display_symbol),
+            venue_id: Some(instrument.venue_id),
+            price_scale: Some(u32::from(instrument.price_scale)),
+            quantity_scale: Some(u32::from(instrument.quantity_scale)),
+            entitlement_id: Some(entitlement_id),
+            rejection: None,
+        },
+        RithmicCatalogEvent::CommandRejected {
+            session_generation,
+            command_generation,
+            reason,
+        } => RithmicCatalog {
+            kind: 2,
+            session_generation: session_generation
+                .map(axiusflow_desktop_provider_runtime::SessionGeneration::get),
+            command_generation: usize_to_u64(command_generation.get()),
+            symbols: Vec::new(),
+            instrument_id: None,
+            provider_symbol: None,
+            display_symbol: None,
+            venue_id: None,
+            price_scale: None,
+            quantity_scale: None,
+            entitlement_id: None,
+            rejection: Some(rithmic_rejection_code(reason)),
+        },
+    };
+    publications.publish(
+        ViewKind::Catalog,
+        &envelope::Payload::RithmicCatalog(catalog),
+    );
+}
+
+fn publish_rithmic_snapshot(
+    publications: &EnginePublicationHub,
+    convention: &DecimalConvention,
+    selection_generation: NonZeroUsize,
+    series_generation: NonZeroUsize,
+    live: bool,
+    snapshot: &ReplaySnapshot,
+) {
+    let Ok(envelopes) = try_encode_replay_snapshot_chunk_envelopes(
+        "resident_rithmic_market_bars",
+        format!("rithmic-{}", series_generation.get()),
+        snapshot,
+        convention,
+        NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
+    ) else {
+        return;
+    };
+    let maximum_frame = NonZeroUsize::new(900 * 1024).unwrap_or(NonZeroUsize::MIN);
+    let payloads = envelopes
+        .into_iter()
+        .filter_map(|encoded| {
+            encode_market_bar_stream_frame(&encoded, maximum_frame)
+                .ok()
+                .map(|payload| {
+                    envelope::Payload::RithmicChart(RithmicChart {
+                        selection_generation: usize_to_u64(selection_generation.get()),
+                        series_generation: usize_to_u64(series_generation.get()),
+                        live,
+                        payload,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    if !payloads.is_empty() {
+        publications.publish_covering(ViewKind::Chart, &payloads);
+    }
+}
+
+fn rithmic_rejection_code(reason: RithmicCatalogRejection) -> u32 {
+    match reason {
+        RithmicCatalogRejection::SearchRejected => 0,
+        RithmicCatalogRejection::SupersededSearch => 1,
+        RithmicCatalogRejection::InstrumentUnavailable => 2,
+        RithmicCatalogRejection::SubscriptionRejected => 3,
+        RithmicCatalogRejection::SearchDispatchUnavailable => 4,
+        RithmicCatalogRejection::SelectionDispatchUnavailable => 5,
+    }
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn dom_wire_level(level: DomColumnLevel) -> DomLevel {
@@ -786,6 +1246,18 @@ fn default_coinbase_history_root() -> PathBuf {
                 .join("Axiusflow")
                 .join("market-history")
                 .join("coinbase")
+        },
+    )
+}
+
+fn default_rithmic_history_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").map_or_else(
+        || PathBuf::from("local-data").join("rithmic-history"),
+        |root| {
+            PathBuf::from(root)
+                .join("Axiusflow")
+                .join("market-history")
+                .join("rithmic")
         },
     )
 }

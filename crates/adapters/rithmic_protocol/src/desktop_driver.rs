@@ -100,6 +100,36 @@ impl RithmicSymbolSearch {
         self.search_generation
     }
 
+    #[must_use]
+    pub fn query(&self) -> &str {
+        &self.search_text
+    }
+
+    #[must_use]
+    pub fn exchange(&self) -> Option<&str> {
+        self.exchange.as_deref()
+    }
+
+    #[must_use]
+    pub fn product_code(&self) -> Option<&str> {
+        self.product_code.as_deref()
+    }
+
+    #[must_use]
+    pub const fn instrument_type(&self) -> Option<InstrumentType> {
+        self.instrument_type
+    }
+
+    #[must_use]
+    pub const fn pattern(&self) -> SearchPattern {
+        self.pattern
+    }
+
+    #[must_use]
+    pub const fn maximum_results(&self) -> NonZeroUsize {
+        self.maximum_results
+    }
+
     /// Creates one bounded search without retaining provider text in diagnostics.
     ///
     /// # Errors
@@ -206,6 +236,21 @@ impl RithmicReadOnlySubscription {
     const fn is_empty(self) -> bool {
         !(self.trades || self.quotes || self.order_book)
     }
+
+    #[must_use]
+    pub const fn trades(self) -> bool {
+        self.trades
+    }
+
+    #[must_use]
+    pub const fn quotes(self) -> bool {
+        self.quotes
+    }
+
+    #[must_use]
+    pub const fn order_book(self) -> bool {
+        self.order_book
+    }
 }
 
 impl fmt::Debug for RithmicInstrumentSelection {
@@ -224,6 +269,35 @@ impl RithmicInstrumentSelection {
     #[must_use]
     pub const fn generation(&self) -> NonZeroUsize {
         self.selection_generation
+    }
+
+    #[must_use]
+    pub const fn search_generation(&self) -> NonZeroUsize {
+        self.search_generation
+    }
+
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    #[must_use]
+    pub fn exchange(&self) -> &str {
+        &self.exchange
+    }
+
+    #[must_use]
+    pub fn entitlement_id(&self) -> &str {
+        &self.entitlement_id
+    }
+
+    #[must_use]
+    pub const fn subscription(&self) -> RithmicReadOnlySubscription {
+        RithmicReadOnlySubscription {
+            trades: self.trades,
+            quotes: self.quotes,
+            order_book: self.order_book,
+        }
     }
 
     /// Creates one bounded read-only selection.
@@ -327,6 +401,69 @@ impl fmt::Debug for RithmicCatalogEvent {
                 .field("command_generation", command_generation)
                 .field("reason", reason)
                 .finish(),
+        }
+    }
+}
+
+impl RithmicCatalogEvent {
+    #[must_use]
+    pub fn search_completed(
+        session_generation: std::num::NonZeroU64,
+        search_generation: NonZeroUsize,
+        symbols: CollectedSymbols,
+    ) -> Self {
+        Self::SearchCompleted {
+            session_generation: SessionGeneration::new(session_generation),
+            search_generation,
+            symbols,
+        }
+    }
+
+    /// Creates a selection publication without exposing runtime ownership types to the UI.
+    ///
+    /// # Errors
+    /// Returns an error when the provider-neutral instrument descriptor is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn selection_installed(
+        session_generation: std::num::NonZeroU64,
+        selection_generation: NonZeroUsize,
+        instrument_id: String,
+        provider_symbol: String,
+        display_symbol: String,
+        venue_id: String,
+        price_scale: u8,
+        quantity_scale: u8,
+        entitlement_id: String,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        let instrument = InstrumentDescriptor {
+            instrument_id,
+            provider_symbol,
+            display_symbol,
+            venue_id,
+            price_scale,
+            quantity_scale,
+        };
+        instrument
+            .validate()
+            .map_err(|_| RithmicProviderCommandError::InvalidRequest)?;
+        Ok(Self::SelectionInstalled {
+            session_generation: SessionGeneration::new(session_generation),
+            selection_generation,
+            instrument,
+            entitlement_id,
+        })
+    }
+
+    #[must_use]
+    pub fn command_rejected(
+        session_generation: Option<std::num::NonZeroU64>,
+        command_generation: NonZeroUsize,
+        reason: RithmicCatalogRejection,
+    ) -> Self {
+        Self::CommandRejected {
+            session_generation: session_generation.map(SessionGeneration::new),
+            command_generation,
+            reason,
         }
     }
 }
