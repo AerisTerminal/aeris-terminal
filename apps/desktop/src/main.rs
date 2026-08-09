@@ -25,8 +25,8 @@ use axiusflow_rithmic_protocol_adapter::{
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, Hsla, Render, Role, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, Context, Entity, Hsla, MouseButton, Render, Role, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
@@ -2072,17 +2072,30 @@ fn terminal_header(
     let (connection_label, connection_color) =
         connection_presentation(state.connection_state, state.chart_state, state.delayed);
     let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
-    TitleBar::new()
+    div()
+        .relative()
         .h(px(state.theme.dimensions.app_header_height.logical_pixels))
+        .flex_none()
+        .child(
+            TitleBar::new()
+                .h(px(state.theme.dimensions.app_header_height.logical_pixels))
+                .child(
+                    div()
+                        .h_full()
+                        .flex()
+                        .flex_1()
+                        .gap_4()
+                        .items_center()
+                        .child(div().text_sm().child("Axiusflow"))
+                        .child(connection),
+                ),
+        )
         .child(
             div()
-                .h_full()
-                .flex()
-                .flex_1()
-                .gap_4()
-                .items_center()
-                .child(div().text_sm().child("Axiusflow"))
-                .child(connection)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(102.0))
                 .child(header_controls(
                     cx,
                     app,
@@ -2130,6 +2143,7 @@ fn header_controls(
     );
     div()
         .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .h_full()
         .flex()
         .items_center()
