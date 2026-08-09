@@ -71,7 +71,7 @@ impl Render for ReadOnlyDomView {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .bg(gpui_color(colors.background))
+            .bg(gpui_color(colors.card))
             .text_color(gpui_color(colors.foreground))
             .border_l_1()
             .border_color(gpui_color(colors.border))

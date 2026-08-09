@@ -25,8 +25,8 @@ use axiusflow_rithmic_protocol_adapter::{
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, Hsla, Render, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, Context, Entity, Hsla, Render, Role, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
@@ -149,6 +149,7 @@ struct TerminalApp {
     rithmic_reconnect: RithmicReconnectState,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
+    indicator_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,6 +303,7 @@ struct HeaderState {
     selected_series: Option<rithmic_history::RithmicSeries>,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
+    indicator_message: Option<String>,
     symbol_message: String,
     search_activity: SearchActivity,
     series_message: String,
@@ -542,22 +544,19 @@ impl TerminalApp {
                 )
             }
             MarketWorkerStartup::Loading {
-                instrument,
+                instrument: _instrument,
                 subscription_id,
                 worker_label,
-            } => {
-                let _ = instrument;
-                (
-                    None,
-                    ChartState::Loading,
-                    "waiting for a covering market snapshot".to_string(),
-                    "waiting for a covering market snapshot".to_string(),
-                    worker_label,
-                    subscription_id,
-                    None,
-                    None,
-                )
-            }
+            } => (
+                None,
+                ChartState::Loading,
+                "waiting for a covering market snapshot".to_string(),
+                "waiting for a covering market snapshot".to_string(),
+                worker_label,
+                subscription_id,
+                None,
+                None,
+            ),
             MarketWorkerStartup::Ready(bootstrap) => {
                 let replay_label = generation_status(
                     &bootstrap.worker_label,
@@ -613,6 +612,7 @@ impl TerminalApp {
             rithmic_reconnect: RithmicReconnectState::Idle,
             symbol_input,
             indicator_input,
+            indicator_message: None,
         }
     }
 
@@ -1047,14 +1047,14 @@ impl TerminalApp {
             .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
     }
 
-    fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
         if self.symbol_selection_pending {
             self.symbol_message = "A contract selection is already in progress".to_string();
             cx.notify();
-            return;
+            return false;
         }
         let Some(selection) = self.symbol_browser.select(index) else {
-            return;
+            return false;
         };
         let entitlement_id = format!(
             "rithmic-test:{}:{}",
@@ -1074,9 +1074,9 @@ impl TerminalApp {
             self.symbol_browser.reject_selection(selection.generation);
             self.symbol_message = "Symbol selection is invalid".to_string();
             cx.notify();
-            return;
+            return false;
         };
-        if self.market_worker.try_select_rithmic(request).is_ok() {
+        let dispatched = if self.market_worker.try_select_rithmic(request).is_ok() {
             self.symbol_selection_pending = true;
             self.dom
                 .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
@@ -1084,11 +1084,14 @@ impl TerminalApp {
                 "Selecting {} · {}",
                 selection.instrument.symbol, selection.instrument.exchange
             );
+            true
         } else {
             self.symbol_browser.reject_selection(selection.generation);
             self.symbol_message = "Symbol selection is busy; try again".to_string();
-        }
+            false
+        };
         cx.notify();
+        dispatched
     }
 
     fn apply_rithmic_catalog(&mut self, event: RithmicCatalogEvent, cx: &mut Context<Self>) {
@@ -1423,14 +1426,29 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn add_indicator(&mut self, indicator: ChartIndicator, cx: &mut Context<Self>) {
-        if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, chart_cx| {
-                if let Err(error) = chart.add_indicator(indicator) {
-                    eprintln!("could not add chart indicator: {error}");
-                }
+    fn add_indicator(&mut self, indicator: ChartIndicator, cx: &mut Context<Self>) -> bool {
+        let Some(chart) = self.chart.clone() else {
+            self.indicator_message = Some("Chart data is not available yet".to_string());
+            cx.notify();
+            return false;
+        };
+        let result = chart.update(cx, |chart, chart_cx| {
+            let result = chart.add_indicator(indicator);
+            if result.is_ok() {
                 chart_cx.notify();
-            });
+            }
+            result
+        });
+        match result {
+            Ok(_) => {
+                self.indicator_message = None;
+                true
+            }
+            Err(error) => {
+                self.indicator_message = Some(error.to_string());
+                cx.notify();
+                false
+            }
         }
     }
 
@@ -1484,6 +1502,7 @@ impl Render for TerminalApp {
                 selected_series: self.series_browser.selected().map(|request| request.series),
                 symbol_input: self.symbol_input.clone(),
                 indicator_input: self.indicator_input.clone(),
+                indicator_message: self.indicator_message.clone(),
                 symbol_message: self.symbol_message.clone(),
                 search_activity: SearchActivity::from_pending(self.symbol_browser.search_pending()),
                 series_message: self.series_message.clone(),
@@ -1617,18 +1636,23 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
             (!drawing_toolbar_collapsed)
                 .then(|| drawing_toolbar(app.clone(), drawing_state, theme).into_any_element()),
         )
-        .child(chart_surface)
+        .child(chart_surface.when(!drawing_toolbar_collapsed, |chart| {
+            chart.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
+        }))
         .children(
             drawing_toolbar_collapsed
                 .then(|| drawing_toolbar_expander(app.clone(), theme).into_any_element()),
         );
-    h_resizable("market_workspace")
-        .child(resizable_panel().child(chart_workspace))
-        .child(side_panel_content)
+    div().size_full().overflow_hidden().child(
+        h_resizable("market_workspace")
+            .child(resizable_panel().child(chart_workspace))
+            .child(side_panel_content),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct DrawingToolbarState {
+    availability: DrawingToolbarAvailability,
     active_tool: ChartDrawingTool,
     drawing_count: usize,
     has_selection: bool,
@@ -1636,9 +1660,17 @@ struct DrawingToolbarState {
     all_locked: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DrawingToolbarAvailability {
+    #[default]
+    Unavailable,
+    Available,
+}
+
 impl DrawingToolbarState {
     fn from_chart(chart: &OriginChartView) -> Self {
         Self {
+            availability: DrawingToolbarAvailability::Available,
             active_tool: chart.drawing_tool(),
             drawing_count: chart.drawing_count(),
             has_selection: chart.selected_drawing_id().is_some(),
@@ -1731,21 +1763,26 @@ fn drawing_toolbar(
     let tool_app = app.clone();
     let tools = DRAWING_TOOLS.into_iter().map(move |spec| {
         let app = tool_app.clone();
-        drawing_toolbar_button(spec.id, spec.icon, spec.label, spec.icon_size)
-            .selected(state.active_tool == spec.tool)
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
-                app.update(cx, |app, app_cx| {
-                    app.select_drawing_tool(spec.tool, app_cx);
-                });
-            })
+        drawing_toolbar_action(
+            drawing_toolbar_button(spec.id, spec.icon, spec.label, spec.icon_size),
+            state.availability == DrawingToolbarAvailability::Available,
+        )
+        .selected(state.active_tool == spec.tool)
+        .on_click(move |_, _, cx| {
+            app.update(cx, |app, app_cx| {
+                app.select_drawing_tool(spec.tool, app_cx);
+            });
+        })
     });
     div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
         .w(px(chart_chrome::CHART_CHROME_HEIGHT))
-        .h_full()
-        .flex_none()
         .v_flex()
         .items_center()
+        .overflow_hidden()
         .border_r_1()
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.card))
@@ -1755,11 +1792,12 @@ fn drawing_toolbar(
                 .items_center()
                 .gap_1()
                 .py_2()
-                .flex_1()
-                .overflow_hidden()
-                .children(tools),
+                .size_full()
+                .min_h(px(0.0))
+                .overflow_y_scrollbar()
+                .children(tools)
+                .child(drawing_toolbar_actions(app, state, theme)),
         )
-        .child(drawing_toolbar_actions(app, state, theme))
 }
 
 fn drawing_toolbar_actions(
@@ -2034,23 +2072,25 @@ fn terminal_header(
     let (connection_label, connection_color) =
         connection_presentation(state.connection_state, state.chart_state, state.delayed);
     let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
-    TitleBar::new().child(
-        div()
-            .h_full()
-            .flex()
-            .flex_1()
-            .gap_4()
-            .items_center()
-            .child(div().text_sm().child("Axiusflow"))
-            .child(connection)
-            .child(header_controls(
-                cx,
-                app,
-                state,
-                active_button,
-                symbol_button,
-            )),
-    )
+    TitleBar::new()
+        .h(px(state.theme.dimensions.app_header_height.logical_pixels))
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .flex_1()
+                .gap_4()
+                .items_center()
+                .child(div().text_sm().child("Axiusflow"))
+                .child(connection)
+                .child(header_controls(
+                    cx,
+                    app,
+                    state,
+                    active_button,
+                    symbol_button,
+                )),
+        )
 }
 
 fn header_controls(
@@ -2149,6 +2189,7 @@ fn header_controls(
             cx,
             app.clone(),
             state.indicator_input,
+            state.indicator_message,
             state.controls.enabled(HeaderControls::FIT),
             &state.theme,
         ))
@@ -2164,6 +2205,7 @@ fn instrument_selector(
     variant: ButtonCustomVariant,
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
+        .icon(header_icon(HugeIcon::ExchangeIcon01))
         .label(state.label.clone())
         .tooltip("Search or select a Rithmic contract")
         .dropdown_caret(true)
@@ -2191,6 +2233,7 @@ fn indicator_selector(
     cx: &mut Context<TerminalApp>,
     app: Entity<TerminalApp>,
     input: Entity<InputState>,
+    message: Option<String>,
     enabled: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
@@ -2211,8 +2254,8 @@ fn indicator_selector(
     Dialog::new(cx)
         .trigger(trigger)
         .overlay(false)
-        .w(px(720.0))
-        .max_w(px(720.0))
+        .w(px(896.0))
+        .max_w(px(896.0))
         .close_button(false)
         .on_close(move |_, window, cx| {
             close_input.update(cx, |input, input_cx| {
@@ -2220,19 +2263,28 @@ fn indicator_selector(
             });
         })
         .p_0()
-        .content(move |content, _, cx| indicator_dialog_content(content, &app, &input, &theme, cx))
+        .content(move |content, _, cx| {
+            indicator_dialog_content(content, &app, &input, message.as_deref(), &theme, cx)
+        })
 }
 
 fn indicator_dialog_content(
     content: gpui_component::dialog::DialogContent,
     app: &Entity<TerminalApp>,
     input: &Entity<InputState>,
+    message: Option<&str>,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> gpui_component::dialog::DialogContent {
     let colors = theme.colors;
     let indicator_specs = chart_chrome::filter_indicator_specs(input.read(cx).value().as_ref());
     let result_count = indicator_specs.len();
+    let status = message.unwrap_or("OHLC-compatible").to_string();
+    let status_color = if message.is_some() {
+        colors.loss
+    } else {
+        colors.muted_foreground
+    };
     let rows = indicator_specs
         .into_iter()
         .enumerate()
@@ -2255,8 +2307,10 @@ fn indicator_dialog_content(
                 .cursor_pointer()
                 .hover(|row| row.bg(gpui_color(colors.accent)))
                 .on_click(move |_, window, cx| {
-                    row_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
-                    close_indicator_dialog(&row_input, window, cx);
+                    let added = row_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
+                    if added {
+                        close_indicator_dialog(&row_input, window, cx);
+                    }
                 })
                 .child(
                     div()
@@ -2284,8 +2338,11 @@ fn indicator_dialog_content(
                         .cursor_pointer()
                         .tab_stop(false)
                         .on_click(move |_, window, cx| {
-                            add_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
-                            close_indicator_dialog(&add_input, window, cx);
+                            let added =
+                                add_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
+                            if added {
+                                close_indicator_dialog(&add_input, window, cx);
+                            }
                             cx.stop_propagation();
                         }),
                 )
@@ -2307,24 +2364,36 @@ fn indicator_dialog_content(
                 .text_xs()
                 .text_color(gpui_color(colors.muted_foreground))
                 .child(format!("{result_count} native indicators"))
-                .child("OHLC-compatible"),
+                .child(div().text_color(gpui_color(status_color)).child(status)),
         )
-        .child(div().v_flex().gap_1().p_2().children(rows))
         .child(
             div()
-                .h(px(40.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_3()
-                .border_t_1()
-                .border_color(gpui_color(colors.border))
-                .text_xs()
-                .text_color(gpui_color(colors.muted_foreground))
-                .child("Click Add  ·  Esc Close")
-                .child("Publisher: Native"),
+                .v_flex()
+                .gap_1()
+                .p_2()
+                .max_h(px(480.0))
+                .overflow_y_scrollbar()
+                .children(rows),
         )
+        .child(indicator_dialog_footer(&colors))
+}
+
+fn indicator_dialog_footer(
+    colors: &axiusflow_design_system::ThemeColors,
+) -> impl IntoElement + use<> {
+    div()
+        .h(px(40.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_3()
+        .border_t_1()
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .text_color(gpui_color(colors.muted_foreground))
+        .child("Enter Add  ·  Esc Close")
+        .child("Publisher: Native")
 }
 
 fn indicator_dialog_header(
@@ -2387,10 +2456,11 @@ fn instrument_dialog_content(
                 symbol == &instrument.symbol && exchange == &instrument.exchange
             });
             let app = app.clone();
-            let label = instrument_menu_label(instrument);
+            let symbol = instrument.symbol.clone();
+            let detail = instrument_menu_detail(instrument);
             div()
                 .id(("instrument_dialog_row", index))
-                .h(px(38.0))
+                .min_h(px(48.0))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -2403,11 +2473,38 @@ fn instrument_dialog_content(
                     row.cursor_pointer()
                         .hover(|row| row.bg(gpui_color(colors.accent)))
                         .on_click(move |_, window, cx| {
-                            app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
-                            window.close_dialog(cx);
+                            let dispatched =
+                                app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
+                            if dispatched {
+                                window.close_dialog(cx);
+                            }
                         })
                 })
-                .child(div().flex_1().child(label))
+                .when(state.selection_pending, gpui::Styled::cursor_not_allowed)
+                .child(
+                    div()
+                        .size(px(24.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(gpui_color(colors.muted))
+                        .child(header_icon(HugeIcon::ExchangeIcon01)),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_0p5()
+                        .flex_1()
+                        .child(div().text_sm().child(symbol))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(gpui_color(colors.muted_foreground))
+                                .child(detail),
+                        ),
+                )
                 .children(
                     checked
                         .then(|| header_icon(HugeIcon::CheckmarkCircleIcon01).into_any_element()),
@@ -2440,21 +2537,25 @@ fn instrument_dialog_content(
                 .overflow_y_scrollbar()
                 .children(rows),
         )
-        .child(
-            div()
-                .h(px(40.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_3()
-                .border_t_1()
-                .border_color(gpui_color(colors.border))
-                .text_xs()
-                .text_color(gpui_color(colors.muted_foreground))
-                .child("Enter Search  ·  Esc Close")
-                .child("Rithmic Test catalog"),
-        )
+        .child(instrument_dialog_footer(&colors))
+}
+
+fn instrument_dialog_footer(
+    colors: &axiusflow_design_system::ThemeColors,
+) -> impl IntoElement + use<> {
+    div()
+        .h(px(40.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_3()
+        .border_t_1()
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .text_color(gpui_color(colors.muted_foreground))
+        .child("Enter Search  ·  Esc Close")
+        .child("Rithmic Test catalog")
 }
 
 fn instrument_dialog_header(
@@ -2529,10 +2630,17 @@ fn close_indicator_dialog(input: &Entity<InputState>, window: &mut Window, cx: &
     window.close_dialog(cx);
 }
 
-fn instrument_menu_label(
+fn instrument_menu_detail(
     instrument: &axiusflow_rithmic_protocol_adapter::SymbolSearchResult,
 ) -> String {
-    format!("{} / {}", instrument.symbol, instrument.exchange)
+    let mut details = vec![instrument.exchange.as_str()];
+    if let Some(instrument_type) = instrument.instrument_type.as_deref() {
+        details.push(instrument_type);
+    }
+    if let Some(expiration) = instrument.expiration_date.as_deref() {
+        details.push(expiration);
+    }
+    details.join(" · ")
 }
 
 fn connection_badge(
@@ -2629,12 +2737,24 @@ fn series_selector(
                     let series = *series;
                     let app = app.clone();
                     menu.item(
-                        PopupMenuItem::new(series.label())
-                            .checked(selected == Some(series))
-                            .disabled(pending)
-                            .on_click(move |_, _, cx| {
-                                app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
-                            }),
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .id(series.label())
+                                .w_full()
+                                .h_full()
+                                .mx_neg_2()
+                                .px_2()
+                                .role(Role::Label)
+                                .aria_label(series.label())
+                                .when(!pending, gpui::Styled::cursor_pointer)
+                                .when(pending, gpui::Styled::cursor_not_allowed)
+                                .child(series.label())
+                        })
+                        .checked(selected == Some(series))
+                        .disabled(pending)
+                        .on_click(move |_, _, cx| {
+                            app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
+                        }),
                     )
                 },
             )
@@ -2686,7 +2806,7 @@ fn feed_health_panel(
         .flex_col()
         .border_l_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.background))
+        .bg(gpui_color(colors.card))
         .children(rows.into_iter().map(move |(label, value)| {
             div()
                 .h(px(28.0))
@@ -3093,10 +3213,28 @@ fn subscribe_indicator_input(
     cx: &mut App,
 ) {
     let terminal = terminal.clone();
+    let input = input.clone();
     window
-        .subscribe(input, cx, move |_, _: &InputEvent, _, cx| {
-            terminal.update(cx, |_, cx| cx.notify());
-        })
+        .subscribe(
+            &input.clone(),
+            cx,
+            move |_, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let query = input.read(cx).value().to_string();
+                    let indicator = chart_chrome::filter_indicator_specs(&query)
+                        .first()
+                        .map(|spec| native_indicator(spec.kind));
+                    if let Some(indicator) = indicator {
+                        let added = terminal.update(cx, |app, cx| app.add_indicator(indicator, cx));
+                        if added {
+                            close_indicator_dialog(&input, window, cx);
+                        }
+                    }
+                } else {
+                    terminal.update(cx, |_, cx| cx.notify());
+                }
+            },
+        )
         .detach();
 }
 
@@ -3224,10 +3362,11 @@ mod tests {
         RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
         RithmicSessionRetirement, SidePanel, bounded_status_detail, catalog_rejection_domain,
         chart_status_detail, chart_surface_notice, connection_presentation,
-        default_rithmic_contract_index, duration_label, gpui_color, instrument_selector_label,
-        milli_rate, parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop,
+        default_rithmic_contract_index, duration_label, gpui_color, instrument_menu_detail,
+        instrument_selector_label, milli_rate, parse_rithmic_test_arguments,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        rithmic_production_subscription, rithmic_ready_action, series_selector_label,
+        should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -3553,6 +3692,23 @@ mod tests {
         assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
         assert!(controls.enabled(HeaderControls::LATEST));
+    }
+
+    #[test]
+    fn instrument_menu_detail_keeps_exchange_type_and_expiration_distinct() {
+        let instrument = SymbolSearchResult {
+            symbol: "MNQU6".to_string(),
+            exchange: "CME".to_string(),
+            name: Some("Micro E-mini Nasdaq-100".to_string()),
+            product_code: Some("MNQ".to_string()),
+            instrument_type: Some("Future".to_string()),
+            expiration_date: Some("2026-09".to_string()),
+        };
+
+        assert_eq!(
+            instrument_menu_detail(&instrument),
+            "CME · Future · 2026-09"
+        );
     }
 
     #[test]

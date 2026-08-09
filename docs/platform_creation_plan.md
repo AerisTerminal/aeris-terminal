@@ -526,7 +526,13 @@ both modes while retaining `#3e63dd` as the product primary. Interactive header
 chrome explicitly occludes the native title-bar drag hit region so Windows does
 not consume button presses. Enabled controls expose pointer cursors, disabled
 controls expose not-allowed cursors, and the drawing rail renders its legacy
-24/28 px tool glyph hierarchy inside fixed 32 px hit targets.
+24/28 px tool glyph hierarchy inside fixed 32 px hit targets. The native title
+bar now consumes the declared 44 px header token, the symbol pill and result
+rows expose exchange iconography and distinct contract metadata, short drawing
+rails scroll, and unavailable startup tools fail closed. DOM and feed-health
+panels use the named card surface. Indicator results are height-bounded, Enter
+adds the first filtered result, and rejected indicator or contract actions keep
+their palette open instead of appearing to succeed.
 
 The DOM and feed-health rail now uses the GPUI Components resizable-panel
 primitive rather than a fixed-width container. The chart and rail remain flush,
