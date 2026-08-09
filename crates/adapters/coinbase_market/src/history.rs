@@ -29,6 +29,7 @@ const REST_PORT: u16 = 443;
 const RESPONSE_BYTE_LIMIT: usize = 1_048_576;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const NETWORK_RETRY_PAUSE: Duration = Duration::from_millis(1);
 const ONE_SECOND_NANOS: i64 = 1_000_000_000;
 const ONE_MINUTE_SECONDS: i64 = 60;
 const MAXIMUM_PAGE_ITEMS: usize = 350;
@@ -807,6 +808,7 @@ pub(crate) fn coinbase_tls_config() -> Result<ClientConfig, String> {
 pub(crate) struct DeadlineTcpStream {
     stream: TcpStream,
     deadline: Instant,
+    next_read_at: Instant,
     stop: Option<Arc<AtomicBool>>,
 }
 
@@ -836,20 +838,36 @@ impl DeadlineTcpStream {
                 "Coinbase connection cancelled",
             ));
         }
-        remaining_until(self.deadline).map(|remaining| remaining.min(NETWORK_POLL_INTERVAL))
+        remaining_until(self.deadline)
+            .map(|remaining| remaining.min(NETWORK_POLL_INTERVAL))
+            .inspect_err(|_| thread::sleep(NETWORK_RETRY_PAUSE))
     }
 }
 
 impl Read for DeadlineTcpStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let now = Instant::now();
+        if now < self.next_read_at {
+            thread::sleep(self.next_read_at - now);
+        }
+        self.next_read_at = Instant::now() + NETWORK_RETRY_PAUSE;
         loop {
             self.prepare_read()?;
             match self.stream.read(buffer) {
+                Ok(0) if !buffer.is_empty() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Coinbase connection closed",
+                    ));
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) => {}
+                    ) =>
+                {
+                    thread::sleep(NETWORK_RETRY_PAUSE);
+                }
                 result => return result,
             }
         }
@@ -865,7 +883,10 @@ impl Write for DeadlineTcpStream {
                     if matches!(
                         error.kind(),
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) => {}
+                    ) =>
+                {
+                    thread::sleep(NETWORK_RETRY_PAUSE);
+                }
                 result => return result,
             }
         }
@@ -879,7 +900,10 @@ impl Write for DeadlineTcpStream {
                     if matches!(
                         error.kind(),
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) => {}
+                    ) =>
+                {
+                    thread::sleep(NETWORK_RETRY_PAUSE);
+                }
                 result => return result,
             }
         }
@@ -930,6 +954,7 @@ pub(crate) fn connect_coinbase_endpoint_cancellable(
                 return Ok(DeadlineTcpStream {
                     stream,
                     deadline,
+                    next_read_at: Instant::now(),
                     stop,
                 });
             }
@@ -1215,6 +1240,7 @@ mod tests {
         let mut stream = DeadlineTcpStream {
             stream,
             deadline: started + Duration::from_millis(60),
+            next_read_at: Instant::now(),
             stop: None,
         };
         let mut byte = [0_u8; 1];
@@ -1252,6 +1278,7 @@ mod tests {
         let mut stream = DeadlineTcpStream {
             stream,
             deadline: started + Duration::from_secs(1),
+            next_read_at: Instant::now(),
             stop: Some(stop),
         };
         let error = stream
@@ -1260,6 +1287,28 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
         assert!(started.elapsed() < Duration::from_millis(500));
         canceller.join().expect("join cancellation fixture");
+        server.join().expect("join loopback fixture");
+    }
+
+    #[test]
+    fn closed_socket_reports_eof_instead_of_zero_byte_progress() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
+        let address = listener.local_addr().expect("read loopback address");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept loopback fixture");
+            drop(stream);
+        });
+        let stream = TcpStream::connect(address).expect("connect loopback fixture");
+        let mut stream = DeadlineTcpStream {
+            stream,
+            deadline: Instant::now() + Duration::from_secs(1),
+            next_read_at: Instant::now(),
+            stop: None,
+        };
+        let error = stream
+            .read(&mut [0_u8; 1])
+            .expect_err("closed connection reports EOF");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
         server.join().expect("join loopback fixture");
     }
 

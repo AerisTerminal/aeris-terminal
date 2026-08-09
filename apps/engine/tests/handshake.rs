@@ -8,12 +8,13 @@ use std::{
 };
 
 use axiusflow_engine::{
-    EngineClient, EngineState, bind_listener, load_or_create_installation_token, serve_client,
+    EngineClient, EnginePublicationHub, EngineState, bind_listener,
+    load_or_create_installation_token, serve_client, serve_client_with_publications,
     serve_client_with_state,
 };
 use axiusflow_local_engine_protocol::{
-    ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
-    encode_envelope, envelope,
+    ChartProvenance, ChartSnapshot, ClientHello, ClientKind, EngineFaultCode, Envelope,
+    EnvelopeDecoder, PROTOCOL_VERSION, ViewKind, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::CredentialVault;
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
@@ -168,6 +169,49 @@ fn authenticated_client_restores_engine_owned_workspace() {
     assert_eq!(workspace.market, "BTC-USD");
     assert_eq!(workspace.interval_seconds, 60);
     drop(client);
+    server.join().expect("join server");
+}
+
+#[test]
+fn session_subscription_receives_retained_covering_chart_state() {
+    let name = unique_name();
+    let listener = bind_listener(&name).expect("bind engine listener");
+    let token = [13_u8; 32];
+    let state = EngineState::default();
+    let publications = EnginePublicationHub::default();
+    let covering = envelope::Payload::ChartSnapshot(ChartSnapshot {
+        market: "BTC-USD".to_string(),
+        interval_seconds: 60,
+        engine_epoch: 101,
+        selection_generation: 1,
+        provider_generation: 2,
+        payload: vec![1, 2, 3],
+        provenance: ChartProvenance::LocalCache as i32,
+    });
+    publications.publish_covering(ViewKind::Chart, std::slice::from_ref(&covering));
+    let server_publications = publications.clone();
+    let server = thread::spawn(move || {
+        let stream = listener.accept().expect("accept client");
+        let _ = serve_client_with_publications(stream, &token, 101, &state, &server_publications);
+    });
+    let client = EngineClient::connect(&name, &token).expect("connect engine client");
+    let mut stream = client
+        .subscribe_view(ViewKind::Session)
+        .expect("subscribe session");
+    assert_eq!(stream.receive().expect("receive retained chart"), covering);
+    drop(stream);
+    publications.publish_transient(
+        ViewKind::Chart,
+        &envelope::Payload::ChartSnapshot(ChartSnapshot {
+            market: "BTC-USD".to_string(),
+            interval_seconds: 60,
+            engine_epoch: 101,
+            selection_generation: 1,
+            provider_generation: 3,
+            payload: vec![4],
+            provenance: ChartProvenance::LiveProvider as i32,
+        }),
+    );
     server.join().expect("join server");
 }
 

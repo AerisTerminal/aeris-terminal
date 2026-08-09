@@ -9,12 +9,12 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(untagged)]
 #[allow(dead_code)]
-pub(crate) enum UnsignedInteger {
+pub(crate) enum UnsignedInteger<'a> {
     Number(u64),
-    String(String),
+    String(&'a str),
 }
 
-impl UnsignedInteger {
+impl UnsignedInteger<'_> {
     #[cfg(test)]
     fn value(&self) -> Option<u64> {
         match self {
@@ -25,34 +25,42 @@ impl UnsignedInteger {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ChannelMessage {
-    pub(crate) channel: String,
-    pub(crate) timestamp: String,
+pub(crate) struct ChannelMessage<'a> {
+    #[serde(borrow)]
+    pub(crate) channel: &'a str,
+    #[serde(borrow)]
+    pub(crate) timestamp: &'a str,
     pub(crate) sequence_num: u64,
-    #[serde(default)]
-    pub(crate) events: Vec<ChannelEvent>,
+    #[serde(default, borrow)]
+    pub(crate) events: Vec<ChannelEvent<'a>>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ChannelEvent {
+pub(crate) struct ChannelEvent<'a> {
     #[serde(rename = "type", default)]
     #[allow(dead_code)]
-    pub(crate) event_type: Option<String>,
-    #[serde(default)]
-    pub(crate) trades: Vec<TradeMessage>,
-    #[serde(default)]
+    pub(crate) event_type: Option<&'a str>,
+    #[serde(default, borrow)]
+    pub(crate) trades: Vec<TradeMessage<'a>>,
+    #[serde(default, borrow)]
     #[allow(dead_code)]
-    pub(crate) heartbeat_counter: Option<UnsignedInteger>,
+    pub(crate) heartbeat_counter: Option<UnsignedInteger<'a>>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct TradeMessage {
-    pub(crate) trade_id: String,
-    pub(crate) product_id: String,
-    pub(crate) price: String,
-    pub(crate) size: String,
-    pub(crate) side: String,
-    pub(crate) time: String,
+pub(crate) struct TradeMessage<'a> {
+    #[serde(borrow)]
+    pub(crate) trade_id: &'a str,
+    #[serde(borrow)]
+    pub(crate) product_id: &'a str,
+    #[serde(borrow)]
+    pub(crate) price: &'a str,
+    #[serde(borrow)]
+    pub(crate) size: &'a str,
+    #[serde(borrow)]
+    pub(crate) side: &'a str,
+    #[serde(borrow)]
+    pub(crate) time: &'a str,
 }
 
 /// Builds one subscription frame for the public channels.

@@ -3,6 +3,7 @@
 mod assets;
 mod chart_chrome;
 mod readiness_conformance;
+mod resident_market_worker;
 mod rithmic_history;
 mod rithmic_live_chart;
 mod rithmic_market_worker;
@@ -21,7 +22,7 @@ use axiusflow_coinbase_coordinator::market_worker::{
 };
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
-use axiusflow_market_data::ChartInterval;
+use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::{FeedConnectionState, FeedDiagnosticsSnapshot};
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
@@ -41,7 +42,6 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
-    spinner::Spinner,
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_hugeicons::{HugeiconsAssets, IconName as HugeIcon};
@@ -613,6 +613,15 @@ fn series_selector_label(
         .to_string()
 }
 
+fn chart_interval_for_seconds(seconds: u32) -> Option<ChartInterval> {
+    ChartInterval::ALL.iter().copied().find(|interval| {
+        matches!(
+            interval.aggregation(),
+            ChartAggregation::FixedSeconds(interval_seconds) if interval_seconds.get() == seconds
+        ) || (*interval == ChartInterval::Month1 && seconds == 30 * 24 * 60 * 60)
+    })
+}
+
 #[derive(Clone, Copy)]
 struct HeaderControls(u8);
 
@@ -1042,6 +1051,25 @@ impl TerminalApp {
         mut publication: MarketWorkerPublication,
         cx: &mut Context<Self>,
     ) {
+        if self.provider == TerminalProvider::Coinbase
+            && let ReplayStreamUpdate::Snapshot(snapshot) = &publication.update
+        {
+            if let Some(product) = self
+                .coinbase_products
+                .iter()
+                .find(|product| {
+                    product.instrument_id == snapshot.instrument().instrument_id.as_str()
+                })
+                .cloned()
+            {
+                self.coinbase_product = Some(product);
+            }
+            if let Some(interval) =
+                chart_interval_for_seconds(snapshot.bar_definition().interval_seconds)
+            {
+                self.coinbase_interval = interval;
+            }
+        }
         let ui_diagnostics = publication.ui_diagnostics.take();
         self.worker_label = publication.worker_label;
         self.subscription_id = publication.subscription_id;
@@ -2735,7 +2763,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
                 .flex()
                 .items_center()
                 .gap_2()
-                .children(loading.then(|| Spinner::new().small().color(gpui_color(tone))))
+                .children(loading.then(|| div().size(px(6.0)).rounded_full().bg(gpui_color(tone))))
                 .child(notice.label),
         )
         .children((!loading).then_some(notice.detail).flatten().map(|detail| {
@@ -2963,11 +2991,6 @@ fn instrument_selector(
         .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface_secondary))
         .text_color(gpui_color(theme.colors.foreground))
-        .hover(|style| {
-            style
-                .bg(gpui_color(theme.colors.interactive_neutral_hover_bg))
-                .text_color(gpui_color(theme.colors.interactive_neutral_hover_fg))
-        })
         .h(px(28.0))
         .px_3()
         .rounded(px(f32::from(
@@ -3486,11 +3509,6 @@ fn chrome_button_style(
             button
                 .bg(gpui_color(colors.interactive_neutral_active_bg))
                 .text_color(gpui_color(colors.interactive_neutral_active_fg))
-        })
-        .hover(|style| {
-            style
-                .bg(gpui_color(colors.interactive_neutral_hover_bg))
-                .text_color(gpui_color(colors.interactive_neutral_hover_fg))
         })
 }
 
@@ -4062,18 +4080,6 @@ fn terminal_root(
     cx.new(|cx| Root::new(terminal, window, cx))
 }
 
-fn default_coinbase_history_root() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map_or_else(
-        || PathBuf::from("local-data").join("coinbase-history"),
-        |root| {
-            PathBuf::from(root)
-                .join("Axiusflow")
-                .join("market-history")
-                .join("coinbase")
-        },
-    )
-}
-
 fn coinbase_cli_worker(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> (MarketWorkerStartup, MarketDataWorker) {
@@ -4160,14 +4166,7 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
             std::process::exit(2);
         }
     } else {
-        MarketDataWorker::start_coinbase(
-            "BTC-USD".to_string(),
-            default_coinbase_history_root(),
-            std::thread::current().id(),
-            false,
-            true,
-        )
-        .expect("the default Coinbase public market worker starts")
+        resident_market_worker::start()
     };
     Some(worker)
 }

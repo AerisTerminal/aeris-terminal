@@ -14,7 +14,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 /// Coarse reason that a direct Coinbase generation became unusable.
@@ -358,7 +357,7 @@ impl CoinbaseProviderDriver {
         let task: Arc<SessionTask> = Arc::new(move |_config, generation, stop, _emitter| {
             let _ = started_tx.try_send(generation);
             while !stop.load(Ordering::Acquire) {
-                thread::park_timeout(Duration::from_millis(1));
+                thread::park_timeout(std::time::Duration::from_millis(1));
             }
             let _ = stopped_tx.try_send(generation);
         });

@@ -1137,6 +1137,54 @@ impl MarketDataWorker {
         )
     }
 
+    /// Starts Coinbase with explicit Level 2 subscription control.
+    ///
+    /// Warm resident engines disable depth until a DOM consumer exists.
+    ///
+    /// # Errors
+    /// Returns an error if provider configuration, storage, or worker startup fails.
+    pub fn start_coinbase_with_depth(
+        product_id: String,
+        history_root: PathBuf,
+        ui_thread: thread::ThreadId,
+        detailed_diagnostics: bool,
+        fetch_catalog: bool,
+        include_level2: bool,
+    ) -> Result<(MarketWorkerStartup, Self), String> {
+        crate::live_market_worker::start_with_depth(
+            product_id,
+            history_root,
+            ui_thread,
+            detailed_diagnostics,
+            fetch_catalog,
+            include_level2,
+        )
+    }
+
+    /// Starts Coinbase from an exact validated catalog product.
+    ///
+    /// # Errors
+    /// Returns an error if product metadata, storage, or worker startup fails.
+    pub fn start_coinbase_product(
+        product: CoinbaseSpotProduct,
+        interval: ChartInterval,
+        history_root: PathBuf,
+        ui_thread: thread::ThreadId,
+        detailed_diagnostics: bool,
+        fetch_catalog: bool,
+        include_level2: bool,
+    ) -> Result<(MarketWorkerStartup, Self), String> {
+        crate::live_market_worker::start_product(
+            product,
+            interval,
+            history_root,
+            ui_thread,
+            detailed_diagnostics,
+            fetch_catalog,
+            include_level2,
+        )
+    }
+
     #[must_use]
     pub const fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,

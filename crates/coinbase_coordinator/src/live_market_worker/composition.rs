@@ -146,11 +146,13 @@ pub(super) fn open_worker(
     inbox_tx: &SyncSender<WorkerInboxEvent>,
     provider_wake_pending: &Arc<AtomicBool>,
     detailed_diagnostics: bool,
+    include_level2: bool,
 ) -> Result<OpenedWorker, String> {
     let vault = NativeCredentialVault::new(VAULT_SERVICE).map_err(|error| error.to_string())?;
     let segment_key = load_segment_key(&vault)?;
     let provider_config = CoinbaseConfig::try_new(vec![profile.product_id.clone()])
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .with_level2(include_level2);
     let provider_inbox_tx = inbox_tx.clone();
     let wake_pending = Arc::clone(provider_wake_pending);
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {

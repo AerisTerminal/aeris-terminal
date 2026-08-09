@@ -11,6 +11,7 @@ pub const MAXIMUM_MESSAGE_BYTES: usize = 8 * 1_024 * 1_024;
 pub struct CoinbaseConfig {
     pub products: Vec<String>,
     pub maximum_message_bytes: usize,
+    pub include_level2: bool,
 }
 
 impl CoinbaseConfig {
@@ -38,7 +39,15 @@ impl CoinbaseConfig {
         Ok(Self {
             products,
             maximum_message_bytes: MAXIMUM_MESSAGE_BYTES,
+            include_level2: true,
         })
+    }
+
+    /// Enables or disables the high-rate Level 2 channel for this session.
+    #[must_use]
+    pub const fn with_level2(mut self, include_level2: bool) -> Self {
+        self.include_level2 = include_level2;
+        self
     }
 }
 

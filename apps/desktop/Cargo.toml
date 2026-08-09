@@ -15,8 +15,11 @@ axiusflow_design_system = { path = "../../crates/ui/design_system" }
 axiusflow_desktop_history = { path = "../../crates/desktop_history" }
 axiusflow_desktop_provider_runtime = { path = "../../crates/desktop_provider_runtime" }
 axiusflow_desktop_storage = { path = "../../crates/desktop_storage" }
+axiusflow_engine = { path = "../engine" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }
+axiusflow_local_engine_protocol = { path = "../../crates/local_engine_protocol" }
+axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
 axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
 axiusflow_provider_history = { path = "../../crates/provider_history" }

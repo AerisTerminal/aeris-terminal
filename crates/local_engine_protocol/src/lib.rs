@@ -15,8 +15,8 @@ pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
 pub use fence::Fence;
 pub use messages::{
-    ActivateExistingUi, CatalogEntry, CatalogSnapshot, ChartDelta, ChartSnapshot, ClientHello,
-    ClientKind, DomSnapshot, EngineFaultCode, EngineReady, Envelope, Fault, Goodbye,
+    ActivateExistingUi, CatalogEntry, CatalogSnapshot, ChartDelta, ChartProvenance, ChartSnapshot,
+    ClientHello, ClientKind, DomSnapshot, EngineFaultCode, EngineReady, Envelope, Fault, Goodbye,
     ProviderConnectionState, ProviderState, ResourceMode, RestoreWorkspace, SetSelection,
     SetWatchlist, SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, envelope,
 };

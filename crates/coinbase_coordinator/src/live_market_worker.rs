@@ -21,14 +21,15 @@ use axiusflow_application::{
 use axiusflow_coinbase_market_adapter::{
     CoinbaseAggregatedBar, CoinbaseDesktopEventError, CoinbaseDesktopMarketEvent,
     CoinbaseHttpsHistoryTransport, CoinbaseInterval, CoinbaseLevel2Book, CoinbaseLevel2Outcome,
-    CoinbaseProductCatalog, CoinbaseProviderEvents, aggregate_coinbase_bars, coinbase_depth_limit,
+    CoinbaseProductCatalog, CoinbaseProviderEvents, CoinbaseSpotProduct, aggregate_coinbase_bars,
+    coinbase_depth_limit,
 };
 use axiusflow_desktop_provider_runtime::{
     DesktopMarketWorkerError, DesktopProviderError, DesktopProviderState, SessionGeneration,
 };
 use axiusflow_desktop_storage::SegmentEncryptionKey;
 use axiusflow_instruments::{InstrumentPrecision, InstrumentRevision};
-use axiusflow_market_data::{BarDefinition, MarketEvent};
+use axiusflow_market_data::{BarDefinition, ChartInterval, MarketEvent};
 use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
 use std::{
     collections::VecDeque,
@@ -109,6 +110,7 @@ struct WorkerThreadInput {
     provider_wake_pending: Arc<AtomicBool>,
     ui_diagnostics_rx: UiDiagnosticsReceiver,
     detailed_diagnostics: bool,
+    include_level2: bool,
     selection_sequence: Arc<AtomicU64>,
 }
 
@@ -156,6 +158,28 @@ pub fn start(
     detailed_diagnostics: bool,
     fetch_catalog: bool,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+    start_with_depth(
+        product_id,
+        history_root,
+        ui_thread,
+        detailed_diagnostics,
+        fetch_catalog,
+        true,
+    )
+}
+
+/// Starts Coinbase with explicit control over the high-rate Level 2 channel.
+///
+/// # Errors
+/// Returns an error if product configuration, storage, or worker startup fails.
+pub fn start_with_depth(
+    product_id: String,
+    history_root: PathBuf,
+    ui_thread: ThreadId,
+    detailed_diagnostics: bool,
+    fetch_catalog: bool,
+    include_level2: bool,
+) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let profile = product_profile(product_id)?;
     start_with_profile(
         profile,
@@ -163,6 +187,30 @@ pub fn start(
         ui_thread,
         detailed_diagnostics,
         fetch_catalog,
+        include_level2,
+    )
+}
+
+/// Starts Coinbase from a validated catalog product with explicit Level 2 control.
+///
+/// # Errors
+/// Returns an error if product metadata, storage, or worker startup fails.
+pub fn start_product(
+    product: CoinbaseSpotProduct,
+    interval: ChartInterval,
+    history_root: PathBuf,
+    ui_thread: ThreadId,
+    detailed_diagnostics: bool,
+    fetch_catalog: bool,
+    include_level2: bool,
+) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+    start_with_profile(
+        product_profile_from_spot(product, interval),
+        history_root,
+        ui_thread,
+        detailed_diagnostics,
+        fetch_catalog,
+        include_level2,
     )
 }
 
@@ -172,6 +220,7 @@ fn start_with_profile(
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
     fetch_catalog: bool,
+    include_level2: bool,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let startup = loading_startup(&profile);
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
@@ -220,6 +269,7 @@ fn start_with_profile(
                 provider_wake_pending,
                 ui_diagnostics_rx,
                 detailed_diagnostics,
+                include_level2,
                 selection_sequence: worker_selection_sequence,
             }) {
                 let _ = error_tx.send(MarketWorkerMessage::State {
@@ -273,6 +323,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         provider_wake_pending,
         ui_diagnostics_rx,
         detailed_diagnostics,
+        include_level2,
         selection_sequence,
     } = input;
     ensure_history_parent(&history_root)?;
@@ -300,6 +351,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
             &inbox_tx,
             &provider_wake_pending,
             detailed_diagnostics,
+            include_level2,
         ) {
             Ok(opened) => opened,
             Err(error) => break Err(error),

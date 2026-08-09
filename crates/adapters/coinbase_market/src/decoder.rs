@@ -129,7 +129,7 @@ impl CoinbaseDecoder {
         &mut self,
         bytes: &[u8],
     ) -> Result<(Vec<CanonicalTrade>, bool, bool, bool), CoinbaseError> {
-        let message: ChannelMessage = serde_json::from_slice(bytes).map_err(|error| {
+        let message: ChannelMessage<'_> = serde_json::from_slice(bytes).map_err(|error| {
             let channel = serde_json::from_slice::<serde_json::Value>(bytes)
                 .ok()
                 .and_then(|value| value.get("channel")?.as_str().map(str::to_owned))
@@ -157,19 +157,19 @@ impl CoinbaseDecoder {
             }
         }
         self.next_trade_sequence_num = message.sequence_num.checked_add(1);
-        let provider_timestamp = parse_rfc3339_nanos(&message.timestamp)?;
+        let provider_timestamp = parse_rfc3339_nanos(message.timestamp)?;
         let mut trades = Vec::new();
         for event in &message.events {
             for trade in &event.trades {
-                let maker_side_buy = match trade.side.as_str() {
+                let maker_side_buy = match trade.side {
                     "BUY" => true,
                     "SELL" => false,
                     _ => return Err(CoinbaseError::InvalidMessage),
                 };
-                let price = FixedPointValue::parse(&trade.price)?;
-                let size = FixedPointValue::parse(&trade.size)?;
-                let trade_time_unix_nanos = parse_rfc3339_nanos(&trade.time)?;
-                let dedup_key = (trade.product_id.clone(), trade.trade_id.clone());
+                let price = FixedPointValue::parse(trade.price)?;
+                let size = FixedPointValue::parse(trade.size)?;
+                let trade_time_unix_nanos = parse_rfc3339_nanos(trade.time)?;
+                let dedup_key = (trade.product_id.to_string(), trade.trade_id.to_string());
                 if !self.dedup_set.insert(dedup_key.clone()) {
                     self.metrics.duplicates_dropped += 1;
                     continue;
@@ -181,8 +181,8 @@ impl CoinbaseDecoder {
                     self.dedup_set.remove(&oldest);
                 }
                 trades.push(CanonicalTrade {
-                    product_id: trade.product_id.clone(),
-                    trade_id: trade.trade_id.clone(),
+                    product_id: trade.product_id.to_string(),
+                    trade_id: trade.trade_id.to_string(),
                     price,
                     size,
                     maker_side_buy,

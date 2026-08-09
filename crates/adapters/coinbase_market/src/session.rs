@@ -94,7 +94,12 @@ impl CoinbaseSession {
         let (mut socket, _response) =
             tungstenite::client_tls_with_config(WEBSOCKET_ENDPOINT, tcp, None, Some(connector))
                 .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
-        for channel in ["heartbeats", "market_trades", "level2"] {
+        let channels = if self.config.include_level2 {
+            &["heartbeats", "market_trades", "level2"][..]
+        } else {
+            &["heartbeats", "market_trades"][..]
+        };
+        for channel in channels {
             socket
                 .send(Message::Text(
                     subscribe_frame(&self.config.products, channel).into(),
@@ -305,6 +310,7 @@ impl CoinbaseConnection {
                     if deadline.is_some_and(|limit| Instant::now() >= limit) {
                         break;
                     }
+                    std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(error) => return Err(CoinbaseError::Transport(error.to_string())),
             }

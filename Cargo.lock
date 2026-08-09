@@ -773,8 +773,11 @@ dependencies = [
  "axiusflow_desktop_history",
  "axiusflow_desktop_provider_runtime",
  "axiusflow_desktop_storage",
+ "axiusflow_engine",
  "axiusflow_instruments",
+ "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
+ "axiusflow_market_protocol_adapter",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
@@ -839,8 +842,13 @@ dependencies = [
 name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_application",
  "axiusflow_coinbase_coordinator",
+ "axiusflow_coinbase_market_adapter",
  "axiusflow_local_engine_protocol",
+ "axiusflow_market_data",
+ "axiusflow_market_protocol_adapter",
+ "axiusflow_observability",
  "axiusflow_platform_runtime",
  "getrandom 0.4.3",
  "interprocess",

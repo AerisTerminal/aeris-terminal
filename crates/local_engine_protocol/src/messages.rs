@@ -37,6 +37,8 @@ pub enum ViewKind {
     Diagnostics = 2,
     /// Instrument catalog view. Tag 3.
     Catalog = 3,
+    /// Multiplexed interactive UI session. Tag 4.
+    Session = 4,
 }
 
 /// Provider connection state machine.
@@ -53,6 +55,18 @@ pub enum ProviderConnectionState {
     Rejected = 3,
     /// Engine is shutting the connection down. Tag 4.
     ShuttingDown = 4,
+}
+
+/// Truthful origin of a chart publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum ChartProvenance {
+    /// Persisted authenticated local history. Tag 0.
+    LocalCache = 0,
+    /// Current provider history or streaming data. Tag 1.
+    LiveProvider = 1,
+    /// Deterministic data used only by explicit test tooling. Tag 2.
+    EmbeddedFixture = 2,
 }
 
 /// Machine-readable fault classification shared by protocol errors and faults.
@@ -212,6 +226,12 @@ pub struct CatalogEntry {
     /// Quote currency code. Tag 3.
     #[prost(string, tag = "3")]
     pub quote_currency: String,
+    /// Decimal places required for exact prices. Tag 4.
+    #[prost(uint32, tag = "4")]
+    pub price_scale: u32,
+    /// Decimal places required for exact quantities. Tag 5.
+    #[prost(uint32, tag = "5")]
+    pub quantity_scale: u32,
 }
 
 /// Full chart snapshot. `payload` is coordinator-encoded bars and is opaque to
@@ -236,6 +256,9 @@ pub struct ChartSnapshot {
     /// Coordinator-encoded bars. Tag 6.
     #[prost(bytes = "vec", tag = "6")]
     pub payload: Vec<u8>,
+    /// Truthful snapshot origin as a [`ChartProvenance`] value. Tag 7.
+    #[prost(enumeration = "ChartProvenance", tag = "7")]
+    pub provenance: i32,
 }
 
 /// Incremental chart update; same fencing and opacity rules as [`ChartSnapshot`].
@@ -259,6 +282,9 @@ pub struct ChartDelta {
     /// Coordinator-encoded bars. Tag 6.
     #[prost(bytes = "vec", tag = "6")]
     pub payload: Vec<u8>,
+    /// Truthful update origin as a [`ChartProvenance`] value. Tag 7.
+    #[prost(enumeration = "ChartProvenance", tag = "7")]
+    pub provenance: i32,
 }
 
 /// Depth-of-market snapshot; `payload` is coordinator-encoded and opaque.

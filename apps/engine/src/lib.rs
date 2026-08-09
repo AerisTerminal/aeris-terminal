@@ -1,12 +1,15 @@
 //! Resident engine process boundary and authenticated local sessions.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -14,7 +17,7 @@ use std::{
 use axiusflow_local_engine_protocol::{
     ClientHello, ClientKind, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault,
     Goodbye, PROTOCOL_VERSION, ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist,
-    WorkspaceState, encode_envelope, envelope,
+    SubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
@@ -30,6 +33,105 @@ pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
+const PUBLICATION_SUBSCRIBER_CAPACITY: usize = 128;
+type SelectionCallback = Arc<dyn Fn(WorkspaceState) + Send + Sync>;
+
+/// Bounded latest-state fan-out shared by the engine runtime and authenticated clients.
+#[derive(Clone, Default)]
+pub struct EnginePublicationHub {
+    inner: Arc<Mutex<PublicationHubState>>,
+}
+
+#[derive(Default)]
+struct PublicationHubState {
+    retained: BTreeMap<i32, Vec<envelope::Payload>>,
+    subscribers: Vec<(ViewKind, SyncSender<envelope::Payload>)>,
+}
+
+impl EnginePublicationHub {
+    /// Publishes a view update and retains the latest covering state for instant attachment.
+    pub fn publish(&self, view: ViewKind, payload: &envelope::Payload) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retained.insert(view as i32, vec![payload.clone()]);
+        state.subscribers.retain(|(subscribed_view, sender)| {
+            if *subscribed_view != view && *subscribed_view != ViewKind::Session {
+                return true;
+            }
+            match sender.try_send(payload.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+            }
+        });
+    }
+
+    /// Fans out an incremental update without replacing the retained covering state.
+    pub fn publish_transient(&self, view: ViewKind, payload: &envelope::Payload) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.subscribers.retain(|(subscribed_view, sender)| {
+            if *subscribed_view != view && *subscribed_view != ViewKind::Session {
+                return true;
+            }
+            match sender.try_send(payload.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+            }
+        });
+    }
+
+    /// Atomically replaces and publishes a multi-frame covering state such as a catalog.
+    pub fn publish_covering(&self, view: ViewKind, payloads: &[envelope::Payload]) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retained.insert(view as i32, payloads.to_owned());
+        state.subscribers.retain(|(subscribed_view, sender)| {
+            if *subscribed_view != view && *subscribed_view != ViewKind::Session {
+                return true;
+            }
+            payloads
+                .iter()
+                .all(|payload| match sender.try_send(payload.clone()) {
+                    Ok(()) => true,
+                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+                })
+        });
+    }
+
+    fn subscribe(&self, view: ViewKind) -> Receiver<envelope::Payload> {
+        let (sender, receiver) = mpsc::sync_channel(PUBLICATION_SUBSCRIBER_CAPACITY);
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if view == ViewKind::Session {
+            for retained_view in [
+                ViewKind::Catalog,
+                ViewKind::Diagnostics,
+                ViewKind::Chart,
+                ViewKind::Dom,
+            ] {
+                if let Some(retained) = state.retained.get(&(retained_view as i32)) {
+                    for payload in retained {
+                        let _ = sender.try_send(payload.clone());
+                    }
+                }
+            }
+        } else if let Some(retained) = state.retained.get(&(view as i32)) {
+            for payload in retained {
+                let _ = sender.try_send(payload.clone());
+            }
+        }
+        state.subscribers.push((view, sender));
+        receiver
+    }
+}
 
 /// Loads the installation credential from the native vault, creating it once.
 ///
@@ -67,10 +169,11 @@ fn redacted_vault_error<E>(_error: E) -> String {
 }
 
 /// Shared resident-engine state visible to authenticated clients.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EngineState {
     workspace: Arc<Mutex<WorkspaceState>>,
     workspace_root: Option<Arc<PathBuf>>,
+    selection_callback: Arc<Mutex<Option<SelectionCallback>>>,
 }
 
 impl Default for EngineState {
@@ -78,6 +181,7 @@ impl Default for EngineState {
         Self {
             workspace: Arc::new(Mutex::new(default_workspace())),
             workspace_root: None,
+            selection_callback: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -94,6 +198,7 @@ impl EngineState {
         let state = Self {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
+            selection_callback: Arc::new(Mutex::new(None)),
         };
         if state.workspace().workspace_revision == 0 {
             state.persist(&state.workspace())?;
@@ -108,6 +213,14 @@ impl EngineState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Installs the resident market runtime's nonblocking selection callback.
+    pub fn set_selection_callback(&self, callback: SelectionCallback) {
+        *self
+            .selection_callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(callback);
     }
 
     fn apply_selection(&self, selection: SetSelection) -> Result<WorkspaceState, String> {
@@ -125,6 +238,15 @@ impl EngineState {
         validate_workspace(&candidate)?;
         self.persist(&candidate)?;
         *workspace = candidate.clone();
+        drop(workspace);
+        if let Some(callback) = self
+            .selection_callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            callback(candidate.clone());
+        }
         Ok(candidate)
     }
 
@@ -356,12 +478,44 @@ impl EngineClient {
         self.receive_workspace()
     }
 
+    /// Converts this authenticated connection into a blocking view stream.
+    ///
+    /// Use a separate client connection for commands so live publications can never
+    /// head-of-line block workspace mutations.
+    ///
+    /// # Errors
+    /// Returns an error when the subscription request cannot be sent.
+    pub fn subscribe_view(mut self, view: ViewKind) -> Result<EngineViewStream, String> {
+        self.connection
+            .send(envelope::Payload::SubscribeView(SubscribeView {
+                view: view as i32,
+            }))?;
+        Ok(EngineViewStream {
+            connection: self.connection,
+        })
+    }
+
     fn receive_workspace(&mut self) -> Result<WorkspaceState, String> {
         match self.connection.receive()? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected workspace reply".to_string()),
         }
+    }
+}
+
+/// Blocking authenticated stream for one bounded engine view.
+pub struct EngineViewStream {
+    connection: FramedConnection,
+}
+
+impl EngineViewStream {
+    /// Receives the next publication for the subscribed view.
+    ///
+    /// # Errors
+    /// Returns an error when the engine disconnects or sends an invalid frame.
+    pub fn receive(&mut self) -> Result<envelope::Payload, String> {
+        self.connection.receive()
     }
 }
 
@@ -539,6 +693,86 @@ pub fn serve_client_with_state(
         workspace_revision: state.workspace().workspace_revision,
     }))?;
     serve_authenticated_session(&mut connection, state)
+}
+
+/// Serves one client with workspace commands and bounded view subscriptions.
+///
+/// # Errors
+/// Returns an error for authentication, transport, framing, or malformed requests.
+pub fn serve_client_with_publications(
+    stream: LocalSocketStream,
+    installation_token: &[u8],
+    engine_epoch: u64,
+    state: &EngineState,
+    publications: &EnginePublicationHub,
+) -> Result<(), String> {
+    if installation_token.len() != INSTALLATION_TOKEN_BYTES {
+        return Err("installation credential has an invalid length".to_string());
+    }
+    let mut connection = FramedConnection::new(stream)?;
+    let envelope::Payload::ClientHello(hello) = connection.receive()? else {
+        return Err("client hello must be the first engine message".to_string());
+    };
+    if ClientKind::try_from(hello.client_kind).is_err() {
+        return Err("client kind is invalid".to_string());
+    }
+    if !constant_time_equals(&hello.installation_token, installation_token) {
+        connection.send(envelope::Payload::Fault(Fault {
+            code: EngineFaultCode::Unauthenticated as i32,
+            redacted_detail: "local engine authentication failed".to_string(),
+        }))?;
+        return Ok(());
+    }
+    connection.send(envelope::Payload::EngineReady(EngineReady {
+        protocol_version: PROTOCOL_VERSION,
+        engine_epoch,
+        workspace_revision: state.workspace().workspace_revision,
+    }))?;
+    serve_authenticated_session_with_publications(&mut connection, state, publications)
+}
+
+fn serve_authenticated_session_with_publications(
+    connection: &mut FramedConnection,
+    state: &EngineState,
+    publications: &EnginePublicationHub,
+) -> Result<(), String> {
+    loop {
+        let payload = match connection.receive() {
+            Ok(payload) => payload,
+            Err(error) if error == "local engine connection closed" => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        match payload {
+            envelope::Payload::RestoreWorkspace(_) => {
+                connection.send(envelope::Payload::WorkspaceState(state.workspace()))?;
+            }
+            envelope::Payload::SetSelection(selection) => {
+                apply_selection(state, selection, connection)?;
+            }
+            envelope::Payload::SetWatchlist(watchlist) => {
+                apply_watchlist(state, watchlist, connection)?;
+            }
+            envelope::Payload::SubscribeView(subscription) => {
+                let view = ViewKind::try_from(subscription.view)
+                    .map_err(|_| "engine view subscription is invalid".to_string())?;
+                let receiver = publications.subscribe(view);
+                while let Ok(publication) = receiver.recv() {
+                    connection.send(publication)?;
+                }
+                return Ok(());
+            }
+            envelope::Payload::Goodbye(_) => {
+                connection.send(envelope::Payload::Goodbye(Goodbye {
+                    reason: "client session closed".to_string(),
+                }))?;
+                return Ok(());
+            }
+            _ => connection.send(envelope::Payload::Fault(Fault {
+                code: EngineFaultCode::MalformedMessage as i32,
+                redacted_detail: "message is invalid in the current engine state".to_string(),
+            }))?,
+        }
+    }
 }
 
 fn serve_authenticated_session(

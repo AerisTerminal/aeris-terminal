@@ -1,10 +1,10 @@
 use axiusflow_local_engine_protocol::{
     ActivateExistingUi, CatalogEntry, CatalogReassembler, CatalogSnapshot, ChartDelta,
-    ChartSnapshot, ClientHello, ClientKind, DomSnapshot, EngineFaultCode, EngineReady, Envelope,
-    EnvelopeDecoder, Fault, Fence, Goodbye, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError,
-    ProviderConnectionState, ProviderState, ResourceMode, RestoreWorkspace, SetSelection,
-    SetWatchlist, SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, encode_envelope,
-    envelope, split_catalog,
+    ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomSnapshot, EngineFaultCode,
+    EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION, ProtocolError, ProviderConnectionState, ProviderState, ResourceMode,
+    RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, UnsubscribeView, ViewKind,
+    WorkspaceState, encode_envelope, envelope, split_catalog,
 };
 use axiusflow_transport::encode_binary_frame;
 use std::num::NonZeroUsize;
@@ -55,6 +55,8 @@ fn all_payloads() -> Vec<envelope::Payload> {
                 product_id: "BTC-USD".to_string(),
                 base_currency: "BTC".to_string(),
                 quote_currency: "USD".to_string(),
+                price_scale: 2,
+                quantity_scale: 8,
             }],
         }),
         envelope::Payload::ChartSnapshot(ChartSnapshot {
@@ -64,6 +66,7 @@ fn all_payloads() -> Vec<envelope::Payload> {
             selection_generation: 9,
             provider_generation: 3,
             payload: vec![9, 9, 9],
+            provenance: ChartProvenance::LiveProvider as i32,
         }),
         envelope::Payload::ChartDelta(ChartDelta {
             market: "BTC-USD".to_string(),
@@ -72,6 +75,7 @@ fn all_payloads() -> Vec<envelope::Payload> {
             selection_generation: 9,
             provider_generation: 3,
             payload: vec![8, 8],
+            provenance: ChartProvenance::LiveProvider as i32,
         }),
         envelope::Payload::DomSnapshot(DomSnapshot {
             market: "BTC-USD".to_string(),
@@ -148,6 +152,7 @@ fn oversized_encode_is_rejected_as_oversized_frame() {
         selection_generation: 9,
         provider_generation: 3,
         payload: vec![0_u8; MAX_FRAME_BYTES],
+        provenance: ChartProvenance::LiveProvider as i32,
     }));
     let error = encode_envelope(&envelope).expect_err("oversized payload must fail");
     assert_eq!(error.fault_code(), EngineFaultCode::OversizedFrame);
@@ -220,6 +225,8 @@ fn catalog_entry(index: usize) -> CatalogEntry {
         product_id: format!("PROD-{index:06}"),
         base_currency: "BASE".to_string(),
         quote_currency: "QUOTE".to_string(),
+        price_scale: 2,
+        quantity_scale: 8,
     }
 }
 
