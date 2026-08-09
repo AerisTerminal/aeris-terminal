@@ -1,12 +1,15 @@
 use std::{
     cell::RefCell,
+    fs,
     io::{Read, Write},
+    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     thread,
 };
 
 use axiusflow_engine::{
-    EngineClient, bind_listener, load_or_create_installation_token, serve_client,
+    EngineClient, EngineState, bind_listener, load_or_create_installation_token, serve_client,
+    serve_client_with_state,
 };
 use axiusflow_local_engine_protocol::{
     ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
@@ -16,6 +19,22 @@ use axiusflow_platform_runtime::CredentialVault;
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 
 static NEXT_NAME: AtomicU64 = AtomicU64::new(1);
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(unique_name());
+        fs::create_dir(&path).expect("create test directory");
+        Self(path)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 #[derive(Default)]
 struct MemoryVault(RefCell<Option<Vec<u8>>>);
@@ -150,4 +169,48 @@ fn authenticated_client_restores_engine_owned_workspace() {
     assert_eq!(workspace.interval_seconds, 60);
     drop(client);
     server.join().expect("join server");
+}
+
+#[test]
+fn workspace_selection_is_durable_across_engine_restart() {
+    let directory = TestDirectory::new();
+    let state = EngineState::open(&directory.0).expect("open persistent state");
+    let name = unique_name();
+    let listener = bind_listener(&name).expect("bind engine listener");
+    let token = [11_u8; 32];
+    let server = thread::spawn(move || {
+        let stream = listener.accept().expect("accept client");
+        serve_client_with_state(stream, &token, 91, &state).expect("serve client");
+    });
+    let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
+    let restored = client.restore_workspace().expect("restore workspace");
+    let updated = client
+        .set_selection("ETH-USD".to_string(), 300, restored.workspace_revision, 1)
+        .expect("persist selection");
+    assert_eq!(updated.workspace_revision, 1);
+    drop(client);
+    server.join().expect("join server");
+
+    let reopened = EngineState::open(&directory.0).expect("reopen persistent state");
+    assert_eq!(reopened.workspace().market, "ETH-USD");
+    assert_eq!(reopened.workspace().interval_seconds, 300);
+    assert_eq!(reopened.workspace().workspace_revision, 1);
+}
+
+#[test]
+fn corrupt_latest_workspace_is_quarantined_and_falls_back() {
+    let directory = TestDirectory::new();
+    fs::write(
+        directory.0.join("workspace-00000000000000000007.frame"),
+        b"corrupt",
+    )
+    .expect("write corrupt state");
+    let state = EngineState::open(&directory.0).expect("recover workspace state");
+    assert_eq!(state.workspace().workspace_revision, 0);
+    assert!(
+        directory
+            .0
+            .join("workspace-00000000000000000007.corrupt-0")
+            .exists()
+    );
 }

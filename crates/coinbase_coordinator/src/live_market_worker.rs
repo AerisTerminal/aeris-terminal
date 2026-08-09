@@ -14,10 +14,10 @@ use crate::market_worker::{
     MarketWorkerSender, MarketWorkerStartup, UiDiagnosticsReceiver, market_worker_channel,
     ui_diagnostics_channel,
 };
+use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
 };
-use axiusflow_chart_integration::ReplayRecoveryCommand;
 use axiusflow_coinbase_market_adapter::{
     CoinbaseAggregatedBar, CoinbaseDesktopEventError, CoinbaseDesktopMarketEvent,
     CoinbaseHttpsHistoryTransport, CoinbaseInterval, CoinbaseLevel2Book, CoinbaseLevel2Outcome,

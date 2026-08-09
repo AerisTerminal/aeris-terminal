@@ -721,7 +721,6 @@ name = "axiusflow_coinbase_coordinator"
 version = "0.1.0"
 dependencies = [
  "axiusflow_application",
- "axiusflow_chart_integration",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_desktop_history",
  "axiusflow_desktop_provider_runtime",
@@ -840,6 +839,7 @@ dependencies = [
 name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_coinbase_coordinator",
  "axiusflow_local_engine_protocol",
  "axiusflow_platform_runtime",
  "getrandom 0.4.3",

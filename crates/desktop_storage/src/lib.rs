@@ -14,7 +14,7 @@ pub use error::DesktopStorageError;
 pub use model::{
     AuthorizedHistoryRead, AvailabilityReason, CatalogStatistics, DataKind, DeletionReport,
     HistoryRead, HistoryScope, HistorySeriesIdentity, Invalidation, KeyRevocationEvidence,
-    PublicationOutcome, PublicationRequest, RecoveryAction, RetentionPolicy, SegmentAccessPolicy,
-    SegmentEncryptionKey, SegmentIdentity, SegmentReceipt,
+    PublicationOutcome, PublicationRequest, RecoveryAction, RetainedRange, RetainedSeriesCoverage,
+    RetentionPolicy, SegmentAccessPolicy, SegmentEncryptionKey, SegmentIdentity, SegmentReceipt,
 };
 pub use store::{CatalogKey, HistoryStore, MAXIMUM_CATALOG_ENTRIES, MAXIMUM_SEGMENT_BYTES};

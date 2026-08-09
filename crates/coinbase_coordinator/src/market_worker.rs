@@ -5,12 +5,12 @@
 //! binary protocol and application model that a future connected adapter will own.
 
 use crate::rithmic_series::RithmicSeriesRequest;
+use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketBarReplayPort, MarketGeneration, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot,
     ReplayStreamUpdate,
 };
-use axiusflow_chart_integration::ReplayRecoveryCommand;
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_desktop_provider_runtime::SessionGeneration;
 use axiusflow_market_data::ChartInterval;

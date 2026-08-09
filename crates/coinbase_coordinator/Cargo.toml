@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../application" }
-axiusflow_chart_integration = { path = "../ui/chart_integration" }
 axiusflow_coinbase_market_adapter = { path = "../adapters/coinbase_market" }
 axiusflow_desktop_history = { path = "../desktop_history" }
 axiusflow_desktop_provider_runtime = { path = "../desktop_provider_runtime" }
@@ -20,7 +19,7 @@ axiusflow_observability = { path = "../observability" }
 axiusflow_platform_runtime = { path = "../platform_runtime" }
 axiusflow_provider_history = { path = "../provider_history" }
 axiusflow_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
-axiusflow_terminal_ui = { path = "../ui/terminal_ui" }
+axiusflow_terminal_ui = { path = "../ui/terminal_ui", default-features = false }
 getrandom.workspace = true
 zeroize.workspace = true
 

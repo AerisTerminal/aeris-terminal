@@ -418,6 +418,43 @@ impl Catalog {
             .map_err(Into::into)
     }
 
+    pub fn active_series_ranges(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        now_unix_seconds: i64,
+    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT range_start, range_end FROM history_segment
+             WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+               AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+               AND source_revision=?7 AND schema_revision=?8
+               AND calendar_revision=?9 AND adjustment_revision=?10
+               AND correction_revision=?11 AND state=0
+               AND (retention_until IS NULL OR retention_until>?12)
+             ORDER BY range_start ASC, range_end ASC",
+        )?;
+        let rows = statement.query_map(
+            params![
+                tokens.provider.as_slice(),
+                tokens.account.as_slice(),
+                tokens.entitlement.as_slice(),
+                tokens.instrument.as_slice(),
+                dimensions.data_kind,
+                tokens.resolution.as_slice(),
+                dimensions.source_revision,
+                dimensions.schema_revision,
+                dimensions.calendar_revision,
+                dimensions.adjustment_revision,
+                i64::try_from(dimensions.correction_revision)
+                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                now_unix_seconds,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), DesktopStorageError> {
         let transaction = self.connection.transaction()?;
         for record in records {

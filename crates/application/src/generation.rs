@@ -348,3 +348,10 @@ pub enum ResnapshotReason {
     OwnershipHandoff,
     TransportReset,
 }
+
+/// Correlated command for one bounded background snapshot recovery attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReplayRecoveryCommand {
+    pub request_id: u64,
+    pub reason: ResnapshotReason,
+}

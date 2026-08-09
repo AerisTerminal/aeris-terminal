@@ -1,8 +1,8 @@
 //! Bounded replay-to-Origin data bridge with correlated recovery commands.
 
 use axiusflow_application::{
-    ProvenancedMarketBar, ReplaySession, ReplaySnapshot, ReplayStreamUpdate, ReplayValidationError,
-    ResnapshotReason, SequenceDecision,
+    ProvenancedMarketBar, ReplayRecoveryCommand, ReplaySession, ReplaySnapshot, ReplayStreamUpdate,
+    ReplayValidationError, ResnapshotReason, SequenceDecision,
 };
 use axiusflow_terminal_ui::BoundedUiQueue;
 use std::{num::NonZeroUsize, time::Instant};
@@ -113,13 +113,6 @@ impl MergedChartData {
     pub(crate) const fn mutates_series(&self) -> bool {
         self.snapshot.is_some() || !self.accepted_deltas.is_empty()
     }
-}
-
-/// Correlated command for one bounded background snapshot recovery attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReplayRecoveryCommand {
-    pub request_id: u64,
-    pub reason: ResnapshotReason,
 }
 
 /// Observable bounded-bridge state used for resnapshot and overload telemetry.

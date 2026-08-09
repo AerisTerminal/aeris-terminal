@@ -16,7 +16,8 @@ pub use embedded_source::{
 };
 pub use errors::ReplayValidationError;
 pub use generation::{
-    MarketBarClientModel, MarketBarModelOutcome, MarketGeneration, ResnapshotReason,
+    MarketBarClientModel, MarketBarModelOutcome, MarketGeneration, ReplayRecoveryCommand,
+    ResnapshotReason,
 };
 pub use provenance::{
     ProvenancedMarketBar, ReplayProvenance, RequestContext, validate_provenanced_market_bar,

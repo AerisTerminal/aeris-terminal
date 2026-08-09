@@ -1,7 +1,8 @@
 use axiusflow_desktop_storage::{
     AvailabilityReason, CatalogKey, DataKind, DesktopStorageError, HistoryRead, HistoryScope,
-    HistoryStore, Invalidation, KeyRevocationEvidence, PublicationOutcome, PublicationRequest,
-    RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
+    HistorySeriesIdentity, HistoryStore, Invalidation, KeyRevocationEvidence, PublicationOutcome,
+    PublicationRequest, RecoveryAction, RetainedRange, RetentionPolicy, SegmentEncryptionKey,
+    SegmentIdentity,
 };
 use std::{
     collections::BTreeSet,
@@ -118,6 +119,82 @@ fn overwrite_for_fault(path: &Path, bytes: &[u8]) {
         .expect("owned segment opens for fault injection");
     file.write_all(bytes).expect("fault injection writes");
     file.sync_all().expect("fault injection syncs");
+}
+
+#[test]
+fn retained_coverage_merges_exact_series_segments_and_reports_gaps() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-1");
+    let mut first = identity(series_scope.clone(), "btc-usd");
+    first.range_start_unix_nanos = 10;
+    first.range_end_unix_nanos = 30;
+    let mut second = first.clone();
+    second.range_start_unix_nanos = 25;
+    second.range_end_unix_nanos = 40;
+    let mut third = first.clone();
+    third.range_start_unix_nanos = 50;
+    third.range_end_unix_nanos = 60;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    for segment in [&first, &second, &third] {
+        publish(
+            &mut store,
+            segment,
+            &key,
+            b"bars",
+            RetentionPolicy::UntilRevoked,
+            RecoveryAction::ProviderRefetch,
+        );
+    }
+    let coverage = store
+        .retained_coverage(
+            HistorySeriesIdentity {
+                scope: &series_scope,
+                instrument_id: "btc-usd",
+                data_kind: DataKind::Bars,
+                resolution: "1m",
+                source_revision: 1,
+                schema_revision: 1,
+                calendar_revision: 1,
+                adjustment_revision: 1,
+                correction_revision: 1,
+            },
+            101,
+        )
+        .expect("coverage reads");
+    assert_eq!(
+        coverage.ranges(),
+        &[
+            RetainedRange {
+                start_unix_nanos: 10,
+                end_unix_nanos: 40,
+            },
+            RetainedRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 60,
+            },
+        ]
+    );
+    assert_eq!(
+        coverage.missing_ranges(RetainedRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 70,
+        }),
+        vec![
+            RetainedRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 10,
+            },
+            RetainedRange {
+                start_unix_nanos: 40,
+                end_unix_nanos: 50,
+            },
+            RetainedRange {
+                start_unix_nanos: 60,
+                end_unix_nanos: 70,
+            },
+        ]
+    );
 }
 
 #[cfg(windows)]

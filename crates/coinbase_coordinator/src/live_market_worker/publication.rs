@@ -3,11 +3,11 @@ use crate::market_worker::{
     DesktopMarketGeneration, MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication,
     MarketWorkerSender, PendingUiDiagnostics,
 };
+use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketStreamPublication, ProvenancedMarketBar,
     ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_chart_integration::ReplayRecoveryCommand;
 use axiusflow_desktop_provider_runtime::SessionGeneration;
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::BarDefinition;

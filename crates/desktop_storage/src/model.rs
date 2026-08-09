@@ -102,6 +102,77 @@ pub struct HistorySeriesIdentity<'a> {
     pub correction_revision: u64,
 }
 
+/// One retained half-open time range for an exact history series revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetainedRange {
+    pub start_unix_nanos: i64,
+    pub end_unix_nanos: i64,
+}
+
+/// Merged retained coverage for an exact history series revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedSeriesCoverage {
+    ranges: Vec<RetainedRange>,
+}
+
+impl RetainedSeriesCoverage {
+    pub(crate) fn from_ranges(mut ranges: Vec<RetainedRange>) -> Self {
+        ranges.sort_unstable_by_key(|range| (range.start_unix_nanos, range.end_unix_nanos));
+        let mut merged: Vec<RetainedRange> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            if let Some(previous) = merged.last_mut()
+                && range.start_unix_nanos <= previous.end_unix_nanos
+            {
+                previous.end_unix_nanos = previous.end_unix_nanos.max(range.end_unix_nanos);
+            } else {
+                merged.push(range);
+            }
+        }
+        Self { ranges: merged }
+    }
+
+    /// Returns sorted, non-overlapping retained ranges.
+    #[must_use]
+    pub fn ranges(&self) -> &[RetainedRange] {
+        &self.ranges
+    }
+
+    /// Returns every missing half-open range inside the requested bounds.
+    #[must_use]
+    pub fn missing_ranges(&self, requested: RetainedRange) -> Vec<RetainedRange> {
+        if requested.start_unix_nanos >= requested.end_unix_nanos {
+            return Vec::new();
+        }
+        let mut missing = Vec::new();
+        let mut cursor = requested.start_unix_nanos;
+        for range in &self.ranges {
+            if range.end_unix_nanos <= cursor {
+                continue;
+            }
+            if range.start_unix_nanos >= requested.end_unix_nanos {
+                break;
+            }
+            if range.start_unix_nanos > cursor {
+                missing.push(RetainedRange {
+                    start_unix_nanos: cursor,
+                    end_unix_nanos: range.start_unix_nanos.min(requested.end_unix_nanos),
+                });
+            }
+            cursor = cursor.max(range.end_unix_nanos);
+            if cursor >= requested.end_unix_nanos {
+                break;
+            }
+        }
+        if cursor < requested.end_unix_nanos {
+            missing.push(RetainedRange {
+                start_unix_nanos: cursor,
+                end_unix_nanos: requested.end_unix_nanos,
+            });
+        }
+        missing
+    }
+}
+
 impl HistorySeriesIdentity<'_> {
     pub(crate) fn validate(self) -> Result<(), DesktopStorageError> {
         self.scope.validate()?;
@@ -394,4 +465,64 @@ pub(crate) fn validate_identifier(
         return Err(DesktopStorageError::InvalidIdentity(field));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{RetainedRange, RetainedSeriesCoverage};
+
+    #[test]
+    fn coverage_merges_overlap_and_adjacency_before_gap_detection() {
+        let coverage = RetainedSeriesCoverage::from_ranges(vec![
+            RetainedRange {
+                start_unix_nanos: 30,
+                end_unix_nanos: 40,
+            },
+            RetainedRange {
+                start_unix_nanos: 10,
+                end_unix_nanos: 20,
+            },
+            RetainedRange {
+                start_unix_nanos: 18,
+                end_unix_nanos: 30,
+            },
+            RetainedRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 60,
+            },
+        ]);
+        assert_eq!(
+            coverage.ranges(),
+            &[
+                RetainedRange {
+                    start_unix_nanos: 10,
+                    end_unix_nanos: 40,
+                },
+                RetainedRange {
+                    start_unix_nanos: 50,
+                    end_unix_nanos: 60,
+                },
+            ]
+        );
+        assert_eq!(
+            coverage.missing_ranges(RetainedRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 70,
+            }),
+            vec![
+                RetainedRange {
+                    start_unix_nanos: 0,
+                    end_unix_nanos: 10,
+                },
+                RetainedRange {
+                    start_unix_nanos: 40,
+                    end_unix_nanos: 50,
+                },
+                RetainedRange {
+                    start_unix_nanos: 60,
+                    end_unix_nanos: 70,
+                },
+            ]
+        );
+    }
 }

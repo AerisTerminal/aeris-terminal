@@ -12,7 +12,8 @@ mod provenance;
 mod recovery_conformance;
 mod view;
 
-pub use bridge::{ChartBridgeMetrics, ChartDataBridge, MergedChartData, ReplayRecoveryCommand};
+pub use axiusflow_application::ReplayRecoveryCommand;
+pub use bridge::{ChartBridgeMetrics, ChartDataBridge, MergedChartData};
 pub use coordinator::{
     ChartStreamCoordinator, ChartStreamCoordinatorError, ChartStreamCoordinatorMetrics,
     ChartStreamPollOutcome, ChartStreamRecoveryDispatch,

@@ -1,11 +1,12 @@
 //! GPUI entity hosting one authoritative Origin chart engine and renderer.
 
-use crate::bridge::{ChartBridgeMetrics, ChartDataBridge, ReplayRecoveryCommand};
+use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::origin_bridge::{
     apply_merged_chart_data, chart_data_queue_capacity, install_replay, install_volume_series,
     replay_price_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
+use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError, UseCase,

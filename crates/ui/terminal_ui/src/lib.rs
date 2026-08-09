@@ -7,9 +7,11 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 
 mod dom;
+#[cfg(feature = "gpui")]
 mod dom_view;
 
 pub use dom::{DomColumnLevel, DomFrame, DomRow, DomSelection, DomUpdateOutcome, ReadOnlyDom};
+#[cfg(feature = "gpui")]
 pub use dom_view::ReadOnlyDomView;
 
 /// A bounded queue that prevents background producers from growing UI work.

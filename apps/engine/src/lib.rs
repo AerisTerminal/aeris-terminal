@@ -2,8 +2,13 @@
 
 use std::{
     collections::VecDeque,
+    fs::{self, OpenOptions},
     io::{self, Read, Write},
+    path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use axiusflow_local_engine_protocol::{
@@ -19,6 +24,9 @@ use zeroize::Zeroizing;
 pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v1";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
+
+/// Maximum time allowed for a newly spawned engine to publish readiness.
+pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
@@ -62,25 +70,37 @@ fn redacted_vault_error<E>(_error: E) -> String {
 #[derive(Clone, Debug)]
 pub struct EngineState {
     workspace: Arc<Mutex<WorkspaceState>>,
+    workspace_root: Option<Arc<PathBuf>>,
 }
 
 impl Default for EngineState {
     fn default() -> Self {
         Self {
-            workspace: Arc::new(Mutex::new(WorkspaceState {
-                provider: "coinbase".to_string(),
-                market: "BTC-USD".to_string(),
-                interval_seconds: 60,
-                watchlist: vec!["BTC-USD".to_string(), "ETH-USD".to_string()],
-                workspace_revision: 0,
-                warm_mode_enabled: true,
-                resource_mode: ResourceMode::Warm as i32,
-            })),
+            workspace: Arc::new(Mutex::new(default_workspace())),
+            workspace_root: None,
         }
     }
 }
 
 impl EngineState {
+    /// Opens immutable revisioned workspace state below an application-owned directory.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be created or durable state cannot be written.
+    pub fn open(workspace_root: impl Into<PathBuf>) -> Result<Self, String> {
+        let workspace_root = workspace_root.into();
+        fs::create_dir_all(&workspace_root).map_err(redacted_workspace_error)?;
+        let workspace = load_latest_workspace(&workspace_root)?.unwrap_or_else(default_workspace);
+        let state = Self {
+            workspace: Arc::new(Mutex::new(workspace)),
+            workspace_root: Some(Arc::new(workspace_root)),
+        };
+        if state.workspace().workspace_revision == 0 {
+            state.persist(&state.workspace())?;
+        }
+        Ok(state)
+    }
+
     /// Returns a consistent copy of the current workspace state.
     #[must_use]
     pub fn workspace(&self) -> WorkspaceState {
@@ -89,6 +109,162 @@ impl EngineState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    fn apply_selection(&self, selection: SetSelection) -> Result<WorkspaceState, String> {
+        let mut workspace = self
+            .workspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if selection.workspace_revision != workspace.workspace_revision {
+            return Err("workspace revision is stale".to_string());
+        }
+        let mut candidate = workspace.clone();
+        candidate.market = selection.market;
+        candidate.interval_seconds = selection.interval_seconds;
+        candidate.workspace_revision = candidate.workspace_revision.saturating_add(1);
+        validate_workspace(&candidate)?;
+        self.persist(&candidate)?;
+        *workspace = candidate.clone();
+        Ok(candidate)
+    }
+
+    fn apply_watchlist(&self, watchlist: SetWatchlist) -> Result<WorkspaceState, String> {
+        let mut workspace = self
+            .workspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if watchlist.workspace_revision != workspace.workspace_revision {
+            return Err("workspace revision is stale".to_string());
+        }
+        let mut candidate = workspace.clone();
+        candidate.watchlist = watchlist.markets;
+        candidate.workspace_revision = candidate.workspace_revision.saturating_add(1);
+        validate_workspace(&candidate)?;
+        self.persist(&candidate)?;
+        *workspace = candidate.clone();
+        Ok(candidate)
+    }
+
+    fn persist(&self, workspace: &WorkspaceState) -> Result<(), String> {
+        let Some(root) = &self.workspace_root else {
+            return Ok(());
+        };
+        persist_workspace(root, workspace)
+    }
+}
+
+fn default_workspace() -> WorkspaceState {
+    WorkspaceState {
+        provider: "coinbase".to_string(),
+        market: "BTC-USD".to_string(),
+        interval_seconds: 60,
+        watchlist: vec!["BTC-USD".to_string(), "ETH-USD".to_string()],
+        workspace_revision: 0,
+        warm_mode_enabled: true,
+        resource_mode: ResourceMode::Warm as i32,
+    }
+}
+
+fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
+    const MAXIMUM_MARKET_BYTES: usize = 128;
+    const MAXIMUM_WATCHLIST_ITEMS: usize = 256;
+
+    if workspace.provider.trim().is_empty()
+        || workspace.market.trim().is_empty()
+        || workspace.market.len() > MAXIMUM_MARKET_BYTES
+        || workspace.interval_seconds == 0
+        || workspace.watchlist.len() > MAXIMUM_WATCHLIST_ITEMS
+        || workspace
+            .watchlist
+            .iter()
+            .any(|market| market.trim().is_empty() || market.len() > MAXIMUM_MARKET_BYTES)
+    {
+        return Err("workspace state is invalid".to_string());
+    }
+    if ResourceMode::try_from(workspace.resource_mode).is_err() {
+        return Err("workspace resource mode is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn workspace_filename(revision: u64) -> String {
+    format!("workspace-{revision:020}.frame")
+}
+
+fn persist_workspace(root: &Path, workspace: &WorkspaceState) -> Result<(), String> {
+    validate_workspace(workspace)?;
+    let path = root.join(workspace_filename(workspace.workspace_revision));
+    if path.exists() {
+        return Ok(());
+    }
+    let bytes = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        payload: Some(envelope::Payload::WorkspaceState(workspace.clone())),
+    })
+    .map_err(|_| "workspace state could not be encoded".to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(redacted_workspace_error)?;
+    file.write_all(&bytes).map_err(redacted_workspace_error)?;
+    file.sync_all().map_err(redacted_workspace_error)
+}
+
+fn load_latest_workspace(root: &Path) -> Result<Option<WorkspaceState>, String> {
+    let mut candidates = fs::read_dir(root)
+        .map_err(redacted_workspace_error)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let revision = name
+                .strip_prefix("workspace-")?
+                .strip_suffix(".frame")?
+                .parse::<u64>()
+                .ok()?;
+            Some((revision, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|(revision, _)| std::cmp::Reverse(*revision));
+    for (revision, path) in candidates {
+        match decode_workspace_file(&path, revision) {
+            Ok(workspace) => return Ok(Some(workspace)),
+            Err(()) => quarantine_workspace_file(&path)?,
+        }
+    }
+    Ok(None)
+}
+
+fn decode_workspace_file(path: &Path, revision: u64) -> Result<WorkspaceState, ()> {
+    let bytes = fs::read(path).map_err(|_| ())?;
+    let mut decoder = EnvelopeDecoder::try_new().map_err(|_| ())?;
+    let mut envelopes = decoder.push(&bytes).map_err(|_| ())?;
+    if envelopes.len() != 1 {
+        return Err(());
+    }
+    let Some(envelope::Payload::WorkspaceState(workspace)) =
+        envelopes.pop().and_then(|item| item.payload)
+    else {
+        return Err(());
+    };
+    if workspace.workspace_revision != revision || validate_workspace(&workspace).is_err() {
+        return Err(());
+    }
+    Ok(workspace)
+}
+
+fn quarantine_workspace_file(path: &Path) -> Result<(), String> {
+    for suffix in 0_u16..=u16::MAX {
+        let quarantine = path.with_extension(format!("corrupt-{suffix}"));
+        if !quarantine.exists() {
+            return fs::rename(path, quarantine).map_err(redacted_workspace_error);
+        }
+    }
+    Err("corrupt workspace state could not be quarantined".to_string())
+}
+
+fn redacted_workspace_error<E>(_error: E) -> String {
+    "engine workspace storage is unavailable".to_string()
 }
 
 /// Authenticated local-engine client connection.
@@ -188,6 +364,70 @@ impl EngineClient {
         }
     }
 }
+
+/// Resolves the engine executable installed beside the current desktop binary.
+///
+/// # Errors
+/// Returns an error when the current executable path has no parent directory.
+pub fn sibling_engine_executable() -> Result<PathBuf, String> {
+    let current = std::env::current_exe().map_err(|error| error.to_string())?;
+    let parent = current
+        .parent()
+        .ok_or_else(|| "current executable has no installation directory".to_string())?;
+    Ok(parent.join(format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// Resolves the application-owned resident-engine state directory.
+///
+/// # Errors
+/// Returns an error when neither the native data root nor current directory is available.
+pub fn default_engine_state_root() -> Result<PathBuf, String> {
+    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+        return Ok(PathBuf::from(root).join("Axiusflow").join("engine"));
+    }
+    std::env::current_dir()
+        .map(|root| root.join("local-data").join("engine"))
+        .map_err(|error| error.to_string())
+}
+
+/// Attaches to the resident engine or starts the installed sibling and retries readiness.
+///
+/// This function is blocking and must run away from the UI thread.
+///
+/// # Errors
+/// Returns an error when credentials, process launch, or readiness negotiation fail.
+pub fn connect_or_start_engine(engine_executable: &Path) -> Result<EngineClient, String> {
+    let token = native_installation_token()?;
+    if let Ok(client) = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice()) {
+        return Ok(client);
+    }
+    let mut command = Command::new(engine_executable);
+    configure_background_process(&mut command);
+    command.spawn().map_err(|_| {
+        "resident engine could not be started from the installation directory".to_string()
+    })?;
+    let deadline = Instant::now() + ENGINE_START_TIMEOUT;
+    let mut last_error = "resident engine did not publish readiness".to_string();
+    while Instant::now() < deadline {
+        match EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice()) {
+            Ok(client) => return Ok(client),
+            Err(error) => last_error = error,
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(last_error)
+}
+
+#[cfg(target_os = "windows")]
+fn configure_background_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_background_process(_command: &mut Command) {}
 
 struct FramedConnection {
     stream: LocalSocketStream,
@@ -340,17 +580,13 @@ fn apply_selection(
     selection: SetSelection,
     connection: &mut FramedConnection,
 ) -> Result<(), String> {
-    let mut workspace = state
-        .workspace
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if selection.workspace_revision != workspace.workspace_revision {
-        return connection.send(stale_workspace_fault());
+    match state.apply_selection(selection) {
+        Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == "workspace revision is stale" => {
+            connection.send(stale_workspace_fault())
+        }
+        Err(error) => Err(error),
     }
-    workspace.market = selection.market;
-    workspace.interval_seconds = selection.interval_seconds;
-    workspace.workspace_revision = workspace.workspace_revision.saturating_add(1);
-    connection.send(envelope::Payload::WorkspaceState(workspace.clone()))
 }
 
 fn apply_watchlist(
@@ -358,16 +594,13 @@ fn apply_watchlist(
     watchlist: SetWatchlist,
     connection: &mut FramedConnection,
 ) -> Result<(), String> {
-    let mut workspace = state
-        .workspace
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if watchlist.workspace_revision != workspace.workspace_revision {
-        return connection.send(stale_workspace_fault());
+    match state.apply_watchlist(watchlist) {
+        Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == "workspace revision is stale" => {
+            connection.send(stale_workspace_fault())
+        }
+        Err(error) => Err(error),
     }
-    workspace.watchlist = watchlist.markets;
-    workspace.workspace_revision = workspace.workspace_revision.saturating_add(1);
-    connection.send(envelope::Payload::WorkspaceState(workspace.clone()))
 }
 
 fn stale_workspace_fault() -> envelope::Payload {

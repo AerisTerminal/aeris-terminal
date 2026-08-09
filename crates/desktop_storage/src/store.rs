@@ -202,6 +202,50 @@ impl HistoryStore {
         ))
     }
 
+    /// Returns merged active retained coverage for one exact series revision.
+    ///
+    /// Expired, quarantined, revoked, or dimension-mismatched segments are excluded.
+    ///
+    /// # Errors
+    /// Returns an error for invalid dimensions or catalog access failure.
+    pub fn retained_coverage(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<crate::RetainedSeriesCoverage, DesktopStorageError> {
+        series.validate()?;
+        let scope = scope_tokens(&self.catalog_key, series.scope)?;
+        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
+        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
+        let ranges = self.catalog.active_series_ranges(
+            SeriesTokens {
+                provider: &scope.provider,
+                account: &scope.account,
+                entitlement: &scope.entitlement,
+                instrument: &instrument,
+                resolution: &resolution,
+            },
+            SeriesDimensions {
+                data_kind: series.data_kind.code(),
+                source_revision: series.source_revision,
+                schema_revision: series.schema_revision,
+                calendar_revision: series.calendar_revision,
+                adjustment_revision: series.adjustment_revision,
+                correction_revision: series.correction_revision,
+            },
+            now_unix_seconds,
+        )?;
+        Ok(crate::RetainedSeriesCoverage::from_ranges(
+            ranges
+                .into_iter()
+                .map(|(start_unix_nanos, end_unix_nanos)| crate::RetainedRange {
+                    start_unix_nanos,
+                    end_unix_nanos,
+                })
+                .collect(),
+        ))
+    }
+
     /// Reads one exact segment only when its cataloged payload fits the caller's bound.
     ///
     /// The bound is checked from cataloged payload metadata before opening,
