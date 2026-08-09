@@ -42,6 +42,12 @@ pub(super) struct PreparedHistory {
     pub(super) received_unix_nanos: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FetchPhase {
+    Recent,
+    Full,
+}
+
 pub(super) trait HistorySource: Send {
     fn now_unix_nanos(&self) -> Result<i64, String>;
 
@@ -50,6 +56,7 @@ pub(super) trait HistorySource: Send {
         profile: &ProductProfile,
         now_unix_nanos: i64,
         cancel: Arc<AtomicBool>,
+        phase: FetchPhase,
     ) -> Result<PreparedHistory, String>;
 }
 
@@ -65,12 +72,13 @@ impl HistorySource for DirectHistorySource {
         profile: &ProductProfile,
         now_unix_nanos: i64,
         cancel: Arc<AtomicBool>,
+        phase: FetchPhase,
     ) -> Result<PreparedHistory, String> {
         let transport = CoinbaseHttpsHistoryTransport::with_stop(Arc::clone(&cancel));
         let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(transport)
             .map_err(|error| error.to_string())?;
         adapter.set_stop(cancel);
-        fetch_history_with_adapter(profile, &mut adapter, now_unix_nanos)
+        fetch_history_with_adapter(profile, &mut adapter, now_unix_nanos, phase)
     }
 }
 
@@ -130,6 +138,27 @@ pub(super) struct InitialHistoryContext<'a> {
     pub(super) bar_definition: &'a BarDefinition,
     pub(super) worker_label: &'a str,
     pub(super) initial_network: Option<axiusflow_platform_runtime::NetworkEvent>,
+}
+
+pub(super) fn install_recent_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    generation: SessionGeneration,
+    context: &StreamingSeriesContext<'_>,
+    history: &PreparedHistory,
+    state: &mut LiveLoopState,
+    model: &mut MarketBarClientModel,
+    message_tx: &MarketWorkerSender,
+) -> Result<(), String> {
+    if install_covering_snapshot(worker, generation, context, history, model, message_tx).is_err() {
+        fence_failed_history(
+            worker,
+            generation,
+            &mut state.retained,
+            &mut state.recovery_announced,
+            message_tx,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn install_fetched_history<V: axiusflow_platform_runtime::CredentialVault>(
@@ -425,17 +454,32 @@ pub(super) fn history_installation_time(
     Ok(now_unix_nanos / 1_000_000_000)
 }
 
+const RECENT_PHASE_SOURCE_ITEMS: usize = 350;
+
+pub(super) fn needs_recent_phase(interval: axiusflow_market_data::ChartInterval) -> bool {
+    let Ok(interval) = CoinbaseInterval::try_from(interval) else {
+        return false;
+    };
+    coinbase_history_source_items(interval, HISTORY_BARS)
+        .is_ok_and(|items| items > RECENT_PHASE_SOURCE_ITEMS)
+}
+
 pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
     profile: &ProductProfile,
     adapter: &mut CoinbaseHistoryCapabilityAdapter<T>,
     now: i64,
+    phase: FetchPhase,
 ) -> Result<PreparedHistory, String> {
     let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
     let source_seconds = coinbase_history_source_seconds(interval);
     let source_nanos = source_seconds
         .checked_mul(1_000_000_000)
         .ok_or_else(|| "Coinbase history source interval overflow".to_string())?;
-    let source_items = coinbase_history_source_items(interval, HISTORY_BARS)?;
+    let full_source_items = coinbase_history_source_items(interval, HISTORY_BARS)?;
+    let source_items = match phase {
+        FetchPhase::Recent => full_source_items.min(RECENT_PHASE_SOURCE_ITEMS),
+        FetchPhase::Full => full_source_items,
+    };
     let end = now.div_euclid(source_nanos) * source_nanos;
     let start = end
         .checked_sub(
@@ -484,6 +528,25 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
     let batch = adapter
         .fetch_paginated(&dispatch.request)
         .map_err(|error| format!("Coinbase history provider fetch failed: {error}"))?;
+    let page = aggregated_history_page(&dispatch.request, &batch, interval, source_seconds, start)?;
+    let received_unix_nanos = now;
+    let completion = scheduler
+        .complete(dispatch.dispatch_id, page, received_unix_nanos)
+        .map_err(|error| error.to_string())?;
+    Ok(PreparedHistory {
+        identity,
+        completion,
+        received_unix_nanos,
+    })
+}
+
+fn aggregated_history_page(
+    request: &HistoryPageRequest,
+    batch: &axiusflow_coinbase_market_adapter::CoinbaseHistoryBatch,
+    interval: CoinbaseInterval,
+    source_seconds: i64,
+    start: i64,
+) -> Result<HistoryPage, String> {
     if batch.items.is_empty() {
         return Err("Coinbase returned no completed history bars".to_string());
     }
@@ -494,6 +557,11 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
         .collect::<Result<Vec<_>, _>>()?;
     let source = materialize_coinbase_continuity(source, source_seconds)?;
     let (mut bars, _) = aggregate_coinbase_bars(&source, interval)?;
+    bars.retain(|bar| {
+        bar.exchange_timestamp_seconds
+            .checked_mul(1_000_000_000)
+            .is_some_and(|nanos| nanos >= start)
+    });
     if bars.len() > HISTORY_BARS {
         bars.drain(..bars.len() - HISTORY_BARS);
     }
@@ -503,8 +571,8 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| "Coinbase history sequence overflow".to_string())?;
     }
-    let page = HistoryPage {
-        request: dispatch.request.clone(),
+    Ok(HistoryPage {
+        request: request.clone(),
         items: bars
             .into_iter()
             .map(|bar| HistoryItem {
@@ -514,15 +582,6 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
             })
             .collect(),
         next: None,
-    };
-    let received_unix_nanos = now;
-    let completion = scheduler
-        .complete(dispatch.dispatch_id, page, received_unix_nanos)
-        .map_err(|error| error.to_string())?;
-    Ok(PreparedHistory {
-        identity,
-        completion,
-        received_unix_nanos,
     })
 }
 

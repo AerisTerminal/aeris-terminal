@@ -194,7 +194,7 @@ fn spawn_worker(
 
     Ok((
         MarketWorkerStartup::Shell(shell),
-        MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None),
+        MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None),
     ))
 }
 
@@ -736,7 +736,8 @@ fn process_command(
                 "Rithmic visible history could not be scheduled",
             )
         }
-        Ok(MarketWorkerCommand::Recovery(_)) | Err(TryRecvError::Empty) => return false,
+        Ok(MarketWorkerCommand::Recovery(_) | MarketWorkerCommand::CoinbaseSelect(_))
+        | Err(TryRecvError::Empty) => return false,
     };
     if dispatch.is_err() {
         if let Some(rejection) = rejection {

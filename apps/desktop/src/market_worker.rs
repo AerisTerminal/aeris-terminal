@@ -31,7 +31,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
@@ -91,8 +91,6 @@ pub(crate) enum MarketWorkerStartup {
 
 pub(crate) struct CoinbaseWorkerStartup {
     pub coinbase_product: CoinbaseSpotProduct,
-    pub history_root: PathBuf,
-    pub detailed_diagnostics: bool,
     pub subscription_id: String,
     pub worker_label: String,
 }
@@ -132,6 +130,9 @@ pub(crate) enum MarketWorkerMessage {
         snapshot: ReplaySnapshot,
     },
     RithmicDom(DomFrame),
+    CoinbaseSwitchMarker {
+        sequence: u64,
+    },
     CoinbaseCatalog(Result<Vec<CoinbaseSpotProduct>, String>),
     CoinbaseDom(DomFrame),
 }
@@ -728,6 +729,7 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         | MarketWorkerMessage::RithmicHistory { .. }
         | MarketWorkerMessage::RithmicLive { .. }
         | MarketWorkerMessage::RithmicDom(_)
+        | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
         | MarketWorkerMessage::CoinbaseCatalog(_)
         | MarketWorkerMessage::CoinbaseDom(_) => None,
     }
@@ -803,7 +805,15 @@ pub(crate) enum MarketWorkerCommand {
     RithmicSearch(RithmicSymbolSearch),
     RithmicSelect(RithmicInstrumentSelection),
     RithmicHistory(RithmicSeriesRequest),
+    CoinbaseSelect(Box<CoinbaseSelectionRequest>),
     Shutdown,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CoinbaseSelectionRequest {
+    pub sequence: u64,
+    pub product: CoinbaseSpotProduct,
+    pub interval: ChartInterval,
 }
 
 pub(crate) struct PendingUiDiagnostics {
@@ -978,6 +988,7 @@ pub(crate) struct MarketDataWorker {
     shutdown_complete: Receiver<()>,
     connected: bool,
     ui_diagnostics: Option<UiDiagnosticsSender>,
+    coinbase_sequence: Option<Arc<AtomicU64>>,
 }
 
 impl MarketDataWorker {
@@ -1005,6 +1016,7 @@ impl MarketDataWorker {
                 shutdown_complete: shutdown_rx,
                 connected: true,
                 ui_diagnostics: None,
+                coinbase_sequence: None,
             },
         ))
     }
@@ -1022,36 +1034,6 @@ impl MarketDataWorker {
             ui_thread,
             detailed_diagnostics,
             fetch_catalog,
-        )
-    }
-
-    pub(crate) fn disconnected() -> Self {
-        Self {
-            commands: None,
-            messages: None,
-            shutdown_complete: mpsc::channel().1,
-            connected: false,
-            ui_diagnostics: None,
-        }
-    }
-
-    pub fn start_coinbase_product_interval(
-        product: CoinbaseSpotProduct,
-        interval: ChartInterval,
-        history_root: PathBuf,
-        ui_thread: thread::ThreadId,
-        detailed_diagnostics: bool,
-        fetch_catalog: bool,
-        previous_shutdown: Option<Receiver<()>>,
-    ) -> Result<(MarketWorkerStartup, Self), String> {
-        crate::live_market_worker::start_product_interval(
-            product,
-            interval,
-            history_root,
-            ui_thread,
-            detailed_diagnostics,
-            fetch_catalog,
-            previous_shutdown,
         )
     }
 
@@ -1074,6 +1056,7 @@ impl MarketDataWorker {
         messages: MarketWorkerReceiver,
         shutdown_complete: Receiver<()>,
         ui_diagnostics: Option<UiDiagnosticsSender>,
+        coinbase_sequence: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             commands: Some(commands),
@@ -1081,7 +1064,50 @@ impl MarketDataWorker {
             shutdown_complete,
             connected: true,
             ui_diagnostics,
+            coinbase_sequence,
         }
+    }
+
+    pub fn try_select_coinbase(
+        &self,
+        product: CoinbaseSpotProduct,
+        interval: ChartInterval,
+    ) -> Result<u64, TrySendError<Box<CoinbaseSelectionRequest>>> {
+        let (Some(commands), Some(sequence)) =
+            (self.commands.as_ref(), self.coinbase_sequence.as_ref())
+        else {
+            return Err(TrySendError::Disconnected(Box::new(
+                CoinbaseSelectionRequest {
+                    sequence: 0,
+                    product,
+                    interval,
+                },
+            )));
+        };
+        let next = sequence.load(Ordering::Acquire).saturating_add(1);
+        let request = Box::new(CoinbaseSelectionRequest {
+            sequence: next,
+            product,
+            interval,
+        });
+        commands
+            .try_send(MarketWorkerCommand::CoinbaseSelect(request))
+            .map_err(|error| {
+                let (full, command) = match error {
+                    TrySendError::Full(command) => (true, command),
+                    TrySendError::Disconnected(command) => (false, command),
+                };
+                let MarketWorkerCommand::CoinbaseSelect(request) = command else {
+                    unreachable!("Coinbase selection send errors retain the selection command");
+                };
+                if full {
+                    TrySendError::Full(request)
+                } else {
+                    TrySendError::Disconnected(request)
+                }
+            })?;
+        sequence.store(next, Ordering::Release);
+        Ok(next)
     }
 
     pub(crate) fn send_ui_diagnostics(&self, feedback: UiDiagnosticsFeedback) {
@@ -1114,13 +1140,15 @@ impl MarketDataWorker {
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::RithmicSearch(_)
                     | MarketWorkerCommand::RithmicSelect(_)
-                    | MarketWorkerCommand::RithmicHistory(_),
+                    | MarketWorkerCommand::RithmicHistory(_)
+                    | MarketWorkerCommand::CoinbaseSelect(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::RithmicSearch(_)
                     | MarketWorkerCommand::RithmicSelect(_)
-                    | MarketWorkerCommand::RithmicHistory(_),
+                    | MarketWorkerCommand::RithmicHistory(_)
+                    | MarketWorkerCommand::CoinbaseSelect(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }
@@ -1233,11 +1261,6 @@ impl MarketDataWorker {
                 .recv_timeout(CONFIRMED_SHUTDOWN_TIMEOUT),
             Err(mpsc::RecvTimeoutError::Timeout)
         )
-    }
-
-    pub fn shutdown_detached(mut self) -> Receiver<()> {
-        self.begin_shutdown();
-        std::mem::replace(&mut self.shutdown_complete, mpsc::channel().1)
     }
 }
 
@@ -1490,7 +1513,8 @@ fn run_worker(
             }
             MarketWorkerCommand::RithmicSearch(_)
             | MarketWorkerCommand::RithmicSelect(_)
-            | MarketWorkerCommand::RithmicHistory(_) => {}
+            | MarketWorkerCommand::RithmicHistory(_)
+            | MarketWorkerCommand::CoinbaseSelect(_) => {}
             MarketWorkerCommand::Shutdown => return,
         }
     }
@@ -1568,6 +1592,7 @@ mod tests {
             message_rx,
             shutdown_rx,
             None,
+            None,
         ));
 
         assert!(acknowledged.load(Ordering::Acquire));
@@ -1588,7 +1613,8 @@ mod tests {
                 .send(())
                 .expect("shutdown acknowledgement sends");
         });
-        let mut worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None);
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
 
         assert!(worker.shutdown_and_wait());
 
@@ -2255,7 +2281,8 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(3);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None);
+        let worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
         let search = RithmicSymbolSearch::try_new(
             NonZeroUsize::MIN,
             "ES",

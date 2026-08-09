@@ -1,9 +1,12 @@
 use super::{
     COMMAND_CAPACITY, CoinbaseDesktopWorker, INBOX_BATCH, InflightHistory, LiveLoopState,
     apply_environment_event,
-    history::{PreparedHistory, StreamingSeriesContext, install_fetched_history},
+    history::{
+        FetchPhase, PreparedHistory, StreamingSeriesContext, install_fetched_history,
+        install_recent_history,
+    },
 };
-use crate::market_worker::{MarketWorkerCommand, MarketWorkerSender};
+use crate::market_worker::{CoinbaseSelectionRequest, MarketWorkerCommand, MarketWorkerSender};
 use axiusflow_application::MarketBarClientModel;
 use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
 use axiusflow_desktop_provider_runtime::{DesktopProviderState, SessionGeneration};
@@ -12,7 +15,7 @@ use axiusflow_platform_runtime::{
 };
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender},
     },
     thread,
@@ -35,8 +38,15 @@ pub(super) enum WorkerInboxEvent {
     Command(MarketWorkerCommand),
     HistoryCompleted {
         generation: SessionGeneration,
+        phase: FetchPhase,
         result: Result<Box<PreparedHistory>, String>,
     },
+}
+
+pub(super) enum DrainSignal {
+    None,
+    Shutdown,
+    Reselect(Box<CoinbaseSelectionRequest>),
 }
 
 pub(super) struct InboxDrainContext<'a, V: axiusflow_platform_runtime::CredentialVault> {
@@ -45,6 +55,7 @@ pub(super) struct InboxDrainContext<'a, V: axiusflow_platform_runtime::Credentia
     pub(super) state: &'a mut LiveLoopState,
     pub(super) message_tx: &'a MarketWorkerSender,
     pub(super) provider_wake_pending: &'a AtomicBool,
+    pub(super) selection_sequence: &'a AtomicU64,
     pub(super) series: StreamingSeriesContext<'a>,
     pub(super) model: &'a mut MarketBarClientModel,
 }
@@ -110,6 +121,16 @@ pub(super) fn forward_commands(
                     return;
                 }
             }
+            Ok(MarketWorkerCommand::CoinbaseSelect(request)) => {
+                if inbox_tx
+                    .send(WorkerInboxEvent::Command(
+                        MarketWorkerCommand::CoinbaseSelect(request),
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(
                 MarketWorkerCommand::RithmicSearch(_)
                 | MarketWorkerCommand::RithmicSelect(_)
@@ -127,11 +148,11 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
     inbox_rx: &Receiver<WorkerInboxEvent>,
     ready_event: &mut Option<WorkerInboxEvent>,
     context: &mut InboxDrainContext<'_, V>,
-) -> Result<bool, String> {
+) -> Result<DrainSignal, String> {
     for _ in 0..INBOX_BATCH {
         let event = ready_event.take().or_else(|| inbox_rx.try_recv().ok());
         let Some(event) = event else {
-            return Ok(false);
+            return Ok(DrainSignal::None);
         };
         match event {
             WorkerInboxEvent::ProviderReady => {
@@ -156,8 +177,17 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                     context.message_tx,
                 )?;
             }
-            WorkerInboxEvent::HistoryCompleted { generation, result } => {
-                handle_history_completed(context, generation, result)?;
+            WorkerInboxEvent::HistoryCompleted {
+                generation,
+                phase,
+                result,
+            } => {
+                handle_history_completed(context, generation, phase, result)?;
+            }
+            WorkerInboxEvent::Command(MarketWorkerCommand::CoinbaseSelect(request)) => {
+                if request.sequence >= context.selection_sequence.load(Ordering::Acquire) {
+                    return Ok(DrainSignal::Reselect(request));
+                }
             }
             WorkerInboxEvent::Command(MarketWorkerCommand::Recovery(command)) => {
                 if context.state.pending_recovery.len() >= COMMAND_CAPACITY {
@@ -165,18 +195,23 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                 }
                 context.state.pending_recovery.push_back(command);
             }
-            WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown) => return Ok(true),
+            WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown) => {
+                return Ok(DrainSignal::Shutdown);
+            }
         }
     }
-    Ok(false)
+    Ok(DrainSignal::None)
 }
 
 fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
     context: &mut InboxDrainContext<'_, V>,
     generation: SessionGeneration,
+    phase: FetchPhase,
     result: Result<Box<PreparedHistory>, String>,
 ) -> Result<(), String> {
-    context.state.history = None;
+    if phase == FetchPhase::Full {
+        context.state.history = None;
+    }
     let still_streaming = matches!(
         context
             .worker
@@ -189,8 +224,8 @@ fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
     if !still_streaming {
         return Ok(());
     }
-    match result {
-        Ok(history) => install_fetched_history(
+    match (phase, result) {
+        (FetchPhase::Recent, Ok(history)) => install_recent_history(
             context.worker,
             generation,
             &context.series,
@@ -199,7 +234,16 @@ fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
             context.model,
             context.message_tx,
         ),
-        Err(_) => super::fence_failed_history(
+        (FetchPhase::Full, Ok(history)) => install_fetched_history(
+            context.worker,
+            generation,
+            &context.series,
+            &history,
+            context.state,
+            context.model,
+            context.message_tx,
+        ),
+        (_, Err(_)) => super::fence_failed_history(
             context.worker,
             generation,
             &mut context.state.retained,

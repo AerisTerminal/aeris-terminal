@@ -161,11 +161,12 @@ struct TerminalApp {
     provider: TerminalProvider,
     coinbase_products: Vec<CoinbaseSpotProduct>,
     coinbase_product: Option<CoinbaseSpotProduct>,
-    coinbase_history_root: Option<PathBuf>,
-    coinbase_diagnostics: CoinbaseDiagnosticsMode,
     coinbase_switch: CoinbaseSwitchState,
     coinbase_interval: ChartInterval,
     coinbase_catalog: CoinbaseCatalogState,
+    coinbase_pending_interval: Option<ChartInterval>,
+    coinbase_pending_product: Option<CoinbaseSpotProduct>,
+    coinbase_pending_sequence: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,32 +194,6 @@ enum CoinbaseCatalogState {
     #[default]
     Loading,
     Ready,
-}
-
-impl CoinbaseCatalogState {
-    const fn needs_fetch(self) -> bool {
-        matches!(self, Self::Loading)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CoinbaseDiagnosticsMode {
-    Standard,
-    Detailed,
-}
-
-impl CoinbaseDiagnosticsMode {
-    const fn from_enabled(enabled: bool) -> Self {
-        if enabled {
-            Self::Detailed
-        } else {
-            Self::Standard
-        }
-    }
-
-    const fn enabled(self) -> bool {
-        matches!(self, Self::Detailed)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -604,8 +579,6 @@ struct TerminalStartupState {
     connection_message: Option<String>,
     provider: TerminalProvider,
     coinbase_product: Option<CoinbaseSpotProduct>,
-    coinbase_history_root: Option<PathBuf>,
-    coinbase_detailed_diagnostics: bool,
 }
 
 fn terminal_startup_state(
@@ -628,8 +601,6 @@ fn terminal_startup_state(
                 connection_message: Some(message),
                 provider: TerminalProvider::Rithmic,
                 coinbase_product: None,
-                coinbase_history_root: None,
-                coinbase_detailed_diagnostics: false,
             }
         }
         MarketWorkerStartup::Loading(startup) => TerminalStartupState {
@@ -643,8 +614,6 @@ fn terminal_startup_state(
             connection_message: Some("Connecting to Coinbase public markets".to_string()),
             provider: TerminalProvider::Coinbase,
             coinbase_product: Some(startup.coinbase_product),
-            coinbase_history_root: Some(startup.history_root),
-            coinbase_detailed_diagnostics: startup.detailed_diagnostics,
         },
         MarketWorkerStartup::Ready(bootstrap) => {
             let replay_label = generation_status(
@@ -664,8 +633,6 @@ fn terminal_startup_state(
                 connection_message: None,
                 provider: TerminalProvider::Fixture,
                 coinbase_product: None,
-                coinbase_history_root: None,
-                coinbase_detailed_diagnostics: false,
             }
         }
     }
@@ -691,8 +658,6 @@ impl TerminalApp {
             connection_message,
             provider,
             coinbase_product,
-            coinbase_history_root,
-            coinbase_detailed_diagnostics,
         } = terminal_startup_state(startup, cx);
         let bridge_label = chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
@@ -739,13 +704,12 @@ impl TerminalApp {
             provider,
             coinbase_products: coinbase_product.clone().into_iter().collect(),
             coinbase_product,
-            coinbase_history_root,
-            coinbase_diagnostics: CoinbaseDiagnosticsMode::from_enabled(
-                coinbase_detailed_diagnostics,
-            ),
             coinbase_switch: CoinbaseSwitchState::Idle,
             coinbase_interval: ChartInterval::Minute1,
             coinbase_catalog: CoinbaseCatalogState::Loading,
+            coinbase_pending_interval: None,
+            coinbase_pending_product: None,
+            coinbase_pending_sequence: None,
         }
     }
 
@@ -773,35 +737,24 @@ impl TerminalApp {
             self.select_rithmic_series(interval.into(), cx);
             return true;
         }
-        if self.coinbase_interval == interval {
+        if self.coinbase_interval == interval && self.coinbase_pending_interval.is_none() {
             return true;
         }
-        let (Some(product), Some(history_root)) = (
-            self.coinbase_product.clone(),
-            self.coinbase_history_root.clone(),
-        ) else {
+        if self.coinbase_pending_interval == Some(interval) {
+            return true;
+        }
+        let Some(product) = self.coinbase_product.clone() else {
             self.series_message = "Coinbase market selection is unavailable".to_string();
             cx.notify();
             return false;
         };
-        let previous = std::mem::replace(&mut self.market_worker, MarketDataWorker::disconnected());
-        let previous_shutdown = previous.shutdown_detached();
-        let worker = MarketDataWorker::start_coinbase_product_interval(
-            product,
-            interval,
-            history_root,
-            std::thread::current().id(),
-            self.coinbase_diagnostics.enabled(),
-            self.coinbase_catalog.needs_fetch(),
-            Some(previous_shutdown),
-        );
-        let Ok((_, worker)) = worker else {
+        let Ok(sequence) = self.market_worker.try_select_coinbase(product, interval) else {
             self.series_message = format!("{} history could not start", interval.label());
             cx.notify();
             return false;
         };
-        self.market_worker = worker;
-        self.coinbase_interval = interval;
+        self.coinbase_pending_interval = Some(interval);
+        self.coinbase_pending_sequence = Some(sequence);
         self.coinbase_switch = CoinbaseSwitchState::Pending;
         self.chart_state = ChartState::Loading;
         self.chart_state_message = format!("Loading {} history", interval.label());
@@ -868,33 +821,31 @@ impl TerminalApp {
                     .coinbase_product
                     .as_ref()
                     .is_some_and(|selected| selected.product_id == product.product_id)
+                    && self.coinbase_pending_product.is_none()
                 {
                     return true;
                 }
-                let Some(history_root) = self.coinbase_history_root.clone() else {
-                    self.symbol_message = "Coinbase history root is unavailable".to_string();
-                    cx.notify();
-                    return false;
-                };
-                let previous =
-                    std::mem::replace(&mut self.market_worker, MarketDataWorker::disconnected());
-                let previous_shutdown = previous.shutdown_detached();
-                let worker = MarketDataWorker::start_coinbase_product_interval(
-                    product.clone(),
-                    self.coinbase_interval,
-                    history_root,
-                    std::thread::current().id(),
-                    self.coinbase_diagnostics.enabled(),
-                    self.coinbase_catalog.needs_fetch(),
-                    Some(previous_shutdown),
-                );
-                let Ok((_, worker)) = worker else {
+                if self
+                    .coinbase_pending_product
+                    .as_ref()
+                    .is_some_and(|pending| pending.product_id == product.product_id)
+                {
+                    return true;
+                }
+                let interval = self
+                    .coinbase_pending_interval
+                    .unwrap_or(self.coinbase_interval);
+                let Ok(sequence) = self
+                    .market_worker
+                    .try_select_coinbase(product.clone(), interval)
+                else {
                     self.symbol_message = "Coinbase product worker could not start".to_string();
                     cx.notify();
                     return false;
                 };
-                self.market_worker = worker;
-                self.coinbase_product = Some(product.clone());
+                self.coinbase_pending_product = Some(product.clone());
+                self.coinbase_pending_interval = Some(interval);
+                self.coinbase_pending_sequence = Some(sequence);
                 self.coinbase_switch = CoinbaseSwitchState::Pending;
                 self.symbol_selection_pending = true;
                 self.chart_state = ChartState::Loading;
@@ -1003,27 +954,6 @@ impl TerminalApp {
             &self.subscription_id,
             &publication.generation,
         );
-        if self.coinbase_switch.is_pending()
-            && let axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot) =
-                publication.update
-        {
-            let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
-            observe_chart(Some(&chart), cx);
-            self.chart = Some(chart);
-            self.coinbase_switch = CoinbaseSwitchState::Idle;
-            self.symbol_selection_pending = false;
-            self.chart_state = ChartState::Ready;
-            self.chart_state_message = "market snapshot is current".to_string();
-            self.symbol_message = self.coinbase_product.as_ref().map_or_else(
-                || "Coinbase market ready".to_string(),
-                |product| format!("{} · Coinbase spot", product.product_id),
-            );
-            self.connection_state = Some(FeedConnectionState::Streaming);
-            self.connection_message = Some("Coinbase public market stream is live".to_string());
-            self.finish_ui_diagnostics(ui_diagnostics, true);
-            cx.notify();
-            return;
-        }
         let (next_state, accepted) = match (&self.chart, publication.update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
                 let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
@@ -1060,6 +990,11 @@ impl TerminalApp {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = "market snapshot is current".to_string();
             if self.provider == TerminalProvider::Coinbase {
+                self.symbol_selection_pending = false;
+                self.symbol_message = self.coinbase_product.as_ref().map_or_else(
+                    || "Coinbase market ready".to_string(),
+                    |product| format!("{} · Coinbase spot", product.product_id),
+                );
                 self.connection_state = Some(FeedConnectionState::Streaming);
                 self.connection_message = Some("Coinbase public market stream is live".to_string());
             }
@@ -1217,6 +1152,9 @@ impl TerminalApp {
             MarketWorkerMessage::State { state, message } => {
                 if state == ChartState::Error && self.provider == TerminalProvider::Coinbase {
                     self.coinbase_switch = CoinbaseSwitchState::Idle;
+                    self.coinbase_pending_interval = None;
+                    self.coinbase_pending_product = None;
+                    self.coinbase_pending_sequence = None;
                     self.symbol_selection_pending = false;
                     self.connection_state = Some(FeedConnectionState::Disconnected);
                     self.connection_message = Some(message.clone());
@@ -1227,6 +1165,24 @@ impl TerminalApp {
                     self.connection_message = Some(message.clone());
                 }
                 self.set_chart_state(state, message, cx);
+            }
+            MarketWorkerMessage::CoinbaseSwitchMarker { sequence } => {
+                if self.provider == TerminalProvider::Coinbase
+                    && self.coinbase_switch.is_pending()
+                    && self.coinbase_pending_sequence == Some(sequence)
+                {
+                    if let Some(interval) = self.coinbase_pending_interval.take() {
+                        self.coinbase_interval = interval;
+                    }
+                    if let Some(product) = self.coinbase_pending_product.take() {
+                        self.coinbase_product = Some(product);
+                    }
+                    self.coinbase_pending_sequence = None;
+                    self.coinbase_switch = CoinbaseSwitchState::Idle;
+                    self.chart = None;
+                    self.chart_state = ChartState::Loading;
+                    cx.notify();
+                }
             }
             MarketWorkerMessage::Connection { state, message } => {
                 self.apply_connection_state(state, message, cx);

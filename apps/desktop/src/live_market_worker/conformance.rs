@@ -1,7 +1,7 @@
 use super::{
     COMMAND_CAPACITY, INBOX_CAPACITY, MESSAGE_CAPACITY, PROVIDER_EVENT_CAPACITY,
     UI_DIAGNOSTICS_CAPACITY, WorkerInboxEvent, forward_commands, nonzero, prepare_running_worker,
-    product_profile, run_worker_loop,
+    product_profile, run_session,
 };
 use super::{composition::open_test_worker, history::fetch_history_with_adapter};
 use crate::market_worker::{
@@ -18,6 +18,7 @@ use axiusflow_desktop_storage::{
     CatalogKey, HistoryStore, PublicationOutcome, PublicationRequest, RecoveryAction,
     RetentionPolicy, SegmentEncryptionKey,
 };
+use axiusflow_market_data::ChartInterval;
 use axiusflow_platform_runtime::CredentialVault;
 use std::{
     fmt::Write as _,
@@ -25,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -69,8 +70,9 @@ impl<T: CoinbaseHistoryTransport + Send> super::HistorySource for FixtureHistory
         profile: &super::ProductProfile,
         now_unix_nanos: i64,
         _cancel: Arc<AtomicBool>,
+        phase: super::history::FetchPhase,
     ) -> Result<super::history::PreparedHistory, String> {
-        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos)
+        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos, phase)
     }
 }
 
@@ -119,6 +121,7 @@ impl super::HistorySource for BlockingHistorySource {
         profile: &super::ProductProfile,
         now_unix_nanos: i64,
         cancel: Arc<AtomicBool>,
+        phase: super::history::FetchPhase,
     ) -> Result<super::history::PreparedHistory, String> {
         let started = Instant::now();
         while !self.release.load(Ordering::Acquire) {
@@ -131,7 +134,7 @@ impl super::HistorySource for BlockingHistorySource {
             );
             thread::sleep(Duration::from_millis(1));
         }
-        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos)
+        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos, phase)
     }
 }
 
@@ -149,6 +152,8 @@ struct ControlledWorkerInput<'a, H> {
     inbox_rx: mpsc::Receiver<WorkerInboxEvent>,
     provider_wake_pending: &'a AtomicBool,
     ui_diagnostics_rx: &'a super::UiDiagnosticsReceiver,
+    selection_sequence: Arc<AtomicU64>,
+    session_end: mpsc::SyncSender<Option<u64>>,
 }
 
 impl TestRoot {
@@ -177,7 +182,7 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
     let root = TestRoot::create("reconnect");
     seed_corrupt_cache(&root.0);
     let source = fixture_source(CandleTransport);
-    let (mut worker, control) = start_controlled_worker(&root.0, source);
+    let (mut worker, control, _session_end) = start_controlled_worker(&root.0, source);
 
     let first = control
         .wait_started(Duration::from_secs(1))
@@ -211,7 +216,7 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
 fn shipping_loop_redacts_nested_history_failures() {
     let root = TestRoot::create("redaction");
     let source = fixture_source(SecretFailureTransport);
-    let (mut worker, control) = start_controlled_worker(&root.0, source);
+    let (mut worker, control, _session_end) = start_controlled_worker(&root.0, source);
     let generation = control
         .wait_started(Duration::from_secs(1))
         .expect("controlled generation starts");
@@ -237,7 +242,7 @@ fn pre_seed_live_trades_survive_history_seeding() {
         adapter: CoinbaseHistoryCapabilityAdapter::try_with_transport(CandleTransport)
             .expect("blocking fixture capabilities validate"),
     };
-    let (mut worker, control) = start_controlled_worker(&root.0, source);
+    let (mut worker, control, _session_end) = start_controlled_worker(&root.0, source);
     let generation = control
         .wait_started(Duration::from_secs(1))
         .expect("controlled generation starts");
@@ -277,7 +282,7 @@ fn shutdown_during_an_inflight_fetch_completes_boundedly() {
         adapter: CoinbaseHistoryCapabilityAdapter::try_with_transport(CandleTransport)
             .expect("blocking fixture capabilities validate"),
     };
-    let (worker, control) = start_controlled_worker(&root.0, source);
+    let (worker, control, _session_end) = start_controlled_worker(&root.0, source);
     let generation = control
         .wait_started(Duration::from_secs(1))
         .expect("controlled generation starts");
@@ -293,6 +298,163 @@ fn shutdown_during_an_inflight_fetch_completes_boundedly() {
     );
 }
 
+#[test]
+fn reselection_ends_the_session_cleanly_without_store_contention() {
+    let root = TestRoot::create("reselect");
+    let source = fixture_source(CandleTransport);
+    let (mut worker, control, session_end) = start_controlled_worker(&root.0, source);
+    let generation = control
+        .wait_started(Duration::from_secs(1))
+        .expect("controlled generation starts");
+    assert!(control.established(generation));
+
+    let sequence = worker
+        .try_select_coinbase(spot_product("ETH-USD"), ChartInterval::Minute5)
+        .expect("selection enters the bounded command channel");
+    assert_eq!(
+        session_end
+            .recv_timeout(Duration::from_secs(2))
+            .expect("session reports its end"),
+        Some(sequence)
+    );
+    assert_eq!(
+        control.wait_stopped(Duration::from_secs(2)),
+        Some(generation)
+    );
+    let (messages, _) = worker.drain_messages();
+    for message in &messages {
+        if let MarketWorkerMessage::State { message, .. } = message {
+            assert!(
+                !message.contains("already open"),
+                "reselection must never contend for the store: {message}"
+            );
+        }
+    }
+    drop(worker);
+}
+
+#[test]
+fn stale_selections_are_fenced_to_the_newest_requested_sequence() {
+    let ui_thread = thread::current().id();
+    thread::spawn(move || stale_selection_drain(ui_thread))
+        .join()
+        .expect("stale selection fencing holds on the worker thread");
+}
+
+fn stale_selection_drain(ui_thread: thread::ThreadId) {
+    let root = TestRoot::create("stale-reselect");
+    let profile = product_profile("BTC-USD".to_string()).expect("fixture profile validates");
+    let config =
+        CoinbaseConfig::try_new(vec![profile.product_id.clone()]).expect("product validates");
+    let (driver, events, _control) = CoinbaseProviderDriver::new_controlled_with_wake(
+        config,
+        nonzero(PROVIDER_EVENT_CAPACITY),
+        Arc::new(|| {}),
+    );
+    let worker = open_test_worker(
+        &profile,
+        root.0.clone(),
+        ui_thread,
+        MemoryVault,
+        driver,
+        catalog_key(),
+    )
+    .expect("controlled worker opens");
+    let history_source = fixture_source(CandleTransport);
+    let (message_tx, _message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
+    let mut running = prepare_running_worker(
+        profile,
+        super::OpenedWorker {
+            worker,
+            events,
+            segment_key: segment_key(),
+        },
+        None,
+        false,
+        &history_source,
+        &message_tx,
+    )
+    .expect("controlled worker prepares");
+    let latest = AtomicU64::new(2);
+    let (inbox_tx, inbox_rx) = mpsc::sync_channel(INBOX_CAPACITY);
+    for sequence in [1, 2] {
+        inbox_tx
+            .send(WorkerInboxEvent::Command(
+                crate::market_worker::MarketWorkerCommand::CoinbaseSelect(Box::new(
+                    crate::market_worker::CoinbaseSelectionRequest {
+                        sequence,
+                        product: spot_product("ETH-USD"),
+                        interval: ChartInterval::Minute5,
+                    },
+                )),
+            ))
+            .expect("selection enters the inbox");
+    }
+    let provider_wake_pending = AtomicBool::new(false);
+    let signal = super::lifecycle::drain_worker_inbox(
+        &inbox_rx,
+        &mut None,
+        &mut super::lifecycle::InboxDrainContext {
+            worker: &mut running.worker,
+            events: &running.events,
+            state: &mut running.state,
+            message_tx: &message_tx,
+            provider_wake_pending: &provider_wake_pending,
+            selection_sequence: &latest,
+            series: super::history::StreamingSeriesContext {
+                profile: &running.profile,
+                segment_key: &running.segment_key,
+                instrument: &running.instrument,
+                bar_definition: &running.bar_definition,
+                worker_label: &running.worker_label,
+            },
+            model: &mut running.model,
+        },
+    )
+    .expect("inbox drains");
+    let super::lifecycle::DrainSignal::Reselect(request) = signal else {
+        panic!("the newest selection must trigger exactly one reselection");
+    };
+    assert_eq!(request.sequence, 2);
+}
+
+#[test]
+fn recent_phase_publishes_the_newest_page_before_the_full_range() {
+    let mut profile = product_profile("BTC-USD".to_string()).expect("fixture profile validates");
+    profile.interval = ChartInterval::Minute3;
+    assert!(super::history::needs_recent_phase(profile.interval));
+
+    let fetch = |phase| {
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(CandleTransport)
+            .expect("fixture capabilities validate");
+        fetch_history_with_adapter(&profile, &mut adapter, FIXED_NOW_UNIX_NANOS, phase)
+            .expect("fixture history fetches")
+    };
+    let recent = fetch(super::history::FetchPhase::Recent);
+    let full = fetch(super::history::FetchPhase::Full);
+    let recent_items = &recent.completion.page().items;
+    let full_items = &full.completion.page().items;
+    assert!(recent_items.len() < full_items.len());
+    assert!(!recent_items.is_empty());
+    assert_eq!(
+        recent_items.last().map(|item| item.event_time_unix_nanos),
+        full_items.last().map(|item| item.event_time_unix_nanos),
+        "the recent phase ends at the same live boundary as the full range"
+    );
+}
+
+fn spot_product(product_id: &str) -> axiusflow_coinbase_market_adapter::CoinbaseSpotProduct {
+    axiusflow_coinbase_market_adapter::CoinbaseSpotProduct {
+        product_id: product_id.to_string(),
+        instrument_id: format!("instrument:coinbase:{}", product_id.to_ascii_lowercase()),
+        display_symbol: product_id.replace('-', "/"),
+        base_currency: "ETH".to_string(),
+        quote_currency: "USD".to_string(),
+        price_scale: 2,
+        quantity_scale: 8,
+    }
+}
+
 fn fixture_source<T>(transport: T) -> FixtureHistorySource<T> {
     FixtureHistorySource {
         adapter: CoinbaseHistoryCapabilityAdapter::try_with_transport(transport)
@@ -303,7 +465,11 @@ fn fixture_source<T>(transport: T) -> FixtureHistorySource<T> {
 fn start_controlled_worker<H: super::HistorySource + 'static>(
     history_root: &Path,
     history_source: H,
-) -> (MarketDataWorker, CoinbaseProviderFixtureControl) {
+) -> (
+    MarketDataWorker,
+    CoinbaseProviderFixtureControl,
+    mpsc::Receiver<Option<u64>>,
+) {
     let product_id = "BTC-USD".to_string();
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
@@ -337,6 +503,9 @@ fn start_controlled_worker<H: super::HistorySource + 'static>(
     thread::spawn(move || forward_commands(&command_rx, &command_inbox));
     let root = history_root.to_path_buf();
     let ui_thread = thread::current().id();
+    let selection_sequence = Arc::new(AtomicU64::new(0));
+    let (session_end_tx, session_end_rx) = mpsc::sync_channel::<Option<u64>>(1);
+    let worker_selection = Arc::clone(&selection_sequence);
     thread::spawn(move || {
         let error_tx = message_tx.clone();
         let result = run_controlled_worker(ControlledWorkerInput {
@@ -351,6 +520,8 @@ fn start_controlled_worker<H: super::HistorySource + 'static>(
             inbox_rx,
             provider_wake_pending: &provider_wake_pending,
             ui_diagnostics_rx: &ui_diagnostics_rx,
+            selection_sequence: worker_selection,
+            session_end: session_end_tx,
         });
         if let Err(error) = result {
             let _ = error_tx.send(MarketWorkerMessage::State {
@@ -366,8 +537,10 @@ fn start_controlled_worker<H: super::HistorySource + 'static>(
             message_rx,
             shutdown_rx,
             Some(ui_diagnostics_tx),
+            Some(selection_sequence),
         ),
         control,
+        session_end_rx,
     )
 }
 
@@ -395,15 +568,30 @@ fn run_controlled_worker<H: super::HistorySource + 'static>(
         &input.history_source,
         input.message_tx,
     )?;
-    run_worker_loop(
+    let (history_command_tx, history_command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+    let history_inbox_tx = input.inbox_tx.clone();
+    let history_handle = thread::spawn(move || {
+        let mut history_source = input.history_source;
+        super::history_command_loop(&mut history_source, &history_command_rx, &history_inbox_tx);
+    });
+    let result = run_session(
         running,
-        input.history_source,
+        &history_command_tx,
         input.message_tx,
-        &input.inbox_tx,
         &input.inbox_rx,
         input.provider_wake_pending,
         input.ui_diagnostics_rx,
-    )
+        &input.selection_sequence,
+    );
+    let reselected = match &result {
+        Ok(super::SessionEnd::Reselect(request)) => Some(request.sequence),
+        _ => None,
+    };
+    let _ = input.session_end.send(reselected);
+    let result = result.map(|_| ());
+    drop(history_command_tx);
+    let _ = history_handle.join();
+    result
 }
 
 fn seed_corrupt_cache(root: &Path) {
@@ -414,6 +602,7 @@ fn seed_corrupt_cache(root: &Path) {
         &profile,
         FIXED_NOW_UNIX_NANOS,
         Arc::new(AtomicBool::new(false)),
+        super::history::FetchPhase::Full,
     )
     .expect("fixture history fetches");
     let payload = encode_history_segment(&prepared.completion.page().items)
@@ -561,6 +750,7 @@ fn assert_message_redacted(message: &MarketWorkerMessage) {
             Err(error) => error.clone(),
         },
         MarketWorkerMessage::CoinbaseDom(_) => "Coinbase depth frame".to_string(),
+        MarketWorkerMessage::CoinbaseSwitchMarker { .. } => "Coinbase switch marker".to_string(),
         MarketWorkerMessage::Update(publication) => format!(
             "{} {} {}",
             publication.subscription_id,

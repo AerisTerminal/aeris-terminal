@@ -10,8 +10,9 @@ mod provenance;
 mod publication;
 
 use crate::market_worker::{
-    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup,
-    UiDiagnosticsReceiver, market_worker_channel, ui_diagnostics_channel,
+    ChartState, CoinbaseSelectionRequest, MarketDataWorker, MarketWorkerMessage,
+    MarketWorkerSender, MarketWorkerStartup, UiDiagnosticsReceiver, market_worker_channel,
+    ui_diagnostics_channel,
 };
 use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
@@ -35,11 +36,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::AtomicBool,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, ThreadId},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use composition::{
@@ -49,11 +50,11 @@ use composition::{
 };
 use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
-    DirectHistorySource, HistorySource, InitialHistoryContext, StreamingSeriesContext,
-    prepare_initial_history,
+    DirectHistorySource, FetchPhase, HistorySource, InitialHistoryContext, StreamingSeriesContext,
+    needs_recent_phase, prepare_initial_history,
 };
 use lifecycle::{
-    EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
+    DrainSignal, EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
     apply_initial_network, cancel_inflight_history, drain_worker_inbox, environment_events,
     forward_commands, wait_for_inbox,
 };
@@ -108,7 +109,7 @@ struct WorkerThreadInput {
     provider_wake_pending: Arc<AtomicBool>,
     ui_diagnostics_rx: UiDiagnosticsReceiver,
     detailed_diagnostics: bool,
-    previous_shutdown: Option<Receiver<()>>,
+    selection_sequence: Arc<AtomicU64>,
 }
 
 struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault> {
@@ -158,26 +159,6 @@ pub(crate) fn start(
         ui_thread,
         detailed_diagnostics,
         fetch_catalog,
-        None,
-    )
-}
-
-pub(crate) fn start_product_interval(
-    product: axiusflow_coinbase_market_adapter::CoinbaseSpotProduct,
-    interval: axiusflow_market_data::ChartInterval,
-    history_root: PathBuf,
-    ui_thread: ThreadId,
-    detailed_diagnostics: bool,
-    fetch_catalog: bool,
-    previous_shutdown: Option<Receiver<()>>,
-) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    start_with_profile(
-        product_profile_from_spot(product, interval),
-        history_root,
-        ui_thread,
-        detailed_diagnostics,
-        fetch_catalog,
-        previous_shutdown,
     )
 }
 
@@ -187,9 +168,8 @@ fn start_with_profile(
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
     fetch_catalog: bool,
-    previous_shutdown: Option<Receiver<()>>,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    let startup = loading_startup(&profile, history_root.clone(), detailed_diagnostics);
+    let startup = loading_startup(&profile);
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
     if fetch_catalog {
         let catalog_message_tx = message_tx.clone();
@@ -215,11 +195,13 @@ fn start_with_profile(
         ui_diagnostics_channel(nonzero(UI_DIAGNOSTICS_CAPACITY), diagnostics_wake);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let provider_wake_pending = Arc::new(AtomicBool::new(false));
+    let selection_sequence = Arc::new(AtomicU64::new(0));
     let command_inbox_tx = inbox_tx.clone();
     thread::Builder::new()
         .name("axiusflow-coinbase-command-inbox".to_string())
         .spawn(move || forward_commands(&command_rx, &command_inbox_tx))
         .map_err(|error| error.to_string())?;
+    let worker_selection_sequence = Arc::clone(&selection_sequence);
     thread::Builder::new()
         .name("axiusflow-coinbase-market-worker".to_string())
         .spawn(move || {
@@ -234,7 +216,7 @@ fn start_with_profile(
                 provider_wake_pending,
                 ui_diagnostics_rx,
                 detailed_diagnostics,
-                previous_shutdown,
+                selection_sequence: worker_selection_sequence,
             }) {
                 let _ = error_tx.send(MarketWorkerMessage::State {
                     state: ChartState::Error,
@@ -251,36 +233,10 @@ fn start_with_profile(
             message_rx,
             shutdown_rx,
             Some(ui_diagnostics_tx),
+            Some(selection_sequence),
         ),
     ))
 }
-
-#[cfg(test)]
-mod handoff_tests {
-    use super::{PREVIOUS_SHUTDOWN_WAIT, await_previous_shutdown};
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn replacement_waits_for_the_previous_shutdown_before_opening_the_store() {
-        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let started = Instant::now();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
-            let _ = shutdown_tx.send(());
-        });
-        await_previous_shutdown(Some(shutdown_rx), PREVIOUS_SHUTDOWN_WAIT);
-        assert!(started.elapsed() >= Duration::from_millis(150));
-
-        await_previous_shutdown(None, PREVIOUS_SHUTDOWN_WAIT);
-
-        let (_hung_tx, hung_rx) = mpsc::sync_channel::<()>(1);
-        let bounded = Instant::now();
-        await_previous_shutdown(Some(hung_rx), Duration::from_millis(50));
-        assert!(bounded.elapsed() < Duration::from_secs(2));
-    }
-}
-
 fn ensure_history_parent(history_root: &Path) -> Result<(), String> {
     let Some(parent) = history_root.parent() else {
         return Ok(());
@@ -292,15 +248,16 @@ fn ensure_history_parent(history_root: &Path) -> Result<(), String> {
         .map_err(|error| format!("Coinbase history parent could not be created: {error}"))
 }
 
-const PREVIOUS_SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
-
-fn await_previous_shutdown(previous: Option<Receiver<()>>, timeout: Duration) {
-    let Some(previous) = previous else {
-        return;
-    };
-    let _ = previous.recv_timeout(timeout);
+enum SessionEnd {
+    Shutdown,
+    Exit,
+    Reselect(Box<CoinbaseSelectionRequest>),
 }
 
+/// One coordinator owns the history thread, environment monitors, and the
+/// encrypted store session for the application's lifetime. Selection changes
+/// rebuild the provider session in place on this thread, so the store lock is
+/// always released before it is reacquired.
 fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
     let WorkerThreadInput {
         profile,
@@ -312,46 +269,77 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         provider_wake_pending,
         ui_diagnostics_rx,
         detailed_diagnostics,
-        previous_shutdown,
+        selection_sequence,
     } = input;
     ensure_history_parent(&history_root)?;
     enforce_coinbase_disk_cache_quota(&history_root, COINBASE_DISK_CACHE_BYTES)?;
-    await_previous_shutdown(previous_shutdown, PREVIOUS_SHUTDOWN_WAIT);
-    let OpenedWorker {
-        worker,
-        events,
-        segment_key,
-    } = open_worker(
-        &profile,
-        &history_root,
-        ui_thread,
-        &inbox_tx,
-        &provider_wake_pending,
-        detailed_diagnostics,
-    )?;
+    let (history_command_tx, history_command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+    let history_inbox_tx = inbox_tx.clone();
+    let history_handle = thread::Builder::new()
+        .name("axiusflow-coinbase-history".to_string())
+        .spawn(move || {
+            let mut history_source = DirectHistorySource;
+            history_command_loop(&mut history_source, &history_command_rx, &history_inbox_tx);
+        })
+        .map_err(|error| error.to_string())?;
     let (initial_network, monitors_active) = environment_events(inbox_tx.clone());
-    let history_source = DirectHistorySource;
-    let running = prepare_running_worker(
-        profile,
-        OpenedWorker {
+    let mut profile = profile;
+    let result = loop {
+        let OpenedWorker {
             worker,
             events,
             segment_key,
-        },
-        initial_network,
-        monitors_active,
-        &history_source,
-        &message_tx,
-    )?;
-    run_worker_loop(
-        running,
-        history_source,
-        &message_tx,
-        &inbox_tx,
-        &inbox_rx,
-        &provider_wake_pending,
-        &ui_diagnostics_rx,
-    )
+        } = match open_worker(
+            &profile,
+            &history_root,
+            ui_thread,
+            &inbox_tx,
+            &provider_wake_pending,
+            detailed_diagnostics,
+        ) {
+            Ok(opened) => opened,
+            Err(error) => break Err(error),
+        };
+        let history_source = DirectHistorySource;
+        let running = match prepare_running_worker(
+            profile.clone(),
+            OpenedWorker {
+                worker,
+                events,
+                segment_key,
+            },
+            initial_network,
+            monitors_active,
+            &history_source,
+            &message_tx,
+        ) {
+            Ok(running) => running,
+            Err(error) => break Err(error),
+        };
+        match run_session(
+            running,
+            &history_command_tx,
+            &message_tx,
+            &inbox_rx,
+            &provider_wake_pending,
+            &ui_diagnostics_rx,
+            &selection_sequence,
+        ) {
+            Ok(SessionEnd::Reselect(request)) => {
+                let sequence = request.sequence;
+                profile = product_profile_from_spot(request.product, request.interval);
+                let _ = message_tx.send(MarketWorkerMessage::CoinbaseSwitchMarker { sequence });
+                let _ = message_tx.send(MarketWorkerMessage::State {
+                    state: ChartState::Loading,
+                    message: format!("Loading {} history", profile.interval.label()),
+                });
+            }
+            other => break other.map(|_| ()),
+        }
+    };
+    drop(history_command_tx);
+    let _ = history_handle.join();
+    result
 }
 
 fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource>(
@@ -408,39 +396,31 @@ fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: His
     })
 }
 
-fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource + 'static>(
+fn run_session<V: axiusflow_platform_runtime::CredentialVault>(
     mut running: RunningWorker<V>,
-    history_source: H,
+    history_command_tx: &SyncSender<HistoryCommand>,
     message_tx: &MarketWorkerSender,
-    inbox_tx: &SyncSender<WorkerInboxEvent>,
     inbox_rx: &Receiver<WorkerInboxEvent>,
     provider_wake_pending: &AtomicBool,
     ui_diagnostics_rx: &UiDiagnosticsReceiver,
-) -> Result<(), String> {
-    let (history_command_tx, history_command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-    let history_inbox_tx = inbox_tx.clone();
-    let mut history_source = history_source;
-    let history_handle = thread::Builder::new()
-        .name("axiusflow-coinbase-history".to_string())
-        .spawn(move || {
-            history_command_loop(&mut history_source, &history_command_rx, &history_inbox_tx);
-        })
-        .map_err(|error| error.to_string())?;
-    let (result, shutdown) = run_market_event_loop(
+    selection_sequence: &AtomicU64,
+) -> Result<SessionEnd, String> {
+    let end = run_market_event_loop(
         &mut running,
-        &history_command_tx,
+        history_command_tx,
         message_tx,
         inbox_rx,
-        provider_wake_pending,
-        ui_diagnostics_rx,
-    );
+        &SessionWiring {
+            provider_wake_pending,
+            ui_diagnostics_rx,
+            selection_sequence,
+        },
+    )?;
     cancel_inflight_history(&mut running.state.history);
-    drop(history_command_tx);
-    let _ = history_handle.join();
-    if shutdown && result.is_ok() {
+    if !matches!(end, SessionEnd::Exit) {
         running.worker.stop().map_err(|error| error.to_string())?;
     }
-    result
+    Ok(end)
 }
 
 fn history_command_loop<H: HistorySource>(
@@ -454,14 +434,34 @@ fn history_command_loop<H: HistorySource>(
         cancel,
     }) = commands.recv()
     {
-        let result = source
-            .now_unix_nanos()
-            .and_then(|now| source.fetch(&profile, now, cancel).map(Box::new));
-        if inbox_tx
-            .send(WorkerInboxEvent::HistoryCompleted { generation, result })
-            .is_err()
-        {
-            return;
+        let phases = if needs_recent_phase(profile.interval) {
+            [FetchPhase::Recent, FetchPhase::Full].as_slice()
+        } else {
+            [FetchPhase::Full].as_slice()
+        };
+        for &phase in phases {
+            if cancel.load(Ordering::Acquire) {
+                break;
+            }
+            let result = source.now_unix_nanos().and_then(|now| {
+                source
+                    .fetch(&profile, now, Arc::clone(&cancel), phase)
+                    .map(Box::new)
+            });
+            let failed = result.is_err();
+            if inbox_tx
+                .send(WorkerInboxEvent::HistoryCompleted {
+                    generation,
+                    phase,
+                    result,
+                })
+                .is_err()
+            {
+                return;
+            }
+            if failed {
+                break;
+            }
         }
     }
 }
@@ -470,6 +470,13 @@ enum LoopAction {
     Continue,
     Shutdown,
     Exit,
+    Reselect(Box<CoinbaseSelectionRequest>),
+}
+
+struct SessionWiring<'a> {
+    provider_wake_pending: &'a AtomicBool,
+    ui_diagnostics_rx: &'a UiDiagnosticsReceiver,
+    selection_sequence: &'a AtomicU64,
 }
 
 fn run_market_event_loop<V: axiusflow_platform_runtime::CredentialVault>(
@@ -477,9 +484,8 @@ fn run_market_event_loop<V: axiusflow_platform_runtime::CredentialVault>(
     history_command_tx: &SyncSender<HistoryCommand>,
     message_tx: &MarketWorkerSender,
     inbox_rx: &Receiver<WorkerInboxEvent>,
-    provider_wake_pending: &AtomicBool,
-    ui_diagnostics_rx: &UiDiagnosticsReceiver,
-) -> (Result<(), String>, bool) {
+    wiring: &SessionWiring<'_>,
+) -> Result<SessionEnd, String> {
     let mut ready_event = None;
     loop {
         match market_loop_iteration(
@@ -488,13 +494,12 @@ fn run_market_event_loop<V: axiusflow_platform_runtime::CredentialVault>(
             message_tx,
             inbox_rx,
             &mut ready_event,
-            provider_wake_pending,
-            ui_diagnostics_rx,
-        ) {
-            Ok(LoopAction::Continue) => {}
-            Ok(LoopAction::Shutdown) => return (Ok(()), true),
-            Ok(LoopAction::Exit) => return (Ok(()), false),
-            Err(error) => return (Err(error), false),
+            wiring,
+        )? {
+            LoopAction::Continue => {}
+            LoopAction::Shutdown => return Ok(SessionEnd::Shutdown),
+            LoopAction::Exit => return Ok(SessionEnd::Exit),
+            LoopAction::Reselect(request) => return Ok(SessionEnd::Reselect(request)),
         }
     }
 }
@@ -505,10 +510,9 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
     message_tx: &MarketWorkerSender,
     inbox_rx: &Receiver<WorkerInboxEvent>,
     ready_event: &mut Option<WorkerInboxEvent>,
-    provider_wake_pending: &AtomicBool,
-    ui_diagnostics_rx: &UiDiagnosticsReceiver,
+    wiring: &SessionWiring<'_>,
 ) -> Result<LoopAction, String> {
-    if drain_worker_inbox(
+    match drain_worker_inbox(
         inbox_rx,
         ready_event,
         &mut InboxDrainContext {
@@ -516,7 +520,8 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
             events: &running.events,
             state: &mut running.state,
             message_tx,
-            provider_wake_pending,
+            provider_wake_pending: wiring.provider_wake_pending,
+            selection_sequence: wiring.selection_sequence,
             series: StreamingSeriesContext {
                 profile: &running.profile,
                 segment_key: &running.segment_key,
@@ -527,9 +532,11 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
             model: &mut running.model,
         },
     )? {
-        return Ok(LoopAction::Shutdown);
+        DrainSignal::None => {}
+        DrainSignal::Shutdown => return Ok(LoopAction::Shutdown),
+        DrainSignal::Reselect(request) => return Ok(LoopAction::Reselect(request)),
     }
-    flush_diagnostics(&mut running.worker, ui_diagnostics_rx, message_tx)?;
+    flush_diagnostics(&mut running.worker, wiring.ui_diagnostics_rx, message_tx)?;
 
     running.reconcile_recovery(message_tx)?;
 
@@ -566,7 +573,7 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
         return Ok(LoopAction::Exit);
     }
     discard_provider_events(&mut running.worker)?;
-    flush_diagnostics(&mut running.worker, ui_diagnostics_rx, message_tx)?;
+    flush_diagnostics(&mut running.worker, wiring.ui_diagnostics_rx, message_tx)?;
     if running.events.has_ready() {
         return Ok(LoopAction::Continue);
     }

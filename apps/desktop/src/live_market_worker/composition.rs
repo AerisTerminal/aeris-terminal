@@ -23,7 +23,7 @@ use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -215,7 +215,7 @@ pub(super) fn open_worker(
 #[cfg(test)]
 pub(super) fn open_test_worker<V: CredentialVault>(
     profile: &ProductProfile,
-    history_root: PathBuf,
+    history_root: std::path::PathBuf,
     ui_thread: ThreadId,
     vault: V,
     driver: CoinbaseProviderDriver,
@@ -255,15 +255,9 @@ pub(super) fn worker_label(monitors_active: bool) -> String {
     .to_string()
 }
 
-pub(super) fn loading_startup(
-    profile: &ProductProfile,
-    history_root: PathBuf,
-    detailed_diagnostics: bool,
-) -> MarketWorkerStartup {
+pub(super) fn loading_startup(profile: &ProductProfile) -> MarketWorkerStartup {
     MarketWorkerStartup::Loading(Box::new(CoinbaseWorkerStartup {
         coinbase_product: spot_product(profile),
-        history_root,
-        detailed_diagnostics,
         subscription_id: SUBSCRIPTION_ID.to_string(),
         worker_label: "Coinbase direct · loading local provider history".to_string(),
     }))
@@ -488,9 +482,7 @@ mod tests {
     #[test]
     fn live_startup_is_loading_metadata_without_synthetic_market_data() {
         let profile = product_profile("BTC-USD".to_string()).expect("profile validates");
-        let MarketWorkerStartup::Loading(startup) =
-            loading_startup(&profile, std::path::PathBuf::from("history"), false)
-        else {
+        let MarketWorkerStartup::Loading(startup) = loading_startup(&profile) else {
             panic!("live startup must wait for a provider snapshot");
         };
         let CoinbaseWorkerStartup {
