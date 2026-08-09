@@ -39,7 +39,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, ThreadId},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use composition::{
@@ -108,6 +108,7 @@ struct WorkerThreadInput {
     provider_wake_pending: Arc<AtomicBool>,
     ui_diagnostics_rx: UiDiagnosticsReceiver,
     detailed_diagnostics: bool,
+    previous_shutdown: Option<Receiver<()>>,
 }
 
 struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault> {
@@ -157,6 +158,7 @@ pub(crate) fn start(
         ui_thread,
         detailed_diagnostics,
         fetch_catalog,
+        None,
     )
 }
 
@@ -167,6 +169,7 @@ pub(crate) fn start_product_interval(
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
     fetch_catalog: bool,
+    previous_shutdown: Option<Receiver<()>>,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     start_with_profile(
         product_profile_from_spot(product, interval),
@@ -174,6 +177,7 @@ pub(crate) fn start_product_interval(
         ui_thread,
         detailed_diagnostics,
         fetch_catalog,
+        previous_shutdown,
     )
 }
 
@@ -183,6 +187,7 @@ fn start_with_profile(
     ui_thread: ThreadId,
     detailed_diagnostics: bool,
     fetch_catalog: bool,
+    previous_shutdown: Option<Receiver<()>>,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let startup = loading_startup(&profile, history_root.clone(), detailed_diagnostics);
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
@@ -229,6 +234,7 @@ fn start_with_profile(
                 provider_wake_pending,
                 ui_diagnostics_rx,
                 detailed_diagnostics,
+                previous_shutdown,
             }) {
                 let _ = error_tx.send(MarketWorkerMessage::State {
                     state: ChartState::Error,
@@ -249,6 +255,32 @@ fn start_with_profile(
     ))
 }
 
+#[cfg(test)]
+mod handoff_tests {
+    use super::{PREVIOUS_SHUTDOWN_WAIT, await_previous_shutdown};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn replacement_waits_for_the_previous_shutdown_before_opening_the_store() {
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = shutdown_tx.send(());
+        });
+        await_previous_shutdown(Some(shutdown_rx), PREVIOUS_SHUTDOWN_WAIT);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+
+        await_previous_shutdown(None, PREVIOUS_SHUTDOWN_WAIT);
+
+        let (_hung_tx, hung_rx) = mpsc::sync_channel::<()>(1);
+        let bounded = Instant::now();
+        await_previous_shutdown(Some(hung_rx), Duration::from_millis(50));
+        assert!(bounded.elapsed() < Duration::from_secs(2));
+    }
+}
+
 fn ensure_history_parent(history_root: &Path) -> Result<(), String> {
     let Some(parent) = history_root.parent() else {
         return Ok(());
@@ -258,6 +290,15 @@ fn ensure_history_parent(history_root: &Path) -> Result<(), String> {
     }
     fs::create_dir_all(parent)
         .map_err(|error| format!("Coinbase history parent could not be created: {error}"))
+}
+
+const PREVIOUS_SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
+
+fn await_previous_shutdown(previous: Option<Receiver<()>>, timeout: Duration) {
+    let Some(previous) = previous else {
+        return;
+    };
+    let _ = previous.recv_timeout(timeout);
 }
 
 fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
@@ -271,9 +312,11 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         provider_wake_pending,
         ui_diagnostics_rx,
         detailed_diagnostics,
+        previous_shutdown,
     } = input;
     ensure_history_parent(&history_root)?;
     enforce_coinbase_disk_cache_quota(&history_root, COINBASE_DISK_CACHE_BYTES)?;
+    await_previous_shutdown(previous_shutdown, PREVIOUS_SHUTDOWN_WAIT);
     let OpenedWorker {
         worker,
         events,

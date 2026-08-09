@@ -784,6 +784,8 @@ impl TerminalApp {
             cx.notify();
             return false;
         };
+        let previous = std::mem::replace(&mut self.market_worker, MarketDataWorker::disconnected());
+        let previous_shutdown = previous.shutdown_detached();
         let worker = MarketDataWorker::start_coinbase_product_interval(
             product,
             interval,
@@ -791,14 +793,14 @@ impl TerminalApp {
             std::thread::current().id(),
             self.coinbase_diagnostics.enabled(),
             self.coinbase_catalog.needs_fetch(),
+            Some(previous_shutdown),
         );
         let Ok((_, worker)) = worker else {
             self.series_message = format!("{} history could not start", interval.label());
             cx.notify();
             return false;
         };
-        let previous = std::mem::replace(&mut self.market_worker, worker);
-        previous.shutdown_detached();
+        self.market_worker = worker;
         self.coinbase_interval = interval;
         self.coinbase_switch = CoinbaseSwitchState::Pending;
         self.chart_state = ChartState::Loading;
@@ -874,6 +876,9 @@ impl TerminalApp {
                     cx.notify();
                     return false;
                 };
+                let previous =
+                    std::mem::replace(&mut self.market_worker, MarketDataWorker::disconnected());
+                let previous_shutdown = previous.shutdown_detached();
                 let worker = MarketDataWorker::start_coinbase_product_interval(
                     product.clone(),
                     self.coinbase_interval,
@@ -881,14 +886,14 @@ impl TerminalApp {
                     std::thread::current().id(),
                     self.coinbase_diagnostics.enabled(),
                     self.coinbase_catalog.needs_fetch(),
+                    Some(previous_shutdown),
                 );
                 let Ok((_, worker)) = worker else {
                     self.symbol_message = "Coinbase product worker could not start".to_string();
                     cx.notify();
                     return false;
                 };
-                let previous = std::mem::replace(&mut self.market_worker, worker);
-                previous.shutdown_detached();
+                self.market_worker = worker;
                 self.coinbase_product = Some(product.clone());
                 self.coinbase_switch = CoinbaseSwitchState::Pending;
                 self.symbol_selection_pending = true;

@@ -50,6 +50,7 @@ const MAXIMUM_FRAME_BYTES: usize = 65_536;
 const MAXIMUM_BUFFERED_BYTES: usize = 131_072;
 const FRAGMENT_BYTES: usize = 7;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
 const CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
@@ -1024,6 +1025,16 @@ impl MarketDataWorker {
         )
     }
 
+    pub(crate) fn disconnected() -> Self {
+        Self {
+            commands: None,
+            messages: None,
+            shutdown_complete: mpsc::channel().1,
+            connected: false,
+            ui_diagnostics: None,
+        }
+    }
+
     pub fn start_coinbase_product_interval(
         product: CoinbaseSpotProduct,
         interval: ChartInterval,
@@ -1031,6 +1042,7 @@ impl MarketDataWorker {
         ui_thread: thread::ThreadId,
         detailed_diagnostics: bool,
         fetch_catalog: bool,
+        previous_shutdown: Option<Receiver<()>>,
     ) -> Result<(MarketWorkerStartup, Self), String> {
         crate::live_market_worker::start_product_interval(
             product,
@@ -1039,6 +1051,7 @@ impl MarketDataWorker {
             ui_thread,
             detailed_diagnostics,
             fetch_catalog,
+            previous_shutdown,
         )
     }
 
@@ -1222,14 +1235,9 @@ impl MarketDataWorker {
         )
     }
 
-    pub fn shutdown_detached(mut self) {
+    pub fn shutdown_detached(mut self) -> Receiver<()> {
         self.begin_shutdown();
-        let shutdown_complete = std::mem::replace(&mut self.shutdown_complete, mpsc::channel().1);
-        let _ = thread::Builder::new()
-            .name("axiusflow-market-worker-shutdown".to_string())
-            .spawn(move || {
-                let _ = shutdown_complete.recv_timeout(CONFIRMED_SHUTDOWN_TIMEOUT);
-            });
+        std::mem::replace(&mut self.shutdown_complete, mpsc::channel().1)
     }
 }
 
