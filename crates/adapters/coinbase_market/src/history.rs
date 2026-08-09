@@ -33,6 +33,8 @@ const ONE_SECOND_NANOS: i64 = 1_000_000_000;
 const ONE_MINUTE_SECONDS: i64 = 60;
 const MAXIMUM_PAGE_ITEMS: usize = 350;
 const MAXIMUM_PAGINATION_PAGES: usize = 4_096;
+const PUBLIC_REQUEST_INTERVAL: Duration = Duration::from_millis(100);
+const MAXIMUM_RATE_LIMIT_RETRIES: u32 = 3;
 const SUPPORTED_RESOLUTIONS: [&str; 14] = [
     "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
 ];
@@ -101,11 +103,92 @@ pub trait CoinbaseHistoryTransport {
 }
 
 /// Direct rustls transport to Coinbase's public Advanced Trade API.
-pub struct CoinbaseHttpsHistoryTransport;
+#[derive(Clone, Default)]
+pub struct CoinbaseHttpsHistoryTransport {
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl CoinbaseHttpsHistoryTransport {
+    /// Builds the direct transport without cooperative cancellation.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { stop: None }
+    }
+
+    /// Builds the direct transport cancelled by the shared stop signal.
+    #[must_use]
+    pub fn with_stop(stop: Arc<AtomicBool>) -> Self {
+        Self { stop: Some(stop) }
+    }
+}
 
 impl CoinbaseHistoryTransport for CoinbaseHttpsHistoryTransport {
     fn get(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        https_get(path)
+        https_get(path, self.stop.clone())
+    }
+}
+
+/// Paces, retries, and cooperatively cancels public REST requests.
+pub(crate) struct PublicRequestGate {
+    interval: Duration,
+    stop: Option<Arc<AtomicBool>>,
+    last_request: Option<Instant>,
+}
+
+impl PublicRequestGate {
+    pub(crate) const fn new(stop: Option<Arc<AtomicBool>>) -> Self {
+        Self {
+            interval: PUBLIC_REQUEST_INTERVAL,
+            stop,
+            last_request: None,
+        }
+    }
+
+    pub(crate) fn get<T: CoinbaseHistoryTransport>(
+        &mut self,
+        transport: &mut T,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(last) = self.last_request {
+            let remaining = self.interval.saturating_sub(last.elapsed());
+            if !remaining.is_zero() {
+                sleep_cancellable(remaining, self.stop.as_deref())?;
+            }
+        }
+        self.last_request = Some(Instant::now());
+        let mut retries = 0_u32;
+        loop {
+            match transport.get(path) {
+                Err(error) if retries < MAXIMUM_RATE_LIMIT_RETRIES && is_rate_limited(&error) => {
+                    retries = retries.saturating_add(1);
+                    let backoff = self
+                        .interval
+                        .max(Duration::from_millis(500))
+                        .saturating_mul(2_u32.saturating_pow(retries));
+                    sleep_cancellable(backoff, self.stop.as_deref())?;
+                    self.last_request = Some(Instant::now());
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+fn is_rate_limited(error: &str) -> bool {
+    error.contains("HTTP 429")
+}
+
+fn sleep_cancellable(duration: Duration, stop: Option<&AtomicBool>) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            return Err("Coinbase request cancelled".to_string());
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        thread::sleep(remaining.min(Duration::from_millis(50)));
     }
 }
 
@@ -114,6 +197,7 @@ pub struct CoinbaseHistoryCapabilityAdapter<T = CoinbaseHttpsHistoryTransport> {
     capabilities: HistoryCapabilities,
     transport: T,
     cache: CoinbaseNetworkFirstCache,
+    gate: PublicRequestGate,
     products: HashMap<String, ProductPrecision>,
     diagnostics: CoinbaseHistoryDiagnostics,
 }
@@ -132,7 +216,7 @@ impl CoinbaseHistoryCapabilityAdapter<CoinbaseHttpsHistoryTransport> {
     ///
     /// Returns an error if the static capability profile violates shared bounds.
     pub fn try_new() -> Result<Self, ProviderHistoryError> {
-        Self::try_with_transport(CoinbaseHttpsHistoryTransport)
+        Self::try_with_transport(CoinbaseHttpsHistoryTransport::new())
     }
 }
 
@@ -150,7 +234,7 @@ impl<T> CoinbaseHistoryCapabilityAdapter<T> {
             NonZeroUsize::new(MAXIMUM_PAGE_ITEMS).unwrap_or(NonZeroUsize::MIN),
             PaginationStyle::EndTime,
             RateLimit {
-                requests: NonZeroU32::MIN,
+                requests: NonZeroU32::new(10).unwrap_or(NonZeroU32::MIN),
                 window_nanos: NonZeroU64::new(ONE_SECOND_NANOS as u64).unwrap_or(NonZeroU64::MIN),
                 maximum_inflight: NonZeroUsize::MIN,
             },
@@ -180,9 +264,16 @@ impl<T> CoinbaseHistoryCapabilityAdapter<T> {
             capabilities,
             transport,
             cache: CoinbaseNetworkFirstCache::new(),
+            gate: PublicRequestGate::new(None),
             products,
             diagnostics: CoinbaseHistoryDiagnostics::default(),
         })
+    }
+
+    /// Installs a cooperative cancellation signal observed between pages,
+    /// during pacing sleeps, and by stop-aware transports.
+    pub fn set_stop(&mut self, stop: Arc<AtomicBool>) {
+        self.gate = PublicRequestGate::new(Some(stop));
     }
 
     #[must_use]
@@ -246,9 +337,11 @@ impl<T: CoinbaseHistoryTransport> ProviderHistoryAdapter for CoinbaseHistoryCapa
             "/api/v3/brokerage/market/products/{}/candles?start={start_seconds}&end={end_seconds}&granularity={}&limit={}",
             profile.product_id, source.granularity, request.maximum_items
         );
+        let gate = &mut self.gate;
+        let transport = &mut self.transport;
         let body = self
             .cache
-            .network_first(&path, || self.transport.get(&path))?;
+            .network_first(&path, || gate.get(transport, &path))?;
         let page = parse_page(
             request,
             &body,
@@ -286,6 +379,14 @@ impl<T: CoinbaseHistoryTransport> CoinbaseHistoryCapabilityAdapter<T> {
             ..CoinbaseHistoryDiagnostics::default()
         };
         for _ in 0..MAXIMUM_PAGINATION_PAGES {
+            if self
+                .gate
+                .stop
+                .as_ref()
+                .is_some_and(|stop| stop.load(Ordering::Acquire))
+            {
+                return Err("Coinbase history fetch cancelled".to_string());
+            }
             let page = match self.fetch_page(&current) {
                 Ok(page) => page,
                 Err(error) => {
@@ -673,7 +774,7 @@ fn read_i64(payload: &[u8], offset: &mut usize) -> Result<i64, String> {
     Ok(i64::from_le_bytes(bytes))
 }
 
-fn https_get(path: &str) -> Result<Vec<u8>, String> {
+fn https_get(path: &str, stop: Option<Arc<AtomicBool>>) -> Result<Vec<u8>, String> {
     if !path.starts_with('/') || path.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
         return Err("invalid Coinbase history path".to_string());
     }
@@ -683,7 +784,7 @@ fn https_get(path: &str) -> Result<Vec<u8>, String> {
     let mut connection = ClientConnection::new(Arc::new(config), server_name)
         .map_err(|_| "Coinbase TLS initialization failed".to_string())?;
     let deadline = Instant::now() + IO_TIMEOUT;
-    let mut tcp = connect_coinbase_endpoint(REST_HOST, REST_PORT, deadline)?;
+    let mut tcp = connect_coinbase_endpoint_cancellable(REST_HOST, REST_PORT, deadline, stop)?;
     let mut tls = Stream::new(&mut connection, &mut tcp);
     write!(
         tls,
@@ -783,14 +884,6 @@ impl Write for DeadlineTcpStream {
             }
         }
     }
-}
-
-pub(crate) fn connect_coinbase_endpoint(
-    host: &str,
-    port: u16,
-    deadline: Instant,
-) -> Result<DeadlineTcpStream, String> {
-    connect_coinbase_endpoint_cancellable(host, port, deadline, None)
 }
 
 pub(crate) fn connect_coinbase_endpoint_cancellable(
@@ -1201,6 +1294,56 @@ mod tests {
             maximum_items: NonZeroUsize::new(maximum_items).expect("nonzero fixture limit"),
             continuation: None,
         }
+    }
+
+    #[test]
+    fn paginated_fetch_retries_bounded_rate_limits() {
+        struct FlakyTransport {
+            failures: usize,
+        }
+
+        impl CoinbaseHistoryTransport for FlakyTransport {
+            fn get(&mut self, _path: &str) -> Result<Vec<u8>, String> {
+                if self.failures > 0 {
+                    self.failures -= 1;
+                    return Err("Coinbase candle request returned HTTP 429".to_string());
+                }
+                Ok(br#"{"candles":[
+                    {"start":"1700000040","low":"1.00","high":"1.00","open":"1.00","close":"1.00","volume":"1.00000000"}
+                ]}"#
+                .to_vec())
+            }
+        }
+
+        let mut adapter =
+            CoinbaseHistoryCapabilityAdapter::try_with_transport(FlakyTransport { failures: 2 })
+                .expect("flaky adapter validates");
+        let page = adapter
+            .fetch_paginated(&request(3))
+            .expect("bounded rate limit rejections retry");
+        assert_eq!(page.items.len(), 1);
+
+        let mut exhausted =
+            CoinbaseHistoryCapabilityAdapter::try_with_transport(FlakyTransport { failures: 5 })
+                .expect("exhausted adapter validates");
+        assert!(exhausted.fetch_paginated(&request(3)).is_err());
+    }
+
+    #[test]
+    fn paginated_fetch_observes_cancellation_before_transport() {
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
+            response: br#"{"candles":[]}"#.to_vec(),
+            paths: paths.clone(),
+        })
+        .expect("cancellable adapter validates");
+        let stop = Arc::new(AtomicBool::new(true));
+        adapter.set_stop(stop);
+        let error = adapter
+            .fetch_paginated(&request(3))
+            .expect_err("a stopped fetch cancels before transport");
+        assert!(error.contains("cancelled"));
+        assert!(paths.borrow().is_empty());
     }
 
     #[test]

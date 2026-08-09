@@ -1,8 +1,12 @@
 use super::{
-    COMMAND_CAPACITY, CoinbaseDesktopWorker, INBOX_BATCH, LiveLoopState, apply_environment_event,
+    COMMAND_CAPACITY, CoinbaseDesktopWorker, INBOX_BATCH, InflightHistory, LiveLoopState,
+    apply_environment_event,
+    history::{PreparedHistory, StreamingSeriesContext, install_fetched_history},
 };
 use crate::market_worker::{MarketWorkerCommand, MarketWorkerSender};
+use axiusflow_application::MarketBarClientModel;
 use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
+use axiusflow_desktop_provider_runtime::{DesktopProviderState, SessionGeneration};
 use axiusflow_platform_runtime::{
     NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
 };
@@ -29,6 +33,10 @@ pub(super) enum WorkerInboxEvent {
     UiDiagnosticsReady,
     Environment(EnvironmentalEvent),
     Command(MarketWorkerCommand),
+    HistoryCompleted {
+        generation: SessionGeneration,
+        result: Result<Box<PreparedHistory>, String>,
+    },
 }
 
 pub(super) struct InboxDrainContext<'a, V: axiusflow_platform_runtime::CredentialVault> {
@@ -37,6 +45,8 @@ pub(super) struct InboxDrainContext<'a, V: axiusflow_platform_runtime::Credentia
     pub(super) state: &'a mut LiveLoopState,
     pub(super) message_tx: &'a MarketWorkerSender,
     pub(super) provider_wake_pending: &'a AtomicBool,
+    pub(super) series: StreamingSeriesContext<'a>,
+    pub(super) model: &'a mut MarketBarClientModel,
 }
 
 pub(super) struct ReconnectBackoff {
@@ -140,11 +150,14 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                     context.worker,
                     context.events,
                     event,
-                    &mut context.state.prepared,
+                    &mut context.state.history,
                     &mut context.state.streaming_generation,
                     &mut context.state.retained,
                     context.message_tx,
                 )?;
+            }
+            WorkerInboxEvent::HistoryCompleted { generation, result } => {
+                handle_history_completed(context, generation, result)?;
             }
             WorkerInboxEvent::Command(MarketWorkerCommand::Recovery(command)) => {
                 if context.state.pending_recovery.len() >= COMMAND_CAPACITY {
@@ -156,6 +169,50 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
         }
     }
     Ok(false)
+}
+
+fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
+    context: &mut InboxDrainContext<'_, V>,
+    generation: SessionGeneration,
+    result: Result<Box<PreparedHistory>, String>,
+) -> Result<(), String> {
+    context.state.history = None;
+    let still_streaming = matches!(
+        context
+            .worker
+            .provider_state()
+            .map_err(|error| error.to_string())?,
+        DesktopProviderState::Streaming {
+            generation: active,
+        } if active == generation
+    );
+    if !still_streaming {
+        return Ok(());
+    }
+    match result {
+        Ok(history) => install_fetched_history(
+            context.worker,
+            generation,
+            &context.series,
+            &history,
+            context.state,
+            context.model,
+            context.message_tx,
+        ),
+        Err(_) => super::fence_failed_history(
+            context.worker,
+            generation,
+            &mut context.state.retained,
+            &mut context.state.recovery_announced,
+            context.message_tx,
+        ),
+    }
+}
+
+pub(super) fn cancel_inflight_history(history: &mut Option<InflightHistory>) {
+    if let Some(inflight) = history.take() {
+        inflight.cancel.store(true, Ordering::Release);
+    }
 }
 
 pub(super) fn environment_events(

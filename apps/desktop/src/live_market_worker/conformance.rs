@@ -68,7 +68,8 @@ impl<T: CoinbaseHistoryTransport + Send> super::HistorySource for FixtureHistory
         &mut self,
         profile: &super::ProductProfile,
         now_unix_nanos: i64,
-    ) -> Result<super::PreparedHistory, String> {
+        _cancel: Arc<AtomicBool>,
+    ) -> Result<super::history::PreparedHistory, String> {
         fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos)
     }
 }
@@ -103,16 +104,48 @@ impl CoinbaseHistoryTransport for SecretFailureTransport {
     }
 }
 
+struct BlockingHistorySource {
+    release: Arc<AtomicBool>,
+    adapter: CoinbaseHistoryCapabilityAdapter<CandleTransport>,
+}
+
+impl super::HistorySource for BlockingHistorySource {
+    fn now_unix_nanos(&self) -> Result<i64, String> {
+        Ok(FIXED_NOW_UNIX_NANOS)
+    }
+
+    fn fetch(
+        &mut self,
+        profile: &super::ProductProfile,
+        now_unix_nanos: i64,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<super::history::PreparedHistory, String> {
+        let started = Instant::now();
+        while !self.release.load(Ordering::Acquire) {
+            if cancel.load(Ordering::Acquire) {
+                return Err("fixture fetch cancelled".to_string());
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "fixture fetch latch expired"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos)
+    }
+}
+
 struct TestRoot(PathBuf);
 
-struct ControlledWorkerInput<'a, T> {
+struct ControlledWorkerInput<'a, H> {
     product_id: String,
     history_root: PathBuf,
     ui_thread: thread::ThreadId,
     driver: CoinbaseProviderDriver,
     events: axiusflow_coinbase_market_adapter::CoinbaseProviderEvents,
-    history_source: FixtureHistorySource<T>,
+    history_source: H,
     message_tx: &'a super::MarketWorkerSender,
+    inbox_tx: mpsc::SyncSender<WorkerInboxEvent>,
     inbox_rx: mpsc::Receiver<WorkerInboxEvent>,
     provider_wake_pending: &'a AtomicBool,
     ui_diagnostics_rx: &'a super::UiDiagnosticsReceiver,
@@ -195,6 +228,71 @@ fn shipping_loop_redacts_nested_history_failures() {
     drop(worker);
 }
 
+#[test]
+fn pre_seed_live_trades_survive_history_seeding() {
+    let root = TestRoot::create("pre-seed");
+    let release = Arc::new(AtomicBool::new(false));
+    let source = BlockingHistorySource {
+        release: Arc::clone(&release),
+        adapter: CoinbaseHistoryCapabilityAdapter::try_with_transport(CandleTransport)
+            .expect("blocking fixture capabilities validate"),
+    };
+    let (mut worker, control) = start_controlled_worker(&root.0, source);
+    let generation = control
+        .wait_started(Duration::from_secs(1))
+        .expect("controlled generation starts");
+    assert!(control.established(generation));
+    thread::sleep(Duration::from_millis(100));
+    // Live trades arrive and roll a minute while the covering fetch is blocked.
+    assert!(control.trade(generation, fixture_trade(1, FIXED_CURRENT_MINUTE_SECONDS)));
+    assert!(control.trade(
+        generation,
+        fixture_trade(2, FIXED_CURRENT_MINUTE_SECONDS + 60)
+    ));
+    thread::sleep(Duration::from_millis(200));
+    release.store(true, Ordering::Release);
+
+    assert_eq!(wait_for_live_snapshot(&mut worker, 2), (1, 300));
+    assert!(control.trade(
+        generation,
+        fixture_trade(3, FIXED_CURRENT_MINUTE_SECONDS + 120)
+    ));
+    assert!(control.trade(
+        generation,
+        fixture_trade(4, FIXED_CURRENT_MINUTE_SECONDS + 180)
+    ));
+    assert_eq!(wait_for_live_delta(&mut worker), (300, 301));
+    drop(worker);
+    assert_eq!(
+        control.wait_stopped(Duration::from_secs(1)),
+        Some(generation)
+    );
+}
+
+#[test]
+fn shutdown_during_an_inflight_fetch_completes_boundedly() {
+    let root = TestRoot::create("fetch-shutdown");
+    let source = BlockingHistorySource {
+        release: Arc::new(AtomicBool::new(false)),
+        adapter: CoinbaseHistoryCapabilityAdapter::try_with_transport(CandleTransport)
+            .expect("blocking fixture capabilities validate"),
+    };
+    let (worker, control) = start_controlled_worker(&root.0, source);
+    let generation = control
+        .wait_started(Duration::from_secs(1))
+        .expect("controlled generation starts");
+    assert!(control.established(generation));
+    thread::sleep(Duration::from_millis(200));
+
+    let shutdown_started = Instant::now();
+    drop(worker);
+    assert!(shutdown_started.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        control.wait_stopped(Duration::from_secs(1)),
+        Some(generation)
+    );
+}
+
 fn fixture_source<T>(transport: T) -> FixtureHistorySource<T> {
     FixtureHistorySource {
         adapter: CoinbaseHistoryCapabilityAdapter::try_with_transport(transport)
@@ -202,9 +300,9 @@ fn fixture_source<T>(transport: T) -> FixtureHistorySource<T> {
     }
 }
 
-fn start_controlled_worker<T: CoinbaseHistoryTransport + Send + 'static>(
+fn start_controlled_worker<H: super::HistorySource + 'static>(
     history_root: &Path,
-    history_source: FixtureHistorySource<T>,
+    history_source: H,
 ) -> (MarketDataWorker, CoinbaseProviderFixtureControl) {
     let product_id = "BTC-USD".to_string();
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
@@ -249,6 +347,7 @@ fn start_controlled_worker<T: CoinbaseHistoryTransport + Send + 'static>(
             events,
             history_source,
             message_tx: &message_tx,
+            inbox_tx,
             inbox_rx,
             provider_wake_pending: &provider_wake_pending,
             ui_diagnostics_rx: &ui_diagnostics_rx,
@@ -272,8 +371,8 @@ fn start_controlled_worker<T: CoinbaseHistoryTransport + Send + 'static>(
     )
 }
 
-fn run_controlled_worker<T: CoinbaseHistoryTransport + Send>(
-    input: ControlledWorkerInput<'_, T>,
+fn run_controlled_worker<H: super::HistorySource + 'static>(
+    input: ControlledWorkerInput<'_, H>,
 ) -> Result<(), String> {
     let profile = product_profile(input.product_id)?;
     let worker = open_test_worker(
@@ -293,12 +392,14 @@ fn run_controlled_worker<T: CoinbaseHistoryTransport + Send>(
         },
         None,
         false,
-        input.history_source,
+        &input.history_source,
         input.message_tx,
     )?;
     run_worker_loop(
         running,
+        input.history_source,
         input.message_tx,
+        &input.inbox_tx,
         &input.inbox_rx,
         input.provider_wake_pending,
         input.ui_diagnostics_rx,
@@ -308,8 +409,13 @@ fn run_controlled_worker<T: CoinbaseHistoryTransport + Send>(
 fn seed_corrupt_cache(root: &Path) {
     let profile = product_profile("BTC-USD".to_string()).expect("fixture profile validates");
     let mut source = fixture_source(CandleTransport);
-    let prepared = super::HistorySource::fetch(&mut source, &profile, FIXED_NOW_UNIX_NANOS)
-        .expect("fixture history fetches");
+    let prepared = super::HistorySource::fetch(
+        &mut source,
+        &profile,
+        FIXED_NOW_UNIX_NANOS,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .expect("fixture history fetches");
     let payload = encode_history_segment(&prepared.completion.page().items)
         .expect("fixture history segment encodes");
     let mut store = HistoryStore::open(root, catalog_key(), 8).expect("fixture store opens");

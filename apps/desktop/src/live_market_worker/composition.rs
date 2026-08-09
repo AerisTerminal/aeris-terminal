@@ -5,15 +5,14 @@ use super::{
 use crate::market_worker::{CoinbaseWorkerStartup, MarketWorkerStartup};
 use axiusflow_application::MarketBarClientModel;
 use axiusflow_coinbase_market_adapter::{
-    CoinbaseAggregatedBar, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig,
-    CoinbaseDesktopEventError, CoinbaseDesktopMarketEvent, CoinbaseProviderDriver,
-    CoinbaseProviderEvents, CoinbaseSpotProduct, seed_coinbase_bar_history,
-    try_recv_coinbase_aggregated_bar, try_recv_coinbase_market_event,
+    CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig, CoinbaseDesktopEventError,
+    CoinbaseDesktopMarketEvent, CoinbaseProviderDriver, CoinbaseProviderEvents,
+    CoinbaseSpotProduct, seed_coinbase_bar_history, try_recv_coinbase_market_event,
 };
 use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
-    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig, ProviderEnvironment,
-    SessionGeneration,
+    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
+    DesktopProviderConfig, ProviderEnvironment, SessionGeneration,
 };
 use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentity};
 use axiusflow_instruments::{
@@ -24,7 +23,7 @@ use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -55,17 +54,6 @@ pub(super) struct CoinbaseDesktopWorker<V: CredentialVault = NativeCredentialVau
 }
 
 impl<V: CredentialVault> CoinbaseDesktopWorker<V> {
-    pub(super) fn try_recv_coinbase_aggregated_bar(
-        &mut self,
-        events: &CoinbaseProviderEvents,
-    ) -> Result<Option<(SessionGeneration, CoinbaseAggregatedBar)>, CoinbaseDesktopEventError> {
-        try_recv_coinbase_aggregated_bar(
-            &mut self.runtime,
-            events,
-            std::slice::from_mut(&mut self.aggregator),
-        )
-    }
-
     pub(super) fn try_recv_coinbase_market_event(
         &mut self,
         events: &CoinbaseProviderEvents,
@@ -129,24 +117,43 @@ pub(super) struct OpenedWorker<V: CredentialVault = NativeCredentialVault> {
     pub(super) segment_key: SegmentEncryptionKey,
 }
 
+const STORE_LOCK_ATTEMPTS: u32 = 100;
+const STORE_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A replaced worker releases the encrypted store lock as its shutdown
+/// completes; wait briefly on the calling worker thread, never the UI.
+fn open_with_store_lock_retry<T>(
+    mut open: impl FnMut() -> Result<T, DesktopMarketWorkerError>,
+    maximum_retries: u32,
+    retry_interval: std::time::Duration,
+) -> Result<T, DesktopMarketWorkerError> {
+    let mut attempt = 0_u32;
+    loop {
+        match open() {
+            Err(DesktopMarketWorkerError::HistoryStoreAlreadyOpen) if attempt < maximum_retries => {
+                attempt = attempt.saturating_add(1);
+                std::thread::sleep(retry_interval);
+            }
+            result => return result,
+        }
+    }
+}
+
 pub(super) fn open_worker(
     profile: &ProductProfile,
-    history_root: PathBuf,
+    history_root: &Path,
     ui_thread: ThreadId,
     inbox_tx: &SyncSender<WorkerInboxEvent>,
     provider_wake_pending: &Arc<AtomicBool>,
     detailed_diagnostics: bool,
 ) -> Result<OpenedWorker, String> {
     let vault = NativeCredentialVault::new(VAULT_SERVICE).map_err(|error| error.to_string())?;
-    let catalog_key = load_catalog_key(&vault)?;
     let segment_key = load_segment_key(&vault)?;
-    let runtime_vault =
-        NativeCredentialVault::new(VAULT_SERVICE).map_err(|error| error.to_string())?;
     let provider_config = CoinbaseConfig::try_new(vec![profile.product_id.clone()])
         .map_err(|error| error.to_string())?;
     let provider_inbox_tx = inbox_tx.clone();
     let wake_pending = Arc::clone(provider_wake_pending);
-    let wake = Arc::new(move || {
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if wake_pending
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
@@ -157,19 +164,32 @@ pub(super) fn open_worker(
             wake_pending.store(false, Ordering::Release);
         }
     });
-    let (driver, events) = CoinbaseProviderDriver::new_with_wake(
-        provider_config,
-        nonzero(PROVIDER_EVENT_CAPACITY),
-        wake,
-    );
-    let runtime = DesktopMarketWorker::try_open(
-        runtime_vault,
-        driver,
-        "coinbase-public-session",
-        history_root,
-        catalog_key,
-        ui_thread,
-        worker_config(detailed_diagnostics)?,
+    let (runtime, events) = open_with_store_lock_retry(
+        || {
+            let runtime_vault = NativeCredentialVault::new(VAULT_SERVICE)
+                .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
+            let catalog_key = load_catalog_key(&runtime_vault)
+                .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
+            let config = worker_config(detailed_diagnostics)
+                .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
+            let (driver, events) = CoinbaseProviderDriver::new_with_wake(
+                provider_config.clone(),
+                nonzero(PROVIDER_EVENT_CAPACITY),
+                Arc::clone(&wake),
+            );
+            DesktopMarketWorker::try_open(
+                runtime_vault,
+                driver,
+                "coinbase-public-session",
+                history_root,
+                catalog_key,
+                ui_thread,
+                config,
+            )
+            .map(|runtime| (runtime, events))
+        },
+        STORE_LOCK_ATTEMPTS,
+        STORE_LOCK_RETRY_INTERVAL,
     )
     .map_err(|error| error.to_string())?;
     let aggregator = CoinbaseBarAggregator::new(
@@ -409,12 +429,54 @@ pub(super) const fn nonzero(value: usize) -> NonZeroUsize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SUBSCRIPTION_ID, instrument, loading_startup, nonzero, product_profile};
+    use super::{
+        DesktopMarketWorkerError, SUBSCRIPTION_ID, instrument, loading_startup, nonzero,
+        open_with_store_lock_retry, product_profile,
+    };
     use crate::market_worker::{CoinbaseWorkerStartup, MarketWorkerStartup};
     use axiusflow_coinbase_market_adapter::{
         CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, FixedPointValue,
     };
     use axiusflow_market_data::MarketBar;
+
+    #[test]
+    fn store_lock_retry_waits_for_the_replaced_worker_and_stays_bounded() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result: Result<(), DesktopMarketWorkerError> = open_with_store_lock_retry(
+            || {
+                attempts.set(attempts.get().saturating_add(1));
+                if attempts.get() < 3 {
+                    Err(DesktopMarketWorkerError::HistoryStoreAlreadyOpen)
+                } else {
+                    Ok(())
+                }
+            },
+            8,
+            std::time::Duration::from_millis(1),
+        );
+        assert!(result.is_ok());
+        assert_eq!(attempts.get(), 3);
+
+        let exhausted: Result<(), DesktopMarketWorkerError> = open_with_store_lock_retry(
+            || Err(DesktopMarketWorkerError::HistoryStoreAlreadyOpen),
+            2,
+            std::time::Duration::from_millis(1),
+        );
+        assert!(matches!(
+            exhausted,
+            Err(DesktopMarketWorkerError::HistoryStoreAlreadyOpen)
+        ));
+
+        let immediate: Result<(), DesktopMarketWorkerError> = open_with_store_lock_retry(
+            || Err(DesktopMarketWorkerError::HistoryConfiguration),
+            8,
+            std::time::Duration::from_millis(1),
+        );
+        assert!(matches!(
+            immediate,
+            Err(DesktopMarketWorkerError::HistoryConfiguration)
+        ));
+    }
 
     #[test]
     fn live_mode_accepts_only_reviewed_coinbase_precision_profiles() {

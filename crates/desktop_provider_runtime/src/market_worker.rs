@@ -39,6 +39,7 @@ pub enum DesktopMarketWorkerError {
     HistoryResourceLimit,
     HistoryHandoffState,
     HistoryStorage,
+    HistoryStoreAlreadyOpen,
     HistoryContinuity,
     HistoryCompletionMismatch,
     HistoryCompletionIncomplete,
@@ -68,6 +69,8 @@ impl fmt::Display for DesktopMarketWorkerError {
                 formatter.write_str("desktop market history handoff state is invalid")
             }
             Self::HistoryStorage => formatter.write_str("desktop market history storage failed"),
+            Self::HistoryStoreAlreadyOpen => formatter
+                .write_str("desktop market history store is already open by another worker"),
             Self::HistoryContinuity => {
                 formatter.write_str("desktop market history continuity failed")
             }
@@ -106,6 +109,7 @@ impl Error for DesktopMarketWorkerError {
             | Self::HistoryResourceLimit
             | Self::HistoryHandoffState
             | Self::HistoryStorage
+            | Self::HistoryStoreAlreadyOpen
             | Self::HistoryContinuity
             | Self::HistoryCompletionMismatch
             | Self::HistoryCompletionIncomplete
@@ -139,6 +143,9 @@ impl From<DesktopHistoryError> for DesktopMarketWorkerError {
             DesktopHistoryError::HandoffAlreadyStarted | DesktopHistoryError::MissingHandoff => {
                 Self::HistoryHandoffState
             }
+            DesktopHistoryError::Storage(
+                axiusflow_desktop_storage::DesktopStorageError::StoreAlreadyOpen,
+            ) => Self::HistoryStoreAlreadyOpen,
             DesktopHistoryError::Storage(_) => Self::HistoryStorage,
             DesktopHistoryError::Provider(_) => Self::HistoryContinuity,
         }

@@ -42,6 +42,7 @@ pub use desktop_driver::{
 pub use errors::CoinbaseError;
 pub use fixed_point::FixedPointValue;
 pub use fixture::{CoinbaseFixtureSession, deterministic_fixture_session};
+pub(crate) use history::PublicRequestGate;
 pub use history::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryBatch, CoinbaseHistoryCapabilityAdapter,
     CoinbaseHistoryDiagnostics, CoinbaseHistoryTransport, CoinbaseHttpsHistoryTransport,

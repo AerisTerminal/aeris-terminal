@@ -51,7 +51,7 @@ pub(crate) fn apply_merged_chart_data(
                 .provenance()
                 .exchange_timestamp_unix_nanos
                 .to_f64()
-                .expect("validated replay timestamps fit f64")
+                .unwrap_or_default()
                 / 1_000_000_000.0;
             (
                 time,
@@ -101,39 +101,33 @@ pub(crate) fn install_replay_with_deltas(
             item.provenance()
                 .exchange_timestamp_unix_nanos
                 .to_f64()
-                .expect("validated replay timestamps fit f64")
+                .unwrap_or_default()
                 / 1_000_000_000.0,
         );
         open.push(fixed_price(bar.open, price_divisor));
         high.push(fixed_price(bar.high, price_divisor));
         low.push(fixed_price(bar.low, price_divisor));
         close.push(fixed_price(bar.close, price_divisor));
-        volume.push(
-            bar.volume
-                .to_f64()
-                .expect("validated non-negative volume fits f64"),
-        );
+        volume.push(bar.volume.to_f64().unwrap_or_default());
     }
 
-    engine
+    // A rejected install keeps the previous series rather than panicking the
+    // UI thread; upstream validation makes this unreachable.
+    if engine
         .set_series_data(0, &times, &open, &high, &low, &close)
-        .expect("validated replay columns satisfy Origin's data contract");
+        .is_err()
+    {
+        return;
+    }
     engine.series[0].kind = SeriesKind::Candlestick;
-    engine
-        .set_series_data(volume_series, &times, &volume, &volume, &volume, &volume)
-        .expect("validated replay volume satisfies Origin's data contract");
+    let _ = engine.set_series_data(volume_series, &times, &volume, &volume, &volume, &volume);
 }
 
 fn volume_row(volume: i64, time: f64) -> (f64, [f64; 4]) {
-    let volume = volume
-        .to_f64()
-        .expect("validated non-negative volume fits f64");
+    let volume = volume.to_f64().unwrap_or_default();
     (time, [volume; 4])
 }
 
 pub(crate) fn fixed_price(value: i64, divisor: f64) -> f64 {
-    value
-        .to_f64()
-        .expect("validated fixed-point price fits f64")
-        / divisor
+    value.to_f64().unwrap_or_default() / divisor
 }

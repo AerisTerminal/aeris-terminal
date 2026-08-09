@@ -7,6 +7,24 @@
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub(crate) enum UnsignedInteger {
+    Number(u64),
+    String(String),
+}
+
+impl UnsignedInteger {
+    #[cfg(test)]
+    fn value(&self) -> Option<u64> {
+        match self {
+            Self::Number(value) => Some(*value),
+            Self::String(value) => value.parse().ok(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct ChannelMessage {
     pub(crate) channel: String,
     pub(crate) timestamp: String,
@@ -24,7 +42,7 @@ pub(crate) struct ChannelEvent {
     pub(crate) trades: Vec<TradeMessage>,
     #[serde(default)]
     #[allow(dead_code)]
-    pub(crate) heartbeat_counter: Option<u64>,
+    pub(crate) heartbeat_counter: Option<UnsignedInteger>,
 }
 
 #[derive(Deserialize)]
@@ -64,10 +82,16 @@ mod tests {
     #[test]
     fn documented_heartbeat_parses() {
         let message: ChannelMessage = serde_json::from_str(
-            r#"{"channel":"heartbeats","timestamp":"2023-06-23T20:31:26.122969572Z","sequence_num":0,"events":[{"current_time":"2023-06-23 20:31:56.121961769 +0000 UTC m=+91717.525857105","heartbeat_counter":3049}]}"#,
+            r#"{"channel":"heartbeats","timestamp":"2023-06-23T20:31:26.122969572Z","sequence_num":0,"events":[{"current_time":"2023-06-23 20:31:56.121961769 +0000 UTC m=+91717.525857105","heartbeat_counter":"3049"}]}"#,
         )
         .expect("documented heartbeat parses");
-        assert_eq!(message.events[0].heartbeat_counter, Some(3049));
+        assert_eq!(
+            message.events[0]
+                .heartbeat_counter
+                .as_ref()
+                .and_then(super::UnsignedInteger::value),
+            Some(3049)
+        );
     }
 
     #[test]

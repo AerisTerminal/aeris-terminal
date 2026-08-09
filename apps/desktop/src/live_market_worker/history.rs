@@ -10,17 +10,15 @@ use axiusflow_application::{
 };
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-    CoinbaseInterval, CoinbaseSpotProduct, ENTITLEMENT_CLASS, aggregate_coinbase_bars,
-    decode_history_bar, decode_history_segment, encode_history_bar, encode_history_segment,
-    history_segment_item_count,
+    CoinbaseHttpsHistoryTransport, CoinbaseInterval, CoinbaseSpotProduct, ENTITLEMENT_CLASS,
+    aggregate_coinbase_bars, decode_history_bar, decode_history_segment, encode_history_bar,
+    encode_history_segment, history_segment_item_count,
 };
 use axiusflow_desktop_history::{
     ControlPlaneState, HistoryDecoder, HydrationOutcome, HydrationRequest, ProviderConnectionState,
     StartupCacheState,
 };
-use axiusflow_desktop_provider_runtime::{
-    DesktopProviderState, HistoryCompletionInstall, SessionGeneration,
-};
+use axiusflow_desktop_provider_runtime::{HistoryCompletionInstall, SessionGeneration};
 use axiusflow_desktop_storage::{
     DataKind, HistoryScope, HistorySeriesIdentity, PublicationRequest, RecoveryAction,
     RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
@@ -35,6 +33,7 @@ use std::{
     collections::VecDeque,
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 pub(super) struct PreparedHistory {
@@ -50,6 +49,7 @@ pub(super) trait HistorySource: Send {
         &mut self,
         profile: &ProductProfile,
         now_unix_nanos: i64,
+        cancel: Arc<AtomicBool>,
     ) -> Result<PreparedHistory, String>;
 }
 
@@ -64,9 +64,12 @@ impl HistorySource for DirectHistorySource {
         &mut self,
         profile: &ProductProfile,
         now_unix_nanos: i64,
+        cancel: Arc<AtomicBool>,
     ) -> Result<PreparedHistory, String> {
-        let mut adapter =
-            CoinbaseHistoryCapabilityAdapter::try_new().map_err(|error| error.to_string())?;
+        let transport = CoinbaseHttpsHistoryTransport::with_stop(Arc::clone(&cancel));
+        let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(transport)
+            .map_err(|error| error.to_string())?;
+        adapter.set_stop(cancel);
         fetch_history_with_adapter(profile, &mut adapter, now_unix_nanos)
     }
 }
@@ -109,15 +112,6 @@ pub(super) struct StreamingSeriesContext<'a> {
     pub(super) worker_label: &'a str,
 }
 
-struct StreamingHistoryRequest<'a> {
-    generation: SessionGeneration,
-    profile: &'a ProductProfile,
-    segment_key: &'a SegmentEncryptionKey,
-    instrument: &'a InstrumentRevision,
-    bar_definition: &'a BarDefinition,
-    worker_label: &'a str,
-}
-
 struct CachedHistoryRequest<'a> {
     identity: &'a SegmentIdentity,
     segment_key: &'a SegmentEncryptionKey,
@@ -138,47 +132,17 @@ pub(super) struct InitialHistoryContext<'a> {
     pub(super) initial_network: Option<axiusflow_platform_runtime::NetworkEvent>,
 }
 
-pub(super) fn install_ready_history<
-    V: axiusflow_platform_runtime::CredentialVault,
-    H: HistorySource,
->(
+pub(super) fn install_fetched_history<V: axiusflow_platform_runtime::CredentialVault>(
     worker: &mut CoinbaseDesktopWorker<V>,
-    history_source: &mut H,
+    generation: SessionGeneration,
     context: &StreamingSeriesContext<'_>,
+    history: &PreparedHistory,
     state: &mut LiveLoopState,
     model: &mut MarketBarClientModel,
     message_tx: &MarketWorkerSender,
-) -> Result<bool, String> {
-    if state.streaming_generation.is_some() {
-        return Ok(false);
-    }
-    let DesktopProviderState::Streaming { generation } =
-        worker.provider_state().map_err(|error| error.to_string())?
-    else {
-        return Ok(false);
-    };
-    let history = install_streaming_history(
-        worker,
-        history_source,
-        &StreamingHistoryRequest {
-            generation,
-            profile: context.profile,
-            segment_key: context.segment_key,
-            instrument: context.instrument,
-            bar_definition: context.bar_definition,
-            worker_label: context.worker_label,
-        },
-        &mut state.prepared,
-        model,
-        message_tx,
-    );
-    if let Ok(history) = history {
-        state.retained = history;
-        state.streaming_generation = Some(generation);
-        state.reconnect_backoff.reset();
-        state.recovery_announced = false;
-        Ok(false)
-    } else {
+) -> Result<(), String> {
+    let result = install_covering_snapshot(worker, generation, context, history, model, message_tx);
+    if result.is_err() {
         fence_failed_history(
             worker,
             generation,
@@ -186,58 +150,59 @@ pub(super) fn install_ready_history<
             &mut state.recovery_announced,
             message_tx,
         )?;
-        Ok(true)
+        return Ok(());
     }
+    let bars = worker.coinbase_bar_history(&context.profile.product_id)?;
+    state.retained = bars
+        .into_iter()
+        .map(|bar| history_provenance(bar, generation, history.received_unix_nanos))
+        .collect::<Result<VecDeque<_>, _>>()?;
+    state.streaming_generation = Some(generation);
+    state.reconnect_backoff.reset();
+    state.recovery_announced = false;
+    Ok(())
 }
 
-fn install_streaming_history<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource>(
+fn install_covering_snapshot<V: axiusflow_platform_runtime::CredentialVault>(
     worker: &mut CoinbaseDesktopWorker<V>,
-    history_source: &mut H,
-    request: &StreamingHistoryRequest<'_>,
-    prepared: &mut Option<PreparedHistory>,
+    generation: SessionGeneration,
+    context: &StreamingSeriesContext<'_>,
+    history: &PreparedHistory,
     model: &mut MarketBarClientModel,
     message_tx: &MarketWorkerSender,
-) -> Result<VecDeque<ProvenancedMarketBar>, String> {
-    let history = if let Some(history) = prepared.take() {
-        history
-    } else {
-        let now = history_source.now_unix_nanos()?;
-        history_source.fetch(request.profile, now)?
-    };
-    let now = history_source.now_unix_nanos()?;
+) -> Result<(), String> {
     install_history(
         worker,
-        request.generation,
-        request.profile,
-        &history,
-        request.segment_key,
-        now,
+        generation,
+        context.profile,
+        history,
+        context.segment_key,
+        history.received_unix_nanos,
     )?;
-    let bars = worker.coinbase_bar_history(&request.profile.product_id)?;
+    let bars = worker.coinbase_bar_history(&context.profile.product_id)?;
     let retained = bars
         .into_iter()
-        .map(|bar| history_provenance(bar, request.generation, history.received_unix_nanos))
+        .map(|bar| history_provenance(bar, generation, history.received_unix_nanos))
         .collect::<Result<VecDeque<_>, _>>()?;
     let snapshot_generation = model
         .current_generation()
         .map_or(1, |current| current.generation().saturating_add(1));
     let snapshot = ReplaySnapshot::try_from_provenanced_values(
-        request.instrument.clone(),
+        context.instrument.clone(),
         ReplayProvenance::LiveProvider,
-        request.bar_definition.clone(),
+        context.bar_definition.clone(),
         snapshot_generation,
         retained.iter().cloned().collect(),
     )
     .map_err(|error| error.to_string())?;
     publish_update(
         worker,
-        request.generation,
+        generation,
         model,
         ReplayStreamUpdate::Snapshot(snapshot),
-        request.worker_label,
+        context.worker_label,
         message_tx,
-    )?;
-    Ok(retained)
+    )
 }
 
 pub(super) fn prepare_initial_history<V: axiusflow_platform_runtime::CredentialVault>(
@@ -424,6 +389,7 @@ fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
             |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
         )
         .map_err(|error| error.to_string())?;
+    worker.reset_aggregation();
     if profile.interval == axiusflow_market_data::ChartInterval::Minute1 {
         worker.seed_coinbase_bar_history(
             generation,
@@ -432,8 +398,6 @@ fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
             segment_key,
             now_seconds,
         )?;
-    } else {
-        worker.reset_aggregation();
     }
     let payload = encode_history_segment(&history.completion.page().items)?;
     worker
@@ -583,9 +547,18 @@ fn history_installation_time_for(
     now_unix_nanos: i64,
 ) -> Result<i64, String> {
     let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
-    let source_nanos = coinbase_history_source_seconds(interval) * 1_000_000_000;
+    let source_seconds = coinbase_history_source_seconds(interval);
+    let source_nanos = source_seconds * 1_000_000_000;
     let current_source = now_unix_nanos.div_euclid(source_nanos) * source_nanos;
-    if range_end_unix_nanos != current_source {
+    // One-minute history must end at the live boundary because the live
+    // aggregator seeds from the newest retained minute. Coarser sources may
+    // lag one bucket when a long paginated fetch crosses a boundary.
+    let tolerance = if source_seconds == 60 {
+        0
+    } else {
+        source_nanos
+    };
+    if range_end_unix_nanos > current_source || current_source - range_end_unix_nanos > tolerance {
         return Err("Coinbase history became stale before installation".to_string());
     }
     Ok(now_unix_nanos / 1_000_000_000)
@@ -764,6 +737,28 @@ mod tests {
             Ok(150)
         );
         assert!(history_installation_time(requested_end, requested_end + 60_000_000_000).is_err());
+    }
+
+    #[test]
+    fn coarse_intervals_tolerate_one_source_bucket_of_fetch_lag() {
+        let mut profile = product_profile("BTC-USD".to_string()).expect("profile validates");
+        profile.interval = axiusflow_market_data::ChartInterval::Minute5;
+        let current_bucket = 1_700_000_100_i64.div_euclid(300) * 300;
+        let now = (current_bucket + 30) * 1_000_000_000;
+        let lagging_end = (current_bucket - 300) * 1_000_000_000;
+        assert_eq!(
+            super::history_installation_time_for(&profile, lagging_end, now),
+            Ok(now / 1_000_000_000)
+        );
+        let stale_end = (current_bucket - 600) * 1_000_000_000;
+        assert!(super::history_installation_time_for(&profile, stale_end, now).is_err());
+
+        profile.interval = axiusflow_market_data::ChartInterval::Minute1;
+        let minute_now = 1_700_000_090_i64 * 1_000_000_000;
+        let lagging_minute = 1_699_999_980_i64 * 1_000_000_000;
+        assert!(
+            super::history_installation_time_for(&profile, lagging_minute, minute_now).is_err()
+        );
     }
 
     #[test]

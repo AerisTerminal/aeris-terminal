@@ -50,6 +50,7 @@ const MAXIMUM_FRAME_BYTES: usize = 65_536;
 const MAXIMUM_BUFFERED_BYTES: usize = 131_072;
 const FRAGMENT_BYTES: usize = 7;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
 
@@ -1012,8 +1013,15 @@ impl MarketDataWorker {
         history_root: PathBuf,
         ui_thread: thread::ThreadId,
         detailed_diagnostics: bool,
+        fetch_catalog: bool,
     ) -> Result<(MarketWorkerStartup, Self), String> {
-        crate::live_market_worker::start(product_id, history_root, ui_thread, detailed_diagnostics)
+        crate::live_market_worker::start(
+            product_id,
+            history_root,
+            ui_thread,
+            detailed_diagnostics,
+            fetch_catalog,
+        )
     }
 
     pub fn start_coinbase_product_interval(
@@ -1022,6 +1030,7 @@ impl MarketDataWorker {
         history_root: PathBuf,
         ui_thread: thread::ThreadId,
         detailed_diagnostics: bool,
+        fetch_catalog: bool,
     ) -> Result<(MarketWorkerStartup, Self), String> {
         crate::live_market_worker::start_product_interval(
             product,
@@ -1029,6 +1038,7 @@ impl MarketDataWorker {
             history_root,
             ui_thread,
             detailed_diagnostics,
+            fetch_catalog,
         )
     }
 
@@ -1192,16 +1202,43 @@ impl MarketDataWorker {
     pub fn mark_disconnected(&mut self) {
         self.connected = false;
     }
-}
 
-impl Drop for MarketDataWorker {
-    fn drop(&mut self) {
+    fn begin_shutdown(&mut self) {
         if let Some(commands) = self.commands.take() {
             let _ = commands.try_send(MarketWorkerCommand::Shutdown);
             drop(commands);
         }
         drop(self.messages.take());
-        let _ = self.shutdown_complete.recv_timeout(SHUTDOWN_TIMEOUT);
+        self.connected = false;
+    }
+
+    #[cfg(test)]
+    pub fn shutdown_and_wait(&mut self) -> bool {
+        self.begin_shutdown();
+        !matches!(
+            self.shutdown_complete
+                .recv_timeout(CONFIRMED_SHUTDOWN_TIMEOUT),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        )
+    }
+
+    pub fn shutdown_detached(mut self) {
+        self.begin_shutdown();
+        let shutdown_complete = std::mem::replace(&mut self.shutdown_complete, mpsc::channel().1);
+        let _ = thread::Builder::new()
+            .name("axiusflow-market-worker-shutdown".to_string())
+            .spawn(move || {
+                let _ = shutdown_complete.recv_timeout(CONFIRMED_SHUTDOWN_TIMEOUT);
+            });
+    }
+}
+
+impl Drop for MarketDataWorker {
+    fn drop(&mut self) {
+        if self.commands.is_some() || self.messages.is_some() {
+            self.begin_shutdown();
+            let _ = self.shutdown_complete.recv_timeout(SHUTDOWN_TIMEOUT);
+        }
     }
 }
 
@@ -1526,6 +1563,31 @@ mod tests {
         ));
 
         assert!(acknowledged.load(Ordering::Acquire));
+        worker_thread.join().expect("worker exits");
+    }
+
+    #[test]
+    fn explicit_shutdown_waits_and_leaves_a_reusable_disconnected_handle() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let worker_thread = thread::spawn(move || {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::Shutdown)
+            ));
+            shutdown_tx
+                .send(())
+                .expect("shutdown acknowledgement sends");
+        });
+        let mut worker = MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None);
+
+        assert!(worker.shutdown_and_wait());
+
+        assert!(!worker.is_connected());
+        let (messages, newly_disconnected) = worker.drain_messages();
+        assert!(messages.is_empty());
+        assert!(!newly_disconnected);
         worker_thread.join().expect("worker exits");
     }
 

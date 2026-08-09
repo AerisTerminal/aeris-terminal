@@ -297,7 +297,7 @@ impl AxiusflowTheme {
         [
             ColorToken::new(
                 "background",
-                mode_source(dark, "oklch(1 0 0)", "#0c0c0c"),
+                mode_source(dark, "#f3f3f3", "#0c0c0c"),
                 colors.background,
             ),
             ColorToken::new(
@@ -305,11 +305,7 @@ impl AxiusflowTheme {
                 mode_source(dark, "oklch(0.145 0 0)", "#f5f5f5"),
                 colors.foreground,
             ),
-            ColorToken::new(
-                "card",
-                mode_source(dark, "oklch(1 0 0)", "#0c0c0c"),
-                colors.card,
-            ),
+            ColorToken::new("card", mode_source(dark, "#fcfcfc", "#0c0c0c"), colors.card),
             ColorToken::new(
                 "card_foreground",
                 mode_source(dark, "oklch(0.145 0 0)", "#f5f5f5"),
@@ -317,7 +313,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "popover",
-                mode_source(dark, "oklch(1 0 0)", "#0c0c0c"),
+                mode_source(dark, "#fcfcfc", "#0c0c0c"),
                 colors.popover,
             ),
             ColorToken::new(
@@ -347,7 +343,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "muted",
-                mode_source(dark, "oklch(0.97 0 0)", "#141414"),
+                mode_source(dark, "#ffffff", "#1a1a1a"),
                 colors.muted,
             ),
             ColorToken::new(
@@ -357,7 +353,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "accent",
-                mode_source(dark, "oklch(0.97 0 0)", "oklch(0.269 0 0)"),
+                mode_source(dark, "#ffffff", "#1a1a1a"),
                 colors.accent,
             ),
             ColorToken::new(
@@ -450,12 +446,12 @@ const fn mode_source(
 fn light_colors() -> ThemeColors {
     foundational_colors(
         ThemeMode::Light,
-        ThemeColor::from_oklch(1.0, 0.0, 0.0),
+        ThemeColor::from_rgb8(243, 243, 243),
         ThemeColor::from_oklch(0.145, 0.0, 0.0),
-        ThemeColor::from_oklch(1.0, 0.0, 0.0),
+        ThemeColor::from_rgb8(252, 252, 252),
         ThemeColor::from_oklch(0.967, 0.001, 286.375),
         ThemeColor::from_oklch(0.21, 0.006, 285.885),
-        ThemeColor::from_oklch(0.97, 0.0, 0.0),
+        ThemeColor::from_rgb8(255, 255, 255),
         ThemeColor::from_oklch(0.556, 0.0, 0.0),
         ThemeColor::from_oklch(0.205, 0.0, 0.0),
         ThemeColor::from_oklch(0.577, 0.245, 27.325),
@@ -472,7 +468,7 @@ fn dark_colors() -> ThemeColors {
         ThemeColor::from_rgb8(12, 12, 12),
         ThemeColor::from_oklch(0.274, 0.006, 286.033),
         ThemeColor::from_rgb8(245, 245, 245),
-        ThemeColor::from_rgb8(20, 20, 20),
+        ThemeColor::from_rgb8(26, 26, 26),
         ThemeColor::from_rgb8(136, 136, 136),
         ThemeColor::from_rgb8(245, 245, 245),
         ThemeColor::from_oklch(0.704, 0.191, 22.216),
@@ -602,16 +598,16 @@ mod tests {
         let light = AxiusflowTheme::light().colors;
         let dark = AxiusflowTheme::dark().colors;
 
-        assert_eq!(light.background, ThemeColor::from_oklch(1.0, 0.0, 0.0));
-        assert_eq!(light.card, ThemeColor::from_oklch(1.0, 0.0, 0.0));
+        assert_eq!(light.background, ThemeColor::from_rgb8(243, 243, 243));
+        assert_eq!(light.card, ThemeColor::from_rgb8(252, 252, 252));
         assert_eq!(light.foreground, ThemeColor::from_oklch(0.145, 0.0, 0.0));
         assert_eq!(dark.background, ThemeColor::from_rgb8(12, 12, 12));
         assert_eq!(dark.card, ThemeColor::from_rgb8(12, 12, 12));
         assert_eq!(dark.border, ThemeColor::from_rgb8(30, 30, 30));
         assert_eq!(dark.foreground, ThemeColor::from_rgb8(245, 245, 245));
         assert_eq!(dark.muted_foreground, ThemeColor::from_rgb8(136, 136, 136));
-        assert_eq!(dark.muted, ThemeColor::from_rgb8(20, 20, 20));
-        assert_eq!(dark.accent, ThemeColor::from_rgb8(20, 20, 20));
+        assert_eq!(dark.muted, ThemeColor::from_rgb8(26, 26, 26));
+        assert_eq!(dark.accent, ThemeColor::from_rgb8(26, 26, 26));
         assert_eq!(dark.chart_axis_text, dark.foreground);
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
@@ -630,12 +626,12 @@ mod tests {
 
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
-        assert_eq!(token_source(&light_tokens, "background"), "oklch(1 0 0)");
+        assert_eq!(token_source(&light_tokens, "background"), "#f3f3f3");
         assert_eq!(token_source(&dark_tokens, "background"), "#0c0c0c");
         assert_eq!(token_source(&dark_tokens, "card"), "#0c0c0c");
         assert_eq!(token_source(&dark_tokens, "foreground"), "#f5f5f5");
         assert_eq!(token_source(&dark_tokens, "muted_foreground"), "#888888");
-        assert_eq!(token_source(&dark_tokens, "muted"), "#141414");
+        assert_eq!(token_source(&dark_tokens, "muted"), "#1a1a1a");
         assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
         assert_eq!(token_source(&dark_tokens, "border"), "#1e1e1e");
         assert_eq!(

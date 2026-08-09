@@ -1,4 +1,4 @@
-use crate::{CoinbaseError, CoinbaseHistoryTransport, FixedPointValue};
+use crate::{CoinbaseError, CoinbaseHistoryTransport, FixedPointValue, PublicRequestGate};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
@@ -22,7 +22,9 @@ pub struct CoinbaseCatalogDiagnostics {
     pub pages_fetched: u64,
     pub products_received: u64,
     pub inactive_products_dropped: u64,
+    pub malformed_products_dropped: u64,
     pub duplicate_products_dropped: u64,
+    pub truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +58,7 @@ struct ProductMessage {
 
 pub struct CoinbaseProductCatalog<T> {
     transport: T,
+    gate: PublicRequestGate,
     diagnostics: CoinbaseCatalogDiagnostics,
 }
 
@@ -64,11 +67,14 @@ impl<T> CoinbaseProductCatalog<T> {
     pub const fn with_transport(transport: T) -> Self {
         Self {
             transport,
+            gate: PublicRequestGate::new(None),
             diagnostics: CoinbaseCatalogDiagnostics {
                 pages_fetched: 0,
                 products_received: 0,
                 inactive_products_dropped: 0,
+                malformed_products_dropped: 0,
                 duplicate_products_dropped: 0,
+                truncated: false,
             },
         }
     }
@@ -82,9 +88,13 @@ impl<T> CoinbaseProductCatalog<T> {
 impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
     /// Fetches every bounded public catalog page and retains active spot products.
     ///
+    /// Individual malformed products are skipped so one bad entry cannot discard
+    /// the catalog; malformed pages, transport failures, and bound violations
+    /// still fail closed. Pagination anomalies retain the validated prefix.
+    ///
     /// # Errors
     ///
-    /// Returns an error for transport failures, malformed pages, invalid precision, or bounds.
+    /// Returns an error for transport failures or malformed pages.
     pub fn fetch_active_spot_products(
         &mut self,
     ) -> Result<Vec<CoinbaseSpotProduct>, CoinbaseError> {
@@ -99,8 +109,8 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                 path.push_str(value);
             }
             let body = self
-                .transport
-                .get(&path)
+                .gate
+                .get(&mut self.transport, &path)
                 .map_err(CoinbaseError::Transport)?;
             let response: ProductsResponse =
                 serde_json::from_slice(&body).map_err(|_| CoinbaseError::InvalidMessage)?;
@@ -115,7 +125,13 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                         self.diagnostics.inactive_products_dropped.saturating_add(1);
                     continue;
                 }
-                let profile = profile(product)?;
+                let Ok(profile) = profile(product) else {
+                    self.diagnostics.malformed_products_dropped = self
+                        .diagnostics
+                        .malformed_products_dropped
+                        .saturating_add(1);
+                    continue;
+                };
                 if !identities.insert(profile.product_id.clone()) {
                     self.diagnostics.duplicate_products_dropped = self
                         .diagnostics
@@ -124,11 +140,12 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                     continue;
                 }
                 if products.len() >= MAXIMUM_PRODUCTS {
-                    return Err(CoinbaseError::InvalidMessage);
+                    self.diagnostics.truncated = true;
+                    break;
                 }
                 products.push(profile);
             }
-            if !response.has_next {
+            if self.diagnostics.truncated || !response.has_next {
                 products.sort_by(|left, right| {
                     product_rank(left)
                         .cmp(&product_rank(right))
@@ -137,11 +154,23 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                 return Ok(products);
             }
             if response.cursor.is_empty() || cursor.as_ref() == Some(&response.cursor) {
-                return Err(CoinbaseError::InvalidMessage);
+                self.diagnostics.truncated = true;
+                products.sort_by(|left, right| {
+                    product_rank(left)
+                        .cmp(&product_rank(right))
+                        .then_with(|| left.product_id.cmp(&right.product_id))
+                });
+                return Ok(products);
             }
             cursor = Some(response.cursor);
         }
-        Err(CoinbaseError::InvalidMessage)
+        self.diagnostics.truncated = true;
+        products.sort_by(|left, right| {
+            product_rank(left)
+                .cmp(&product_rank(right))
+                .then_with(|| left.product_id.cmp(&right.product_id))
+        });
+        Ok(products)
     }
 }
 
@@ -197,7 +226,7 @@ fn validate_currency(value: &str) -> Result<(), CoinbaseError> {
 
 fn increment_scale(value: &str) -> Result<u8, CoinbaseError> {
     let parsed = FixedPointValue::parse(value)?;
-    if parsed.mantissa != 1 || parsed.scale > 18 {
+    if parsed.mantissa <= 0 || parsed.scale > 18 {
         return Err(CoinbaseError::InvalidMessage);
     }
     u8::try_from(parsed.scale).map_err(|_| CoinbaseError::InvalidMessage)
@@ -255,10 +284,64 @@ mod tests {
     }
 
     #[test]
-    fn catalog_rejects_non_decimal_power_of_ten_precision() {
-        let page = br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.05","product_type":"SPOT","status":"online"}],"has_next":false,"cursor":""}"#.to_vec();
+    fn catalog_skips_malformed_products_without_discarding_valid_ones() {
+        let page = br#"{"products":[
+            {"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.05","product_type":"SPOT","status":"online"},
+            {"product_id":"BAD","base_currency_id":"BAD","quote_currency_id":"USD","base_increment":"0.01","price_increment":"0.01","product_type":"SPOT","status":"online"},
+            {"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.0001","price_increment":"0.5","product_type":"SPOT","status":"online"}
+        ],"has_next":false,"cursor":""}"#.to_vec();
         let mut catalog = CoinbaseProductCatalog::with_transport(Pages(VecDeque::from([page])));
-        assert!(catalog.fetch_active_spot_products().is_err());
+        let products = catalog
+            .fetch_active_spot_products()
+            .expect("one malformed product cannot fail the catalog");
+        assert_eq!(products.len(), 2);
+        assert_eq!(products[0].product_id, "BTC-USD");
+        assert_eq!(products[0].price_scale, 2);
+        assert_eq!(products[1].product_id, "ETH-USD");
+        assert_eq!(products[1].price_scale, 1);
+        assert_eq!(products[1].quantity_scale, 4);
+        assert_eq!(catalog.diagnostics().malformed_products_dropped, 1);
+    }
+
+    #[test]
+    fn catalog_retains_the_validated_prefix_on_pagination_anomalies() {
+        let pages = VecDeque::from([
+            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":true,"cursor":"stuck"}"#.to_vec(),
+            br#"{"products":[{"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":true,"cursor":"stuck"}"#.to_vec(),
+        ]);
+        let mut catalog = CoinbaseProductCatalog::with_transport(Pages(pages));
+        let products = catalog
+            .fetch_active_spot_products()
+            .expect("a repeated cursor retains validated products");
+        assert_eq!(products.len(), 2);
+        assert!(catalog.diagnostics().truncated);
+    }
+
+    #[test]
+    fn catalog_retries_bounded_rate_limit_rejections() {
+        let pages = VecDeque::from([
+            b"rate limited: HTTP 429".to_vec(),
+            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":false,"cursor":""}"#.to_vec(),
+        ]);
+        let mut catalog = CoinbaseProductCatalog::with_transport(FailingThenOk(pages));
+        let products = catalog
+            .fetch_active_spot_products()
+            .expect("a single rate limit rejection retries");
+        assert_eq!(products.len(), 1);
+    }
+
+    struct FailingThenOk(VecDeque<Vec<u8>>);
+
+    impl CoinbaseHistoryTransport for FailingThenOk {
+        fn get(&mut self, _path: &str) -> Result<Vec<u8>, String> {
+            match self.0.pop_front() {
+                Some(body) if body.starts_with(b"rate limited") => {
+                    Err("Coinbase candle request returned HTTP 429".to_string())
+                }
+                Some(body) => Ok(body),
+                None => Err("missing page".to_string()),
+            }
+        }
     }
 
     #[allow(dead_code)]

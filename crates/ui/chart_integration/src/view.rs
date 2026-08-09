@@ -240,9 +240,8 @@ impl OriginChartView {
 
     /// Creates a chart from one validated application replay snapshot.
     ///
-    /// # Panics
-    ///
-    /// Panics only if the validated snapshot cannot establish resumable sequence state.
+    /// A snapshot that cannot establish resumable sequence state installs
+    /// without a live bridge instead of panicking the UI thread.
     #[must_use]
     pub fn with_replay(replay: &ReplaySnapshot) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
@@ -254,13 +253,13 @@ impl OriginChartView {
         let volume_retention_applied =
             engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(volume_retention_applied);
-        let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay)
-            .expect("a validated replay snapshot establishes chart sequence state");
+        let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay).ok();
+        debug_assert!(data_bridge.is_some());
 
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
-            data_bridge: Some(data_bridge),
+            data_bridge,
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
             price_divisor: replay_price_divisor(replay),
             volume_series,
@@ -606,7 +605,6 @@ impl OriginChartView {
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.invalidate_series_frame();
-        self.fitted = false;
         Ok(true)
     }
 
@@ -642,7 +640,6 @@ impl OriginChartView {
         };
         match bridge.drain_merged() {
             Ok(Some(update)) if update.mutates_series() => {
-                let replaces_snapshot = update.snapshot().is_some();
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
                 }
@@ -654,9 +651,6 @@ impl OriginChartView {
                     &update,
                 );
                 self.invalidate_series_frame();
-                if replaces_snapshot {
-                    self.fitted = false;
-                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -693,16 +687,6 @@ impl OriginChartView {
         self.engine.brush_create_cancel();
     }
 
-    fn rearm_anchored_drawing(&mut self) {
-        let Some(kind) = self.drawing_tool.drawing_kind() else {
-            return;
-        };
-        if kind != DrawingKind::Brush {
-            let armed = self.engine.drawing_create_begin(kind, None);
-            debug_assert!(armed, "an empty drawing-options template is valid");
-        }
-    }
-
     fn drawing_pointer_down(&mut self, pane_x: f64, y: f64, modifiers: DrawingModifiers) -> bool {
         match self.drawing_tool {
             ChartDrawingTool::Cursor => {
@@ -724,7 +708,8 @@ impl OriginChartView {
             _ => {
                 let result = self.engine.drawing_create_click(pane_x, y, modifiers);
                 if result > 0 {
-                    self.rearm_anchored_drawing();
+                    self.drawing_tool = ChartDrawingTool::Cursor;
+                    self.cursor_style = CursorStyle::Crosshair;
                 }
                 result != 0
             }
@@ -765,6 +750,8 @@ impl OriginChartView {
         if self.engine.brush_create_active() {
             self.engine.brush_create_add(pane_x, y);
             self.engine.brush_create_end();
+            self.drawing_tool = ChartDrawingTool::Cursor;
+            self.cursor_style = CursorStyle::Crosshair;
             return true;
         }
         if self.engine.drawing_drag_active() {
@@ -1517,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn anchored_drawing_tools_commit_real_origin_drawings_and_rearm() {
+    fn anchored_drawing_tools_commit_real_origin_drawings_and_return_to_cursor() {
         let mut chart = interactive_chart();
         let tools = [
             (ChartDrawingTool::TrendLine, 2, 160.0),
@@ -1537,12 +1524,13 @@ mod tests {
                 assert!(handled);
             }
             assert_eq!(chart.drawing_count(), index + 1);
-            assert!(chart.engine.drawing_create_active());
+            assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+            assert!(!chart.engine.drawing_create_active());
         }
     }
 
     #[test]
-    fn brush_capture_commits_on_release_and_stays_armed() {
+    fn brush_capture_commits_on_release_and_returns_to_cursor() {
         let mut chart = interactive_chart();
         chart.set_drawing_tool(ChartDrawingTool::Brush);
 
@@ -1551,7 +1539,7 @@ mod tests {
         assert!(chart.drawing_pointer_up(320.0, 240.0, DrawingModifiers::default()));
 
         assert_eq!(chart.drawing_count(), 1);
-        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Brush);
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
         assert!(!chart.engine.brush_create_active());
     }
 
@@ -1584,6 +1572,7 @@ mod tests {
         let mut chart = interactive_chart();
         chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
         assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default()));
+        chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
         assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default()));
         assert_eq!(chart.drawing_count(), 2);
 

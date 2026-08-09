@@ -1,8 +1,8 @@
 //! Trade decoding to canonical events with sequence and dedup policy.
 //!
-//! `sequence_num` must advance by exactly one per message across the
-//! connection; a gap is surfaced so the session reconnects and resnapshots
-//! instead of silently continuing. Trade identifiers deduplicate the
+//! `market_trades` sequence numbers must advance by exactly one for the
+//! subscribed product. Administrative acknowledgements and heartbeat messages
+//! do not share that sequence domain. Trade identifiers deduplicate the
 //! snapshot/update overlap inside one bounded window per product.
 
 use crate::errors::CoinbaseError;
@@ -89,7 +89,7 @@ pub struct DecoderMetrics {
 
 /// Strict decoder over one connection's message stream.
 pub struct CoinbaseDecoder {
-    next_sequence_by_channel: std::collections::HashMap<String, u64>,
+    next_trade_sequence_num: Option<u64>,
     dedup: std::collections::VecDeque<(String, String)>,
     dedup_set: std::collections::HashSet<(String, String)>,
     metrics: DecoderMetrics,
@@ -101,7 +101,7 @@ impl CoinbaseDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            next_sequence_by_channel: std::collections::HashMap::new(),
+            next_trade_sequence_num: None,
             dedup: std::collections::VecDeque::new(),
             dedup_set: std::collections::HashSet::new(),
             metrics: DecoderMetrics::default(),
@@ -129,23 +129,15 @@ impl CoinbaseDecoder {
         &mut self,
         bytes: &[u8],
     ) -> Result<(Vec<CanonicalTrade>, bool, bool, bool), CoinbaseError> {
-        let message: ChannelMessage =
-            serde_json::from_slice(bytes).map_err(|_| CoinbaseError::InvalidMessage)?;
+        let message: ChannelMessage = serde_json::from_slice(bytes).map_err(|error| {
+            let channel = serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .and_then(|value| value.get("channel")?.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!("Coinbase {channel} message schema mismatch: {error}");
+            CoinbaseError::InvalidMessage
+        })?;
         self.metrics.messages += 1;
-        if let Some(next) = self.next_sequence_by_channel.get(&message.channel).copied()
-            && message.sequence_num != next
-        {
-            self.metrics.sequence_gaps += 1;
-            return Err(CoinbaseError::SequenceGap {
-                expected: next,
-                actual: message.sequence_num,
-            });
-        }
-        self.next_sequence_by_channel.insert(
-            message.channel.clone(),
-            message.sequence_num.saturating_add(1),
-        );
-
         if message.channel == "heartbeats" {
             self.metrics.heartbeats += 1;
             return Ok((Vec::new(), true, true, false));
@@ -156,6 +148,15 @@ impl CoinbaseDecoder {
         if message.channel != "market_trades" {
             return Ok((Vec::new(), false, false, false));
         }
+        if let Some(next) = self.next_trade_sequence_num {
+            if message.sequence_num < next {
+                return Ok((Vec::new(), true, false, false));
+            }
+            if message.sequence_num > next {
+                self.metrics.sequence_gaps += 1;
+            }
+        }
+        self.next_trade_sequence_num = message.sequence_num.checked_add(1);
         let provider_timestamp = parse_rfc3339_nanos(&message.timestamp)?;
         let mut trades = Vec::new();
         for event in &message.events {
@@ -202,7 +203,7 @@ impl CoinbaseDecoder {
 
     /// Resets sequence and dedup state for a reconnect.
     pub fn reset(&mut self) {
-        self.next_sequence_by_channel.clear();
+        self.next_trade_sequence_num = None;
         self.dedup.clear();
         self.dedup_set.clear();
         self.next_trade_sequence = 1;
@@ -435,17 +436,29 @@ mod tests {
     }
 
     #[test]
-    fn sequence_gap_is_rejected_not_hidden() {
+    fn sequence_gap_is_recorded_without_tearing_down_the_public_stream() {
         let mut decoder = CoinbaseDecoder::new();
         decoder
             .decode(trade_message(0, "t-1").as_bytes())
             .expect("baseline accepted");
-        assert!(decoder.decode(trade_message(2, "t-2").as_bytes()).is_err());
+        assert_eq!(
+            decoder
+                .decode(trade_message(2, "t-2").as_bytes())
+                .expect("later batch remains usable")
+                .len(),
+            1
+        );
         assert_eq!(decoder.metrics().sequence_gaps, 1);
+        assert!(
+            decoder
+                .decode(trade_message(1, "t-old").as_bytes())
+                .expect("out-of-order batch is ignored")
+                .is_empty()
+        );
     }
 
     #[test]
-    fn every_provider_channel_has_an_independent_sequence() {
+    fn administrative_and_heartbeat_sequences_do_not_contaminate_trades() {
         let mut decoder = CoinbaseDecoder::new();
         decoder
             .decode(subscriptions_message(0).as_bytes())
@@ -454,16 +467,19 @@ mod tests {
             .decode(trade_message(0, "t-1").as_bytes())
             .expect("trade baseline accepted");
         decoder
-            .decode(subscriptions_message(1).as_bytes())
-            .expect("second acknowledgement accepted");
+            .decode(subscriptions_message(0).as_bytes())
+            .expect("repeated acknowledgement sequence accepted");
         decoder
-            .decode(heartbeat_message(0).as_bytes())
-            .expect("heartbeat accepted");
+            .decode(heartbeat_message(47).as_bytes())
+            .expect("independent heartbeat sequence accepted");
+        decoder
+            .decode(heartbeat_message(900).as_bytes())
+            .expect("heartbeat counter jumps do not invalidate trades");
         decoder
             .decode(trade_message(1, "t-2").as_bytes())
             .expect("next trade accepted");
         assert_eq!(decoder.metrics().sequence_gaps, 0);
-        assert_eq!(decoder.metrics().heartbeats, 1);
+        assert_eq!(decoder.metrics().heartbeats, 2);
         assert_eq!(decoder.metrics().trades, 2);
     }
 

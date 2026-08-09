@@ -4,8 +4,8 @@ use crate::errors::CoinbaseError;
 
 /// Maximum products per subscription.
 pub const MAXIMUM_PRODUCTS: usize = 64;
-/// Maximum accepted WebSocket message.
-pub const MAXIMUM_MESSAGE_BYTES: usize = 262_144;
+/// Maximum accepted WebSocket message, including a complete Level 2 snapshot.
+pub const MAXIMUM_MESSAGE_BYTES: usize = 8 * 1_024 * 1_024;
 /// Validated bounded configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoinbaseConfig {
@@ -44,7 +44,7 @@ impl CoinbaseConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoinbaseConfig, MAXIMUM_PRODUCTS};
+    use super::{CoinbaseConfig, MAXIMUM_MESSAGE_BYTES, MAXIMUM_PRODUCTS};
 
     #[test]
     fn configuration_bounds() {
@@ -55,5 +55,11 @@ mod tests {
         );
         assert!(CoinbaseConfig::try_new(vec!["BTC USD".to_string()]).is_err());
         assert!(CoinbaseConfig::try_new(vec!["X".to_string(); MAXIMUM_PRODUCTS + 1]).is_err());
+        assert_eq!(
+            CoinbaseConfig::try_new(vec!["BTC-USD".to_string()])
+                .expect("valid config")
+                .maximum_message_bytes,
+            MAXIMUM_MESSAGE_BYTES
+        );
     }
 }

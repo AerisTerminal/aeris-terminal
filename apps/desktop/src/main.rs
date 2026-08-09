@@ -32,8 +32,7 @@ use gpui::{
     rgb, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName as ComponentIcon, Root, Selectable, Sizable,
-    StyledExt, TitleBar,
+    ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
     button::{Button, ButtonVariants},
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
@@ -166,6 +165,7 @@ struct TerminalApp {
     coinbase_diagnostics: CoinbaseDiagnosticsMode,
     coinbase_switch: CoinbaseSwitchState,
     coinbase_interval: ChartInterval,
+    coinbase_catalog: CoinbaseCatalogState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +185,19 @@ enum CoinbaseSwitchState {
 impl CoinbaseSwitchState {
     const fn is_pending(self) -> bool {
         matches!(self, Self::Pending)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CoinbaseCatalogState {
+    #[default]
+    Loading,
+    Ready,
+}
+
+impl CoinbaseCatalogState {
+    const fn needs_fetch(self) -> bool {
+        matches!(self, Self::Loading)
     }
 }
 
@@ -382,7 +395,6 @@ struct HeaderState {
     indicator_input: Entity<InputState>,
     indicator_message: Option<String>,
     symbol_message: String,
-    search_activity: SearchActivity,
     series_message: String,
     pending: HeaderPendingState,
     controls: HeaderControls,
@@ -397,22 +409,6 @@ struct HeaderState {
 struct HeaderPendingState {
     symbol_selection: bool,
     series: bool,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum SearchActivity {
-    Idle,
-    Pending,
-}
-
-impl SearchActivity {
-    const fn from_pending(pending: bool) -> Self {
-        if pending { Self::Pending } else { Self::Idle }
-    }
-
-    const fn is_pending(self) -> bool {
-        matches!(self, Self::Pending)
-    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -749,6 +745,7 @@ impl TerminalApp {
             ),
             coinbase_switch: CoinbaseSwitchState::Idle,
             coinbase_interval: ChartInterval::Minute1,
+            coinbase_catalog: CoinbaseCatalogState::Loading,
         }
     }
 
@@ -793,13 +790,15 @@ impl TerminalApp {
             history_root,
             std::thread::current().id(),
             self.coinbase_diagnostics.enabled(),
+            self.coinbase_catalog.needs_fetch(),
         );
         let Ok((_, worker)) = worker else {
             self.series_message = format!("{} history could not start", interval.label());
             cx.notify();
             return false;
         };
-        self.market_worker = worker;
+        let previous = std::mem::replace(&mut self.market_worker, worker);
+        previous.shutdown_detached();
         self.coinbase_interval = interval;
         self.coinbase_switch = CoinbaseSwitchState::Pending;
         self.chart_state = ChartState::Loading;
@@ -881,13 +880,15 @@ impl TerminalApp {
                     history_root,
                     std::thread::current().id(),
                     self.coinbase_diagnostics.enabled(),
+                    self.coinbase_catalog.needs_fetch(),
                 );
                 let Ok((_, worker)) = worker else {
                     self.symbol_message = "Coinbase product worker could not start".to_string();
                     cx.notify();
                     return false;
                 };
-                self.market_worker = worker;
+                let previous = std::mem::replace(&mut self.market_worker, worker);
+                previous.shutdown_detached();
                 self.coinbase_product = Some(product.clone());
                 self.coinbase_switch = CoinbaseSwitchState::Pending;
                 self.symbol_selection_pending = true;
@@ -1148,7 +1149,7 @@ impl TerminalApp {
                 chart_cx.notify();
             });
         }
-        eprintln!("fixture market worker invalidated the stream: {message}");
+        eprintln!("market worker invalidated the stream: {message}");
     }
 
     fn set_chart_state(&mut self, state: ChartState, message: String, cx: &mut Context<Self>) {
@@ -1247,6 +1248,7 @@ impl TerminalApp {
             }
             MarketWorkerMessage::CoinbaseCatalog(result) => match result {
                 Ok(products) => {
+                    self.coinbase_catalog = CoinbaseCatalogState::Ready;
                     self.coinbase_products = products;
                     self.symbol_message = format!(
                         "{} active Coinbase spot markets",
@@ -1255,6 +1257,7 @@ impl TerminalApp {
                     cx.notify();
                 }
                 Err(error) => {
+                    self.coinbase_catalog = CoinbaseCatalogState::Loading;
                     self.symbol_message = format!("Coinbase catalog unavailable: {error}");
                     cx.notify();
                 }
@@ -1274,18 +1277,24 @@ impl TerminalApp {
         for message in messages {
             self.apply_market_worker_message(message, cx);
         }
-        if should_apply_rithmic_worker_stop(disconnected, self.connection_state) {
+        if self.provider == TerminalProvider::Rithmic
+            && should_apply_rithmic_worker_stop(disconnected, self.connection_state)
+        {
             self.apply_connection_state(
                 FeedConnectionState::Stopped,
                 "Rithmic market worker stopped".to_string(),
                 cx,
             );
         } else if disconnected && self.chart_state != ChartState::Error {
-            self.set_chart_state(
-                ChartState::Error,
-                "worker channel disconnected".to_string(),
-                cx,
-            );
+            let message = match self.provider {
+                TerminalProvider::Coinbase => "Coinbase market worker stopped",
+                TerminalProvider::Rithmic => "Rithmic market worker stopped",
+                TerminalProvider::Fixture => "Fixture market worker stopped",
+            }
+            .to_string();
+            self.connection_state = Some(FeedConnectionState::Stopped);
+            self.connection_message = Some(message.clone());
+            self.set_chart_state(ChartState::Error, message, cx);
         }
         self.dispatch_recovery(cx);
 
@@ -1915,6 +1924,7 @@ fn chrome_overlay_layer(
     cx: &App,
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
+    let timeframe = overlay == ChromeOverlay::Timeframe;
     let panel = match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
@@ -1923,9 +1933,6 @@ fn chrome_overlay_layer(
                 instruments: app_state.instrument_entries(cx),
                 input: app_state.symbol_input.clone(),
                 message: app_state.symbol_message.clone(),
-                search_activity: SearchActivity::from_pending(
-                    app_state.symbol_browser.search_pending(),
-                ),
                 selection_pending: app_state.symbol_selection_pending,
                 enabled: true,
                 provider: app_state.provider,
@@ -1965,8 +1972,8 @@ fn chrome_overlay_layer(
             .occlude()
             .flex()
             .items_start()
-            .justify_center()
-            .pt_2()
+            .when(timeframe, |scrim| scrim.justify_start().pl(px(320.0)))
+            .when(!timeframe, |scrim| scrim.justify_center().pt_2())
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
                     app.close_chrome_overlay(window, app_cx);
@@ -1981,7 +1988,6 @@ fn chrome_overlay_layer(
                     .border_1()
                     .border_color(gpui_color(theme.colors.border))
                     .bg(gpui_color(theme.colors.popover))
-                    .shadow_lg()
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(panel),
@@ -2000,7 +2006,7 @@ fn timeframe_overlay_content(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     div()
-        .w(px(280.0))
+        .w(px(192.0))
         .v_flex()
         .p_2()
         .gap_1()
@@ -2024,7 +2030,7 @@ fn timeframe_overlay_content(
                                 .text_color(gpui_color(colors.foreground))
                         })
                         .when(keyboard_selection == index, |row| {
-                            row.border_1().border_color(gpui_color(colors.ring))
+                            row.bg(gpui_color(colors.muted))
                         })
                         .when(!pending, |row| {
                             row.cursor_pointer()
@@ -2082,7 +2088,6 @@ impl Render for TerminalApp {
                 indicator_input: self.indicator_input.clone(),
                 indicator_message: self.indicator_message.clone(),
                 symbol_message: self.symbol_message.clone(),
-                search_activity: SearchActivity::from_pending(self.symbol_browser.search_pending()),
                 series_message: self.series_message.clone(),
                 pending: HeaderPendingState {
                     symbol_selection: self.symbol_selection_pending,
@@ -2744,58 +2749,6 @@ fn terminal_header(
                 )
                 .child(header_controls(cx, app, state)),
         )
-        .child(window_control_cluster())
-}
-
-fn window_control_cluster() -> impl IntoElement {
-    let control = |id, icon, tooltip, action: u8| {
-        chrome_tooltip(
-            id,
-            tooltip,
-            Button::new(id)
-                .icon(Icon::new(icon))
-                .ghost()
-                .w(px(34.0))
-                .h_full()
-                .cursor_pointer()
-                .on_click(move |_, window, cx| {
-                    match action {
-                        0 => window.minimize_window(),
-                        1 => window.zoom_window(),
-                        _ => window.remove_window(),
-                    }
-                    cx.stop_propagation();
-                }),
-        )
-    };
-    div()
-        .id("application_window_controls")
-        .absolute()
-        .right_0()
-        .top_0()
-        .bottom_0()
-        .w(px(102.0))
-        .occlude()
-        .flex()
-        .items_center()
-        .child(control(
-            "window_minimize",
-            ComponentIcon::WindowMinimize,
-            "Minimize",
-            0,
-        ))
-        .child(control(
-            "window_zoom",
-            ComponentIcon::WindowMaximize,
-            "Maximize or restore",
-            1,
-        ))
-        .child(control(
-            "window_close",
-            ComponentIcon::WindowClose,
-            "Close",
-            2,
-        ))
 }
 
 fn header_controls(
@@ -2840,7 +2793,6 @@ fn header_controls(
                 instruments: state.instruments,
                 input: state.symbol_input,
                 message: state.symbol_message,
-                search_activity: state.search_activity,
                 selection_pending: state.pending.symbol_selection,
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 provider: state.provider,
@@ -3060,7 +3012,7 @@ fn indicator_dialog_content(
                 )))
                 .cursor_pointer()
                 .when(keyboard_selection == index, |row| {
-                    row.border_1().border_color(gpui_color(colors.ring))
+                    row.bg(gpui_color(colors.muted))
                 })
                 .hover(|row| row.bg(gpui_color(colors.accent)))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3111,10 +3063,10 @@ fn indicator_dialog_content(
                 ))
         });
     div()
-        .w(px(896.0))
+        .w(px(720.0))
         .bg(gpui_color(colors.card))
         .text_color(gpui_color(colors.card_foreground))
-        .child(indicator_dialog_header(input.clone(), app.clone(), &colors))
+        .child(indicator_dialog_header(input, &colors))
         .child(indicator_status_bar(
             result_count,
             status,
@@ -3183,8 +3135,7 @@ fn indicator_dialog_footer(
 }
 
 fn indicator_dialog_header(
-    input: Entity<InputState>,
-    app: Entity<TerminalApp>,
+    input: &Entity<InputState>,
     colors: &axiusflow_design_system::ThemeColors,
 ) -> impl IntoElement + use<> {
     div()
@@ -3197,8 +3148,13 @@ fn indicator_dialog_header(
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .child(header_icon(HugeIcon::SearchIcon01))
-        .child(Input::new(&input).flex_1())
-        .child(indicator_dialog_close_button(input, app))
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false)
+                .flex_1(),
+        )
 }
 
 const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {
@@ -3221,7 +3177,6 @@ struct InstrumentSelectorState {
     instruments: Vec<InstrumentMenuEntry>,
     input: Option<Entity<InputState>>,
     message: String,
-    search_activity: SearchActivity,
     selection_pending: bool,
     enabled: bool,
     provider: TerminalProvider,
@@ -3234,7 +3189,7 @@ fn instrument_dialog_content(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let header = instrument_dialog_header(app, state, theme);
+    let header = instrument_dialog_header(state, theme);
     let rows = state
         .instruments
         .iter()
@@ -3256,7 +3211,7 @@ fn instrument_dialog_content(
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .text_sm()
                 .when(state.keyboard_selection == index, |row| {
-                    row.border_1().border_color(gpui_color(colors.ring))
+                    row.bg(gpui_color(colors.muted))
                 })
                 .when(checked, |row| row.bg(gpui_color(colors.muted)))
                 .when(!state.selection_pending, |row| {
@@ -3304,7 +3259,7 @@ fn instrument_dialog_content(
                 )
         });
     div()
-        .w(px(896.0))
+        .w(px(720.0))
         .bg(gpui_color(colors.card))
         .text_color(gpui_color(colors.card_foreground))
         .child(header)
@@ -3357,16 +3312,10 @@ fn instrument_dialog_footer(
         })
 }
 
-fn instrument_dialog_header(
-    app: &Entity<TerminalApp>,
-    state: &InstrumentSelectorState,
-    theme: &AxiusflowTheme,
-) -> AnyElement {
+fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTheme) -> AnyElement {
     let Some(input) = state.input.as_ref() else {
         return div().into_any_element();
     };
-    let app = app.clone();
-    let search_app = app.clone();
     div()
         .h(px(chart_chrome::CHART_CHROME_HEIGHT))
         .flex_none()
@@ -3377,74 +3326,14 @@ fn instrument_dialog_header(
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
         .child(header_icon(HugeIcon::SearchIcon01))
-        .child(Input::new(input).flex_1())
-        .child(button_activation(
-            Button::new("rithmic_dialog_search")
-                .label("Search")
-                .primary()
-                .compact()
-                .loading(state.search_activity.is_pending())
-                .disabled(state.search_activity.is_pending() || state.selection_pending)
-                .when(
-                    !state.search_activity.is_pending() && !state.selection_pending,
-                    Button::cursor_pointer,
-                )
-                .when(
-                    state.search_activity.is_pending() || state.selection_pending,
-                    Button::cursor_not_allowed,
-                ),
-            !state.search_activity.is_pending() && !state.selection_pending,
-            move |_, cx| {
-                search_app.update(cx, |app, app_cx| {
-                    app.submit_symbol_input(app_cx);
-                });
-            },
-        ))
-        .child(dialog_close_button("close_instrument_dialog", app.clone()))
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false)
+                .flex_1(),
+        )
         .into_any_element()
-}
-
-fn dialog_close_button(id: &'static str, app: Entity<TerminalApp>) -> impl IntoElement + use<> {
-    chrome_tooltip(
-        id,
-        "Close",
-        button_activation(
-            Button::new(id)
-                .icon(header_icon(HugeIcon::CancelIcon01))
-                .ghost()
-                .compact()
-                .cursor_pointer(),
-            true,
-            move |window, cx| {
-                app.update(cx, |app, app_cx| {
-                    app.close_chrome_overlay(window, app_cx);
-                });
-            },
-        ),
-    )
-}
-
-fn indicator_dialog_close_button(
-    _input: Entity<InputState>,
-    app: Entity<TerminalApp>,
-) -> impl IntoElement + use<> {
-    chrome_tooltip(
-        "close_indicator_dialog",
-        "Close",
-        button_activation(
-            Button::new("close_indicator_dialog")
-                .icon(header_icon(HugeIcon::CancelIcon01))
-                .ghost()
-                .compact()
-                .cursor_pointer(),
-            true,
-            move |window, cx| {
-                app.update(cx, |app, app_cx| {
-                    app.close_chrome_overlay(window, app_cx);
-                });
-            },
-        ),
-    )
 }
 
 fn instrument_menu_detail(
@@ -3912,6 +3801,7 @@ fn run_coinbase_live_smoke(
         history_root,
         std::thread::current().id(),
         false,
+        true,
     )?;
     if !matches!(startup, MarketWorkerStartup::Loading(_)) {
         return Err("Coinbase shipping worker bypassed the loading state".to_string());
@@ -4208,6 +4098,7 @@ fn coinbase_cli_worker(
         PathBuf::from(history_root),
         std::thread::current().id(),
         detailed_diagnostics,
+        true,
     )
     .expect("the bounded direct Coinbase worker starts")
 }
@@ -4269,6 +4160,7 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
             default_coinbase_history_root(),
             std::thread::current().id(),
             false,
+            true,
         )
         .expect("the default Coinbase public market worker starts")
     };
