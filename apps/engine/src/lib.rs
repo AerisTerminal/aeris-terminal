@@ -235,6 +235,16 @@ impl EngineState {
             .clone()
     }
 
+    /// Updates the current operational resource mode without changing user state.
+    pub fn set_resource_mode(&self, mode: ResourceMode) -> WorkspaceState {
+        let mut workspace = self
+            .workspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        workspace.resource_mode = mode as i32;
+        workspace.clone()
+    }
+
     /// Installs the resident market runtime's nonblocking selection callback.
     pub fn set_selection_callback(&self, callback: SelectionCallback) {
         *self

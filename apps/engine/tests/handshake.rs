@@ -175,6 +175,18 @@ fn authenticated_client_restores_engine_owned_workspace() {
 }
 
 #[test]
+fn operational_resource_mode_updates_without_revising_user_workspace() {
+    let state = EngineState::default();
+    let before = state.workspace();
+    let interactive = state.set_resource_mode(ResourceMode::Interactive);
+    assert_eq!(interactive.resource_mode, ResourceMode::Interactive as i32);
+    assert_eq!(interactive.workspace_revision, before.workspace_revision);
+    let warm = state.set_resource_mode(ResourceMode::Warm);
+    assert_eq!(warm.resource_mode, ResourceMode::Warm as i32);
+    assert_eq!(warm.workspace_revision, before.workspace_revision);
+}
+
+#[test]
 fn session_subscription_receives_retained_covering_chart_state() {
     let name = unique_name();
     let listener = bind_listener(&name).expect("bind engine listener");

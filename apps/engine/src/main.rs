@@ -49,6 +49,13 @@ struct ActiveSelection {
     interval_seconds: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceTransition {
+    KeepRunning,
+    Suspend,
+    Resume,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("Axiusflow engine failed: {error}");
@@ -120,6 +127,7 @@ fn start_market_runtime(
 ) -> Result<Arc<dyn Fn(ResourceMode) + Send + Sync>, String> {
     let (selection_tx, selection_rx) = mpsc::channel();
     let (resource_mode_tx, resource_mode_rx) = mpsc::sync_channel(4);
+    let resource_state = state.clone();
     let handle = thread::Builder::new()
         .name("axiusflow-engine-market".to_string())
         .spawn(move || {
@@ -141,6 +149,7 @@ fn start_market_runtime(
         .map_err(|error| error.to_string())?;
     let market_thread = handle.thread().clone();
     Ok(Arc::new(move |mode| {
+        resource_state.set_resource_mode(mode);
         if resource_mode_tx.try_send(mode).is_ok() {
             market_thread.unpark();
         }
@@ -186,7 +195,7 @@ fn run_market_runtime(
         market: workspace.market,
         interval_seconds: workspace.interval_seconds,
     };
-    let mut include_level2 = false;
+    let include_level2 = true;
     let mut worker = match start_resident_worker(
         &active.product,
         active.interval,
@@ -218,7 +227,6 @@ fn run_market_runtime(
             &active.product,
             active.interval,
             &history_root,
-            &mut include_level2,
             &mut chart_context,
         ) {
             publish_fault(
@@ -228,7 +236,8 @@ fn run_market_runtime(
             return;
         }
         let Some(active_worker) = worker.as_mut() else {
-            return;
+            thread::park();
+            continue;
         };
         let (messages, disconnected) = active_worker.drain_messages();
         for message in messages {
@@ -291,26 +300,36 @@ fn apply_resource_mode(
     active_product: &CoinbaseSpotProduct,
     active_interval: ChartInterval,
     history_root: &std::path::Path,
-    include_level2: &mut bool,
     chart_context: &mut Option<ReplaySnapshot>,
 ) -> Result<(), String> {
     let Some(mode) = resource_modes.try_iter().last() else {
         return Ok(());
     };
-    let next_include_level2 = mode == ResourceMode::Interactive;
-    if next_include_level2 == *include_level2 {
-        return Ok(());
+    match resource_transition(mode, worker.is_some()) {
+        ResourceTransition::KeepRunning => {}
+        ResourceTransition::Suspend => {
+            drop(worker.take());
+            *chart_context = None;
+        }
+        ResourceTransition::Resume => {
+            *worker = Some(start_resident_worker(
+                active_product,
+                active_interval,
+                history_root,
+                true,
+            )?);
+            *chart_context = None;
+        }
     }
-    drop(worker.take());
-    *worker = Some(start_resident_worker(
-        active_product,
-        active_interval,
-        history_root,
-        next_include_level2,
-    )?);
-    *include_level2 = next_include_level2;
-    *chart_context = None;
     Ok(())
+}
+
+const fn resource_transition(mode: ResourceMode, running: bool) -> ResourceTransition {
+    match (mode, running) {
+        (ResourceMode::OfflineSuspended, true) => ResourceTransition::Suspend,
+        (ResourceMode::OfflineSuspended, false) | (_, true) => ResourceTransition::KeepRunning,
+        (_, false) => ResourceTransition::Resume,
+    }
 }
 
 fn start_resident_worker(
@@ -671,4 +690,42 @@ fn default_coinbase_history_root() -> PathBuf {
                 .join("coinbase")
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResourceTransition, resource_transition};
+    use axiusflow_local_engine_protocol::ResourceMode;
+
+    #[test]
+    fn warm_and_interactive_transitions_keep_the_provider_connection_alive() {
+        assert_eq!(
+            resource_transition(ResourceMode::Warm, true),
+            ResourceTransition::KeepRunning
+        );
+        assert_eq!(
+            resource_transition(ResourceMode::Interactive, true),
+            ResourceTransition::KeepRunning
+        );
+        assert_eq!(
+            resource_transition(ResourceMode::Constrained, true),
+            ResourceTransition::KeepRunning
+        );
+    }
+
+    #[test]
+    fn offline_suspension_is_idempotent_and_resumes_only_when_requested() {
+        assert_eq!(
+            resource_transition(ResourceMode::OfflineSuspended, true),
+            ResourceTransition::Suspend
+        );
+        assert_eq!(
+            resource_transition(ResourceMode::OfflineSuspended, false),
+            ResourceTransition::KeepRunning
+        );
+        assert_eq!(
+            resource_transition(ResourceMode::Warm, false),
+            ResourceTransition::Resume
+        );
+    }
 }
