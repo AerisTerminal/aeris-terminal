@@ -9,10 +9,10 @@ use axiusflow_rithmic_protocol_adapter::{
     InstrumentReferenceRequest, MarketDataSubscription, RITHMIC_TEST_VAULT_KEY,
     RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicAuthorizedSilenceEvidenceFault,
     RithmicCallbackLimits, RithmicCredentialBytes, RithmicProviderConfig, RithmicProviderDriver,
-    RithmicProviderEvents, RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession,
-    SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
-    SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
-    collect_rithmic_covering_recovery_evidence,
+    RithmicProviderEvents, RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming,
+    RithmicTestSession, SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest,
+    SymbolSearchCollector, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
+    TimeBarType, collect_rithmic_covering_recovery_evidence,
 };
 use std::{
     io::{self, Write},
@@ -26,14 +26,17 @@ use zeroize::Zeroize;
 mod provider_silence_evidence;
 
 use provider_silence_evidence::{
-    EvidenceFailure, EvidenceProvenance, EvidenceStatus, ExpectedSilence, ObservedRetry,
+    EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS, EVIDENCE_RESPONSE_TIMEOUT_NANOS, EvidenceFailure,
+    EvidenceProvenance, EvidenceStatus, ExpectedSilence, ObservedRetry, ObservedSessionTiming,
     ProviderSilenceEvidence,
 };
 
 const SYMBOL: &str = "MNQ";
 const AUTHORIZED_SILENCE_RUN_TIMEOUT: Duration = Duration::from_mins(2);
-const PROVIDER_OBSERVED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-const PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT: Duration = Duration::from_mins(2);
+const PROVIDER_OBSERVED_RESPONSE_TIMEOUT: Duration =
+    Duration::from_nanos(EVIDENCE_RESPONSE_TIMEOUT_NANOS);
+const PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT: Duration =
+    Duration::from_nanos(EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS);
 const HISTORY_LOOKBACK_MINUTES: i32 = 4 * 24 * 60 + 300;
 const MAXIMUM_HISTORY_BARS: usize = 6_063;
 const MINIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 30;
@@ -508,10 +511,7 @@ fn run_provider_observed_silence(
     let mut evidence =
         ProviderSilenceEvidence::incomplete(expected, observation_limit_ms, provenance);
     collect_provider_observed_silence(credentials, observation_limit, &mut evidence);
-    if !evidence.qualified
-        && evidence.failure.is_none()
-        && evidence.qualification_limitation.is_some()
-    {
+    if !evidence.qualified && evidence.failure.is_none() {
         evidence.failure = Some(EvidenceFailure::TimingMetadataInsufficient);
     }
     if !evidence.qualified && evidence.failure != Some(EvidenceFailure::ObservationTimeout) {
@@ -629,6 +629,17 @@ fn wait_for_provider_observed_silence(
 ) -> Result<(), EvidenceFailure> {
     let deadline = Instant::now() + observation_limit;
     loop {
+        if evidence.timing.is_none()
+            && let Some(timing) = events.session_timing(generation)
+        {
+            evidence.observe_timing(observed_session_timing(timing)?);
+            if !evidence.timing_is_feasible() {
+                return Err(EvidenceFailure::TimingMetadataInsufficient);
+            }
+            if !evidence.observation_window_is_sufficient() {
+                return Err(EvidenceFailure::ObservationWindowInsufficient);
+            }
+        }
         if Instant::now() >= deadline {
             return Err(EvidenceFailure::ObservationTimeout);
         }
@@ -681,6 +692,20 @@ fn wait_for_provider_observed_silence(
             thread::sleep(Duration::from_millis(5));
         }
     }
+}
+
+fn observed_session_timing(
+    timing: RithmicSessionTiming,
+) -> Result<ObservedSessionTiming, EvidenceFailure> {
+    Ok(ObservedSessionTiming {
+        generation: timing.generation().get(),
+        negotiated_heartbeat_interval_nanos: u64::try_from(timing.heartbeat_interval().as_nanos())
+            .map_err(|_| EvidenceFailure::TimingMetadataInsufficient)?,
+        response_timeout_nanos: u64::try_from(timing.response_timeout().as_nanos())
+            .map_err(|_| EvidenceFailure::TimingMetadataInsufficient)?,
+        message_silence_timeout_nanos: u64::try_from(timing.message_silence_timeout().as_nanos())
+            .map_err(|_| EvidenceFailure::TimingMetadataInsufficient)?,
+    })
 }
 
 fn wait_for_provider_recovery(

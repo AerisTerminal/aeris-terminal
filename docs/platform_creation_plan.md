@@ -526,6 +526,13 @@ stale or reconnecting charts retain their real candles and show only a compact
 top-left notice. Ready charts have no overlay, and the redundant outer chart
 border is removed so the chart remains flush against the resizable rail.
 
+Physical disconnect and suspend retirement now preserve the exact selected
+contract, venue, and series for the next authenticated generation. Retired DOM
+and feed-health state is cleared immediately, retained Origin candles move
+through truthful stale/reconnecting states, and interrupted initial autoload is
+eligible to retry after authentication. Manual contract replacement also clears
+the old depth image before the new selection is installed.
+
 
 
 ### Gate
@@ -626,23 +633,30 @@ machine deterministically. This is authorized client-local fault injection, not
 provider-observed heartbeat loss (`provider_observed_loss=false`), so the
 heartbeat/message-silence row remains open.
 
-A schema-2 passive provider-path recorder now runs the unmodified production
+A schema-3 passive provider-path recorder now runs the unmodified production
 receive loop from an immutable, clean-worktree binary, loads credentials only
 from the native vault, and writes a no-overwrite artifact bound to the full
 source revision, executable hash, and `Cargo.lock` hash. It requires an exact
 raw invalidation, transient retry, confirmed generation stop, strictly newer
 authenticated recovery, and clean protocol close. It never claims provider
 causation: a client-side observation cannot distinguish Rithmic from a network
-middlebox. `MessageSilence` also remains structurally unqualified until
-negotiated timing or external incident evidence proves it can win the timeout
-race. No real provider-path silence artifact has been captured, so the row
-remains open.
+middlebox. The artifact also records the exact observation generation's
+negotiated heartbeat interval together with the shipping response and
+message-silence timeouts. Qualification recomputes the production detector
+ordering with checked arithmetic: heartbeat silence is feasible only when
+`heartbeat + response < message`, while message silence is feasible when
+`message <= heartbeat + response`; missing, stale-generation, altered, or
+short-window timing fails closed. No real provider-path silence artifact has
+been captured, so the row remains open.
 
 The passive heartbeat observation uses the shipping two-minute message-silence
 window and a five-second heartbeat-response deadline. The observed Rithmic Test
 ten-second negotiated heartbeat can therefore reach `HeartbeatSilence` before
 the broader message timeout; a regression locks that ordering without changing
-production behavior or claiming provider causation.
+production behavior or claiming provider causation. With that exact Test timing,
+passive `MessageSilence` cannot win the production timeout race; its evidence
+remains externally unavailable unless a provider session negotiates a feasible
+heartbeat interval and the corresponding raw invalidation is actually observed.
 
 Windows native environment support landed on 2026-08-08. The platform runtime
 registers bounded connectivity-hint and suspend/resume callbacks, and actual

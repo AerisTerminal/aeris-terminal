@@ -157,11 +157,89 @@ enum RithmicReconnectState {
     SearchInFlight(RithmicReconnectTarget),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RithmicSessionRetirement {
+    None,
+    Offline,
+    Recovering,
+    Stopped,
+}
+
+impl RithmicSessionRetirement {
+    const fn from_connection(state: FeedConnectionState) -> Self {
+        match state {
+            FeedConnectionState::Disconnected => Self::Offline,
+            FeedConnectionState::Recovering => Self::Recovering,
+            FeedConnectionState::Stopped => Self::Stopped,
+            FeedConnectionState::Discovering
+            | FeedConnectionState::Authenticating
+            | FeedConnectionState::Streaming => Self::None,
+        }
+    }
+
+    const fn retained_chart_state(self, has_market_data: bool) -> Option<ChartState> {
+        if !has_market_data {
+            return None;
+        }
+        match self {
+            Self::Offline => Some(ChartState::Stale),
+            Self::Recovering => Some(ChartState::Recovering),
+            Self::None | Self::Stopped => None,
+        }
+    }
+}
+
 impl RithmicReconnectState {
     fn target(&self) -> Option<&RithmicReconnectTarget> {
         match self {
             Self::AwaitingSearch(target) | Self::SearchInFlight(target) => Some(target),
             Self::Idle => None,
+        }
+    }
+
+    fn capture_retired_selection(
+        &mut self,
+        selection: Option<rithmic_shell::RithmicSymbolSelection>,
+        series: rithmic_history::RithmicSeries,
+    ) -> bool {
+        if *self == Self::Idle
+            && let Some(selection) = selection
+        {
+            *self = Self::AwaitingSearch(RithmicReconnectTarget {
+                symbol: selection.instrument.symbol,
+                exchange: selection.instrument.exchange,
+                series,
+            });
+        }
+        *self == Self::Idle
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RithmicReadyAction {
+    None,
+    Reconnect(String),
+    Autoload,
+}
+
+fn rithmic_ready_action(
+    state: FeedConnectionState,
+    message: &str,
+    reconnect: &RithmicReconnectState,
+    autoload_started: bool,
+) -> RithmicReadyAction {
+    if state != FeedConnectionState::Authenticating
+        || !message.contains("ready for instrument search")
+    {
+        return RithmicReadyAction::None;
+    }
+    match reconnect {
+        RithmicReconnectState::AwaitingSearch(target) => {
+            RithmicReadyAction::Reconnect(target.symbol.clone())
+        }
+        RithmicReconnectState::Idle if !autoload_started => RithmicReadyAction::Autoload,
+        RithmicReconnectState::Idle | RithmicReconnectState::SearchInFlight(_) => {
+            RithmicReadyAction::None
         }
     }
 }
@@ -714,7 +792,8 @@ impl TerminalApp {
             }
         }
         if disconnected && self.connection_state.is_some() {
-            self.invalidate_rithmic_interaction_state();
+            self.rithmic_reconnect = RithmicReconnectState::Idle;
+            self.retire_rithmic_session(cx);
             self.connection_state = Some(FeedConnectionState::Stopped);
             self.connection_message = Some("Rithmic market worker stopped".to_string());
             cx.notify();
@@ -754,37 +833,46 @@ impl TerminalApp {
         message: String,
         cx: &mut Context<Self>,
     ) {
-        if state == FeedConnectionState::Recovering {
-            self.begin_rithmic_reconnect();
-        } else if state == FeedConnectionState::Stopped {
-            self.invalidate_rithmic_interaction_state();
+        let retirement = RithmicSessionRetirement::from_connection(state);
+        let retained_market_data = self
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).has_market_data());
+        match retirement {
+            RithmicSessionRetirement::Offline | RithmicSessionRetirement::Recovering => {
+                self.begin_rithmic_reconnect(cx);
+            }
+            RithmicSessionRetirement::Stopped => {
+                self.rithmic_reconnect = RithmicReconnectState::Idle;
+                self.retire_rithmic_session(cx);
+            }
+            RithmicSessionRetirement::None => {}
+        }
+        if let Some(chart_state) = retirement.retained_chart_state(retained_market_data) {
+            self.chart_state = chart_state;
+            self.chart_state_message.clone_from(&message);
         }
         self.connection_state = Some(state);
-        let ready_for_search = state == FeedConnectionState::Authenticating
-            && message.contains("ready for instrument search");
-        let should_reconnect = ready_for_search
-            && matches!(
-                self.rithmic_reconnect,
-                RithmicReconnectState::AwaitingSearch(_)
-            );
-        let should_autoload = ready_for_search
-            && self.rithmic_reconnect == RithmicReconnectState::Idle
-            && !self.rithmic_autoload_started;
+        let ready_action = rithmic_ready_action(
+            state,
+            &message,
+            &self.rithmic_reconnect,
+            self.rithmic_autoload_started,
+        );
         self.connection_message = Some(message);
-        if should_reconnect {
-            let symbol = self
-                .rithmic_reconnect
-                .target()
-                .map(|target| target.symbol.clone())
-                .unwrap_or_default();
-            if self.search_rithmic_query(&symbol, cx)
-                && let RithmicReconnectState::AwaitingSearch(target) = &self.rithmic_reconnect
-            {
-                self.rithmic_reconnect = RithmicReconnectState::SearchInFlight(target.clone());
+        match ready_action {
+            RithmicReadyAction::Reconnect(symbol) => {
+                if self.search_rithmic_query(&symbol, cx)
+                    && let RithmicReconnectState::AwaitingSearch(target) = &self.rithmic_reconnect
+                {
+                    self.rithmic_reconnect = RithmicReconnectState::SearchInFlight(target.clone());
+                }
             }
-        } else if should_autoload {
-            self.rithmic_autoload_started = true;
-            let _ = self.search_rithmic_query("MNQ", cx);
+            RithmicReadyAction::Autoload => {
+                self.rithmic_autoload_started = true;
+                let _ = self.search_rithmic_query("MNQ", cx);
+            }
+            RithmicReadyAction::None => {}
         }
         cx.notify();
     }
@@ -878,30 +966,29 @@ impl TerminalApp {
         self.search_rithmic_query(&query, cx);
     }
 
-    fn begin_rithmic_reconnect(&mut self) {
-        if self.rithmic_reconnect == RithmicReconnectState::Idle
-            && let Some(selection) = self.symbol_browser.selected().cloned()
+    fn begin_rithmic_reconnect(&mut self, cx: &mut Context<Self>) {
+        let series = self
+            .series_browser
+            .selected()
+            .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
+                request.series
+            });
+        if self
+            .rithmic_reconnect
+            .capture_retired_selection(self.symbol_browser.selected().cloned(), series)
         {
-            let series = self
-                .series_browser
-                .selected()
-                .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
-                    request.series
-                });
-            self.rithmic_reconnect =
-                RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
-                    symbol: selection.instrument.symbol,
-                    exchange: selection.instrument.exchange,
-                    series,
-                });
+            self.rithmic_autoload_started = false;
         }
-        self.invalidate_rithmic_interaction_state();
+        self.retire_rithmic_session(cx);
     }
 
-    fn invalidate_rithmic_interaction_state(&mut self) {
+    fn retire_rithmic_session(&mut self, cx: &mut Context<Self>) {
         self.symbol_selection_pending = false;
         self.symbol_browser.invalidate_session();
         self.series_browser.reset();
+        self.feed_diagnostics = None;
+        self.dom
+            .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -936,6 +1023,8 @@ impl TerminalApp {
         };
         if self.market_worker.try_select_rithmic(request).is_ok() {
             self.symbol_selection_pending = true;
+            self.dom
+                .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
             self.symbol_message = format!(
                 "Selecting {} · {}",
                 selection.instrument.symbol, selection.instrument.exchange
@@ -1021,7 +1110,7 @@ impl TerminalApp {
                     self.symbol_message = catalog_rejection_message(reason).to_string();
                     if let Some(target) = self.rithmic_reconnect.target().cloned() {
                         self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
-                        self.invalidate_rithmic_interaction_state();
+                        self.retire_rithmic_session(cx);
                     }
                 }
             }
@@ -2314,12 +2403,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls, RithmicReconnectTarget,
-        SidePanel, bounded_status_detail, chart_status_detail, chart_surface_notice,
-        connection_presentation, default_rithmic_contract_index, duration_label, gpui_color,
-        instrument_selector_label, milli_rate, parse_rithmic_test_arguments,
-        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
-        series_selector_label,
+        ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls, RithmicReadyAction,
+        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
+        bounded_status_detail, chart_status_detail, chart_surface_notice, connection_presentation,
+        default_rithmic_contract_index, duration_label, gpui_color, instrument_selector_label,
+        milli_rate, parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index, rithmic_ready_action, series_selector_label,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -2394,6 +2483,90 @@ mod tests {
             ..target
         };
         assert_eq!(reconnect_contract_index(&results, &missing), None);
+    }
+
+    #[test]
+    fn disconnected_session_retires_surfaces_and_keeps_a_stale_chart_notice() {
+        let retirement =
+            RithmicSessionRetirement::from_connection(FeedConnectionState::Disconnected);
+        assert_eq!(retirement, RithmicSessionRetirement::Offline);
+        assert_eq!(
+            retirement.retained_chart_state(true),
+            Some(ChartState::Stale)
+        );
+        assert_eq!(retirement.retained_chart_state(false), None);
+        let mut retained_chart_state = retirement
+            .retained_chart_state(true)
+            .expect("offline retained chart becomes stale");
+        assert_eq!(retained_chart_state, ChartState::Stale);
+        retained_chart_state =
+            RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
+                .retained_chart_state(true)
+                .expect("the same retained chart advances to reconnecting");
+        assert_eq!(retained_chart_state, ChartState::Recovering);
+        assert_eq!(
+            RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
+                .retained_chart_state(true),
+            Some(ChartState::Recovering)
+        );
+        assert_eq!(
+            RithmicSessionRetirement::from_connection(FeedConnectionState::Streaming),
+            RithmicSessionRetirement::None
+        );
+    }
+
+    #[test]
+    fn authentication_ready_reselects_the_retired_contract() {
+        let reconnect = RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
+            symbol: "MNQU6".to_string(),
+            exchange: "CME".to_string(),
+            series: crate::rithmic_history::RithmicSeries::Minute5,
+        });
+        assert_eq!(
+            rithmic_ready_action(
+                FeedConnectionState::Authenticating,
+                "Rithmic Test session is ready for instrument search",
+                &reconnect,
+                true,
+            ),
+            RithmicReadyAction::Reconnect("MNQU6".to_string())
+        );
+        assert_eq!(
+            rithmic_ready_action(
+                FeedConnectionState::Discovering,
+                "discovering Rithmic Test systems",
+                &reconnect,
+                true,
+            ),
+            RithmicReadyAction::None
+        );
+    }
+
+    #[test]
+    fn interrupted_initial_autoload_restarts_after_authentication() {
+        let mut reconnect = RithmicReconnectState::Idle;
+        assert!(
+            reconnect
+                .capture_retired_selection(None, crate::rithmic_history::RithmicSeries::Minute1,)
+        );
+        assert_eq!(
+            rithmic_ready_action(
+                FeedConnectionState::Authenticating,
+                "Rithmic Test session is ready for instrument search",
+                &reconnect,
+                false,
+            ),
+            RithmicReadyAction::Autoload
+        );
+        assert_eq!(
+            rithmic_ready_action(
+                FeedConnectionState::Authenticating,
+                "Rithmic Test session is ready for instrument search",
+                &RithmicReconnectState::Idle,
+                true,
+            ),
+            RithmicReadyAction::None
+        );
     }
 
     #[test]

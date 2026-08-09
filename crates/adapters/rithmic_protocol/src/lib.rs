@@ -43,7 +43,7 @@ pub use desktop_driver::{
     RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderConfigError,
     RithmicProviderDriver, RithmicProviderDriverError, RithmicProviderEvents,
     RithmicProviderInstrument, RithmicReadOnlySubscription, RithmicRetryScheduler,
-    RithmicRetryTicket, RithmicSymbolSearch, apply_rithmic_environment_event,
+    RithmicRetryTicket, RithmicSessionTiming, RithmicSymbolSearch, apply_rithmic_environment_event,
     try_recv_rithmic_event,
 };
 pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};

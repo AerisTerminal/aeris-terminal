@@ -40,6 +40,7 @@ pub struct ProviderSilenceEvidence {
     pub observation_method: ObservationMethod,
     pub local_interference: LocalInterference,
     pub timing_metadata_scope: TimingMetadataScope,
+    pub timing: Option<ObservedSessionTiming>,
     pub qualification_limitation: Option<QualificationLimitation>,
     pub credentials_source: CredentialSource,
     pub observation_generation: u64,
@@ -156,6 +157,49 @@ pub enum ObservedRetry {
 #[serde(rename_all = "snake_case")]
 pub enum TimingMetadataScope {
     LocalMonotonicDetectorOnly,
+    NegotiatedLoginAndShippingConfig,
+}
+
+const MAXIMUM_TIMING_NANOS: u64 = 300_000_000_000;
+pub const EVIDENCE_RESPONSE_TIMEOUT_NANOS: u64 = 5_000_000_000;
+pub const EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS: u64 = 120_000_000_000;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedSessionTiming {
+    pub generation: u64,
+    pub negotiated_heartbeat_interval_nanos: u64,
+    pub response_timeout_nanos: u64,
+    pub message_silence_timeout_nanos: u64,
+}
+
+impl ObservedSessionTiming {
+    fn detector_deadline_nanos(self, expected: ExpectedSilence) -> Option<u64> {
+        if self.generation == 0
+            || self.negotiated_heartbeat_interval_nanos == 0
+            || self.negotiated_heartbeat_interval_nanos > MAXIMUM_TIMING_NANOS
+            || self.response_timeout_nanos != EVIDENCE_RESPONSE_TIMEOUT_NANOS
+            || self.message_silence_timeout_nanos != EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS
+        {
+            return None;
+        }
+        let heartbeat_deadline = self
+            .negotiated_heartbeat_interval_nanos
+            .checked_add(self.response_timeout_nanos)?;
+        match expected {
+            ExpectedSilence::HeartbeatSilence
+                if heartbeat_deadline < self.message_silence_timeout_nanos =>
+            {
+                Some(heartbeat_deadline)
+            }
+            ExpectedSilence::MessageSilence
+                if self.message_silence_timeout_nanos <= heartbeat_deadline =>
+            {
+                Some(self.message_silence_timeout_nanos)
+            }
+            ExpectedSilence::HeartbeatSilence | ExpectedSilence::MessageSilence => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -175,6 +219,7 @@ pub enum CredentialSource {
 pub enum EvidenceFailure {
     ObservationStart,
     ObservationTimeout,
+    ObservationWindowInsufficient,
     ObservationInvalidationMismatch,
     ObservationStop,
     RecoveryStart,
@@ -192,7 +237,7 @@ impl ProviderSilenceEvidence {
         provenance: EvidenceProvenance,
     ) -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             provenance,
             status: EvidenceStatus::Incomplete,
             scope: EvidenceScope::RawProviderPathPassiveObservation,
@@ -210,6 +255,7 @@ impl ProviderSilenceEvidence {
                 local_fault_injection: false,
             },
             timing_metadata_scope: TimingMetadataScope::LocalMonotonicDetectorOnly,
+            timing: None,
             qualification_limitation: (expected == ExpectedSilence::MessageSilence)
                 .then_some(QualificationLimitation::MessageSilenceTimingNotProven),
             credentials_source: CredentialSource::NativeVault,
@@ -234,13 +280,48 @@ impl ProviderSilenceEvidence {
         }
     }
 
+    pub fn observe_timing(&mut self, timing: ObservedSessionTiming) {
+        self.timing_metadata_scope = TimingMetadataScope::NegotiatedLoginAndShippingConfig;
+        self.timing = Some(timing);
+        self.qualification_limitation = (self.expected_invalidation
+            == ExpectedSilence::MessageSilence
+            && timing
+                .detector_deadline_nanos(self.expected_invalidation)
+                .is_none())
+        .then_some(QualificationLimitation::MessageSilenceTimingNotProven);
+    }
+
+    #[must_use]
+    pub fn timing_is_feasible(&self) -> bool {
+        self.qualified_timing().is_some()
+    }
+
+    #[must_use]
+    pub fn observation_window_is_sufficient(&self) -> bool {
+        let Some(deadline_nanos) = self.qualified_timing() else {
+            return false;
+        };
+        self.observation_limit_ms
+            .checked_mul(1_000_000)
+            .is_some_and(|limit_nanos| limit_nanos >= deadline_nanos)
+    }
+
+    fn qualified_timing(&self) -> Option<u64> {
+        if self.timing_metadata_scope != TimingMetadataScope::NegotiatedLoginAndShippingConfig {
+            return None;
+        }
+        let timing = self.timing?;
+        (timing.generation == self.observation_generation)
+            .then(|| timing.detector_deadline_nanos(self.expected_invalidation))
+            .flatten()
+    }
+
     pub fn qualify(&mut self) {
-        self.qualified = self.schema == 2
+        self.qualified = self.schema == 3
             && self.provenance.valid()
             && self.status == EvidenceStatus::Passed
             && self.scope == EvidenceScope::RawProviderPathPassiveObservation
             && self.boundary == EvidenceBoundary::RawRithmicAdapter
-            && self.expected_invalidation == ExpectedSilence::HeartbeatSilence
             && self.observed_invalidation == Some(self.expected_invalidation)
             && self.observed_invalidation_generation == Some(self.observation_generation)
             && self.observed_retry == Some(ObservedRetry::Transient)
@@ -249,7 +330,9 @@ impl ProviderSilenceEvidence {
             && self.credentials_source == CredentialSource::NativeVault
             && !self.local_interference.client_local_suppression
             && !self.local_interference.local_fault_injection
-            && self.timing_metadata_scope == TimingMetadataScope::LocalMonotonicDetectorOnly
+            && self.timing_metadata_scope == TimingMetadataScope::NegotiatedLoginAndShippingConfig
+            && self.timing_is_feasible()
+            && self.observation_window_is_sufficient()
             && self.qualification_limitation.is_none()
             && self.observation_generation == 1
             && self.recovery_generation == 2
@@ -395,6 +478,27 @@ mod tests {
         evidence.clean_protocol_close = true;
         evidence.observation_elapsed_ms = 30_000;
         evidence.failure = None;
+        evidence.observe_timing(timing(10_000_000_000));
+        evidence.qualify();
+        evidence
+    }
+
+    fn timing(heartbeat_nanos: u64) -> ObservedSessionTiming {
+        ObservedSessionTiming {
+            generation: 1,
+            negotiated_heartbeat_interval_nanos: heartbeat_nanos,
+            response_timeout_nanos: EVIDENCE_RESPONSE_TIMEOUT_NANOS,
+            message_silence_timeout_nanos: EVIDENCE_MESSAGE_SILENCE_TIMEOUT_NANOS,
+        }
+    }
+
+    fn qualified_message(heartbeat_nanos: u64) -> ProviderSilenceEvidence {
+        let mut evidence = qualified();
+        evidence.expected_invalidation = ExpectedSilence::MessageSilence;
+        evidence.observed_invalidation = Some(ExpectedSilence::MessageSilence);
+        evidence.observation_limit_ms = 120_000;
+        evidence.observation_elapsed_ms = 120_000;
+        evidence.observe_timing(timing(heartbeat_nanos));
         evidence.qualify();
         evidence
     }
@@ -448,11 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn exact_timing_race_qualifies_only_the_reason_that_can_win() {
+        assert!(qualified().qualified);
+        assert!(!qualified_message(10_000_000_000).qualified);
+        assert!(qualified_message(116_000_000_000).qualified);
+        assert!(qualified_message(115_000_000_000).qualified);
+
+        let mut heartbeat_loses = qualified();
+        heartbeat_loses.observe_timing(timing(115_000_000_000));
+        heartbeat_loses.qualify();
+        assert!(!heartbeat_loses.qualified);
+    }
+
+    #[test]
+    fn verifier_accepts_feasible_message_silence_at_the_timing_boundary() {
+        let path = test_path("message-silence-qualified");
+        write_new_atomically(&path, &qualified_message(115_000_000_000))
+            .expect("message evidence writes");
+        assert!(verify(&path, &test_provenance()).is_ok());
+        fs::remove_file(path).expect("test evidence removes");
+    }
+
+    #[test]
     fn message_silence_remains_unqualified_without_negotiated_timing() {
         let path = test_path("message-silence-timing-limited");
-        let mut evidence = qualified();
+        let mut evidence = qualified_message(116_000_000_000);
         evidence.expected_invalidation = ExpectedSilence::MessageSilence;
         evidence.observed_invalidation = Some(ExpectedSilence::MessageSilence);
+        evidence.timing_metadata_scope = TimingMetadataScope::LocalMonotonicDetectorOnly;
+        evidence.timing = None;
         evidence.qualification_limitation =
             Some(QualificationLimitation::MessageSilenceTimingNotProven);
         evidence.qualify();
@@ -460,6 +588,77 @@ mod tests {
         write_new_atomically(&path, &evidence).expect("evidence writes");
         assert!(verify(&path, &test_provenance()).is_err());
         fs::remove_file(path).expect("test evidence removes");
+    }
+
+    #[test]
+    fn verifier_rejects_missing_wrong_unbounded_or_tampered_timing() {
+        for (name, mutate) in [
+            ("missing", 0_u8),
+            ("generation", 1),
+            ("zero", 2),
+            ("overflow", 3),
+            ("response", 4),
+            ("message-timeout", 5),
+            ("scope", 6),
+            ("window", 7),
+            ("schema", 8),
+        ] {
+            let path = test_path(name);
+            let mut evidence = qualified();
+            match mutate {
+                0 => evidence.timing = None,
+                1 => evidence.timing.as_mut().expect("timing").generation = 2,
+                2 => {
+                    evidence
+                        .timing
+                        .as_mut()
+                        .expect("timing")
+                        .negotiated_heartbeat_interval_nanos = 0;
+                }
+                3 => {
+                    evidence
+                        .timing
+                        .as_mut()
+                        .expect("timing")
+                        .negotiated_heartbeat_interval_nanos = u64::MAX;
+                }
+                4 => {
+                    evidence
+                        .timing
+                        .as_mut()
+                        .expect("timing")
+                        .response_timeout_nanos += 1;
+                }
+                5 => {
+                    evidence
+                        .timing
+                        .as_mut()
+                        .expect("timing")
+                        .message_silence_timeout_nanos += 1;
+                }
+                6 => {
+                    evidence.timing_metadata_scope =
+                        TimingMetadataScope::LocalMonotonicDetectorOnly;
+                }
+                7 => evidence.observation_limit_ms = 14_999,
+                _ => evidence.schema = 2,
+            }
+            write_new_atomically(&path, &evidence).expect("evidence writes");
+            assert!(verify(&path, &test_provenance()).is_err(), "{name}");
+            fs::remove_file(path).expect("test evidence removes");
+        }
+    }
+
+    #[test]
+    fn timing_metadata_alone_never_qualifies() {
+        let mut evidence = ProviderSilenceEvidence::incomplete(
+            ExpectedSilence::HeartbeatSilence,
+            60_000,
+            test_provenance(),
+        );
+        evidence.observe_timing(timing(10_000_000_000));
+        evidence.qualify();
+        assert!(!evidence.qualified);
     }
 
     #[test]

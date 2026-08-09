@@ -547,6 +547,60 @@ pub struct RithmicProviderEvents {
     callbacks: Arc<SharedCallbacks>,
 }
 
+/// Non-secret silence-detector timing negotiated for one exact session generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RithmicSessionTiming {
+    generation: SessionGeneration,
+    heartbeat_interval: Duration,
+    response_timeout: Duration,
+    message_silence_timeout: Duration,
+}
+
+impl RithmicSessionTiming {
+    fn try_new(
+        generation: SessionGeneration,
+        heartbeat_interval: Duration,
+        response_timeout: Duration,
+        message_silence_timeout: Duration,
+    ) -> Option<Self> {
+        if heartbeat_interval.is_zero()
+            || heartbeat_interval > MAXIMUM_SILENCE_TIMEOUT
+            || response_timeout.is_zero()
+            || response_timeout > MAXIMUM_SILENCE_TIMEOUT
+            || message_silence_timeout.is_zero()
+            || message_silence_timeout > MAXIMUM_SILENCE_TIMEOUT
+        {
+            return None;
+        }
+        Some(Self {
+            generation,
+            heartbeat_interval,
+            response_timeout,
+            message_silence_timeout,
+        })
+    }
+
+    #[must_use]
+    pub const fn generation(self) -> SessionGeneration {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn heartbeat_interval(self) -> Duration {
+        self.heartbeat_interval
+    }
+
+    #[must_use]
+    pub const fn response_timeout(self) -> Duration {
+        self.response_timeout
+    }
+
+    #[must_use]
+    pub const fn message_silence_timeout(self) -> Duration {
+        self.message_silence_timeout
+    }
+}
+
 /// One bounded adapter-local catalog callback.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RithmicCatalogCallback {
@@ -608,6 +662,19 @@ impl RithmicProviderEvents {
                 event: terminal.event,
                 retry: terminal.retry,
             })
+    }
+
+    /// Returns the immutable timing snapshot for the exact active or most recently stopped
+    /// session generation.
+    #[must_use]
+    pub fn session_timing(&self, generation: SessionGeneration) -> Option<RithmicSessionTiming> {
+        self.callbacks
+            .timing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .copied()
+            .filter(|timing| timing.generation == generation)
     }
 
     /// Receives at most one bounded catalog callback.
@@ -756,6 +823,7 @@ struct SharedCallbacks {
     maximum_instruments: NonZeroUsize,
     state: Mutex<CallbackState>,
     catalog: Mutex<CatalogCallbackState>,
+    timing: Mutex<Option<RithmicSessionTiming>>,
     commands: Mutex<Option<(SessionGeneration, SyncSender<RithmicSessionCommand>)>>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -767,6 +835,32 @@ struct SessionEmitter {
 }
 
 impl SessionEmitter {
+    fn record_timing(
+        &self,
+        heartbeat_interval: Duration,
+        response_timeout: Duration,
+        message_silence_timeout: Duration,
+    ) -> bool {
+        let Some(timing) = RithmicSessionTiming::try_new(
+            self.generation,
+            heartbeat_interval,
+            response_timeout,
+            message_silence_timeout,
+        ) else {
+            return false;
+        };
+        let mut snapshot = self
+            .callbacks
+            .timing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if snapshot.is_some() {
+            return false;
+        }
+        *snapshot = Some(timing);
+        true
+    }
+
     fn send(&self, event: ProviderSessionEvent) -> bool {
         if event_generation(&event).is_some_and(|generation| generation != self.generation)
             || event
@@ -967,6 +1061,7 @@ impl RithmicProviderDriver {
                 queue: VecDeque::with_capacity(callback_limits.event_capacity.get()),
                 queued_bytes: 0,
             }),
+            timing: Mutex::new(None),
             commands: Mutex::new(None),
             wake,
         });
@@ -1050,6 +1145,11 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             catalog.queue.clear();
             catalog.queued_bytes = 0;
         }
+        *self
+            .callbacks
+            .timing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let stop = Arc::new(AtomicBool::new(false));
         let abort = Arc::new(ConnectionAbort::default());
         let (command_tx, command_rx) = sync_channel(SESSION_COMMAND_CAPACITY);
@@ -1429,6 +1529,17 @@ fn direct_session_task() -> Arc<SessionTask> {
                     return;
                 }
             };
+            if !emitter.record_timing(
+                connection.heartbeat_interval(),
+                config.session_limits.response_timeout,
+                config.message_silence_timeout,
+            ) {
+                emitter.invalid(
+                    ProviderInvalidationReason::MalformedMessage,
+                    RetryDisposition::Terminal,
+                );
+                return;
+            }
             if !emitter.send(ProviderSessionEvent::SystemsDiscovered {
                 environments: vec![RithmicProviderConfig::environment()],
             }) || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
@@ -3357,6 +3468,79 @@ mod tests {
             events.search_symbols(generation(11), search(12)),
             Err(RithmicProviderCommandError::SessionUnavailable)
         );
+    }
+
+    #[test]
+    fn session_timing_snapshot_is_exact_generation_bounded_and_immutable() {
+        let timing_recorded = Arc::new(Barrier::new(2));
+        let task_recorded = Arc::clone(&timing_recorded);
+        let task: Arc<SessionTask> = Arc::new(move |config, _, _, stop, _, _, emitter| {
+            assert!(emitter.record_timing(
+                Duration::from_secs(10),
+                config.session_limits.response_timeout,
+                config.message_silence_timeout,
+            ));
+            assert!(!emitter.record_timing(
+                Duration::from_secs(11),
+                config.session_limits.response_timeout,
+                config.message_silence_timeout,
+            ));
+            task_recorded.wait();
+            while !stop.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        });
+        let expected_config = config();
+        let expected_response_timeout = expected_config.session_limits.response_timeout;
+        let expected_message_timeout = expected_config.message_silence_timeout;
+        let (mut driver, events) =
+            RithmicProviderDriver::with_task(expected_config, callback_limits(4, 4_096), task);
+        let credentials = credentials();
+        driver
+            .start_session(generation(21), credentials.as_bytes())
+            .expect("session starts");
+        timing_recorded.wait();
+
+        assert_eq!(events.session_timing(generation(20)), None);
+        assert_eq!(
+            events.session_timing(generation(21)),
+            Some(RithmicSessionTiming {
+                generation: generation(21),
+                heartbeat_interval: Duration::from_secs(10),
+                response_timeout: expected_response_timeout,
+                message_silence_timeout: expected_message_timeout,
+            })
+        );
+        driver
+            .stop_session(generation(21))
+            .expect("timing session stops");
+        assert_eq!(
+            events
+                .session_timing(generation(21))
+                .map(|timing| timing.heartbeat_interval),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn invalid_timing_snapshot_fails_closed() {
+        let task: Arc<SessionTask> = Arc::new(|config, _, _, _, _, _, emitter| {
+            assert!(!emitter.record_timing(
+                Duration::ZERO,
+                config.session_limits.response_timeout,
+                config.message_silence_timeout,
+            ));
+        });
+        let (mut driver, events) =
+            RithmicProviderDriver::with_task(config(), callback_limits(4, 4_096), task);
+        let credentials = credentials();
+        driver
+            .start_session(generation(22), credentials.as_bytes())
+            .expect("session starts");
+        driver
+            .stop_session(generation(22))
+            .expect("timing session stops");
+        assert_eq!(events.session_timing(generation(22)), None);
     }
 
     #[test]
