@@ -1,5 +1,6 @@
 use std::{
     num::NonZeroUsize,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicU64, mpsc},
     thread,
 };
@@ -12,13 +13,10 @@ use axiusflow_coinbase_coordinator::market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender, market_worker_channel,
 };
 use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
-use axiusflow_engine::{
-    ENGINE_SOCKET_NAME, EngineClient, connect_or_start_engine, native_installation_token,
-    sibling_engine_executable,
-};
+use axiusflow_engine::{EngineClient, connect_or_start_engine, sibling_engine_executable};
 use axiusflow_local_engine_protocol::{
     CatalogReassembler, ChartProvenance, DomBookState, DomRecoveryReason, DomSnapshot,
-    ProviderConnectionState, ViewKind, envelope,
+    ProviderConnectionState, ViewKind, WorkspaceState, envelope,
 };
 use axiusflow_market_data::{
     ChartAggregation, ChartInterval, DomColumnLevel, DomFrame, DomRow, OrderBookRecoveryReason,
@@ -73,22 +71,23 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
             return;
         }
     };
-    let mut commands = match connect_or_start_engine(&executable) {
-        Ok(client) => client,
-        Err(error) => {
-            send_error(message_tx, error);
-            return;
-        }
-    };
-    let mut workspace = match commands.restore_workspace() {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            send_error(message_tx, error);
-            return;
+    let (mut commands, mut workspace) = loop {
+        match connect_commands(&executable) {
+            Ok(connected) => break connected,
+            Err(error) => {
+                if !send_recovering(message_tx, &error) {
+                    return;
+                }
+                thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     };
     let latest_snapshot = Arc::new(Mutex::new(None));
-    spawn_session_stream(message_tx.clone(), Arc::clone(&latest_snapshot));
+    spawn_session_stream(
+        message_tx.clone(),
+        Arc::clone(&latest_snapshot),
+        executable.clone(),
+    );
     let _ = message_tx.send(MarketWorkerMessage::State {
         state: axiusflow_coinbase_coordinator::market_worker::ChartState::Loading,
         message: "Attached to the resident market engine".to_string(),
@@ -101,10 +100,12 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
                     send_error(message_tx, "unsupported Coinbase interval".to_string());
                     continue;
                 };
-                match commands.set_selection(
+                match set_selection_reconnecting(
+                    &mut commands,
+                    &mut workspace,
+                    &executable,
                     request.product.product_id,
                     interval_seconds,
-                    workspace.workspace_revision,
                     request.sequence,
                 ) {
                     Ok(updated) => {
@@ -138,89 +139,153 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
     }
 }
 
-fn spawn_session_stream(message_tx: MarketWorkerSender, latest_snapshot: LatestSnapshot) {
-    let stream_error_tx = message_tx.clone();
-    spawn_stream(
-        "axiusflow-engine-session-stream",
-        stream_error_tx,
-        move || {
-            let mut stream = connect_stream(ViewKind::Session)?;
-            let convention = DecimalConvention::try_new("price_mantissa", "quantity_mantissa")
-                .map_err(|error| error.to_string())?;
-            let mut decoder = chart_decoder(&convention, ReplayProvenance::LiveProvider)?;
-            let mut provenance = ReplayProvenance::LiveProvider;
-            let mut model = MarketBarClientModel::new(nonzero(MODEL_ITEM_CAPACITY));
-            let mut catalog = CatalogReassembler::new();
+fn spawn_session_stream(
+    message_tx: MarketWorkerSender,
+    latest_snapshot: LatestSnapshot,
+    executable: PathBuf,
+) {
+    let _ = thread::Builder::new()
+        .name("axiusflow-engine-session-stream".to_string())
+        .spawn(move || {
             loop {
-                let publication = stream.receive()?;
-                let (payload, next_provenance, is_snapshot) = match publication {
-                    envelope::Payload::ChartSnapshot(snapshot) => (
-                        snapshot.payload,
-                        replay_provenance(snapshot.provenance)?,
-                        true,
-                    ),
-                    envelope::Payload::ChartDelta(delta) => {
-                        (delta.payload, replay_provenance(delta.provenance)?, false)
+                if let Err(error) = run_session_stream(&message_tx, &latest_snapshot, &executable) {
+                    eprintln!("resident engine stream stopped: {error}");
+                    if !send_recovering(&message_tx, &error) {
+                        break;
                     }
-                    envelope::Payload::CatalogSnapshot(snapshot) => {
-                        if let Some(entries) =
-                            catalog.push(snapshot).map_err(|error| error.to_string())?
-                        {
-                            publish_catalog(&message_tx, entries)?;
-                        }
-                        continue;
-                    }
-                    envelope::Payload::ProviderState(provider) => {
-                        publish_provider_state(&message_tx, provider.state)?;
-                        continue;
-                    }
-                    envelope::Payload::DomSnapshot(snapshot) => {
-                        publish_dom(&message_tx, snapshot)?;
-                        continue;
-                    }
-                    envelope::Payload::Fault(fault) => {
-                        send_error(&message_tx, fault.redacted_detail);
-                        continue;
-                    }
-                    _ => continue,
-                };
-                if is_snapshot && next_provenance != provenance {
-                    decoder = chart_decoder(&convention, next_provenance)?;
-                    model = MarketBarClientModel::new(nonzero(MODEL_ITEM_CAPACITY));
-                    provenance = next_provenance;
-                }
-                for projected in decoder.push(&payload).map_err(|error| error.to_string())? {
-                    let update = projected.update;
-                    let MarketBarModelOutcome::Published(generation) = model
-                        .apply_update(update.clone())
-                        .map_err(|error| error.to_string())?
-                    else {
-                        continue;
-                    };
-                    if let ReplayStreamUpdate::Snapshot(snapshot) = &update {
-                        *latest_snapshot
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(MarketWorkerBootstrap {
-                                snapshot: snapshot.clone(),
-                                subscription_id: projected.subscription_id.clone(),
-                                generation: generation.clone(),
-                                worker_label: WORKER_LABEL.to_string(),
-                            });
-                    }
-                    message_tx
-                        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                            update,
-                            generation,
-                            subscription_id: projected.subscription_id,
-                            worker_label: WORKER_LABEL.to_string(),
-                            ui_diagnostics: None,
-                        }))
-                        .map_err(|_| "desktop market mailbox disconnected".to_string())?;
+                    thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
-        },
-    );
+        });
+}
+
+fn run_session_stream(
+    message_tx: &MarketWorkerSender,
+    latest_snapshot: &LatestSnapshot,
+    executable: &Path,
+) -> Result<(), String> {
+    let mut stream = connect_or_start_engine(executable)?.subscribe_view(ViewKind::Session)?;
+    let convention = DecimalConvention::try_new("price_mantissa", "quantity_mantissa")
+        .map_err(|error| error.to_string())?;
+    let mut decoder = chart_decoder(&convention, ReplayProvenance::LiveProvider)?;
+    let mut provenance = ReplayProvenance::LiveProvider;
+    let mut model = MarketBarClientModel::new(nonzero(MODEL_ITEM_CAPACITY));
+    let mut catalog = CatalogReassembler::new();
+    loop {
+        let publication = stream.receive()?;
+        let (payload, next_provenance, is_snapshot) = match publication {
+            envelope::Payload::ChartSnapshot(snapshot) => (
+                snapshot.payload,
+                replay_provenance(snapshot.provenance)?,
+                true,
+            ),
+            envelope::Payload::ChartDelta(delta) => {
+                (delta.payload, replay_provenance(delta.provenance)?, false)
+            }
+            envelope::Payload::CatalogSnapshot(snapshot) => {
+                if let Some(entries) = catalog.push(snapshot).map_err(|error| error.to_string())? {
+                    publish_catalog(message_tx, entries)?;
+                }
+                continue;
+            }
+            envelope::Payload::ProviderState(provider) => {
+                publish_provider_state(message_tx, provider.state)?;
+                continue;
+            }
+            envelope::Payload::DomSnapshot(snapshot) => {
+                publish_dom(message_tx, snapshot)?;
+                continue;
+            }
+            envelope::Payload::Fault(fault) => {
+                send_error(message_tx, fault.redacted_detail);
+                continue;
+            }
+            _ => continue,
+        };
+        if is_snapshot && next_provenance != provenance {
+            decoder = chart_decoder(&convention, next_provenance)?;
+            model = MarketBarClientModel::new(nonzero(MODEL_ITEM_CAPACITY));
+            provenance = next_provenance;
+        }
+        publish_chart_payload(
+            message_tx,
+            latest_snapshot,
+            &mut decoder,
+            &mut model,
+            &payload,
+        )?;
+    }
+}
+
+fn publish_chart_payload(
+    message_tx: &MarketWorkerSender,
+    latest_snapshot: &LatestSnapshot,
+    decoder: &mut BinaryMarketBarStreamDecoder,
+    model: &mut MarketBarClientModel,
+    payload: &[u8],
+) -> Result<(), String> {
+    for projected in decoder.push(payload).map_err(|error| error.to_string())? {
+        let update = projected.update;
+        let MarketBarModelOutcome::Published(generation) = model
+            .apply_update(update.clone())
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if let ReplayStreamUpdate::Snapshot(snapshot) = &update {
+            *latest_snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MarketWorkerBootstrap {
+                snapshot: snapshot.clone(),
+                subscription_id: projected.subscription_id.clone(),
+                generation: generation.clone(),
+                worker_label: WORKER_LABEL.to_string(),
+            });
+        }
+        message_tx
+            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                update,
+                generation,
+                subscription_id: projected.subscription_id,
+                worker_label: WORKER_LABEL.to_string(),
+                ui_diagnostics: None,
+            }))
+            .map_err(|_| "desktop market mailbox disconnected".to_string())?;
+    }
+    Ok(())
+}
+
+fn connect_commands(executable: &Path) -> Result<(EngineClient, WorkspaceState), String> {
+    let mut client = connect_or_start_engine(executable)?;
+    let workspace = client.restore_workspace()?;
+    Ok((client, workspace))
+}
+
+fn set_selection_reconnecting(
+    commands: &mut EngineClient,
+    workspace: &mut WorkspaceState,
+    executable: &Path,
+    market: String,
+    interval_seconds: u32,
+    selection_generation: u64,
+) -> Result<WorkspaceState, String> {
+    if let Ok(updated) = commands.set_selection(
+        market.clone(),
+        interval_seconds,
+        workspace.workspace_revision,
+        selection_generation,
+    ) {
+        return Ok(updated);
+    }
+    let (mut replacement, restored) = connect_commands(executable)?;
+    let updated = replacement.set_selection(
+        market,
+        interval_seconds,
+        restored.workspace_revision,
+        selection_generation,
+    )?;
+    *commands = replacement;
+    Ok(updated)
 }
 
 fn publish_catalog(
@@ -328,25 +393,6 @@ fn dom_level(level: axiusflow_local_engine_protocol::DomLevel) -> Result<DomColu
     })
 }
 
-fn spawn_stream(
-    name: &str,
-    error_tx: MarketWorkerSender,
-    run: impl FnOnce() -> Result<(), String> + Send + 'static,
-) {
-    let name = name.to_string();
-    let _ = thread::Builder::new().name(name).spawn(move || {
-        if let Err(error) = run() {
-            eprintln!("resident engine stream stopped: {error}");
-            send_error(&error_tx, error);
-        }
-    });
-}
-
-fn connect_stream(view: ViewKind) -> Result<axiusflow_engine::EngineViewStream, String> {
-    let token = native_installation_token()?;
-    EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())?.subscribe_view(view)
-}
-
 fn chart_decoder(
     convention: &DecimalConvention,
     provenance: ReplayProvenance,
@@ -406,6 +452,15 @@ fn send_error(message_tx: &MarketWorkerSender, message: String) {
         state: axiusflow_coinbase_coordinator::market_worker::ChartState::Error,
         message,
     });
+}
+
+fn send_recovering(message_tx: &MarketWorkerSender, message: &str) -> bool {
+    message_tx
+        .send(MarketWorkerMessage::State {
+            state: axiusflow_coinbase_coordinator::market_worker::ChartState::Recovering,
+            message: format!("Resident engine reconnecting: {message}"),
+        })
+        .is_ok()
 }
 
 const fn nonzero(value: usize) -> NonZeroUsize {
