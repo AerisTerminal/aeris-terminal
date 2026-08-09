@@ -3,7 +3,10 @@ use super::{
     UI_DIAGNOSTICS_CAPACITY, WorkerInboxEvent, forward_commands, nonzero, prepare_running_worker,
     product_profile, run_session,
 };
-use super::{composition::open_test_worker, history::fetch_history_with_adapter};
+use super::{
+    composition::open_test_worker,
+    history::{fetch_history_range_with_adapter, fetch_history_with_adapter},
+};
 use crate::market_worker::{
     ChartState, MarketDataWorker, MarketWorkerMessage, market_worker_channel,
     ui_diagnostics_channel,
@@ -70,9 +73,9 @@ impl<T: CoinbaseHistoryTransport + Send> super::HistorySource for FixtureHistory
         profile: &super::ProductProfile,
         now_unix_nanos: i64,
         _cancel: Arc<AtomicBool>,
-        phase: super::history::FetchPhase,
+        range: axiusflow_provider_history::HistoryRange,
     ) -> Result<super::history::PreparedHistory, String> {
-        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos, phase)
+        fetch_history_range_with_adapter(profile, &mut self.adapter, now_unix_nanos, range)
     }
 }
 
@@ -121,7 +124,7 @@ impl super::HistorySource for BlockingHistorySource {
         profile: &super::ProductProfile,
         now_unix_nanos: i64,
         cancel: Arc<AtomicBool>,
-        phase: super::history::FetchPhase,
+        range: axiusflow_provider_history::HistoryRange,
     ) -> Result<super::history::PreparedHistory, String> {
         let started = Instant::now();
         while !self.release.load(Ordering::Acquire) {
@@ -134,7 +137,7 @@ impl super::HistorySource for BlockingHistorySource {
             );
             thread::sleep(Duration::from_millis(1));
         }
-        fetch_history_with_adapter(profile, &mut self.adapter, now_unix_nanos, phase)
+        fetch_history_range_with_adapter(profile, &mut self.adapter, now_unix_nanos, range)
     }
 }
 
@@ -597,12 +600,18 @@ fn run_controlled_worker<H: super::HistorySource + 'static>(
 fn seed_corrupt_cache(root: &Path) {
     let profile = product_profile("BTC-USD".to_string()).expect("fixture profile validates");
     let mut source = fixture_source(CandleTransport);
+    let range = super::history::history_request_range(
+        &profile,
+        FIXED_NOW_UNIX_NANOS,
+        super::history::FetchPhase::Full,
+    )
+    .expect("fixture history range validates");
     let prepared = super::HistorySource::fetch(
         &mut source,
         &profile,
         FIXED_NOW_UNIX_NANOS,
         Arc::new(AtomicBool::new(false)),
-        super::history::FetchPhase::Full,
+        range,
     )
     .expect("fixture history fetches");
     let payload = encode_history_segment(&prepared.completion.page().items)

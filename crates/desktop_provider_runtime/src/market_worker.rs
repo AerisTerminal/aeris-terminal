@@ -311,6 +311,21 @@ where
             .map_err(Into::into)
     }
 
+    /// Records provider-proven empty coverage through the sole history owner.
+    ///
+    /// # Errors
+    /// Returns a redacted wrong-thread, invalid-dimension, or catalog failure.
+    pub fn record_confirmed_empty_history(
+        &mut self,
+        series: HistorySeriesIdentity<'_>,
+        range: RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.history
+            .record_confirmed_empty(series, range, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
     /// Returns active immutable history segments overlapping one requested range.
     ///
     /// # Errors

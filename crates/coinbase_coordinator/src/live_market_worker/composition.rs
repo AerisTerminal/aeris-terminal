@@ -65,13 +65,6 @@ impl<V: CredentialVault> CoinbaseDesktopWorker<V> {
         )
     }
 
-    pub(super) fn coinbase_bar_history(&self, product_id: &str) -> Result<Vec<MarketBar>, String> {
-        if product_id != self.aggregator.product_id() {
-            return Err("Coinbase bar product is not registered".to_string());
-        }
-        Ok(self.aggregator.history())
-    }
-
     pub(super) fn seed_coinbase_bar_history(
         &mut self,
         generation: SessionGeneration,

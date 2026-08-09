@@ -2,7 +2,7 @@ use super::{
     COMMAND_CAPACITY, CoinbaseDesktopWorker, INBOX_BATCH, InflightHistory, LiveLoopState,
     apply_environment_event,
     history::{
-        FetchPhase, PreparedHistory, StreamingSeriesContext, install_fetched_history,
+        FetchPhase, PreparedHistoryBatch, StreamingSeriesContext, install_fetched_history,
         install_recent_history,
     },
 };
@@ -39,7 +39,7 @@ pub(super) enum WorkerInboxEvent {
     HistoryCompleted {
         generation: SessionGeneration,
         phase: FetchPhase,
-        result: Result<Box<PreparedHistory>, String>,
+        result: Result<Box<PreparedHistoryBatch>, String>,
     },
 }
 
@@ -209,7 +209,7 @@ fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
     context: &mut InboxDrainContext<'_, V>,
     generation: SessionGeneration,
     phase: FetchPhase,
-    result: Result<Box<PreparedHistory>, String>,
+    result: Result<Box<PreparedHistoryBatch>, String>,
 ) -> Result<(), String> {
     if phase == FetchPhase::Full {
         context.state.history = None;

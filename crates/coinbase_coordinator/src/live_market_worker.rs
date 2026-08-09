@@ -33,7 +33,7 @@ use axiusflow_desktop_storage::{
 use axiusflow_instruments::{InstrumentPrecision, InstrumentRevision};
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketEvent};
 use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
-use axiusflow_provider_history::CoverageClass;
+use axiusflow_provider_history::{CoverageClass, HistoryRange};
 use std::{
     collections::VecDeque,
     fs,
@@ -54,8 +54,8 @@ use composition::{
 };
 use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
-    DirectHistorySource, FetchPhase, HistorySource, InitialHistoryContext, StreamingSeriesContext,
-    history_request_range, needs_recent_phase, prepare_initial_history,
+    DirectHistorySource, FetchPhase, HistorySource, InitialHistoryContext, PreparedHistoryBatch,
+    StreamingSeriesContext, history_request_range, needs_recent_phase, prepare_initial_history,
 };
 use lifecycle::{
     DrainSignal, EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
@@ -95,9 +95,12 @@ pub(super) struct InflightHistory {
 }
 
 enum HistoryCommand {
+    Now(SyncSender<Result<i64, String>>),
     Fetch {
         generation: SessionGeneration,
         profile: ProductProfile,
+        requested: HistoryRange,
+        repairs: Vec<HistoryRange>,
         cancel: Arc<AtomicBool>,
     },
 }
@@ -485,42 +488,141 @@ fn history_command_loop<H: HistorySource>(
     commands: &Receiver<HistoryCommand>,
     inbox_tx: &SyncSender<WorkerInboxEvent>,
 ) {
-    while let Ok(HistoryCommand::Fetch {
-        generation,
-        profile,
-        cancel,
-    }) = commands.recv()
-    {
-        let phases = if needs_recent_phase(profile.interval) {
-            [FetchPhase::Recent, FetchPhase::Full].as_slice()
-        } else {
-            [FetchPhase::Full].as_slice()
+    'commands: while let Ok(command) = commands.recv() {
+        let HistoryCommand::Fetch {
+            generation,
+            profile,
+            requested,
+            repairs,
+            cancel,
+        } = command
+        else {
+            let HistoryCommand::Now(reply) = command else {
+                unreachable!();
+            };
+            let _ = reply.send(source.now_unix_nanos());
+            continue;
         };
-        for &phase in phases {
-            if cancel.load(Ordering::Acquire) {
-                break;
+        let Ok(now) = source.now_unix_nanos() else {
+            continue;
+        };
+        let mut remaining = repairs;
+        if needs_recent_phase(profile.interval) {
+            let recent = match history_request_range(&profile, now, FetchPhase::Recent) {
+                Ok(range) => range,
+                Err(error) => {
+                    let _ = inbox_tx.send(WorkerInboxEvent::HistoryCompleted {
+                        generation,
+                        phase: FetchPhase::Recent,
+                        result: Err(error),
+                    });
+                    continue;
+                }
+            };
+            let visible_repairs = remaining
+                .iter()
+                .filter_map(|range| intersect_history_range(*range, recent))
+                .collect::<Vec<_>>();
+            remaining = remaining
+                .into_iter()
+                .flat_map(|range| subtract_history_range(range, recent))
+                .collect();
+            if !visible_repairs.is_empty() {
+                let result =
+                    fetch_history_repairs(source, &profile, now, &visible_repairs, &cancel).map(
+                        |repairs| {
+                            Box::new(PreparedHistoryBatch {
+                                requested: recent,
+                                repairs,
+                                received_unix_nanos: now,
+                            })
+                        },
+                    );
+                let failed = result.is_err();
+                if inbox_tx
+                    .send(WorkerInboxEvent::HistoryCompleted {
+                        generation,
+                        phase: FetchPhase::Recent,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    continue 'commands;
+                }
             }
-            let result = source.now_unix_nanos().and_then(|now| {
-                source
-                    .fetch(&profile, now, Arc::clone(&cancel), phase)
-                    .map(Box::new)
+        }
+        if cancel.load(Ordering::Acquire) {
+            continue;
+        }
+        let result =
+            fetch_history_repairs(source, &profile, now, &remaining, &cancel).map(|repairs| {
+                Box::new(PreparedHistoryBatch {
+                    requested,
+                    repairs,
+                    received_unix_nanos: now,
+                })
             });
-            let failed = result.is_err();
-            if inbox_tx
+        if !cancel.load(Ordering::Acquire)
+            && inbox_tx
                 .send(WorkerInboxEvent::HistoryCompleted {
                     generation,
-                    phase,
+                    phase: FetchPhase::Full,
                     result,
                 })
                 .is_err()
-            {
-                return;
-            }
-            if failed {
-                break;
-            }
+        {
+            return;
         }
     }
+}
+
+fn intersect_history_range(left: HistoryRange, right: HistoryRange) -> Option<HistoryRange> {
+    let start_unix_nanos = left.start_unix_nanos.max(right.start_unix_nanos);
+    let end_unix_nanos = left.end_unix_nanos.min(right.end_unix_nanos);
+    (start_unix_nanos < end_unix_nanos).then_some(HistoryRange {
+        start_unix_nanos,
+        end_unix_nanos,
+    })
+}
+
+fn subtract_history_range(range: HistoryRange, removed: HistoryRange) -> Vec<HistoryRange> {
+    let Some(overlap) = intersect_history_range(range, removed) else {
+        return vec![range];
+    };
+    let mut retained = Vec::with_capacity(2);
+    if range.start_unix_nanos < overlap.start_unix_nanos {
+        retained.push(HistoryRange {
+            start_unix_nanos: range.start_unix_nanos,
+            end_unix_nanos: overlap.start_unix_nanos,
+        });
+    }
+    if overlap.end_unix_nanos < range.end_unix_nanos {
+        retained.push(HistoryRange {
+            start_unix_nanos: overlap.end_unix_nanos,
+            end_unix_nanos: range.end_unix_nanos,
+        });
+    }
+    retained
+}
+
+fn fetch_history_repairs<H: HistorySource>(
+    source: &mut H,
+    profile: &ProductProfile,
+    now: i64,
+    repairs: &[HistoryRange],
+    cancel: &Arc<AtomicBool>,
+) -> Result<Vec<history::PreparedHistory>, String> {
+    let mut fetched = Vec::with_capacity(repairs.len());
+    for &range in repairs {
+        if cancel.load(Ordering::Acquire) {
+            return Err("Coinbase history repair was cancelled".to_string());
+        }
+        fetched.push(source.fetch(profile, now, Arc::clone(cancel), range)?);
+    }
+    Ok(fetched)
 }
 
 enum LoopAction {
@@ -668,7 +770,22 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
     else {
         return Ok(());
     };
-    if activate_complete_cached_history(running, generation, message_tx)? {
+    let (clock_tx, clock_rx) = mpsc::sync_channel(1);
+    history_command_tx
+        .send(HistoryCommand::Now(clock_tx))
+        .map_err(|_| "Coinbase history worker stopped".to_string())?;
+    let now = clock_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .map_err(|_| "Coinbase history clock did not respond".to_string())??;
+    let requested = history_request_range(&running.profile, now, FetchPhase::Full)?;
+    let coverage = history_coverage_plan(running, requested, now)?;
+    if activate_complete_cached_history(
+        running,
+        generation,
+        message_tx,
+        coverage.classification(),
+        now,
+    )? {
         return Ok(());
     }
     let cancel = Arc::new(AtomicBool::new(false));
@@ -679,6 +796,8 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
         .send(HistoryCommand::Fetch {
             generation,
             profile: running.profile.clone(),
+            requested,
+            repairs: coverage.repair_ranges().to_vec(),
             cancel,
         })
         .map_err(|_| "Coinbase history worker stopped".to_string())
@@ -688,11 +807,15 @@ fn activate_complete_cached_history<V: axiusflow_platform_runtime::CredentialVau
     running: &mut RunningWorker<V>,
     generation: SessionGeneration,
     message_tx: &MarketWorkerSender,
+    coverage: CoverageClass,
+    now: i64,
 ) -> Result<bool, String> {
     if running.state.retained.is_empty() {
         return Ok(false);
     }
-    let now = unix_nanos()?;
+    if !cache_can_resume_live(coverage, true) {
+        return Ok(false);
+    }
     let scope = HistoryScope {
         provider_id: "coinbase".to_string(),
         account_id: axiusflow_coinbase_market_adapter::COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
@@ -709,16 +832,6 @@ fn activate_complete_cached_history<V: axiusflow_platform_runtime::CredentialVau
         adjustment_revision: 1,
         correction_revision: 1,
     };
-    let requested = history_request_range(&running.profile, now, FetchPhase::Full)?;
-    let coverage = running
-        .worker
-        .history_coverage_snapshot(series, now / 1_000_000_000)
-        .map_err(|error| error.to_string())?
-        .plan(requested)
-        .map_err(|error| error.to_string())?;
-    if !cache_can_resume_live(coverage.classification(), true) {
-        return Ok(false);
-    }
     if running.profile.interval == ChartInterval::Minute1 {
         let latest = running
             .worker
@@ -741,6 +854,37 @@ fn activate_complete_cached_history<V: axiusflow_platform_runtime::CredentialVau
         message: "Authenticated local Coinbase coverage is complete; live tail resumed".to_string(),
     });
     Ok(true)
+}
+
+fn history_coverage_plan<V: axiusflow_platform_runtime::CredentialVault>(
+    running: &RunningWorker<V>,
+    requested: HistoryRange,
+    now: i64,
+) -> Result<axiusflow_provider_history::CoveragePlan, String> {
+    let scope = HistoryScope {
+        provider_id: "coinbase".to_string(),
+        account_id: axiusflow_coinbase_market_adapter::COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+        entitlement_revision: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS.to_string(),
+    };
+    running
+        .worker
+        .history_coverage_snapshot(
+            HistorySeriesIdentity {
+                scope: &scope,
+                instrument_id: &running.profile.instrument_id,
+                data_kind: DataKind::Bars,
+                resolution: running.profile.interval.label(),
+                source_revision: 1,
+                schema_revision: 1,
+                calendar_revision: 1,
+                adjustment_revision: 1,
+                correction_revision: 1,
+            },
+            now / 1_000_000_000,
+        )
+        .map_err(|error| error.to_string())?
+        .plan(requested)
+        .map_err(|error| error.to_string())
 }
 
 const fn cache_can_resume_live(class: CoverageClass, has_predecessor: bool) -> bool {
@@ -1114,8 +1258,11 @@ fn request_recovery_if_required<V: axiusflow_platform_runtime::CredentialVault>(
 
 #[cfg(test)]
 mod startup_path_tests {
-    use super::{cache_can_resume_live, ensure_history_parent};
-    use axiusflow_provider_history::CoverageClass;
+    use super::{
+        cache_can_resume_live, ensure_history_parent, intersect_history_range,
+        subtract_history_range,
+    };
+    use axiusflow_provider_history::{CoverageClass, HistoryRange};
     use std::{fs, path::PathBuf, time::SystemTime};
 
     struct TestRoot(PathBuf);
@@ -1158,5 +1305,30 @@ mod startup_path_tests {
         ] {
             assert!(!cache_can_resume_live(class, true));
         }
+    }
+
+    #[test]
+    fn visible_history_split_fetches_only_intersections_and_retains_older_gaps() {
+        let missing = HistoryRange {
+            start_unix_nanos: 100,
+            end_unix_nanos: 500,
+        };
+        let visible = HistoryRange {
+            start_unix_nanos: 300,
+            end_unix_nanos: 500,
+        };
+        assert_eq!(intersect_history_range(missing, visible), Some(visible));
+        assert_eq!(
+            subtract_history_range(missing, visible),
+            vec![HistoryRange {
+                start_unix_nanos: 100,
+                end_unix_nanos: 300,
+            }]
+        );
+        let disjoint = HistoryRange {
+            start_unix_nanos: 700,
+            end_unix_nanos: 900,
+        };
+        assert_eq!(subtract_history_range(missing, disjoint), vec![missing]);
     }
 }

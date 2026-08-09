@@ -183,6 +183,22 @@ impl<T: Clone> HistoryWorker<T> {
             .map_err(Into::into)
     }
 
+    /// Records provider-proven empty coverage through the worker-owned store.
+    ///
+    /// # Errors
+    /// Returns an error for wrong-thread access, invalid dimensions, or catalog failure.
+    pub fn record_confirmed_empty(
+        &mut self,
+        series: HistorySeriesIdentity<'_>,
+        range: axiusflow_desktop_storage::RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopHistoryError> {
+        self.ensure_owner()?;
+        self.store
+            .record_confirmed_empty(series, range, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
     /// Returns active immutable segments overlapping one visible range.
     ///
     /// # Errors
