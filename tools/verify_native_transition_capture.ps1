@@ -78,6 +78,27 @@ function Assert-ClearedState {
     Assert-True ((Get-RequiredProperty $State "buffered_history_trades") -eq 0) "$Name buffered trades must be empty."
 }
 
+function Assert-StartupRecovery {
+    param([object]$Recovery, [uint64]$CheckpointMilliseconds)
+    foreach ($property in @("restoration_callback_observed", "authentication_accepted", "runtime_rehydrated", "completed")) {
+        Assert-JsonTrue (Get-RequiredProperty $Recovery $property) "offline_startup_recovery.$property"
+    }
+    $restorationOrdinal = Get-RequiredProperty $Recovery "restoration_source_ordinal"
+    $freshGeneration = Get-RequiredProperty $Recovery "fresh_generation"
+    foreach ($entry in @(
+        @($restorationOrdinal, "offline_startup_recovery.restoration_source_ordinal"),
+        @($freshGeneration, "offline_startup_recovery.fresh_generation")
+    )) {
+        Assert-NonnegativeInteger $entry[0] $entry[1]
+        Assert-True ([uint64]$entry[0] -gt 0) "$($entry[1]) must be positive."
+    }
+    $restorationTime = [uint64](Get-RequiredProperty $Recovery "restoration_unix_milliseconds")
+    $authenticationTime = [uint64](Get-RequiredProperty $Recovery "authentication_unix_milliseconds")
+    $rehydratedTime = [uint64](Get-RequiredProperty $Recovery "rehydrated_unix_milliseconds")
+    Assert-True ($restorationTime -le $authenticationTime -and $authenticationTime -le $rehydratedTime -and $rehydratedTime -le $CheckpointMilliseconds) "Offline-startup recovery timestamps are not ordered."
+    Assert-ReadyState (Get-RequiredProperty $Recovery "restored_runtime_state") "offline_startup_recovery.restored_runtime_state"
+}
+
 function Assert-Transition {
     param([object]$Transition, [string]$Name, [uint64]$CheckpointMilliseconds)
     foreach ($property in @("loss_callback_observed", "environment_apply_succeeded", "session_stop_confirmed", "retired_state_cleared", "restoration_callback_observed", "authentication_accepted", "runtime_rehydrated", "completed")) {
@@ -148,7 +169,7 @@ catch {
     throw "Native-transition artifact is not valid JSON: $resolvedPath"
 }
 
-Assert-True ((Get-RequiredProperty $report "schema_version") -eq 1) "Native-transition schema_version must be 1."
+Assert-True ((Get-RequiredProperty $report "schema_version") -eq 2) "Native-transition schema_version must be 2."
 Assert-True ((Get-RequiredProperty $report "evidence_scope") -eq "rithmic_test_physical_native_transition_capture") "Native-transition evidence_scope is invalid."
 Assert-True ((Get-RequiredProperty $report "platform") -eq "windows") "Physical native-transition evidence must be captured on Windows."
 Assert-True ((Get-RequiredProperty $report "completion_state") -eq "completed") "Native-transition capture is incomplete."
@@ -165,20 +186,41 @@ Assert-JsonFalse (Get-RequiredProperty $report "credentials_embedded") "credenti
 Assert-JsonFalse (Get-RequiredProperty $report "transitions_triggered_by_capture") "transitions_triggered_by_capture"
 Assert-JsonFalse (Get-RequiredProperty $report "observer_overflow") "observer_overflow"
 Assert-True ((Get-RequiredProperty $report "observer_overflow_count") -eq 0) "Native-transition observer overflow count must be zero."
+$monitorFailures = Get-RequiredProperty $report "monitor_failures"
+Assert-NonnegativeInteger $monitorFailures "monitor_failures"
+Assert-True ($monitorFailures -eq 0) "Native lifecycle monitors must remain healthy for the entire capture."
 Assert-True ((Get-RequiredProperty $report "callback_application_failures") -eq 0) "Native-transition callback application failures must be zero."
 $received = Get-RequiredProperty $report "callbacks_received"
 $applied = Get-RequiredProperty $report "callbacks_applied"
 Assert-NonnegativeInteger $received "callbacks_received"
 Assert-NonnegativeInteger $applied "callbacks_applied"
-Assert-True ([uint64]$received -ge 4 -and $received -eq $applied) "Every received native callback must be applied and at least four are required."
+Assert-True ([uint64]$received -ge 5 -and $received -eq $applied) "Every received native callback must be applied and at least five are required."
 $initialNetwork = [string](Get-RequiredProperty $report "initial_network_state")
 Assert-True ($initialNetwork -eq "unavailable") "Native-transition evidence requires an initial NativeNetworkMonitor Unavailable result."
 Assert-JsonTrue (Get-RequiredProperty $report "offline_startup_observed") "offline_startup_observed"
 $created = [uint64](Get-RequiredProperty $report "created_unix_milliseconds")
 $checkpoint = [uint64](Get-RequiredProperty $report "checkpoint_unix_milliseconds")
 Assert-True ($checkpoint -ge $created) "Final checkpoint predates capture creation."
-Assert-Transition (Get-RequiredProperty $report "network_offline") "network_offline" $checkpoint
-Assert-Transition (Get-RequiredProperty $report "suspend_resume") "suspend_resume" $checkpoint
+$startup = Get-RequiredProperty $report "offline_startup_recovery"
+$network = Get-RequiredProperty $report "network_offline"
+$power = Get-RequiredProperty $report "suspend_resume"
+Assert-StartupRecovery $startup $checkpoint
+Assert-Transition $network "network_offline" $checkpoint
+Assert-Transition $power "suspend_resume" $checkpoint
+$startupRestorationOrdinal = [uint64](Get-RequiredProperty $startup "restoration_source_ordinal")
+$networkLossOrdinal = [uint64](Get-RequiredProperty $network "loss_source_ordinal")
+$networkRestorationOrdinal = [uint64](Get-RequiredProperty $network "restoration_source_ordinal")
+$suspendOrdinal = [uint64](Get-RequiredProperty $power "loss_source_ordinal")
+$resumeOrdinal = [uint64](Get-RequiredProperty $power "restoration_source_ordinal")
+Assert-True ([uint64](Get-RequiredProperty $startup "restoration_unix_milliseconds") -ge $created) "Offline-startup restoration predates capture creation."
+Assert-True ($startupRestorationOrdinal -lt $networkLossOrdinal `
+    -and $networkLossOrdinal -lt $networkRestorationOrdinal `
+    -and $networkRestorationOrdinal -lt $suspendOrdinal `
+    -and $suspendOrdinal -lt $resumeOrdinal) "Physical callback sequence must be offline-startup restoration, separate network loss/restoration, then suspend/resume."
+Assert-True ((Get-RequiredProperty $startup "fresh_generation") -eq (Get-RequiredProperty $network "retired_generation")) "Separate network loss must retire the offline-startup recovery generation."
+Assert-True ((Get-RequiredProperty $network "fresh_generation") -eq (Get-RequiredProperty $power "retired_generation")) "Suspend must retire the network-recovery generation."
+Assert-True ([uint64](Get-RequiredProperty $startup "rehydrated_unix_milliseconds") -le [uint64](Get-RequiredProperty $network "loss_unix_milliseconds")) "Separate network loss occurred before offline-startup rehydration."
+Assert-True ([uint64](Get-RequiredProperty $network "rehydrated_unix_milliseconds") -le [uint64](Get-RequiredProperty $power "loss_unix_milliseconds")) "Suspend occurred before network-loss rehydration."
 Assert-JsonTrue (Get-RequiredProperty $report "scenario_requirements_met") "scenario_requirements_met"
 Assert-JsonTrue (Get-RequiredProperty $report "worker_clean_stop") "worker_clean_stop"
 Assert-JsonTrue (Get-RequiredProperty $report "finalized") "report.finalized"

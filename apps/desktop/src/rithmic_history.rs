@@ -698,6 +698,8 @@ pub(crate) fn history_message(result: RithmicHistoryResult) -> MarketWorkerMessa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart};
+    use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 
     #[test]
     fn series_browser_fences_replaced_selection_and_series_generations() {
@@ -806,6 +808,99 @@ mod tests {
         assert!(latest.iter().enumerate().all(|(index, bar)| {
             bar.value.source_sequence == u64::try_from(index).unwrap_or(u64::MAX) + 1
         }));
+    }
+
+    #[test]
+    fn delayed_entitlement_is_identical_across_history_seed_and_live_trade() {
+        const START: i64 = 1_800_000_000;
+        let entitlement_id = "rithmic-test:CME-Delayed:MNQU6";
+        let selection_generation = NonZeroUsize::MIN;
+        let series_generation = NonZeroUsize::MIN;
+        let request = HistoryFetchRequest {
+            selection_generation,
+            series_generation,
+            series: RithmicSeries::Minute1,
+            instrument: InstalledRithmicInstrument {
+                selection_generation,
+                descriptor: InstrumentDescriptor {
+                    instrument_id: "rithmic:CME:MNQU6".to_string(),
+                    provider_symbol: "MNQU6".to_string(),
+                    display_symbol: "MNQU6".to_string(),
+                    venue_id: "CME".to_string(),
+                    price_scale: 2,
+                    quantity_scale: 0,
+                },
+                entitlement_id: entitlement_id.to_string(),
+            },
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let bootstrap = bootstrap_from_bars(
+            &request,
+            vec![CanonicalHistoryBar {
+                value: MarketBar {
+                    source_sequence: 1,
+                    exchange_timestamp_seconds: START,
+                    open: 2_000_000,
+                    high: 2_000_100,
+                    low: 1_999_900,
+                    close: 2_000_025,
+                    volume: 10,
+                },
+                exchange_timestamp_unix_nanos: START * NANOS_PER_SECOND,
+            }],
+            (START + 1) * NANOS_PER_SECOND,
+        )
+        .expect("delayed-entitlement history seed validates");
+        assert_eq!(
+            bootstrap
+                .snapshot
+                .bars()
+                .last()
+                .expect("history is nonempty")
+                .provenance()
+                .entitlement_revision,
+            entitlement_id
+        );
+
+        let generation = RithmicChartGeneration {
+            selection: selection_generation,
+            series: series_generation,
+        };
+        let mut chart = RithmicLiveChart::from_history(generation, &bootstrap.snapshot)
+            .expect("history installs into live chart");
+        let publication = chart
+            .apply_trade(
+                generation,
+                &MarketTrade {
+                    metadata: EventMetadata {
+                        provider_id: "rithmic".to_string(),
+                        instrument_id: "rithmic:CME:MNQU6".to_string(),
+                        entitlement_id: entitlement_id.to_string(),
+                        source_sequence: 2,
+                        session_generation: 9,
+                        timestamps: QualifiedTimestamp {
+                            exchange_unix_nanos: Some((START + 1) * NANOS_PER_SECOND),
+                            provider_unix_nanos: None,
+                            received_unix_nanos: (START + 2) * NANOS_PER_SECOND,
+                        },
+                    },
+                    trade_id: "delayed-live-2".to_string(),
+                    price: 2_000_050,
+                    quantity: 2,
+                    aggressor: AggressorSide::Buy,
+                },
+            )
+            .expect("matching delayed-entitlement trade extends history");
+        assert_eq!(
+            publication
+                .snapshot
+                .bars()
+                .last()
+                .expect("live snapshot is nonempty")
+                .provenance()
+                .entitlement_revision,
+            entitlement_id
+        );
     }
 
     #[test]

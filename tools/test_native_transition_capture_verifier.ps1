@@ -93,6 +93,21 @@ function New-Transition {
     }
 }
 
+function New-StartupRecovery {
+    return [ordered]@{
+        restoration_callback_observed = $true
+        restoration_source_ordinal = 1
+        restoration_unix_milliseconds = 1500
+        fresh_generation = 7
+        authentication_accepted = $true
+        authentication_unix_milliseconds = 1600
+        runtime_rehydrated = $true
+        rehydrated_unix_milliseconds = 1700
+        restored_runtime_state = New-ReadyState
+        completed = $true
+    }
+}
+
 try {
     [IO.File]::WriteAllText($cargoLockPath, "deterministic-lock-fixture")
     [IO.File]::WriteAllBytes($executablePath, [byte[]](1, 3, 3, 7))
@@ -100,7 +115,7 @@ try {
     $cargoLockHash = (Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash
     $executableHash = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash
     $report = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         evidence_scope = "rithmic_test_physical_native_transition_capture"
         platform = "windows"
         completion_state = "completed"
@@ -120,13 +135,15 @@ try {
         transitions_triggered_by_capture = $false
         initial_network_state = "unavailable"
         offline_startup_observed = $true
+        offline_startup_recovery = New-StartupRecovery
         observer_overflow = $false
         observer_overflow_count = 0
-        callbacks_received = 4
-        callbacks_applied = 4
+        monitor_failures = 0
+        callbacks_received = 5
+        callbacks_applied = 5
         callback_application_failures = 0
-        network_offline = New-Transition 1 2 7 8 2000
-        suspend_resume = New-Transition 3 4 8 9 3000
+        network_offline = New-Transition 2 3 7 8 2000
+        suspend_resume = New-Transition 4 5 8 9 3000
         scenario_requirements_met = $true
         worker_clean_stop = $true
         finalized = $true
@@ -186,6 +203,27 @@ try {
     Invoke-ExpectedFailure
     $report.suspend_resume.provider_invalidation_preceded_fence = $false
 
+    $report.suspend_resume.retired_generation = 99
+    Write-Json $artifact $report
+    $manifest.final_report_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+    Write-Json $manifestPath $manifest
+    Invoke-ExpectedFailure
+    $report.suspend_resume.retired_generation = 8
+
+    $report.suspend_resume.loss_source_ordinal = 3
+    Write-Json $artifact $report
+    $manifest.final_report_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+    Write-Json $manifestPath $manifest
+    Invoke-ExpectedFailure
+    $report.suspend_resume.loss_source_ordinal = 4
+
+    $report.monitor_failures = 1
+    Write-Json $artifact $report
+    $manifest.final_report_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+    Write-Json $manifestPath $manifest
+    Invoke-ExpectedFailure
+    $report.monitor_failures = 0
+
     $report.observer_overflow = $true
     $report.observer_overflow_count = 1
     Write-Json $artifact $report
@@ -193,7 +231,7 @@ try {
     Write-Json $manifestPath $manifest
     Invoke-ExpectedFailure
 
-    Write-Output "native_transition_verifier_self_tests=passed valid=true artifact_tamper_rejected=true incomplete_rejected=true online_startup_rejected=true offline_startup_flag_required=true provider_invalidation_precedence_rejected=true observer_overflow_rejected=true"
+    Write-Output "native_transition_verifier_self_tests=passed valid=true artifact_tamper_rejected=true incomplete_rejected=true online_startup_rejected=true offline_startup_flag_required=true provider_invalidation_precedence_rejected=true generation_discontinuity_rejected=true overlapping_sequence_rejected=true monitor_failure_rejected=true observer_overflow_rejected=true"
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

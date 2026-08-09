@@ -533,6 +533,16 @@ through truthful stale/reconnecting states, and interrupted initial autoload is
 eligible to retry after authentication. Manual contract replacement also clears
 the old depth image before the new selection is installed.
 
+The shipping selection profile requests trades, quotes, and complete depth.
+Catalog selections preserve their exact validated entitlement identity across
+the adapter callback, history seed, live chart, and DOM; a delayed venue uses
+its base exchange only for provider reference/subscription routing and is never
+silently relabeled in canonical market metadata. Feed diagnostics now observe
+all four canonical market-event classes at the generation-fenced runtime
+boundary, so quote/depth counters and book readiness reflect the actual stream.
+Terminal worker loss is an idempotent stopped transition with a truthful chart
+error, while retained candles remain inspectable through Fit and Latest.
+
 
 
 ### Gate
@@ -666,6 +676,11 @@ and clears chart/DOM/selection state on network loss or suspend, discards retire
 callbacks, and reconnects only through a fresh session generation after
 restoration. Deterministic shipping-path tests cover offline startup, network
 recovery, suspend/resume, stale-history rejection, and retry/callback fencing.
+Both native monitors are now mandatory before the provider can connect on the
+shipping path. Registration or monitor-stream failure stops the active session,
+clears live state, inhibits further reconnect in that worker, and surfaces only
+a bounded coarse terminal status instead of continuing without lifecycle
+fencing.
 The Win32 callback ingress is nonblocking and loss-aware: connectivity bursts
 atomically retain the latest provider-relevant state, while suspend/resume
 bursts always publish a pending suspend before a coalesced resume and let a
@@ -690,6 +705,12 @@ artifacts, revalidates source/binary/lockfile provenance after the operator run,
 and invokes a strict artifact verifier. Deterministic recorder and verifier tests
 pass; no physical transition capture has been performed, so the row remains
 open.
+
+The schema-2 transition artifact also requires the initial-offline restoration
+to authenticate and rehydrate before a separate online network loss, followed
+by recovery before suspend/resume. Global callback ordinals, timestamps, and
+retired/fresh generations must form one continuous sequence, and any native
+monitor failure permanently disqualifies the capture.
 
 Qualification also requires the application to start from an actual native
 `Unavailable` network result. The operator then restores connectivity, waits for

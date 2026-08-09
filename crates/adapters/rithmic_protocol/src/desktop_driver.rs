@@ -271,6 +271,7 @@ pub enum RithmicCatalogEvent {
         session_generation: SessionGeneration,
         selection_generation: NonZeroUsize,
         instrument: InstrumentDescriptor,
+        entitlement_id: String,
     },
     CommandRejected {
         session_generation: SessionGeneration,
@@ -1451,12 +1452,15 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
         }
         ProviderSessionEvent::Market { generation, event } => {
             worker.ensure_streaming_generation(*generation)?;
-            if let MarketEvent::Trade(trade) = event {
-                worker.record_trade_diagnostics(
-                    *generation,
-                    trade.metadata.timestamps.exchange_unix_nanos,
-                )?;
-            }
+            let message_timestamp = match event {
+                MarketEvent::Trade(trade) => trade.metadata.timestamps.exchange_unix_nanos,
+                MarketEvent::Quote(quote) => quote.metadata.timestamps.provider_unix_nanos,
+                MarketEvent::DepthSnapshot(snapshot) => {
+                    snapshot.metadata.timestamps.provider_unix_nanos
+                }
+                MarketEvent::DepthDelta(delta) => delta.metadata.timestamps.provider_unix_nanos,
+            };
+            worker.record_market_event_diagnostics(*generation, event, message_timestamp)?;
         }
         ProviderSessionEvent::Heartbeat { generation, .. } => {
             worker.ensure_streaming_generation(*generation)?;
@@ -2113,6 +2117,7 @@ fn advance_subscription(
                 session_generation,
                 selection_generation: plan.selection.selection_generation,
                 instrument: plan.instrument.descriptor,
+                entitlement_id: plan.instrument.entitlement_id,
             }) {
                 return Err((
                     ProviderInvalidationReason::QueueOverflow,
@@ -2592,11 +2597,16 @@ fn retained_catalog_event_bytes(event: &RithmicCatalogEvent) -> Option<usize> {
                 }
             }
         }
-        RithmicCatalogEvent::SelectionInstalled { instrument, .. } => {
+        RithmicCatalogEvent::SelectionInstalled {
+            instrument,
+            entitlement_id,
+            ..
+        } => {
             add(instrument.instrument_id.capacity())?;
             add(instrument.provider_symbol.capacity())?;
             add(instrument.display_symbol.capacity())?;
             add(instrument.venue_id.capacity())?;
+            add(entitlement_id.capacity())?;
         }
         RithmicCatalogEvent::CommandRejected { .. } => {}
     }
@@ -2640,6 +2650,7 @@ mod tests {
     use axiusflow_desktop_history::HistoryWorkerConfig;
     use axiusflow_desktop_provider_runtime::{DesktopMarketWorkerConfig, DesktopProviderConfig};
     use axiusflow_desktop_storage::CatalogKey;
+    use axiusflow_market_data::{BookSide, DepthDelta};
     use std::{
         fs,
         io::Read,
@@ -2939,6 +2950,92 @@ mod tests {
         })
     }
 
+    fn diagnostic_market_task() -> Arc<SessionTask> {
+        Arc::new(|config, generation, _, stop, _, _, emitter| {
+            if !emitter.send(ProviderSessionEvent::DiscoveryStarted)
+                || !emitter.send(ProviderSessionEvent::SystemsDiscovered {
+                    environments: vec![RithmicProviderConfig::environment()],
+                })
+                || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
+                    generation,
+                    state: AuthenticationState::Accepted,
+                })
+                || !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
+                    generation,
+                    instruments: config
+                        .instruments
+                        .iter()
+                        .map(|instrument| instrument.descriptor.clone())
+                        .collect(),
+                })
+            {
+                return;
+            }
+            let metadata = |source_sequence| {
+                let source_offset =
+                    i64::try_from(source_sequence).expect("diagnostic source sequence fits i64");
+                EventMetadata {
+                    provider_id: PROVIDER_ID.to_string(),
+                    instrument_id: "future-cme-es-2027-06".to_string(),
+                    entitlement_id: "rithmic-test-cme".to_string(),
+                    source_sequence,
+                    session_generation: generation.get(),
+                    timestamps: QualifiedTimestamp {
+                        exchange_unix_nanos: Some(1_800_000_000_000_000_000 + source_offset),
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 1_800_000_001_000_000_000 + source_offset,
+                    },
+                }
+            };
+            let events = [
+                MarketEvent::Trade(MarketTrade {
+                    metadata: metadata(1),
+                    trade_id: "trade-1".to_string(),
+                    price: 510_025,
+                    quantity: 1,
+                    aggressor: AggressorSide::Buy,
+                }),
+                MarketEvent::Quote(TopOfBookQuote {
+                    metadata: metadata(2),
+                    bid_price: 510_000,
+                    bid_quantity: 2,
+                    ask_price: 510_025,
+                    ask_quantity: 3,
+                }),
+                MarketEvent::DepthSnapshot(DepthSnapshot {
+                    metadata: metadata(3),
+                    bids: vec![DepthLevel {
+                        price: 510_000,
+                        quantity: 2,
+                        order_count: Some(1),
+                    }],
+                    asks: vec![DepthLevel {
+                        price: 510_025,
+                        quantity: 3,
+                        order_count: Some(1),
+                    }],
+                }),
+                MarketEvent::DepthDelta(DepthDelta {
+                    metadata: metadata(4),
+                    side: BookSide::Bid,
+                    level: DepthLevel {
+                        price: 509_975,
+                        quantity: 4,
+                        order_count: Some(2),
+                    },
+                }),
+            ];
+            for event in events {
+                if !emitter.send(ProviderSessionEvent::Market { generation, event }) {
+                    return;
+                }
+            }
+            while !stop.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        })
+    }
+
     fn open_worker(
         driver: RithmicProviderDriver,
     ) -> (
@@ -3034,6 +3131,50 @@ mod tests {
             ),
             Err(RithmicProviderConfigError)
         );
+    }
+
+    #[test]
+    fn shipping_boundary_records_every_market_class_in_feed_diagnostics() {
+        let (driver, events) = RithmicProviderDriver::with_task(
+            config(),
+            callback_limits(16, 64 * 1_024),
+            diagnostic_market_task(),
+        );
+        let (mut worker, root) = open_worker(driver);
+        let mut retries = RithmicRetryScheduler::default();
+        let active = worker
+            .connect(ConnectTrigger::Initial)
+            .expect("vault-backed diagnostic session starts");
+        let now = Instant::now();
+        for _ in 0..4 {
+            let _ = wait_applied(&mut worker, &events, &mut retries, now);
+        }
+        for expected in ["trade", "quote", "depth snapshot", "depth delta"] {
+            assert!(
+                matches!(
+                    wait_applied(&mut worker, &events, &mut retries, now),
+                    AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market {
+                        generation,
+                        ..
+                    }) if generation == active
+                ),
+                "{expected} reaches the shipping boundary"
+            );
+        }
+
+        let snapshot = worker
+            .try_diagnostics_snapshot()
+            .expect("diagnostics remain available")
+            .expect("first snapshot publishes");
+        assert_eq!(snapshot.counters.trades, 1);
+        assert_eq!(snapshot.counters.quotes, 1);
+        assert_eq!(snapshot.counters.depth_snapshots, 1);
+        assert_eq!(snapshot.counters.depth_deltas, 1);
+        assert_eq!(format!("{:?}", snapshot.order_book_state), "Ready");
+
+        worker.stop().expect("diagnostic session stops cleanly");
+        drop(worker);
+        fs::remove_dir_all(root).expect("history fixture removes");
     }
 
     #[test]
@@ -3427,6 +3568,54 @@ mod tests {
             ),
             Err(RithmicProviderCommandError::InvalidRequest)
         );
+    }
+
+    #[test]
+    fn delayed_catalog_selection_preserves_entitlement_while_using_the_base_market_venue() {
+        let entitlement_id = "rithmic-test:CME-Delayed:MNQU6";
+        let selection = RithmicInstrumentSelection::try_new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            "MNQU6",
+            "CME-Delayed",
+            entitlement_id,
+            RithmicReadOnlySubscription::try_new(true, true, true)
+                .expect("read-only selection validates"),
+        )
+        .expect("delayed selection validates");
+        let selected = selected_instrument(
+            &selection,
+            InstrumentReference {
+                symbol: "MNQU6".to_string(),
+                exchange: "CME".to_string(),
+                exchange_symbol: None,
+                name: Some("Micro E-mini Nasdaq-100".to_string()),
+                product_code: Some("MNQ".to_string()),
+                instrument_type: Some("FUTURE".to_string()),
+                underlying_symbol: None,
+                expiration_date: None,
+                currency: Some("USD".to_string()),
+                price_display_format: None,
+                minimum_price_change: Some(0.25),
+                single_point_value: Some(2.0),
+                price_precision: Some(2),
+            },
+        )
+        .expect("base-venue reference installs");
+
+        assert_eq!(selected.descriptor.venue_id, "CME");
+        assert_eq!(selected.entitlement_id, entitlement_id);
+        let callback = RithmicCatalogEvent::SelectionInstalled {
+            session_generation: generation(1),
+            selection_generation: NonZeroUsize::MIN,
+            instrument: selected.descriptor,
+            entitlement_id: selected.entitlement_id,
+        };
+        let debug = format!("{callback:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("MNQU6"));
+        assert!(!debug.contains("CME-Delayed"));
+        assert!(!debug.contains(entitlement_id));
     }
 
     #[test]

@@ -16,7 +16,8 @@ use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_observability::{FeedConnectionState, FeedDiagnosticsSnapshot};
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
-    RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
+    RithmicProviderCommandError as RithmicCommandError, RithmicReadOnlySubscription,
+    RithmicSymbolSearch, SearchPattern,
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
@@ -177,16 +178,29 @@ impl RithmicSessionRetirement {
         }
     }
 
-    const fn retained_chart_state(self, has_market_data: bool) -> Option<ChartState> {
-        if !has_market_data {
-            return None;
-        }
+    const fn chart_state(self, has_market_data: bool) -> Option<ChartState> {
         match self {
-            Self::Offline => Some(ChartState::Stale),
-            Self::Recovering => Some(ChartState::Recovering),
-            Self::None | Self::Stopped => None,
+            Self::Offline if has_market_data => Some(ChartState::Stale),
+            Self::Recovering if has_market_data => Some(ChartState::Recovering),
+            Self::Stopped => Some(ChartState::Error),
+            Self::None | Self::Offline | Self::Recovering => None,
         }
     }
+}
+
+fn rithmic_production_subscription() -> Result<RithmicReadOnlySubscription, RithmicCommandError> {
+    RithmicReadOnlySubscription::try_new(true, true, true)
+}
+
+const fn should_apply_rithmic_worker_stop(
+    disconnected: bool,
+    connection_state: Option<FeedConnectionState>,
+) -> bool {
+    disconnected
+        && matches!(
+            connection_state,
+            Some(state) if !matches!(state, FeedConnectionState::Stopped)
+        )
 }
 
 impl RithmicReconnectState {
@@ -791,12 +805,12 @@ impl TerminalApp {
                 }
             }
         }
-        if disconnected && self.connection_state.is_some() {
-            self.rithmic_reconnect = RithmicReconnectState::Idle;
-            self.retire_rithmic_session(cx);
-            self.connection_state = Some(FeedConnectionState::Stopped);
-            self.connection_message = Some("Rithmic market worker stopped".to_string());
-            cx.notify();
+        if should_apply_rithmic_worker_stop(disconnected, self.connection_state) {
+            self.apply_connection_state(
+                FeedConnectionState::Stopped,
+                "Rithmic market worker stopped".to_string(),
+                cx,
+            );
         } else if disconnected && self.chart_state != ChartState::Error {
             self.set_chart_state(
                 ChartState::Error,
@@ -848,7 +862,7 @@ impl TerminalApp {
             }
             RithmicSessionRetirement::None => {}
         }
-        if let Some(chart_state) = retirement.retained_chart_state(retained_market_data) {
+        if let Some(chart_state) = retirement.chart_state(retained_market_data) {
             self.chart_state = chart_state;
             self.chart_state_message.clone_from(&message);
         }
@@ -1004,17 +1018,16 @@ impl TerminalApp {
             "rithmic-test:{}:{}",
             selection.instrument.exchange, selection.instrument.symbol
         );
-        let request =
-            RithmicReadOnlySubscription::try_new(true, false, true).and_then(|subscription| {
-                RithmicInstrumentSelection::try_new(
-                    selection.generation,
-                    selection.search_generation,
-                    selection.instrument.symbol.clone(),
-                    selection.instrument.exchange.clone(),
-                    entitlement_id,
-                    subscription,
-                )
-            });
+        let request = rithmic_production_subscription().and_then(|subscription| {
+            RithmicInstrumentSelection::try_new(
+                selection.generation,
+                selection.search_generation,
+                selection.instrument.symbol.clone(),
+                selection.instrument.exchange.clone(),
+                entitlement_id,
+                subscription,
+            )
+        });
         let Ok(request) = request else {
             self.symbol_browser.reject_command(selection.generation);
             self.symbol_message = "Symbol selection is invalid".to_string();
@@ -1304,6 +1317,10 @@ impl Render for TerminalApp {
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
+        let chart_has_market_data = self
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).has_market_data());
         let header = terminal_header(
             cx,
             &app,
@@ -1343,7 +1360,7 @@ impl Render for TerminalApp {
                     self.symbol_browser.selected().is_some(),
                     self.feed_diagnostics.is_some(),
                 )
-                .with_chart_controls(self.chart_state == ChartState::Ready),
+                .with_chart_controls(chart_has_market_data),
                 dom_visible: self.side_panel == Some(SidePanel::Dom),
                 health_visible: self.side_panel == Some(SidePanel::Health),
                 connection_state: self
@@ -1361,10 +1378,7 @@ impl Render for TerminalApp {
         let workspace = market_workspace(MarketWorkspaceState {
             app,
             chart: self.chart.as_ref(),
-            chart_has_market_data: self
-                .chart
-                .as_ref()
-                .is_some_and(|chart| chart.read(cx).has_market_data()),
+            chart_has_market_data,
             dom: self.dom.clone(),
             side_panel: self.side_panel,
             chart_state: self.chart_state,
@@ -2408,11 +2422,12 @@ mod tests {
         bounded_status_detail, chart_status_detail, chart_surface_notice, connection_presentation,
         default_rithmic_contract_index, duration_label, gpui_color, instrument_selector_label,
         milli_rate, parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, rithmic_ready_action, series_selector_label,
+        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
+        series_selector_label, should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
-    use axiusflow_rithmic_protocol_adapter::SymbolSearchResult;
+    use axiusflow_rithmic_protocol_adapter::{RithmicReadOnlySubscription, SymbolSearchResult};
     use std::ffi::OsString;
 
     #[test]
@@ -2490,28 +2505,81 @@ mod tests {
         let retirement =
             RithmicSessionRetirement::from_connection(FeedConnectionState::Disconnected);
         assert_eq!(retirement, RithmicSessionRetirement::Offline);
-        assert_eq!(
-            retirement.retained_chart_state(true),
-            Some(ChartState::Stale)
-        );
-        assert_eq!(retirement.retained_chart_state(false), None);
+        assert_eq!(retirement.chart_state(true), Some(ChartState::Stale));
+        assert_eq!(retirement.chart_state(false), None);
         let mut retained_chart_state = retirement
-            .retained_chart_state(true)
+            .chart_state(true)
             .expect("offline retained chart becomes stale");
         assert_eq!(retained_chart_state, ChartState::Stale);
         retained_chart_state =
             RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
-                .retained_chart_state(true)
+                .chart_state(true)
                 .expect("the same retained chart advances to reconnecting");
         assert_eq!(retained_chart_state, ChartState::Recovering);
         assert_eq!(
             RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
-                .retained_chart_state(true),
+                .chart_state(true),
             Some(ChartState::Recovering)
         );
         assert_eq!(
             RithmicSessionRetirement::from_connection(FeedConnectionState::Streaming),
             RithmicSessionRetirement::None
+        );
+    }
+
+    #[test]
+    fn terminal_session_stop_is_a_truthful_chart_error_with_or_without_data() {
+        let stopped = RithmicSessionRetirement::from_connection(FeedConnectionState::Stopped);
+        assert_eq!(stopped.chart_state(true), Some(ChartState::Error));
+        assert_eq!(stopped.chart_state(false), Some(ChartState::Error));
+        assert_eq!(
+            chart_surface_notice(
+                stopped.chart_state(true).expect("stopped chart state"),
+                true,
+                "Rithmic market worker stopped",
+            )
+            .expect("retained chart error notice")
+            .placement,
+            ChartNoticePlacement::TopLeft
+        );
+        assert_eq!(
+            chart_surface_notice(
+                stopped.chart_state(false).expect("stopped chart state"),
+                false,
+                "Rithmic market worker stopped",
+            )
+            .expect("empty chart error notice")
+            .placement,
+            ChartNoticePlacement::Center
+        );
+    }
+
+    #[test]
+    fn dead_rithmic_worker_stop_transition_is_applied_once() {
+        assert!(should_apply_rithmic_worker_stop(
+            true,
+            Some(FeedConnectionState::Streaming)
+        ));
+        assert!(!should_apply_rithmic_worker_stop(
+            true,
+            Some(FeedConnectionState::Stopped)
+        ));
+        assert!(!should_apply_rithmic_worker_stop(
+            false,
+            Some(FeedConnectionState::Streaming)
+        ));
+        assert!(!should_apply_rithmic_worker_stop(true, None));
+    }
+
+    #[test]
+    fn production_rithmic_selection_requests_every_read_only_market_class() {
+        assert_eq!(
+            rithmic_production_subscription(),
+            RithmicReadOnlySubscription::try_new(true, true, true)
+        );
+        assert_ne!(
+            rithmic_production_subscription(),
+            RithmicReadOnlySubscription::try_new(true, false, true)
         );
     }
 
@@ -2655,6 +2723,19 @@ mod tests {
         assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
         assert!(controls.enabled(HeaderControls::LATEST));
+    }
+
+    #[test]
+    fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
+        let retained_chart_controls =
+            HeaderControls::from_state(true, false, false).with_chart_controls(true);
+        assert!(retained_chart_controls.enabled(HeaderControls::FIT));
+        assert!(retained_chart_controls.enabled(HeaderControls::LATEST));
+
+        let empty_chart_controls =
+            HeaderControls::from_state(true, false, false).with_chart_controls(false);
+        assert!(!empty_chart_controls.enabled(HeaderControls::FIT));
+        assert!(!empty_chart_controls.enabled(HeaderControls::LATEST));
     }
 
     #[test]

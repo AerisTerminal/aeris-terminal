@@ -6,6 +6,7 @@
 //! cloud client or payload-upload boundary.
 
 use axiusflow_application::MarketStreamPublication;
+use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::{
     DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
     MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
@@ -494,6 +495,29 @@ where
             .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
             .feed
             .record_runtime_trade(generation, provider_timestamp_unix_nanos, timestamp)
+            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+    }
+
+    /// Records one generation-fenced market callback in production diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong-thread, stale generation, or diagnostics failure.
+    pub fn record_market_event_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        event: &MarketEvent,
+        message_timestamp_unix_nanos: Option<i64>,
+    ) -> Result<(), DesktopProviderError> {
+        self.ensure_owner()?;
+        let Some(timestamp) = self.diagnostics_now() else {
+            return Ok(());
+        };
+        self.diagnostics
+            .as_mut()
+            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .feed
+            .record_runtime_market_event(generation, event, message_timestamp_unix_nanos, timestamp)
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 

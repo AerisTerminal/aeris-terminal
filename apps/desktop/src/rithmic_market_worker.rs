@@ -41,7 +41,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     },
     thread::{self, ThreadId},
@@ -60,6 +60,8 @@ const IDLE_WAIT: Duration = Duration::from_millis(50);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const CATALOG_KEY_ID: &str = "rithmic-test-history-catalog-key-v1";
 const MAXIMUM_BUFFERED_HISTORY_TRADES: usize = 4_096;
+const NETWORK_MONITOR_FAILED: u8 = 1;
+const POWER_MONITOR_FAILED: u8 = 2;
 
 type RithmicWorker =
     DesktopMarketWorker<ProvenancedMarketBar, NativeCredentialVault, RithmicProviderDriver>;
@@ -74,7 +76,35 @@ struct ObservedEnvironmentEvent {
 struct TransitionCaptureContext<'a> {
     events: &'a Receiver<ObservedEnvironmentEvent>,
     overflow: &'a AtomicU64,
+    monitor_failures: &'a AtomicU8,
     capture: &'a mut Option<NativeTransitionCapture>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvironmentMonitorFailure {
+    Network,
+    Power,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerExitReason {
+    Shutdown,
+    EnvironmentMonitorFailed,
+}
+
+struct EnvironmentMonitorHandles {
+    initial_network: Option<NetworkEvent>,
+    overflow: Arc<AtomicU64>,
+    failures: Arc<AtomicU8>,
+}
+
+struct EnvironmentForwarding<'a> {
+    sender: &'a mpsc::SyncSender<ObservedEnvironmentEvent>,
+    source_ordinal: &'a AtomicU64,
+    overflow: &'a AtomicU64,
+    fail_capture_on_overflow: bool,
+    monitor_failures: &'a AtomicU8,
+    failure_flag: u8,
 }
 
 struct RithmicRuntimeState {
@@ -187,8 +217,24 @@ fn run(
     };
     let capture_enabled = transition_capture.is_some();
     let (environment_tx, environment_rx) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
-    let (initial_network, environment_overflow) =
-        start_environment_monitors(environment_tx, capture_enabled);
+    let Ok(environment) = start_environment_monitors(environment_tx, capture_enabled) else {
+        apply_capture(&mut transition_capture, |capture| {
+            capture.observe_monitor_failure()
+        });
+        apply_capture(&mut transition_capture, |capture| capture.finalize(false));
+        send_connection(
+            messages,
+            FeedConnectionState::Stopped,
+            "Rithmic Test requires native lifecycle monitoring",
+        );
+        wait_for_shutdown(commands);
+        return;
+    };
+    let EnvironmentMonitorHandles {
+        initial_network,
+        overflow: environment_overflow,
+        failures: monitor_failures,
+    } = environment;
     apply_capture(&mut transition_capture, |capture| {
         capture.observe_initial_network(initial_network)
     });
@@ -209,6 +255,7 @@ fn run(
     let mut transitions = TransitionCaptureContext {
         events: &environment_rx,
         overflow: &environment_overflow,
+        monitor_failures: &monitor_failures,
         capture: &mut transition_capture,
     };
     run_connected(
@@ -247,7 +294,14 @@ fn run_connected(
         );
     }
 
-    loop {
+    let exit_reason = loop {
+        if transitions.monitor_failures.swap(0, Ordering::AcqRel) != 0 {
+            apply_capture(transitions.capture, |capture| {
+                capture.observe_monitor_failure()
+            });
+            reset_live_state(&mut state);
+            break WorkerExitReason::EnvironmentMonitorFailed;
+        }
         let overflow_count = transitions.overflow.swap(0, Ordering::AcqRel);
         if overflow_count > 0 {
             apply_capture(transitions.capture, |capture| {
@@ -255,7 +309,7 @@ fn run_connected(
             });
         }
         if process_command(commands, &worker, events, messages, &mut state) {
-            break;
+            break WorkerExitReason::Shutdown;
         }
         drain_environment_events(
             transitions.events,
@@ -305,9 +359,9 @@ fn run_connected(
         });
         match wake_rx.recv_timeout(wait) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Disconnected) => break WorkerExitReason::Shutdown,
         }
-    }
+    };
     let stopped = worker.stop().is_ok();
     apply_capture(transitions.capture, |capture| capture.finalize(stopped));
     send_connection(
@@ -317,7 +371,9 @@ fn run_connected(
         } else {
             FeedConnectionState::Recovering
         },
-        if stopped {
+        if stopped && exit_reason == WorkerExitReason::EnvironmentMonitorFailed {
+            "Rithmic Test stopped because native lifecycle monitoring became unavailable"
+        } else if stopped {
             "Rithmic Test session stopped"
         } else {
             "Rithmic Test session stop was not confirmed"
@@ -357,69 +413,112 @@ fn apply_initial_network_state(
 fn start_environment_monitors(
     sender: mpsc::SyncSender<ObservedEnvironmentEvent>,
     fail_capture_on_overflow: bool,
-) -> (Option<NetworkEvent>, Arc<AtomicU64>) {
+) -> Result<EnvironmentMonitorHandles, EnvironmentMonitorFailure> {
+    let network = NativeNetworkMonitor::connect()
+        .map(|monitor| {
+            let current = monitor.current();
+            (monitor, current)
+        })
+        .map_err(|_| EnvironmentMonitorFailure::Network);
+    let power = NativePowerMonitor::connect().map_err(|_| EnvironmentMonitorFailure::Power);
+    let (network, power, initial_network) = require_environment_monitors(network, power)?;
     let source_ordinal = Arc::new(AtomicU64::new(0));
     let overflow = Arc::new(AtomicU64::new(0));
-    let initial_network = NativeNetworkMonitor::connect().ok().map(|mut monitor| {
-        let initial = monitor.current();
+    let monitor_failures = Arc::new(AtomicU8::new(0));
+    {
         let network_sender = sender.clone();
         let network_ordinal = Arc::clone(&source_ordinal);
         let network_overflow = Arc::clone(&overflow);
-        let _ = thread::Builder::new()
+        let network_failures = Arc::clone(&monitor_failures);
+        thread::Builder::new()
             .name("axiusflow-rithmic-network-monitor".to_string())
             .spawn(move || {
-                while let Ok(event) = monitor.next_event() {
-                    let source_ordinal = network_ordinal
-                        .fetch_add(1, Ordering::AcqRel)
-                        .saturating_add(1);
-                    let observed = ObservedEnvironmentEvent {
-                        source_ordinal,
-                        event: RithmicEnvironmentEvent::Network(event),
-                    };
-                    if fail_capture_on_overflow {
-                        match network_sender.try_send(observed) {
-                            Ok(()) => {}
-                            Err(mpsc::TrySendError::Full(_)) => {
-                                network_overflow.fetch_add(1, Ordering::AcqRel);
-                            }
-                            Err(mpsc::TrySendError::Disconnected(_)) => break,
-                        }
-                    } else if network_sender.send(observed).is_err() {
-                        break;
-                    }
-                }
-            });
-        initial
-    });
-    if let Ok(mut monitor) = NativePowerMonitor::connect() {
+                let mut monitor = network;
+                forward_environment_events(
+                    || monitor.next_event().map_err(|_| ()),
+                    RithmicEnvironmentEvent::Network,
+                    &EnvironmentForwarding {
+                        sender: &network_sender,
+                        source_ordinal: &network_ordinal,
+                        overflow: &network_overflow,
+                        fail_capture_on_overflow,
+                        monitor_failures: &network_failures,
+                        failure_flag: NETWORK_MONITOR_FAILED,
+                    },
+                );
+            })
+            .map_err(|_| EnvironmentMonitorFailure::Network)?;
+    }
+    {
         let power_ordinal = Arc::clone(&source_ordinal);
         let power_overflow = Arc::clone(&overflow);
-        let _ = thread::Builder::new()
+        let power_failures = Arc::clone(&monitor_failures);
+        thread::Builder::new()
             .name("axiusflow-rithmic-power-monitor".to_string())
             .spawn(move || {
-                while let Ok(event) = monitor.next_event() {
-                    let source_ordinal = power_ordinal
-                        .fetch_add(1, Ordering::AcqRel)
-                        .saturating_add(1);
-                    let observed = ObservedEnvironmentEvent {
-                        source_ordinal,
-                        event: RithmicEnvironmentEvent::Power(event),
-                    };
-                    if fail_capture_on_overflow {
-                        match sender.try_send(observed) {
-                            Ok(()) => {}
-                            Err(mpsc::TrySendError::Full(_)) => {
-                                power_overflow.fetch_add(1, Ordering::AcqRel);
-                            }
-                            Err(mpsc::TrySendError::Disconnected(_)) => break,
-                        }
-                    } else if sender.send(observed).is_err() {
-                        break;
-                    }
-                }
-            });
+                let mut monitor = power;
+                forward_environment_events(
+                    || monitor.next_event().map_err(|_| ()),
+                    RithmicEnvironmentEvent::Power,
+                    &EnvironmentForwarding {
+                        sender: &sender,
+                        source_ordinal: &power_ordinal,
+                        overflow: &power_overflow,
+                        fail_capture_on_overflow,
+                        monitor_failures: &power_failures,
+                        failure_flag: POWER_MONITOR_FAILED,
+                    },
+                );
+            })
+            .map_err(|_| EnvironmentMonitorFailure::Power)?;
     }
-    (initial_network, overflow)
+    Ok(EnvironmentMonitorHandles {
+        initial_network: Some(initial_network),
+        overflow,
+        failures: monitor_failures,
+    })
+}
+
+fn require_environment_monitors<N, P>(
+    network: Result<(N, NetworkEvent), EnvironmentMonitorFailure>,
+    power: Result<P, EnvironmentMonitorFailure>,
+) -> Result<(N, P, NetworkEvent), EnvironmentMonitorFailure> {
+    let (network, initial_network) = network?;
+    let power = power?;
+    Ok((network, power, initial_network))
+}
+
+fn forward_environment_events<E>(
+    mut next_event: impl FnMut() -> Result<E, ()>,
+    wrap: impl Fn(E) -> RithmicEnvironmentEvent,
+    forwarding: &EnvironmentForwarding<'_>,
+) {
+    loop {
+        let Ok(event) = next_event() else {
+            forwarding
+                .monitor_failures
+                .fetch_or(forwarding.failure_flag, Ordering::AcqRel);
+            break;
+        };
+        let observed = ObservedEnvironmentEvent {
+            source_ordinal: forwarding
+                .source_ordinal
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1),
+            event: wrap(event),
+        };
+        if forwarding.fail_capture_on_overflow {
+            match forwarding.sender.try_send(observed) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    forwarding.overflow.fetch_add(1, Ordering::AcqRel);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => break,
+            }
+        } else if forwarding.sender.send(observed).is_err() {
+            break;
+        }
+    }
 }
 
 fn drain_environment_events(
@@ -646,43 +745,19 @@ fn drain_events(
             if let axiusflow_rithmic_protocol_adapter::RithmicCatalogEvent::SelectionInstalled {
                 selection_generation,
                 instrument,
+                entitlement_id,
                 ..
             } = &callback.event
             {
-                if let Some(history) = state.history.as_mut() {
-                    history.cancel();
-                }
-                state.live_chart = None;
-                state.pending_live_request = None;
-                state.buffered_history_trades.clear();
-                state.history_trade_overflow = false;
-                state.selection_installed = true;
-                state.installed_instrument = Some(InstalledRithmicInstrument {
-                    selection_generation: *selection_generation,
-                    descriptor: instrument.clone(),
-                    entitlement_id: format!(
-                        "rithmic-test:{}:{}",
-                        instrument.venue_id, instrument.provider_symbol
-                    ),
-                });
-                if let Ok(precision) =
-                    InstrumentPrecision::try_new(instrument.price_scale, instrument.quantity_scale)
-                {
-                    state.dom.select(DomSelection {
-                        provider_id: "rithmic".to_string(),
-                        instrument_id: instrument.instrument_id.clone(),
-                        entitlement_id: format!(
-                            "rithmic-test:{}:{}",
-                            instrument.venue_id, instrument.provider_symbol
-                        ),
-                        session_generation: callback.generation.get(),
-                        selection_generation: u64::try_from(selection_generation.get())
-                            .unwrap_or(u64::MAX),
-                        precision,
-                    });
-                    if let Some(frame) = state.dom.frame() {
-                        let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-                    }
+                install_catalog_selection(
+                    state,
+                    callback.generation,
+                    *selection_generation,
+                    instrument,
+                    entitlement_id,
+                );
+                if let Some(frame) = state.dom.frame() {
+                    let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
                 }
             }
             let _ = messages.send(MarketWorkerMessage::RithmicCatalog(callback.event));
@@ -725,6 +800,40 @@ fn drain_events(
                 break;
             }
         }
+    }
+}
+
+fn install_catalog_selection(
+    state: &mut RithmicRuntimeState,
+    session_generation: axiusflow_desktop_provider_runtime::SessionGeneration,
+    selection_generation: NonZeroUsize,
+    instrument: &axiusflow_desktop_provider_runtime::InstrumentDescriptor,
+    entitlement_id: &str,
+) {
+    if let Some(history) = state.history.as_mut() {
+        history.cancel();
+    }
+    state.live_chart = None;
+    state.pending_live_request = None;
+    state.buffered_history_trades.clear();
+    state.history_trade_overflow = false;
+    state.selection_installed = true;
+    state.installed_instrument = Some(InstalledRithmicInstrument {
+        selection_generation,
+        descriptor: instrument.clone(),
+        entitlement_id: entitlement_id.to_string(),
+    });
+    if let Ok(precision) =
+        InstrumentPrecision::try_new(instrument.price_scale, instrument.quantity_scale)
+    {
+        state.dom.select(DomSelection {
+            provider_id: "rithmic".to_string(),
+            instrument_id: instrument.instrument_id.clone(),
+            entitlement_id: entitlement_id.to_string(),
+            session_generation: session_generation.get(),
+            selection_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
+            precision,
+        });
     }
 }
 
@@ -1144,7 +1253,9 @@ fn nonzero(value: usize) -> NonZeroUsize {
 mod tests {
     use super::*;
     use axiusflow_desktop_provider_runtime::{ProviderEnvironment, SessionGeneration};
-    use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
+    use axiusflow_market_data::{
+        AggressorSide, DepthLevel, DepthSnapshot, EventMetadata, MarketTrade, QualifiedTimestamp,
+    };
 
     fn generation() -> SessionGeneration {
         SessionGeneration::new(NonZeroU64::MIN)
@@ -1232,6 +1343,69 @@ mod tests {
     }
 
     #[test]
+    fn delayed_selection_uses_one_entitlement_for_history_and_depth() {
+        let entitlement_id = "rithmic-test:CME-Delayed:MNQU6";
+        let instrument = axiusflow_desktop_provider_runtime::InstrumentDescriptor {
+            instrument_id: "rithmic:CME:MNQU6".to_string(),
+            provider_symbol: "MNQU6".to_string(),
+            display_symbol: "MNQU6".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
+        };
+        let mut state = RithmicRuntimeState::new();
+        install_catalog_selection(
+            &mut state,
+            generation(),
+            nonzero(7),
+            &instrument,
+            entitlement_id,
+        );
+
+        let installed = state
+            .installed_instrument
+            .as_ref()
+            .expect("history identity is installed");
+        assert_eq!(installed.descriptor.venue_id, "CME");
+        assert_eq!(installed.entitlement_id, entitlement_id);
+        assert_eq!(
+            state
+                .dom
+                .selection()
+                .map(|selection| selection.entitlement_id.as_str()),
+            Some(entitlement_id)
+        );
+        let outcome = state
+            .dom
+            .apply_event(&MarketEvent::DepthSnapshot(DepthSnapshot {
+                metadata: EventMetadata {
+                    provider_id: "rithmic".to_string(),
+                    instrument_id: instrument.instrument_id,
+                    entitlement_id: entitlement_id.to_string(),
+                    source_sequence: 1,
+                    session_generation: generation().get(),
+                    timestamps: QualifiedTimestamp {
+                        exchange_unix_nanos: None,
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 1,
+                    },
+                },
+                bids: vec![DepthLevel {
+                    price: 2_000_000,
+                    quantity: 2,
+                    order_count: Some(1),
+                }],
+                asks: vec![DepthLevel {
+                    price: 2_000_025,
+                    quantity: 3,
+                    order_count: Some(1),
+                }],
+            }))
+            .expect("matching delayed-entitlement depth validates");
+        assert!(matches!(outcome, DomUpdateOutcome::Published(_)));
+    }
+
+    #[test]
     fn terminal_provider_failures_never_render_provider_text() {
         for reason in [
             ProviderInvalidationReason::Authentication,
@@ -1285,6 +1459,60 @@ mod tests {
         stopped_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("drop requests and acknowledges shutdown");
+    }
+
+    #[test]
+    fn native_lifecycle_startup_requires_both_monitors() {
+        assert_eq!(
+            require_environment_monitors::<(), ()>(Err(EnvironmentMonitorFailure::Network), Ok(())),
+            Err(EnvironmentMonitorFailure::Network)
+        );
+        assert_eq!(
+            require_environment_monitors::<(), ()>(
+                Ok(((), NetworkEvent::Available)),
+                Err(EnvironmentMonitorFailure::Power)
+            ),
+            Err(EnvironmentMonitorFailure::Power)
+        );
+        assert_eq!(
+            require_environment_monitors(Ok(((), NetworkEvent::Unavailable)), Ok(())),
+            Ok(((), (), NetworkEvent::Unavailable))
+        );
+    }
+
+    #[test]
+    fn monitor_stream_failure_is_latched_even_when_capture_inbox_is_full() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let source_ordinal = AtomicU64::new(0);
+        let overflow = AtomicU64::new(0);
+        let failures = AtomicU8::new(0);
+        let mut events = VecDeque::from([
+            Ok(NetworkEvent::Unavailable),
+            Ok(NetworkEvent::Available),
+            Err(()),
+        ]);
+        forward_environment_events(
+            || events.pop_front().unwrap_or(Err(())),
+            RithmicEnvironmentEvent::Network,
+            &EnvironmentForwarding {
+                sender: &sender,
+                source_ordinal: &source_ordinal,
+                overflow: &overflow,
+                fail_capture_on_overflow: true,
+                monitor_failures: &failures,
+                failure_flag: NETWORK_MONITOR_FAILED,
+            },
+        );
+
+        let retained = receiver.try_recv().expect("first event remains bounded");
+        assert_eq!(retained.source_ordinal, 1);
+        assert_eq!(
+            retained.event,
+            RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable)
+        );
+        assert_eq!(source_ordinal.load(Ordering::Acquire), 2);
+        assert_eq!(overflow.load(Ordering::Acquire), 1);
+        assert_eq!(failures.load(Ordering::Acquire), NETWORK_MONITOR_FAILED);
     }
 
     #[test]

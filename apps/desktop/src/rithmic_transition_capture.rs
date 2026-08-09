@@ -11,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -63,6 +63,68 @@ impl RithmicRuntimeStateEvidence {
             && self.buffered_history_trades == 0
             && !self.history_trade_overflow.is_true()
             && !self.depth_selection_installed.is_true()
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct OfflineStartupRecoveryEvidence {
+    restoration_callback_observed: EvidenceFlag,
+    restoration_source_ordinal: Option<u64>,
+    restoration_unix_milliseconds: Option<u128>,
+    fresh_generation: Option<u64>,
+    authentication_accepted: EvidenceFlag,
+    authentication_unix_milliseconds: Option<u128>,
+    runtime_rehydrated: EvidenceFlag,
+    rehydrated_unix_milliseconds: Option<u128>,
+    restored_runtime_state: Option<RithmicRuntimeStateEvidence>,
+    completed: EvidenceFlag,
+}
+
+impl OfflineStartupRecoveryEvidence {
+    fn observe_restoration(&mut self, source_ordinal: u64, fresh_generation: Option<u64>) {
+        *self = Self {
+            restoration_callback_observed: true.into(),
+            restoration_source_ordinal: Some(source_ordinal),
+            restoration_unix_milliseconds: Some(unix_milliseconds()),
+            fresh_generation,
+            ..Self::default()
+        };
+    }
+
+    fn observe_authentication(&mut self, generation: u64) -> bool {
+        if self.fresh_generation != Some(generation) || self.authentication_accepted.is_true() {
+            return false;
+        }
+        self.authentication_accepted = true.into();
+        self.authentication_unix_milliseconds = Some(unix_milliseconds());
+        self.recompute();
+        true
+    }
+
+    fn observe_runtime(
+        &mut self,
+        generation: Option<u64>,
+        state: &RithmicRuntimeStateEvidence,
+    ) -> bool {
+        if self.fresh_generation != generation
+            || self.runtime_rehydrated.is_true()
+            || !state.is_ready()
+        {
+            return false;
+        }
+        self.runtime_rehydrated = true.into();
+        self.rehydrated_unix_milliseconds = Some(unix_milliseconds());
+        self.restored_runtime_state = Some(state.clone());
+        self.recompute();
+        true
+    }
+
+    fn recompute(&mut self) {
+        self.completed = (self.restoration_callback_observed.is_true()
+            && self.fresh_generation.is_some()
+            && self.authentication_accepted.is_true()
+            && self.runtime_rehydrated.is_true())
+        .into();
     }
 }
 
@@ -205,8 +267,10 @@ struct NativeTransitionReport {
     transitions_triggered_by_capture: EvidenceFlag,
     initial_network_state: &'static str,
     offline_startup_observed: EvidenceFlag,
+    offline_startup_recovery: OfflineStartupRecoveryEvidence,
     observer_overflow: EvidenceFlag,
     observer_overflow_count: u64,
+    monitor_failures: u64,
     callbacks_received: u64,
     callbacks_applied: u64,
     callback_application_failures: u64,
@@ -216,6 +280,48 @@ struct NativeTransitionReport {
     worker_clean_stop: EvidenceFlag,
     finalized: EvidenceFlag,
     readiness_qualified: EvidenceFlag,
+}
+
+fn physical_sequence_is_contiguous(report: &NativeTransitionReport) -> bool {
+    let startup = &report.offline_startup_recovery;
+    let network = &report.network_offline;
+    let power = &report.suspend_resume;
+    let Some((startup_restoration_ordinal, network_loss_ordinal, network_restoration_ordinal)) =
+        startup
+            .restoration_source_ordinal
+            .zip(network.loss_source_ordinal)
+            .zip(network.restoration_source_ordinal)
+            .map(|((startup, loss), restoration)| (startup, loss, restoration))
+    else {
+        return false;
+    };
+    let Some((suspend_ordinal, resume_ordinal)) = power
+        .loss_source_ordinal
+        .zip(power.restoration_source_ordinal)
+    else {
+        return false;
+    };
+    let ordinals_are_ordered = startup_restoration_ordinal < network_loss_ordinal
+        && network_loss_ordinal < network_restoration_ordinal
+        && network_restoration_ordinal < suspend_ordinal
+        && suspend_ordinal < resume_ordinal;
+    let generations_are_contiguous = startup.fresh_generation == network.retired_generation
+        && network.fresh_generation == power.retired_generation;
+    let Some((startup_rehydrated, network_loss, network_rehydrated, suspend_loss)) = startup
+        .rehydrated_unix_milliseconds
+        .zip(network.loss_unix_milliseconds)
+        .zip(network.rehydrated_unix_milliseconds)
+        .zip(power.loss_unix_milliseconds)
+        .map(|(((startup, network_loss), network_ready), suspend)| {
+            (startup, network_loss, network_ready, suspend)
+        })
+    else {
+        return false;
+    };
+    ordinals_are_ordered
+        && generations_are_contiguous
+        && startup_rehydrated <= network_loss
+        && network_rehydrated <= suspend_loss
 }
 
 #[derive(Deserialize)]
@@ -279,8 +385,10 @@ impl NativeTransitionCapture {
                 transitions_triggered_by_capture: false.into(),
                 initial_network_state: "unknown",
                 offline_startup_observed: false.into(),
+                offline_startup_recovery: OfflineStartupRecoveryEvidence::default(),
                 observer_overflow: false.into(),
                 observer_overflow_count: 0,
+                monitor_failures: 0,
                 callbacks_received: 0,
                 callbacks_applied: 0,
                 callback_application_failures: 0,
@@ -340,6 +448,15 @@ impl NativeTransitionCapture {
                     evidence.after,
                 );
             }
+            RithmicEnvironmentEvent::Network(NetworkEvent::Available)
+                if self.report.offline_startup_observed.is_true()
+                    && !self.report.offline_startup_recovery.completed.is_true()
+                    && !self.report.network_offline.loss_callback_observed.is_true() =>
+            {
+                self.report
+                    .offline_startup_recovery
+                    .observe_restoration(evidence.source_ordinal, evidence.fresh_generation);
+            }
             RithmicEnvironmentEvent::Network(NetworkEvent::Available) => self
                 .report
                 .network_offline
@@ -378,6 +495,11 @@ impl NativeTransitionCapture {
         self.recompute_and_checkpoint()
     }
 
+    pub(crate) fn observe_monitor_failure(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.report.monitor_failures = self.report.monitor_failures.saturating_add(1);
+        self.recompute_and_checkpoint()
+    }
+
     pub(crate) fn observe_overflow(
         &mut self,
         count: u64,
@@ -411,8 +533,12 @@ impl NativeTransitionCapture {
         let generation = generation.get();
         let changed = self
             .report
-            .network_offline
+            .offline_startup_recovery
             .observe_authentication(generation)
+            | self
+                .report
+                .network_offline
+                .observe_authentication(generation)
             | self
                 .report
                 .suspend_resume
@@ -430,8 +556,12 @@ impl NativeTransitionCapture {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let changed = self
             .report
-            .network_offline
+            .offline_startup_recovery
             .observe_runtime(generation, state)
+            | self
+                .report
+                .network_offline
+                .observe_runtime(generation, state)
             | self
                 .report
                 .suspend_resume
@@ -446,9 +576,12 @@ impl NativeTransitionCapture {
     fn recompute_and_checkpoint(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.report.scenario_requirements_met = (self.report.callback_application_failures == 0
             && !self.report.observer_overflow.is_true()
+            && self.report.monitor_failures == 0
             && self.report.offline_startup_observed.is_true()
+            && self.report.offline_startup_recovery.completed.is_true()
             && self.report.network_offline.completed.is_true()
-            && self.report.suspend_resume.completed.is_true())
+            && self.report.suspend_resume.completed.is_true()
+            && physical_sequence_is_contiguous(&self.report))
         .into();
         self.report.readiness_qualified = (self.report.scenario_requirements_met.is_true()
             && self.report.finalized.is_true()
@@ -656,21 +789,32 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn injected_physical_sequences_complete_only_after_fresh_rehydration() {
-        let report_path = std::env::temp_dir().join(format!(
-            "axiusflow-native-transitions-{}-{}.json",
-            std::process::id(),
-            super::unix_milliseconds()
-        ));
-        let mut capture = start_capture(&report_path);
+    fn recover_offline_startup(capture: &mut NativeTransitionCapture) {
         capture
             .observe_initial_network(Some(NetworkEvent::Unavailable))
             .expect("physical offline startup checkpoints");
         capture
             .observe_environment_applied(AppliedEnvironmentEvidence {
-                event: RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
+                event: RithmicEnvironmentEvent::Network(NetworkEvent::Available),
                 source_ordinal: 1,
+                retired_generation: None,
+                fresh_generation: Some(1),
+                session_stop_confirmed: false,
+                before: cleared(),
+                after: cleared(),
+            })
+            .expect("offline startup restoration checkpoints");
+        authenticate(capture, 1).expect("startup authentication checkpoint succeeds");
+        capture
+            .observe_runtime(Some(1), &ready())
+            .expect("startup rehydration checkpoint succeeds");
+    }
+
+    fn recover_physical_network_loss(capture: &mut NativeTransitionCapture) {
+        capture
+            .observe_environment_applied(AppliedEnvironmentEvidence {
+                event: RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
+                source_ordinal: 2,
                 retired_generation: Some(1),
                 fresh_generation: None,
                 session_stop_confirmed: true,
@@ -681,7 +825,7 @@ mod tests {
         capture
             .observe_environment_applied(AppliedEnvironmentEvidence {
                 event: RithmicEnvironmentEvent::Network(NetworkEvent::Available),
-                source_ordinal: 2,
+                source_ordinal: 3,
                 retired_generation: None,
                 fresh_generation: Some(2),
                 session_stop_confirmed: false,
@@ -689,21 +833,17 @@ mod tests {
                 after: cleared(),
             })
             .expect("network restoration checkpoint succeeds");
-        authenticate(&mut capture, 2).expect("network authentication checkpoint succeeds");
+        authenticate(capture, 2).expect("network authentication checkpoint succeeds");
         capture
             .observe_runtime(Some(2), &ready())
             .expect("network rehydration checkpoint succeeds");
-        let halfway: serde_json::Value =
-            serde_json::from_slice(&fs::read(&report_path).expect("halfway report is readable"))
-                .expect("halfway report is JSON");
-        assert_eq!(halfway["completion_state"], "incomplete");
-        assert_eq!(halfway["network_offline"]["completed"], true);
-        assert_eq!(halfway["suspend_resume"]["completed"], false);
+    }
 
+    fn recover_physical_suspend(capture: &mut NativeTransitionCapture) {
         capture
             .observe_environment_applied(AppliedEnvironmentEvidence {
                 event: RithmicEnvironmentEvent::Power(PowerEvent::Suspending),
-                source_ordinal: 3,
+                source_ordinal: 4,
                 retired_generation: Some(2),
                 fresh_generation: None,
                 session_stop_confirmed: true,
@@ -714,7 +854,7 @@ mod tests {
         capture
             .observe_environment_applied(AppliedEnvironmentEvidence {
                 event: RithmicEnvironmentEvent::Power(PowerEvent::Resumed),
-                source_ordinal: 4,
+                source_ordinal: 5,
                 retired_generation: None,
                 fresh_generation: Some(3),
                 session_stop_confirmed: false,
@@ -722,10 +862,30 @@ mod tests {
                 after: cleared(),
             })
             .expect("resume checkpoint succeeds");
-        authenticate(&mut capture, 3).expect("resume authentication checkpoint succeeds");
+        authenticate(capture, 3).expect("resume authentication checkpoint succeeds");
         capture
             .observe_runtime(Some(3), &ready())
             .expect("resume rehydration checkpoint succeeds");
+    }
+
+    #[test]
+    fn injected_physical_sequences_complete_only_after_fresh_rehydration() {
+        let report_path = std::env::temp_dir().join(format!(
+            "axiusflow-native-transitions-{}-{}.json",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        let mut capture = start_capture(&report_path);
+        recover_offline_startup(&mut capture);
+        recover_physical_network_loss(&mut capture);
+        let halfway: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report_path).expect("halfway report is readable"))
+                .expect("halfway report is JSON");
+        assert_eq!(halfway["completion_state"], "incomplete");
+        assert_eq!(halfway["network_offline"]["completed"], true);
+        assert_eq!(halfway["suspend_resume"]["completed"], false);
+
+        recover_physical_suspend(&mut capture);
         capture.finalize(true).expect("clean worker stop finalizes");
         let completed: serde_json::Value =
             serde_json::from_slice(&fs::read(&report_path).expect("completed report is readable"))
@@ -734,6 +894,7 @@ mod tests {
         assert_eq!(completed["readiness_qualified"], true);
         assert_eq!(completed["initial_network_state"], "unavailable");
         assert_eq!(completed["offline_startup_observed"], true);
+        assert_eq!(completed["offline_startup_recovery"]["fresh_generation"], 1);
         assert_eq!(completed["transitions_triggered_by_capture"], false);
         assert_eq!(completed["credentials_embedded"], false);
         assert_eq!(completed["network_offline"]["retired_generation"], 1);
@@ -749,6 +910,18 @@ mod tests {
         );
         let encoded = serde_json::to_string(&completed).expect("completed report serializes");
         assert!(!encoded.to_ascii_lowercase().contains("password"));
+
+        capture.report.suspend_resume.retired_generation = Some(99);
+        capture
+            .recompute_and_checkpoint()
+            .expect("generation discontinuity checkpoints");
+        assert!(!capture.report.scenario_requirements_met.is_true());
+        capture.report.suspend_resume.retired_generation = Some(2);
+        capture.report.suspend_resume.loss_source_ordinal = Some(3);
+        capture
+            .recompute_and_checkpoint()
+            .expect("overlapping physical sequence checkpoints");
+        assert!(!capture.report.scenario_requirements_met.is_true());
         cleanup(&report_path);
     }
 
@@ -780,6 +953,29 @@ mod tests {
         assert_eq!(report["offline_startup_observed"], false);
         assert_eq!(report["scenario_requirements_met"], false);
         assert_eq!(report["completion_state"], "incomplete");
+        assert_eq!(report["readiness_qualified"], false);
+        cleanup(&report_path);
+    }
+
+    #[test]
+    fn native_monitor_failure_permanently_disqualifies_capture() {
+        let report_path = std::env::temp_dir().join(format!(
+            "axiusflow-native-monitor-failure-{}-{}.json",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        let mut capture = start_capture(&report_path);
+        capture
+            .observe_monitor_failure()
+            .expect("monitor failure checkpoints");
+        capture
+            .finalize(false)
+            .expect("failed monitor capture finalizes incompletely");
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report_path).expect("report is readable"))
+                .expect("report is JSON");
+        assert_eq!(report["monitor_failures"], 1);
+        assert_eq!(report["scenario_requirements_met"], false);
         assert_eq!(report["readiness_qualified"], false);
         cleanup(&report_path);
     }

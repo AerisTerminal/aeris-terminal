@@ -245,6 +245,35 @@ impl ProviderFeedDiagnostics {
         Ok(())
     }
 
+    /// Records one generation-fenced production market callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, stale, non-streaming, or regressed evidence.
+    pub fn record_runtime_market_event(
+        &mut self,
+        generation: SessionGeneration,
+        event: &MarketEvent,
+        message_timestamp_unix_nanos: Option<i64>,
+        monotonic_nanos: u64,
+    ) -> Result<(), ProviderFeedDiagnosticsError> {
+        self.accept_monotonic_observation(monotonic_nanos)?;
+        self.require_streaming_generation(generation)?;
+        self.diagnostics
+            .record_message(monotonic_nanos, message_timestamp_unix_nanos);
+        match event {
+            MarketEvent::Trade(_) => self.diagnostics.increment(FeedCounter::Trades),
+            MarketEvent::Quote(_) => self.diagnostics.increment(FeedCounter::Quotes),
+            MarketEvent::DepthSnapshot(_) => {
+                self.diagnostics.increment(FeedCounter::DepthSnapshots);
+                self.diagnostics
+                    .set_order_book_state(OrderBookDiagnosticsState::Ready);
+            }
+            MarketEvent::DepthDelta(_) => self.diagnostics.increment(FeedCounter::DepthDeltas),
+        }
+        Ok(())
+    }
+
     /// Records one live production heartbeat.
     ///
     /// # Errors

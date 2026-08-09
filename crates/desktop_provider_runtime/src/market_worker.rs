@@ -11,6 +11,7 @@ use axiusflow_desktop_history::{
 use axiusflow_desktop_storage::{
     CatalogKey, HistorySeriesIdentity, PublicationRequest, SegmentEncryptionKey, SegmentIdentity,
 };
+use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::{
     DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
 };
@@ -336,6 +337,22 @@ where
     ) -> Result<(), DesktopMarketWorkerError> {
         self.provider
             .record_trade_diagnostics(generation, provider_timestamp_unix_nanos)
+            .map_err(Into::into)
+    }
+
+    /// Records one market callback in generation-fenced production diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale generation, wrong-thread, or diagnostics failure.
+    pub fn record_market_event_diagnostics(
+        &mut self,
+        generation: SessionGeneration,
+        event: &MarketEvent,
+        message_timestamp_unix_nanos: Option<i64>,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.provider
+            .record_market_event_diagnostics(generation, event, message_timestamp_unix_nanos)
             .map_err(Into::into)
     }
 
