@@ -8,8 +8,10 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_local_engine_protocol = { path = "../../crates/local_engine_protocol" }
+axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
 getrandom.workspace = true
 interprocess.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

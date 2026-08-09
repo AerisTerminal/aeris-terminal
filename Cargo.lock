@@ -841,8 +841,10 @@ name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
  "axiusflow_local_engine_protocol",
+ "axiusflow_platform_runtime",
  "getrandom 0.4.3",
  "interprocess",
+ "zeroize",
 ]
 
 [[package]]
