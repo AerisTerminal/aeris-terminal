@@ -9,7 +9,6 @@
 
 use crate::market_worker::FixtureMarketWorker;
 use axiusflow_chart_integration::OriginChartView;
-use axiusflow_design_system::AxiusflowTheme;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
 use axiusflow_platform_runtime::{WindowsCompositionProbe, WindowsCompositionTiming};
@@ -541,9 +540,7 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                 ..Default::default()
             },
             move |window, cx| {
-                let theme = AxiusflowTheme::dark();
-                let chart =
-                    cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
                 #[cfg(target_os = "windows")]
                 let (composition_probe, initial_composition_flush_succeeded, composition_samples) =
                     match WindowsCompositionProbe::new() {

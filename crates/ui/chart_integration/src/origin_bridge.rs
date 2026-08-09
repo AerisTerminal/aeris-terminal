@@ -1,48 +1,12 @@
-//! Origin engine installation, theming, and fixed-point conversion helpers.
+//! Origin engine installation and fixed-point conversion helpers.
 
 use crate::bridge::MergedChartData;
 use axiusflow_application::{ProvenancedMarketBar, ReplaySnapshot};
-use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
 use num_traits::ToPrimitive;
 use origin_engine::{ChartEngine, SeriesKind};
 use std::num::NonZeroUsize;
 
 const DEFAULT_CHART_DATA_QUEUE_CAPACITY: usize = 64;
-
-pub(crate) fn apply_theme(engine: &mut ChartEngine, theme: &AxiusflowTheme) {
-    let background = css_color(theme.colors.background);
-    let axis_text = css_color(theme.colors.chart_axis_text);
-    let border = css_color(theme.colors.border);
-    let options = format!(
-        r#"{{
-  "layout":{{"background":{{"type":"solid","color":"{background}"}},"textColor":"{axis_text}","panes":{{"separatorColor":"{border}"}}}},
-  "leftPriceScale":{{"borderColor":"{border}"}},"rightPriceScale":{{"borderColor":"{border}"}},
-  "timeScale":{{"borderColor":"{border}"}},
-  "grid":{{"vertLines":{{"color":"{border}"}},"horzLines":{{"color":"{border}"}}}}
-}}"#
-    );
-    engine
-        .options
-        .apply_str(&options)
-        .expect("generated Axiusflow Origin theme options are valid");
-}
-
-pub(crate) fn apply_series_theme(engine: &mut ChartEngine, theme: &AxiusflowTheme) {
-    let series = &mut engine.series[0];
-    let candle_up = css_color(theme.colors.chart_candle_up);
-    let candle_down = css_color(theme.colors.chart_candle_down);
-    series.line_color = Some(css_color(theme.colors.chart_palette[0]));
-    series.up_color = Some(candle_up.clone());
-    series.down_color = Some(candle_down.clone());
-    series.wick_up_color = Some(candle_up.clone());
-    series.wick_down_color = Some(candle_down.clone());
-    series.border_up_color = Some(candle_up);
-    series.border_down_color = Some(candle_down);
-}
-
-pub(crate) fn css_color(color: ThemeColor) -> String {
-    color.css_value()
-}
 
 pub(crate) fn chart_data_queue_capacity() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_CHART_DATA_QUEUE_CAPACITY).unwrap_or(NonZeroUsize::MIN)

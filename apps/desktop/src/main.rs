@@ -531,7 +531,7 @@ impl TerminalApp {
                 let profile = shell.profile_label();
                 let connection = shell.connection();
                 let message = shell.message().to_string();
-                let chart = cx.new(move |_| OriginChartView::empty(theme));
+                let chart = cx.new(move |_| OriginChartView::empty());
                 (
                     Some(chart),
                     ChartState::Loading,
@@ -564,8 +564,7 @@ impl TerminalApp {
                     &bootstrap.generation,
                 );
                 let snapshot = bootstrap.snapshot;
-                let chart =
-                    cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
                 (
                     Some(chart),
                     ChartState::Ready,
@@ -631,9 +630,7 @@ impl TerminalApp {
         );
         let (next_state, accepted) = match (&self.chart, publication.update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
-                let theme = self.theme;
-                let chart =
-                    cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot));
+                let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
                 (ChartState::Ready, true)
@@ -770,8 +767,7 @@ impl TerminalApp {
     }
 
     fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
-        let theme = self.theme;
-        self.chart = Some(cx.new(move |_| OriginChartView::empty(theme)));
+        self.chart = Some(cx.new(move |_| OriginChartView::empty()));
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
@@ -936,12 +932,6 @@ impl TerminalApp {
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let theme = self.theme.toggled();
         sync_component_theme(&theme, Some(window), cx);
-        if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, chart_cx| {
-                chart.set_theme(theme);
-                chart_cx.notify();
-            });
-        }
         self.dom.update(cx, |dom, dom_cx| {
             dom.set_theme(theme, dom_cx);
         });
@@ -1253,9 +1243,7 @@ impl TerminalApp {
             &bootstrap.generation,
         );
         let snapshot = bootstrap.snapshot;
-        let theme = self.theme;
-        self.chart =
-            Some(cx.new(move |_| OriginChartView::with_theme_and_replay(theme, &snapshot)));
+        self.chart = Some(cx.new(move |_| OriginChartView::with_replay(&snapshot)));
         self.worker_label = bootstrap.worker_label;
         self.subscription_id = bootstrap.subscription_id;
         self.replay_label = replay_label;

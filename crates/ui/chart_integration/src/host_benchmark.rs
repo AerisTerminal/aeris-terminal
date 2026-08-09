@@ -123,7 +123,7 @@ pub fn run_origin_gpui_host_sample(
         .saturating_add(axis_prims.len());
 
     let host_started = Instant::now();
-    let prepared = PreparedOriginFrame::new(&frame).with_axis(&axis_prims, &[]);
+    let prepared = PreparedOriginFrame::from_engine(&frame, &engine).with_axis(&axis_prims, &[]);
     let mut renderer = GpuiChartRenderer::new();
     let metrics = renderer
         .plan_frame(&prepared, SCALE_FACTOR)

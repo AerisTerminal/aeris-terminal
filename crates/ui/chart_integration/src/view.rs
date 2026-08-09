@@ -2,19 +2,17 @@
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge, ReplayRecoveryCommand};
 use crate::origin_bridge::{
-    apply_merged_chart_data, apply_series_theme, apply_theme, chart_data_queue_capacity,
-    install_replay, replay_price_divisor,
+    apply_merged_chart_data, chart_data_queue_capacity, install_replay, replay_price_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError, UseCase,
 };
-use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
-    prelude::*, px, rgb,
+    prelude::*, px,
 };
 use num_traits::ToPrimitive;
 use origin_engine::{
@@ -167,7 +165,6 @@ pub struct OriginChartView {
     price_divisor: f64,
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
-    theme: AxiusflowTheme,
     built_for: (f32, f32, f32),
     fitted: bool,
     viewport_origin: (f32, f32),
@@ -179,15 +176,13 @@ pub struct OriginChartView {
 }
 
 impl OriginChartView {
-    /// Creates an empty themed Origin surface without inventing market data.
+    /// Creates an empty Origin-owned surface without inventing market data.
     #[must_use]
-    pub fn empty(theme: AxiusflowTheme) -> Self {
+    pub fn empty() -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
-        apply_theme(&mut engine, &theme);
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(retention_applied);
-        apply_series_theme(&mut engine, &theme);
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
@@ -196,7 +191,6 @@ impl OriginChartView {
             price_divisor: 1.0,
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
-            theme,
             built_for: (0.0, 0.0, 0.0),
             fitted: false,
             viewport_origin: (0.0, 0.0),
@@ -208,24 +202,18 @@ impl OriginChartView {
         }
     }
 
-    /// Creates a chart from the bounded embedded replay and default theme.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::with_theme(AxiusflowTheme::default())
-    }
-
-    /// Creates a chart from the bounded embedded replay and a resolved theme.
+    /// Creates a chart from the bounded embedded replay using Origin's own styling.
     ///
     /// # Panics
     ///
     /// Panics only if the application-owned embedded fixture violates its own
     /// validation contract.
     #[must_use]
-    pub fn with_theme(theme: AxiusflowTheme) -> Self {
+    pub fn new() -> Self {
         let replay = EmbeddedReplaySource
             .execute(LoadEmbeddedReplay { bar_count: 600 })
             .expect("the embedded replay is validated application data");
-        Self::with_theme_and_replay(theme, &replay)
+        Self::with_replay(&replay)
     }
 
     /// Creates a chart from one validated application replay snapshot.
@@ -234,14 +222,12 @@ impl OriginChartView {
     ///
     /// Panics only if the validated snapshot cannot establish resumable sequence state.
     #[must_use]
-    pub fn with_theme_and_replay(theme: AxiusflowTheme, replay: &ReplaySnapshot) -> Self {
+    pub fn with_replay(replay: &ReplaySnapshot) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
-        apply_theme(&mut engine, &theme);
         install_replay(&mut engine, replay);
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(retention_applied);
-        apply_series_theme(&mut engine, &theme);
         let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay)
             .expect("a validated replay snapshot establishes chart sequence state");
 
@@ -253,7 +239,6 @@ impl OriginChartView {
             price_divisor: replay_price_divisor(replay),
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
-            theme,
             built_for: (0.0, 0.0, 0.0),
             fitted: false,
             viewport_origin: (0.0, 0.0),
@@ -601,18 +586,6 @@ impl OriginChartView {
     #[must_use]
     pub fn latest_market_provenance(&self) -> Option<&MarketEventProvenance> {
         self.displayed_provenance.latest()
-    }
-
-    /// Applies a complete theme revision to Origin before the next frame.
-    pub fn set_theme(&mut self, theme: AxiusflowTheme) {
-        if self.theme == theme {
-            return;
-        }
-        apply_theme(&mut self.engine, &theme);
-        apply_series_theme(&mut self.engine, &theme);
-        self.theme = theme;
-        self.renderer.invalidate_caches();
-        self.built_for = (0.0, 0.0, 0.0);
     }
 
     fn apply_pending_data(&mut self) {
@@ -1067,7 +1040,8 @@ impl OriginChartView {
             bounds.size.width.into(),
             bounds.size.height.into(),
         );
-        let prepared = PreparedOriginFrame::new(&self.frame).with_axis(&self.axis_prims, &[]);
+        let prepared = PreparedOriginFrame::from_engine(&self.frame, &self.engine)
+            .with_axis(&self.axis_prims, &[]);
         if let Err(error) =
             self.renderer
                 .paint_frame(&prepared, viewport, window.scale_factor(), window, cx)
@@ -1096,7 +1070,6 @@ impl Render for OriginChartView {
         div()
             .id("origin_chart_surface")
             .size_full()
-            .bg(rgb(self.theme.colors.background.rgb_u32()))
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
             .key_context("OriginChart")
@@ -1140,7 +1113,7 @@ mod tests {
     use super::*;
 
     fn interactive_chart() -> OriginChartView {
-        let mut chart = OriginChartView::with_theme(AxiusflowTheme::dark());
+        let mut chart = OriginChartView::new();
         chart.engine.recompute_layout_with_measure(true, |_| 48.0);
         chart.engine.fit_content();
         chart.engine.recompute_layout_with_measure(true, |_| 48.0);
@@ -1150,7 +1123,7 @@ mod tests {
 
     #[test]
     fn empty_chart_surface_accepts_its_first_real_snapshot() {
-        let mut chart = OriginChartView::empty(AxiusflowTheme::dark());
+        let mut chart = OriginChartView::empty();
         assert!(!chart.has_market_data());
         assert_eq!(chart.queued_replay_update_count(), 0);
         assert_eq!(chart.expected_replay_sequence(), None);
@@ -1167,6 +1140,22 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[test]
+    fn platform_leaves_surface_and_market_styling_owned_by_origin() {
+        let chart = OriginChartView::empty();
+        let origin_default = ChartEngine::new(1024.0, 640.0, 1.0);
+        let series = &chart.engine.series[0];
+
+        assert_eq!(chart.engine.options.get(), origin_default.options.get());
+        assert!(series.line_color.is_none());
+        assert!(series.up_color.is_none());
+        assert!(series.down_color.is_none());
+        assert!(series.wick_up_color.is_none());
+        assert!(series.wick_down_color.is_none());
+        assert!(series.border_up_color.is_none());
+        assert!(series.border_down_color.is_none());
     }
 
     #[test]
@@ -1311,7 +1300,7 @@ mod tests {
 
     #[test]
     fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
-        let mut chart = OriginChartView::empty(AxiusflowTheme::dark());
+        let mut chart = OriginChartView::empty();
         let initial_series = chart.engine.series.len();
 
         for indicator in ChartIndicator::ALL {

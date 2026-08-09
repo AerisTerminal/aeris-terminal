@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../../application" }
-axiusflow_design_system = { path = "../design_system" }
 axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_protocols = { path = "../../protocols" }
 axiusflow_terminal_ui = { path = "../terminal_ui" }
