@@ -9,7 +9,7 @@ use axiusflow_desktop_storage::{
     SegmentIdentity,
 };
 use axiusflow_provider_history::{
-    HandoffCoordinator, LiveAcceptance, SequencedHistory, VerifiedHistorySnapshot,
+    CoverageSnapshot, HandoffCoordinator, LiveAcceptance, SequencedHistory, VerifiedHistorySnapshot,
 };
 use std::{
     collections::BTreeMap,
@@ -165,6 +165,21 @@ impl<T: Clone> HistoryWorker<T> {
         self.ensure_owner()?;
         self.store
             .latest_identity(series, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
+    /// Returns normalized durable coverage facts for one exact series revision.
+    ///
+    /// # Errors
+    /// Returns an error for wrong-thread access, invalid dimensions, or catalog failure.
+    pub fn coverage_snapshot(
+        &self,
+        series: HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<CoverageSnapshot, DesktopHistoryError> {
+        self.ensure_owner()?;
+        self.store
+            .series_coverage_snapshot(series, now_unix_seconds)
             .map_err(Into::into)
     }
 

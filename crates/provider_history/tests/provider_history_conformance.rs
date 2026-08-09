@@ -1,8 +1,8 @@
 use axiusflow_provider_history::{
-    CancelOutcome, Continuation, DataClass, DatasetCapability, FetchFailureOutcome,
-    HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
-    HistoryScheduler, PaginationStyle, ProviderHistoryError, RateLimit, RequestInterest,
-    RequestPriority, SchedulerConfig,
+    CancelOutcome, Continuation, CoverageClass, CoverageSnapshot, DataClass, DatasetCapability,
+    FetchFailureOutcome, HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest,
+    HistoryRange, HistoryScheduler, PaginationStyle, ProviderHistoryError, RateLimit,
+    RequestInterest, RequestPriority, SchedulerConfig,
 };
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
@@ -95,6 +95,125 @@ fn item(sequence: u64, event_time: i64) -> HistoryItem {
         event_time_unix_nanos: event_time,
         payload: vec![u8::try_from(sequence).unwrap_or(u8::MAX)],
     }
+}
+
+#[test]
+fn coverage_plan_classifies_every_span_and_repairs_only_unusable_ranges() {
+    let snapshot = CoverageSnapshot::try_new(
+        vec![HistoryRange {
+            start_unix_nanos: 100,
+            end_unix_nanos: 200,
+        }],
+        vec![HistoryRange {
+            start_unix_nanos: 200,
+            end_unix_nanos: 250,
+        }],
+        vec![HistoryRange {
+            start_unix_nanos: 250,
+            end_unix_nanos: 300,
+        }],
+        vec![HistoryRange {
+            start_unix_nanos: 300,
+            end_unix_nanos: 350,
+        }],
+    )
+    .expect("coverage facts validate");
+    let plan = snapshot
+        .plan(HistoryRange {
+            start_unix_nanos: 50,
+            end_unix_nanos: 400,
+        })
+        .expect("requested coverage validates");
+    assert_eq!(plan.classification(), CoverageClass::Partial);
+    assert_eq!(
+        plan.spans()
+            .iter()
+            .map(|span| span.class)
+            .collect::<Vec<_>>(),
+        vec![
+            CoverageClass::Missing,
+            CoverageClass::Complete,
+            CoverageClass::ConfirmedEmpty,
+            CoverageClass::Invalidated,
+            CoverageClass::Quarantined,
+            CoverageClass::Missing,
+        ]
+    );
+    assert_eq!(
+        plan.repair_ranges(),
+        &[
+            HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 100,
+            },
+            HistoryRange {
+                start_unix_nanos: 250,
+                end_unix_nanos: 400,
+            },
+        ]
+    );
+}
+
+#[test]
+fn coverage_repairs_dispatch_visible_gaps_first_and_deduplicate_interests() {
+    let snapshot = CoverageSnapshot::try_new(
+        vec![HistoryRange {
+            start_unix_nanos: 9_200,
+            end_unix_nanos: 9_400,
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("coverage facts validate");
+    let requested = HistoryRange {
+        start_unix_nanos: 9_000,
+        end_unix_nanos: 9_900,
+    };
+    let plan = snapshot.plan(requested).expect("coverage plan");
+    let base = request("btc-usd", requested);
+    let mut scheduler = make_scheduler(PaginationStyle::None, 2, 2, 8, 0);
+    let submitted = scheduler
+        .submit_coverage_repairs(
+            &base,
+            &plan,
+            HistoryRange {
+                start_unix_nanos: 9_500,
+                end_unix_nanos: 9_600,
+            },
+            interest(1),
+            NOW,
+        )
+        .expect("repair work queues");
+    assert_eq!(submitted.queued_new, 2);
+    assert_eq!(submitted.adjacent_prefetches, 1);
+    let first = scheduler
+        .dispatch_next(NOW, MONOTONIC_NOW)
+        .expect("dispatch succeeds")
+        .dispatch
+        .expect("visible repair dispatches");
+    assert_eq!(first.priority, RequestPriority::Visible);
+    assert_eq!(
+        first.request.range,
+        HistoryRange {
+            start_unix_nanos: 9_400,
+            end_unix_nanos: 9_900,
+        }
+    );
+    let duplicate = scheduler
+        .submit_coverage_repairs(
+            &base,
+            &plan,
+            HistoryRange {
+                start_unix_nanos: 9_500,
+                end_unix_nanos: 9_600,
+            },
+            interest(2),
+            NOW,
+        )
+        .expect("second interest shares repair work");
+    assert_eq!(duplicate.queued_new, 0);
+    assert_eq!(duplicate.deduplicated, 2);
 }
 
 #[test]

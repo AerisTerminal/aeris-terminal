@@ -4,6 +4,7 @@ use axiusflow_desktop_storage::{
     PublicationRequest, RecoveryAction, RetainedRange, RetentionPolicy, SegmentEncryptionKey,
     SegmentIdentity,
 };
+use axiusflow_provider_history::{CoverageClass, HistoryRange};
 use std::{
     collections::BTreeSet,
     fmt::Write as FmtWrite,
@@ -68,6 +69,20 @@ fn identity(scope: HistoryScope, instrument: &str) -> SegmentIdentity {
         resolution: "1m".to_string(),
         range_start_unix_nanos: 1_000_000_000,
         range_end_unix_nanos: 61_000_000_000,
+        source_revision: 1,
+        schema_revision: 1,
+        calendar_revision: 1,
+        adjustment_revision: 1,
+        correction_revision: 1,
+    }
+}
+
+fn series_identity<'a>(scope: &'a HistoryScope, instrument: &'a str) -> HistorySeriesIdentity<'a> {
+    HistorySeriesIdentity {
+        scope,
+        instrument_id: instrument,
+        data_kind: DataKind::Bars,
+        resolution: "1m",
         source_revision: 1,
         schema_revision: 1,
         calendar_revision: 1,
@@ -194,6 +209,144 @@ fn retained_coverage_merges_exact_series_segments_and_reports_gaps() {
                 end_unix_nanos: 70,
             },
         ]
+    );
+}
+
+#[test]
+fn durable_coverage_facts_classify_confirmed_empty_invalidated_and_quarantined_ranges() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-1");
+    let series = series_identity(&series_scope, "btc-usd");
+    let mut complete = identity(series_scope.clone(), "btc-usd");
+    complete.range_start_unix_nanos = 10;
+    complete.range_end_unix_nanos = 30;
+    let mut corrupt = complete.clone();
+    corrupt.range_start_unix_nanos = 50;
+    corrupt.range_end_unix_nanos = 60;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    publish(
+        &mut store,
+        &complete,
+        &key,
+        b"complete",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    );
+    let corrupt_receipt = receipt(publish(
+        &mut store,
+        &corrupt,
+        &key,
+        b"corrupt-me",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    ));
+    store
+        .record_confirmed_empty(
+            series,
+            RetainedRange {
+                start_unix_nanos: 30,
+                end_unix_nanos: 40,
+            },
+            101,
+        )
+        .expect("confirmed-empty fact persists");
+    store
+        .record_invalidated_range(
+            series,
+            RetainedRange {
+                start_unix_nanos: 40,
+                end_unix_nanos: 50,
+            },
+            101,
+        )
+        .expect("invalidation fact persists");
+    overwrite_for_fault(
+        &root.path().join("segments").join(corrupt_receipt.file_name),
+        b"damaged ciphertext",
+    );
+    assert_eq!(
+        store
+            .read(&corrupt, &key, 101, RecoveryAction::ProviderRefetch)
+            .expect("corruption becomes an explicit miss"),
+        HistoryRead::Unavailable {
+            reason: AvailabilityReason::Quarantined,
+            recovery: RecoveryAction::ProviderRefetch,
+        }
+    );
+    drop(store);
+
+    let reopened = HistoryStore::open(root.path(), catalog_key(), 8).expect("store reopens");
+    let plan = reopened
+        .series_coverage_snapshot(series, 102)
+        .expect("coverage facts restore")
+        .plan(HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 70,
+        })
+        .expect("coverage request validates");
+    assert_eq!(plan.classification(), CoverageClass::Partial);
+    assert_eq!(
+        plan.spans()
+            .iter()
+            .map(|span| span.class)
+            .collect::<Vec<_>>(),
+        vec![
+            CoverageClass::Missing,
+            CoverageClass::Complete,
+            CoverageClass::ConfirmedEmpty,
+            CoverageClass::Invalidated,
+            CoverageClass::Quarantined,
+            CoverageClass::Missing,
+        ]
+    );
+    assert_eq!(
+        plan.repair_ranges(),
+        &[
+            HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 10,
+            },
+            HistoryRange {
+                start_unix_nanos: 40,
+                end_unix_nanos: 70,
+            },
+        ]
+    );
+}
+
+#[test]
+fn legacy_catalog_additively_migrates_to_durable_coverage_markers() {
+    let root = TestRoot::create();
+    drop(HistoryStore::open(root.path(), catalog_key(), 4).expect("store initializes"));
+    let catalog_path = root.path().join("catalog.sqlite");
+    let connection = rusqlite::Connection::open(&catalog_path).expect("catalog opens directly");
+    connection
+        .execute_batch(
+            "DROP TABLE history_coverage_marker;
+             UPDATE catalog_metadata SET schema_version=1 WHERE singleton=1;",
+        )
+        .expect("legacy catalog fixture installs");
+    drop(connection);
+
+    let store = HistoryStore::open(root.path(), catalog_key(), 4).expect("legacy store migrates");
+    let series_scope = scope("public", "rights-1");
+    store
+        .record_confirmed_empty(
+            series_identity(&series_scope, "btc-usd"),
+            RetainedRange {
+                start_unix_nanos: 10,
+                end_unix_nanos: 20,
+            },
+            101,
+        )
+        .expect("coverage marker writes after migration");
+    assert_eq!(
+        store
+            .statistics()
+            .expect("statistics read")
+            .coverage_entries,
+        1
     );
 }
 

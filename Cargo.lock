@@ -823,6 +823,7 @@ dependencies = [
 name = "axiusflow_desktop_storage"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_provider_history",
  "chacha20poly1305",
  "getrandom 0.4.3",
  "hmac 0.12.1",

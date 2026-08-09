@@ -3,6 +3,7 @@
 //! The synchronous boundary is intended for bounded background workers. It
 //! contains no provider SDK, networking, filesystem, or GPUI work.
 
+mod coverage;
 mod error;
 mod handoff;
 mod model;
@@ -11,6 +12,7 @@ mod rate_gate;
 mod scheduler;
 mod scheduling_model;
 
+pub use coverage::{CoverageClass, CoveragePlan, CoverageSnapshot, CoverageSpan};
 pub use error::ProviderHistoryError;
 pub use handoff::{
     HandoffBatch, HandoffCoordinator, HandoffState, LiveAcceptance, SequencedHistory,

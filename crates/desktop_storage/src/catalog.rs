@@ -5,10 +5,13 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{collections::BTreeSet, path::Path};
 
-const CATALOG_SCHEMA_VERSION: i64 = 1;
+const CATALOG_SCHEMA_VERSION: i64 = 2;
+const LEGACY_CATALOG_SCHEMA_VERSION: i64 = 1;
 const EXPECTED_SQLITE_VERSION: &str = "3.53.2";
 const ACTIVE_STATE: i64 = 0;
 const QUARANTINED_STATE: i64 = 1;
+pub(crate) const CONFIRMED_EMPTY_CLASS: i64 = 2;
+pub(crate) const INVALIDATED_CLASS: i64 = 4;
 
 pub(crate) struct Catalog {
     connection: Connection,
@@ -158,12 +161,46 @@ impl Catalog {
              CREATE INDEX IF NOT EXISTS history_segment_scope
                  ON history_segment(provider_token, account_token, entitlement_token, state);
              CREATE INDEX IF NOT EXISTS history_segment_dimension
-                 ON history_segment(instrument_token, data_kind, resolution_token, state);",
+                 ON history_segment(instrument_token, data_kind, resolution_token, state);
+             CREATE TABLE IF NOT EXISTS history_coverage_marker(
+                 provider_token BLOB NOT NULL CHECK(length(provider_token)=32),
+                 account_token BLOB NOT NULL CHECK(length(account_token)=32),
+                 entitlement_token BLOB NOT NULL CHECK(length(entitlement_token)=32),
+                 instrument_token BLOB NOT NULL CHECK(length(instrument_token)=32),
+                 data_kind INTEGER NOT NULL,
+                 resolution_token BLOB NOT NULL CHECK(length(resolution_token)=32),
+                 range_start INTEGER NOT NULL,
+                 range_end INTEGER NOT NULL CHECK(range_end > range_start),
+                 source_revision INTEGER NOT NULL CHECK(source_revision > 0),
+                 schema_revision INTEGER NOT NULL CHECK(schema_revision > 0),
+                 calendar_revision INTEGER NOT NULL CHECK(calendar_revision > 0),
+                 adjustment_revision INTEGER NOT NULL CHECK(adjustment_revision > 0),
+                 correction_revision INTEGER NOT NULL CHECK(correction_revision > 0),
+                 class INTEGER NOT NULL CHECK(class IN (2,4)),
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY(
+                     provider_token, account_token, entitlement_token, instrument_token,
+                     data_kind, resolution_token, range_start, range_end, source_revision,
+                     schema_revision, calendar_revision, adjustment_revision,
+                     correction_revision, class
+                 )
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS history_coverage_marker_series
+                 ON history_coverage_marker(
+                     provider_token, account_token, entitlement_token, instrument_token,
+                     data_kind, resolution_token
+                 );",
         )?;
         initialize_metadata(&connection, catalog_key_id, catalog_key_verifier)?;
         let existing_count: i64 =
             connection.query_row("SELECT count(*) FROM history_segment", [], |row| row.get(0))?;
-        if usize::try_from(existing_count).unwrap_or(usize::MAX) > maximum_entries {
+        let coverage_count: i64 =
+            connection.query_row("SELECT count(*) FROM history_coverage_marker", [], |row| {
+                row.get(0)
+            })?;
+        if usize::try_from(existing_count.saturating_add(coverage_count)).unwrap_or(usize::MAX)
+            > maximum_entries
+        {
             return Err(DesktopStorageError::InvalidConfiguration(
                 "existing catalog exceeds the configured entry bound",
             ));
@@ -193,7 +230,11 @@ impl Catalog {
     }
 
     pub fn insert(&self, record: &NewCatalogRecord<'_>) -> Result<(), DesktopStorageError> {
-        if self.total_count()? >= self.maximum_entries {
+        if self
+            .total_count()?
+            .saturating_add(self.coverage_marker_count()?)
+            >= self.maximum_entries
+        {
             return Err(DesktopStorageError::CatalogFull {
                 maximum: self.maximum_entries,
             });
@@ -424,14 +465,40 @@ impl Catalog {
         dimensions: SeriesDimensions,
         now_unix_seconds: i64,
     ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+        self.segment_series_ranges(tokens, dimensions, now_unix_seconds, ACTIVE_STATE, false)
+    }
+
+    pub fn quarantined_series_ranges(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        now_unix_seconds: i64,
+    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+        self.segment_series_ranges(
+            tokens,
+            dimensions,
+            now_unix_seconds,
+            QUARANTINED_STATE,
+            true,
+        )
+    }
+
+    fn segment_series_ranges(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        now_unix_seconds: i64,
+        state: i64,
+        include_expired: bool,
+    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
         let mut statement = self.connection.prepare(
             "SELECT range_start, range_end FROM history_segment
              WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
                AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
                AND source_revision=?7 AND schema_revision=?8
                AND calendar_revision=?9 AND adjustment_revision=?10
-               AND correction_revision=?11 AND state=0
-               AND (retention_until IS NULL OR retention_until>?12)
+               AND correction_revision=?11 AND state=?12
+               AND (?13 OR retention_until IS NULL OR retention_until>?14)
              ORDER BY range_start ASC, range_end ASC",
         )?;
         let rows = statement.query_map(
@@ -448,11 +515,126 @@ impl Catalog {
                 dimensions.adjustment_revision,
                 i64::try_from(dimensions.correction_revision)
                     .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                state,
+                include_expired,
                 now_unix_seconds,
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn coverage_marker_ranges(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        class: i64,
+    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT range_start, range_end FROM history_coverage_marker
+             WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+               AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+               AND source_revision=?7 AND schema_revision=?8
+               AND calendar_revision=?9 AND adjustment_revision=?10
+               AND correction_revision=?11 AND class=?12
+             ORDER BY range_start ASC, range_end ASC",
+        )?;
+        let rows = statement.query_map(
+            params![
+                tokens.provider.as_slice(),
+                tokens.account.as_slice(),
+                tokens.entitlement.as_slice(),
+                tokens.instrument.as_slice(),
+                dimensions.data_kind,
+                tokens.resolution.as_slice(),
+                dimensions.source_revision,
+                dimensions.schema_revision,
+                dimensions.calendar_revision,
+                dimensions.adjustment_revision,
+                i64::try_from(dimensions.correction_revision)
+                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                class,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn insert_coverage_marker(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        range: (i64, i64),
+        class: i64,
+        created_at: i64,
+    ) -> Result<(), DesktopStorageError> {
+        let correction_revision = i64::try_from(dimensions.correction_revision)
+            .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?;
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM history_coverage_marker
+                 WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+                   AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+                   AND range_start=?7 AND range_end=?8 AND source_revision=?9
+                   AND schema_revision=?10 AND calendar_revision=?11
+                   AND adjustment_revision=?12 AND correction_revision=?13 AND class=?14
+             )",
+            params![
+                tokens.provider.as_slice(),
+                tokens.account.as_slice(),
+                tokens.entitlement.as_slice(),
+                tokens.instrument.as_slice(),
+                dimensions.data_kind,
+                tokens.resolution.as_slice(),
+                range.0,
+                range.1,
+                dimensions.source_revision,
+                dimensions.schema_revision,
+                dimensions.calendar_revision,
+                dimensions.adjustment_revision,
+                correction_revision,
+                class,
+            ],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        if self
+            .total_count()?
+            .saturating_add(self.coverage_marker_count()?)
+            >= self.maximum_entries
+        {
+            return Err(DesktopStorageError::CatalogFull {
+                maximum: self.maximum_entries,
+            });
+        }
+        self.connection.execute(
+            "INSERT INTO history_coverage_marker(
+                 provider_token, account_token, entitlement_token, instrument_token,
+                 data_kind, resolution_token, range_start, range_end, source_revision,
+                 schema_revision, calendar_revision, adjustment_revision,
+                 correction_revision, class, created_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                tokens.provider.as_slice(),
+                tokens.account.as_slice(),
+                tokens.entitlement.as_slice(),
+                tokens.instrument.as_slice(),
+                dimensions.data_kind,
+                tokens.resolution.as_slice(),
+                range.0,
+                range.1,
+                dimensions.source_revision,
+                dimensions.schema_revision,
+                dimensions.calendar_revision,
+                dimensions.adjustment_revision,
+                correction_revision,
+                class,
+                created_at,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), DesktopStorageError> {
@@ -533,9 +715,15 @@ impl Catalog {
             [QUARANTINED_STATE],
             |row| row.get(0),
         )?;
+        let coverage: i64 = self.connection.query_row(
+            "SELECT count(*) FROM history_coverage_marker",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(CatalogStatistics {
             active_entries: usize::try_from(active).unwrap_or(usize::MAX),
             quarantined_entries: usize::try_from(quarantined).unwrap_or(usize::MAX),
+            coverage_entries: usize::try_from(coverage).unwrap_or(usize::MAX),
             maximum_entries: self.maximum_entries,
         })
     }
@@ -550,6 +738,15 @@ impl Catalog {
         let count: i64 =
             self.connection
                 .query_row("SELECT count(*) FROM history_segment", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    fn coverage_marker_count(&self) -> Result<usize, DesktopStorageError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM history_coverage_marker",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 
@@ -627,6 +824,14 @@ fn initialize_metadata(
         }
         Some((CATALOG_SCHEMA_VERSION, existing_key, existing_verifier))
             if existing_key == catalog_key_id && existing_verifier == *catalog_key_verifier => {}
+        Some((LEGACY_CATALOG_SCHEMA_VERSION, existing_key, existing_verifier))
+            if existing_key == catalog_key_id && existing_verifier == *catalog_key_verifier =>
+        {
+            connection.execute(
+                "UPDATE catalog_metadata SET schema_version=?1 WHERE singleton=1",
+                [CATALOG_SCHEMA_VERSION],
+            )?;
+        }
         Some((CATALOG_SCHEMA_VERSION, _, _)) => {
             return Err(DesktopStorageError::CatalogKeyMismatch);
         }

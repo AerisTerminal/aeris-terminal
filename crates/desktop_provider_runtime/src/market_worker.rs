@@ -17,7 +17,8 @@ use axiusflow_observability::{
 };
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use axiusflow_provider_history::{
-    Completion, DataClass, HistoryItem, RequestInterest, SequencedHistory, VerifiedHistorySnapshot,
+    Completion, CoverageSnapshot, DataClass, HistoryItem, RequestInterest, SequencedHistory,
+    VerifiedHistorySnapshot,
 };
 use std::{
     collections::BTreeMap,
@@ -292,6 +293,20 @@ where
     ) -> Result<Option<SegmentIdentity>, DesktopMarketWorkerError> {
         self.history
             .latest_identity(series, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
+    /// Returns normalized durable coverage facts for one exact history series.
+    ///
+    /// # Errors
+    /// Returns a redacted wrong-thread, invalid-dimension, or catalog failure.
+    pub fn history_coverage_snapshot(
+        &self,
+        series: HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<CoverageSnapshot, DesktopMarketWorkerError> {
+        self.history
+            .coverage_snapshot(series, now_unix_seconds)
             .map_err(Into::into)
     }
 

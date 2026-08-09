@@ -450,6 +450,7 @@ pub struct DeletionReport {
 pub struct CatalogStatistics {
     pub active_entries: usize,
     pub quarantined_entries: usize,
+    pub coverage_entries: usize,
     pub maximum_entries: usize,
 }
 

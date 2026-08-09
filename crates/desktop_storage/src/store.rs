@@ -1,7 +1,8 @@
 use crate::{
     DesktopStorageError,
     catalog::{
-        Catalog, CatalogFilter, CatalogRecord, NewCatalogRecord, SeriesDimensions, SeriesTokens,
+        CONFIRMED_EMPTY_CLASS, Catalog, CatalogFilter, CatalogRecord, INVALIDATED_CLASS,
+        NewCatalogRecord, SeriesDimensions, SeriesTokens,
     },
     crypto::{
         SEGMENT_FILE_OVERHEAD_BYTES, catalog_key_verifier, checksum, decrypt_segment,
@@ -14,6 +15,7 @@ use crate::{
         RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentReceipt, validate_identifier,
     },
 };
+use axiusflow_provider_history::{CoverageSnapshot, HistoryRange};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions, TryLockError},
@@ -244,6 +246,109 @@ impl HistoryStore {
                 })
                 .collect(),
         ))
+    }
+
+    /// Returns complete, confirmed-empty, invalidated, and quarantined facts for
+    /// one exact series revision. Missing and partial coverage are derived by the
+    /// provider-neutral coverage planner for the caller's requested range.
+    ///
+    /// # Errors
+    /// Returns an error for invalid dimensions, catalog access, or corrupt ranges.
+    pub fn series_coverage_snapshot(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        now_unix_seconds: i64,
+    ) -> Result<CoverageSnapshot, DesktopStorageError> {
+        series.validate()?;
+        let scope = scope_tokens(&self.catalog_key, series.scope)?;
+        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
+        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
+        let tokens = SeriesTokens {
+            provider: &scope.provider,
+            account: &scope.account,
+            entitlement: &scope.entitlement,
+            instrument: &instrument,
+            resolution: &resolution,
+        };
+        let dimensions = series_dimensions(series);
+        CoverageSnapshot::try_new(
+            history_ranges(self.catalog.active_series_ranges(
+                tokens,
+                dimensions,
+                now_unix_seconds,
+            )?),
+            history_ranges(self.catalog.coverage_marker_ranges(
+                tokens,
+                dimensions,
+                CONFIRMED_EMPTY_CLASS,
+            )?),
+            history_ranges(self.catalog.coverage_marker_ranges(
+                tokens,
+                dimensions,
+                INVALIDATED_CLASS,
+            )?),
+            history_ranges(self.catalog.quarantined_series_ranges(
+                tokens,
+                dimensions,
+                now_unix_seconds,
+            )?),
+        )
+        .map_err(|_| DesktopStorageError::InvalidConfiguration("catalog coverage range is invalid"))
+    }
+
+    /// Records provider-proven empty coverage for one exact series revision.
+    ///
+    /// # Errors
+    /// Returns an error for invalid dimensions, range, or catalog capacity.
+    pub fn record_confirmed_empty(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        range: crate::RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopStorageError> {
+        self.record_coverage_marker(series, range, CONFIRMED_EMPTY_CLASS, now_unix_seconds)
+    }
+
+    /// Records a range that must be repaired before it can be treated as usable.
+    ///
+    /// # Errors
+    /// Returns an error for invalid dimensions, range, or catalog capacity.
+    pub fn record_invalidated_range(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        range: crate::RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopStorageError> {
+        self.record_coverage_marker(series, range, INVALIDATED_CLASS, now_unix_seconds)
+    }
+
+    fn record_coverage_marker(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        range: crate::RetainedRange,
+        class: i64,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopStorageError> {
+        series.validate()?;
+        if range.start_unix_nanos >= range.end_unix_nanos {
+            return Err(DesktopStorageError::InvalidIdentity("coverage_range"));
+        }
+        let scope = scope_tokens(&self.catalog_key, series.scope)?;
+        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
+        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
+        self.catalog.insert_coverage_marker(
+            SeriesTokens {
+                provider: &scope.provider,
+                account: &scope.account,
+                entitlement: &scope.entitlement,
+                instrument: &instrument,
+                resolution: &resolution,
+            },
+            series_dimensions(series),
+            (range.start_unix_nanos, range.end_unix_nanos),
+            class,
+            now_unix_seconds,
+        )
     }
 
     /// Reads one exact segment only when its cataloged payload fits the caller's bound.
@@ -502,7 +607,10 @@ impl HistoryStore {
         let replacement = self.replacement_record(request, &segment_id)?;
         if replacement.is_none() {
             let statistics = self.catalog.statistics()?;
-            if statistics.active_entries + statistics.quarantined_entries
+            if statistics
+                .active_entries
+                .saturating_add(statistics.quarantined_entries)
+                .saturating_add(statistics.coverage_entries)
                 >= statistics.maximum_entries
             {
                 return Err(DesktopStorageError::CatalogFull {
@@ -1009,6 +1117,27 @@ impl HistoryStore {
         }
         Ok(self.quarantine.join(file_name))
     }
+}
+
+fn series_dimensions(series: crate::HistorySeriesIdentity<'_>) -> SeriesDimensions {
+    SeriesDimensions {
+        data_kind: series.data_kind.code(),
+        source_revision: series.source_revision,
+        schema_revision: series.schema_revision,
+        calendar_revision: series.calendar_revision,
+        adjustment_revision: series.adjustment_revision,
+        correction_revision: series.correction_revision,
+    }
+}
+
+fn history_ranges(ranges: Vec<(i64, i64)>) -> Vec<HistoryRange> {
+    ranges
+        .into_iter()
+        .map(|(start_unix_nanos, end_unix_nanos)| HistoryRange {
+            start_unix_nanos,
+            end_unix_nanos,
+        })
+        .collect()
 }
 
 fn unavailable(reason: AvailabilityReason, recovery: RecoveryAction) -> HistoryRead {

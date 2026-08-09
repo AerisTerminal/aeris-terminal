@@ -1,5 +1,5 @@
 use crate::{
-    Continuation, HistoryCapabilities, HistoryPage, HistoryPageRequest, HistoryRange,
+    Continuation, CoveragePlan, HistoryCapabilities, HistoryPage, HistoryPageRequest, HistoryRange,
     ProviderHistoryError,
     page_validation::{continuation_progresses, validate_page},
     rate_gate::RateGates,
@@ -179,6 +179,69 @@ impl HistoryScheduler {
             queued_new: adjacent_prefetches
                 .saturating_add(1)
                 .saturating_sub(deduplicated),
+            deduplicated,
+            adjacent_prefetches,
+        })
+    }
+
+    /// Queues only coverage ranges that need repair, with visible gaps first.
+    ///
+    /// The plan has already coalesced adjacent missing, invalidated, and quarantined
+    /// spans. Exact work shared with another interest is deduplicated and upgraded.
+    ///
+    /// # Errors
+    /// Returns an error for capability, interest, or scheduler-bound violations.
+    pub fn submit_coverage_repairs(
+        &mut self,
+        base: &HistoryPageRequest,
+        plan: &CoveragePlan,
+        visible: HistoryRange,
+        interest: RequestInterest,
+        now_unix_nanos: i64,
+    ) -> Result<Submission, ProviderHistoryError> {
+        if self.interest_requests.contains_key(&interest) {
+            return Err(ProviderHistoryError::InterestAlreadyScheduled {
+                interest: interest.get(),
+            });
+        }
+        visible.span_nanos()?;
+        let repairs = plan.prioritized_repairs(base, visible);
+        for repair in &repairs {
+            self.capabilities
+                .validate_request(&repair.request, now_unix_nanos)?;
+        }
+        let required_new = repairs
+            .iter()
+            .filter(|repair| !self.contains_request(&repair.request))
+            .count();
+        if self.queued.len().saturating_add(required_new)
+            > self.config.maximum_queued_requests.get()
+        {
+            return Err(ProviderHistoryError::QueueFull {
+                maximum: self.config.maximum_queued_requests.get(),
+            });
+        }
+        let incoming = BTreeSet::from([interest]);
+        for repair in &repairs {
+            self.ensure_interest_capacity(&repair.request, &incoming)?;
+        }
+        let adjacent_prefetches = repairs
+            .iter()
+            .filter(|repair| repair.priority == RequestPriority::AdjacentPrefetch)
+            .count();
+        let mut deduplicated = 0;
+        for repair in repairs {
+            let continuations = initial_continuations(&repair.request);
+            deduplicated += usize::from(self.add_request(
+                repair.request,
+                interest,
+                repair.priority,
+                &continuations,
+                now_unix_nanos,
+            )?);
+        }
+        Ok(Submission {
+            queued_new: required_new,
             deduplicated,
             adjacent_prefetches,
         })
