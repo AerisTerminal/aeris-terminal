@@ -2,12 +2,13 @@ use super::{
     CATALOG_KEY_ID, MODEL_ITEM_CAPACITY, PROVIDER_EVENT_CAPACITY, SEGMENT_KEY_ID, SUBSCRIPTION_ID,
     VAULT_SERVICE,
 };
-use crate::market_worker::MarketWorkerStartup;
+use crate::market_worker::{CoinbaseWorkerStartup, MarketWorkerStartup};
 use axiusflow_application::MarketBarClientModel;
 use axiusflow_coinbase_market_adapter::{
     CoinbaseAggregatedBar, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, CoinbaseConfig,
-    CoinbaseDesktopEventError, CoinbaseProviderDriver, CoinbaseProviderEvents,
-    seed_coinbase_bar_history, try_recv_coinbase_aggregated_bar,
+    CoinbaseDesktopEventError, CoinbaseDesktopMarketEvent, CoinbaseProviderDriver,
+    CoinbaseProviderEvents, CoinbaseSpotProduct, seed_coinbase_bar_history,
+    try_recv_coinbase_aggregated_bar, try_recv_coinbase_market_event,
 };
 use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
@@ -18,7 +19,7 @@ use axiusflow_desktop_storage::{CatalogKey, SegmentEncryptionKey, SegmentIdentit
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use axiusflow_market_data::{BarDefinition, MarketBar};
+use axiusflow_market_data::{BarDefinition, ChartAggregation, ChartInterval, MarketBar};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -36,10 +37,16 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::lifecycle::WorkerInboxEvent;
 
+#[derive(Clone)]
 pub(super) struct ProductProfile {
     pub(super) product_id: String,
     pub(super) instrument_id: String,
     pub(super) symbol: String,
+    pub(super) price_scale: u8,
+    pub(super) quantity_scale: u8,
+    pub(super) base_currency: String,
+    pub(super) quote_currency: String,
+    pub(super) interval: ChartInterval,
 }
 
 pub(super) struct CoinbaseDesktopWorker<V: CredentialVault = NativeCredentialVault> {
@@ -53,6 +60,17 @@ impl<V: CredentialVault> CoinbaseDesktopWorker<V> {
         events: &CoinbaseProviderEvents,
     ) -> Result<Option<(SessionGeneration, CoinbaseAggregatedBar)>, CoinbaseDesktopEventError> {
         try_recv_coinbase_aggregated_bar(
+            &mut self.runtime,
+            events,
+            std::slice::from_mut(&mut self.aggregator),
+        )
+    }
+
+    pub(super) fn try_recv_coinbase_market_event(
+        &mut self,
+        events: &CoinbaseProviderEvents,
+    ) -> Result<Option<CoinbaseDesktopMarketEvent>, CoinbaseDesktopEventError> {
+        try_recv_coinbase_market_event(
             &mut self.runtime,
             events,
             std::slice::from_mut(&mut self.aggregator),
@@ -157,8 +175,8 @@ pub(super) fn open_worker(
     let aggregator = CoinbaseBarAggregator::new(
         CoinbaseBarAggregatorConfig::try_new(
             profile.product_id.clone(),
-            2,
-            8,
+            profile.price_scale,
+            profile.quantity_scale,
             nonzero(MODEL_ITEM_CAPACITY),
         )
         .map_err(|error| error.to_string())?,
@@ -196,8 +214,8 @@ pub(super) fn open_test_worker<V: CredentialVault>(
     let aggregator = CoinbaseBarAggregator::new(
         CoinbaseBarAggregatorConfig::try_new(
             profile.product_id.clone(),
-            2,
-            8,
+            profile.price_scale,
+            profile.quantity_scale,
             nonzero(MODEL_ITEM_CAPACITY),
         )
         .map_err(|error| error.to_string())?,
@@ -217,12 +235,18 @@ pub(super) fn worker_label(monitors_active: bool) -> String {
     .to_string()
 }
 
-pub(super) fn loading_startup(profile: &ProductProfile) -> Result<MarketWorkerStartup, String> {
-    Ok(MarketWorkerStartup::Loading {
-        instrument: instrument(profile)?,
+pub(super) fn loading_startup(
+    profile: &ProductProfile,
+    history_root: PathBuf,
+    detailed_diagnostics: bool,
+) -> MarketWorkerStartup {
+    MarketWorkerStartup::Loading(Box::new(CoinbaseWorkerStartup {
+        coinbase_product: spot_product(profile),
+        history_root,
+        detailed_diagnostics,
         subscription_id: SUBSCRIPTION_ID.to_string(),
         worker_label: "Coinbase direct · loading local provider history".to_string(),
-    })
+    }))
 }
 
 pub(super) fn product_profile(product_id: String) -> Result<ProductProfile, String> {
@@ -235,7 +259,40 @@ pub(super) fn product_profile(product_id: String) -> Result<ProductProfile, Stri
         product_id,
         instrument_id: instrument_id.to_string(),
         symbol: format!("{base}/USD"),
+        price_scale: 2,
+        quantity_scale: 8,
+        base_currency: base.to_string(),
+        quote_currency: "USD".to_string(),
+        interval: ChartInterval::Minute1,
     })
+}
+
+pub(super) fn product_profile_from_spot(
+    product: CoinbaseSpotProduct,
+    interval: ChartInterval,
+) -> ProductProfile {
+    ProductProfile {
+        product_id: product.product_id,
+        instrument_id: product.instrument_id,
+        symbol: product.display_symbol,
+        price_scale: product.price_scale,
+        quantity_scale: product.quantity_scale,
+        base_currency: product.base_currency,
+        quote_currency: product.quote_currency,
+        interval,
+    }
+}
+
+fn spot_product(profile: &ProductProfile) -> CoinbaseSpotProduct {
+    CoinbaseSpotProduct {
+        product_id: profile.product_id.clone(),
+        instrument_id: profile.instrument_id.clone(),
+        display_symbol: profile.symbol.clone(),
+        base_currency: profile.base_currency.clone(),
+        quote_currency: profile.quote_currency.clone(),
+        price_scale: profile.price_scale,
+        quantity_scale: profile.quantity_scale,
+    }
 }
 
 pub(super) fn instrument(profile: &ProductProfile) -> Result<InstrumentRevision, String> {
@@ -246,17 +303,28 @@ pub(super) fn instrument(profile: &ProductProfile) -> Result<InstrumentRevision,
         asset_class: AssetClass::CryptoAsset,
         symbol: profile.symbol.clone(),
         venue_id: "COINBASE".to_string(),
-        trading_currency: "USD".to_string(),
-        precision: InstrumentPrecision::try_new(2, 8).map_err(|error| error.to_string())?,
+        trading_currency: profile.quote_currency.clone(),
+        precision: InstrumentPrecision::try_new(profile.price_scale, profile.quantity_scale)
+            .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     })
 }
 
+#[cfg(test)]
 pub(super) fn bar_definition() -> BarDefinition {
+    bar_definition_for_interval(ChartInterval::Minute1)
+}
+
+pub(super) fn bar_definition_for_interval(interval: ChartInterval) -> BarDefinition {
+    let interval_seconds = match interval.aggregation() {
+        ChartAggregation::FixedSeconds(seconds) => seconds.get(),
+        ChartAggregation::CalendarMonth => 30 * 86_400,
+        ChartAggregation::Trades(_) => 60,
+    };
     BarDefinition {
-        definition_id: "coinbase:spot:one_minute:unadjusted:v1".to_string(),
+        definition_id: format!("coinbase:spot:{}:unadjusted:v1", interval.label()),
         version: 1,
-        interval_seconds: 60,
+        interval_seconds,
         trades_per_bar: None,
     }
 }
@@ -341,8 +409,8 @@ pub(super) const fn nonzero(value: usize) -> NonZeroUsize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SUBSCRIPTION_ID, loading_startup, nonzero, product_profile};
-    use crate::market_worker::MarketWorkerStartup;
+    use super::{SUBSCRIPTION_ID, instrument, loading_startup, nonzero, product_profile};
+    use crate::market_worker::{CoinbaseWorkerStartup, MarketWorkerStartup};
     use axiusflow_coinbase_market_adapter::{
         CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig, FixedPointValue,
     };
@@ -358,15 +426,23 @@ mod tests {
     #[test]
     fn live_startup_is_loading_metadata_without_synthetic_market_data() {
         let profile = product_profile("BTC-USD".to_string()).expect("profile validates");
-        let MarketWorkerStartup::Loading {
-            instrument,
-            subscription_id,
-            worker_label,
-        } = loading_startup(&profile).expect("loading startup validates")
+        let MarketWorkerStartup::Loading(startup) =
+            loading_startup(&profile, std::path::PathBuf::from("history"), false)
         else {
             panic!("live startup must wait for a provider snapshot");
         };
-        assert_eq!(instrument.instrument_id.as_str(), profile.instrument_id);
+        let CoinbaseWorkerStartup {
+            subscription_id,
+            worker_label,
+            ..
+        } = *startup;
+        assert_eq!(
+            instrument(&profile)
+                .expect("instrument validates")
+                .instrument_id
+                .as_str(),
+            profile.instrument_id
+        );
         assert_eq!(subscription_id, SUBSCRIPTION_ID);
         assert!(worker_label.contains("loading"));
     }

@@ -59,11 +59,11 @@ impl CoinbaseBarAggregatorConfig {
             return Err(CoinbaseBarAggregationError::InvalidConfiguration);
         };
         if base.is_empty()
-            || quote != "USD"
+            || quote.is_empty()
             || product_id.len() > 32
-            || !product_id
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            || !product_id.chars().all(|character| {
+                character.is_ascii_uppercase() || character.is_ascii_digit() || character == '-'
+            })
             || price_scale > MAXIMUM_DECIMAL_SCALE
             || quantity_scale > MAXIMUM_DECIMAL_SCALE
             || maximum_history_bars.get() > MAXIMUM_AGGREGATED_HISTORY_BARS
@@ -71,7 +71,8 @@ impl CoinbaseBarAggregatorConfig {
             return Err(CoinbaseBarAggregationError::InvalidConfiguration);
         }
         Ok(Self {
-            instrument_id: format!("instrument:coinbase:{}:usd", base.to_ascii_lowercase()),
+            instrument_id: crate::coinbase_instrument_id(&product_id)
+                .map_err(|_| CoinbaseBarAggregationError::InvalidConfiguration)?,
             product_id,
             price_scale,
             quantity_scale,

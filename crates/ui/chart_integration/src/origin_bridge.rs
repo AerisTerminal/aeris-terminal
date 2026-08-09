@@ -3,7 +3,7 @@
 use crate::bridge::MergedChartData;
 use axiusflow_application::{ProvenancedMarketBar, ReplaySnapshot};
 use num_traits::ToPrimitive;
-use origin_engine::{ChartEngine, SeriesKind};
+use origin_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
 use std::num::NonZeroUsize;
 
 const DEFAULT_CHART_DATA_QUEUE_CAPACITY: usize = 64;
@@ -16,43 +16,73 @@ pub(crate) fn replay_price_divisor(replay: &ReplaySnapshot) -> f64 {
     10_f64.powi(i32::from(replay.instrument().precision.price_scale()))
 }
 
+pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> usize {
+    let id = engine.add_series(SeriesKind::Histogram);
+    let series = &mut engine.series[id];
+    series.visible = false;
+    series.histogram_updown = true;
+    series.title = "Volume".to_string();
+    series.title_visible = true;
+    engine.set_series_price_scale(id, PriceScaleTarget::Overlay);
+    engine.set_price_scale_margins_for(0, PriceScaleTarget::Overlay, 0.8, 0.0);
+    let applied = engine.series_apply_price_format_json(id, r#"{"type":"volume"}"#);
+    debug_assert!(applied);
+    id
+}
+
 pub(crate) fn apply_merged_chart_data(
     engine: &mut ChartEngine,
+    volume_series: usize,
     price_divisor: &mut f64,
     update: &MergedChartData,
 ) {
     if let Some(snapshot) = update.snapshot() {
         *price_divisor = replay_price_divisor(snapshot);
-        install_replay_with_deltas(engine, snapshot, update.accepted_deltas());
+        install_replay_with_deltas(engine, volume_series, snapshot, update.accepted_deltas());
         return;
     }
 
-    let rows = update.accepted_deltas().iter().map(|item| {
-        let bar = *item.value();
-        (
-            item.provenance()
+    let rows = update
+        .accepted_deltas()
+        .iter()
+        .map(|item| {
+            let bar = *item.value();
+            let time = item
+                .provenance()
                 .exchange_timestamp_unix_nanos
                 .to_f64()
                 .expect("validated replay timestamps fit f64")
-                / 1_000_000_000.0,
-            [
-                fixed_price(bar.open, *price_divisor),
-                fixed_price(bar.high, *price_divisor),
-                fixed_price(bar.low, *price_divisor),
-                fixed_price(bar.close, *price_divisor),
-            ],
-        )
-    });
-    let accepted = engine.update_series_bars(0, rows);
+                / 1_000_000_000.0;
+            (
+                time,
+                [
+                    fixed_price(bar.open, *price_divisor),
+                    fixed_price(bar.high, *price_divisor),
+                    fixed_price(bar.low, *price_divisor),
+                    fixed_price(bar.close, *price_divisor),
+                ],
+                volume_row(bar.volume, time),
+            )
+        })
+        .collect::<Vec<_>>();
+    let accepted = engine.update_series_bars(0, rows.iter().map(|(time, ohlc, _)| (*time, *ohlc)));
     debug_assert_eq!(accepted, update.accepted_deltas().len());
+    let accepted_volume =
+        engine.update_series_bars(volume_series, rows.into_iter().map(|(_, _, volume)| volume));
+    debug_assert_eq!(accepted_volume, update.accepted_deltas().len());
 }
 
-pub(crate) fn install_replay(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
-    install_replay_with_deltas(engine, replay, &[]);
+pub(crate) fn install_replay(
+    engine: &mut ChartEngine,
+    volume_series: usize,
+    replay: &ReplaySnapshot,
+) {
+    install_replay_with_deltas(engine, volume_series, replay, &[]);
 }
 
 pub(crate) fn install_replay_with_deltas(
     engine: &mut ChartEngine,
+    volume_series: usize,
     replay: &ReplaySnapshot,
     deltas: &[ProvenancedMarketBar],
 ) {
@@ -62,6 +92,7 @@ pub(crate) fn install_replay_with_deltas(
     let mut high = Vec::with_capacity(item_count);
     let mut low = Vec::with_capacity(item_count);
     let mut close = Vec::with_capacity(item_count);
+    let mut volume = Vec::with_capacity(item_count);
     let price_divisor = replay_price_divisor(replay);
 
     for item in replay.bars().iter().chain(deltas) {
@@ -77,12 +108,27 @@ pub(crate) fn install_replay_with_deltas(
         high.push(fixed_price(bar.high, price_divisor));
         low.push(fixed_price(bar.low, price_divisor));
         close.push(fixed_price(bar.close, price_divisor));
+        volume.push(
+            bar.volume
+                .to_f64()
+                .expect("validated non-negative volume fits f64"),
+        );
     }
 
     engine
         .set_series_data(0, &times, &open, &high, &low, &close)
         .expect("validated replay columns satisfy Origin's data contract");
     engine.series[0].kind = SeriesKind::Candlestick;
+    engine
+        .set_series_data(volume_series, &times, &volume, &volume, &volume, &volume)
+        .expect("validated replay volume satisfies Origin's data contract");
+}
+
+fn volume_row(volume: i64, time: f64) -> (f64, [f64; 4]) {
+    let volume = volume
+        .to_f64()
+        .expect("validated non-negative volume fits f64");
+    (time, [volume; 4])
 }
 
 pub(crate) fn fixed_price(value: i64, divisor: f64) -> f64 {

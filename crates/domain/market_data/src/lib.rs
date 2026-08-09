@@ -3,9 +3,14 @@
 use core::fmt;
 use std::error::Error;
 
+mod chart_interval;
 mod contracts;
 mod order_book;
 
+pub use chart_interval::{
+    ChartAggregation, ChartInterval, RithmicChartAggregation, RithmicDailyAggregation,
+    RithmicTimeUnit,
+};
 pub use contracts::{
     AggressorSide, BarPeriod, BarSeriesKey, BarUpdate, BookSide, DepthDelta, DepthLevel,
     DepthSnapshot, EventMetadata, MAXIMUM_MARKET_DATA_FIELD_BYTES, MarketEvent, MarketTrade,

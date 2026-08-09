@@ -94,6 +94,7 @@ protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland", "x11"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704", version = "=0.5.2" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704", version = "=0.5.1" }
 gpui-hugeicons = { version = "=0.1.0", default-features = false }
 origin_engine = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0" }
 origin_render = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0" }

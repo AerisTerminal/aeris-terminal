@@ -74,12 +74,7 @@ impl CanonicalTrade {
 }
 
 fn instrument_id_for_product(product_id: &str) -> Result<String, CoinbaseError> {
-    let base = match product_id {
-        "BTC-USD" => "btc",
-        "ETH-USD" => "eth",
-        _ => return Err(CoinbaseError::InvalidMessage),
-    };
-    Ok(format!("instrument:coinbase:{base}:usd"))
+    crate::coinbase_instrument_id(product_id)
 }
 
 /// Aggregate decode counters for evidence.
@@ -94,7 +89,7 @@ pub struct DecoderMetrics {
 
 /// Strict decoder over one connection's message stream.
 pub struct CoinbaseDecoder {
-    next_sequence: Option<u64>,
+    next_sequence_by_channel: std::collections::HashMap<String, u64>,
     dedup: std::collections::VecDeque<(String, String)>,
     dedup_set: std::collections::HashSet<(String, String)>,
     metrics: DecoderMetrics,
@@ -106,7 +101,7 @@ impl CoinbaseDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            next_sequence: None,
+            next_sequence_by_channel: std::collections::HashMap::new(),
             dedup: std::collections::VecDeque::new(),
             dedup_set: std::collections::HashSet::new(),
             metrics: DecoderMetrics::default(),
@@ -127,17 +122,17 @@ impl CoinbaseDecoder {
     /// Returns an error for malformed messages or a sequence gap.
     pub fn decode(&mut self, bytes: &[u8]) -> Result<Vec<CanonicalTrade>, CoinbaseError> {
         self.decode_with_liveness(bytes)
-            .map(|(trades, _, _)| trades)
+            .map(|(trades, _, _, _)| trades)
     }
 
     pub(crate) fn decode_with_liveness(
         &mut self,
         bytes: &[u8],
-    ) -> Result<(Vec<CanonicalTrade>, bool, bool), CoinbaseError> {
+    ) -> Result<(Vec<CanonicalTrade>, bool, bool, bool), CoinbaseError> {
         let message: ChannelMessage =
             serde_json::from_slice(bytes).map_err(|_| CoinbaseError::InvalidMessage)?;
         self.metrics.messages += 1;
-        if let Some(next) = self.next_sequence
+        if let Some(next) = self.next_sequence_by_channel.get(&message.channel).copied()
             && message.sequence_num != next
         {
             self.metrics.sequence_gaps += 1;
@@ -146,14 +141,20 @@ impl CoinbaseDecoder {
                 actual: message.sequence_num,
             });
         }
-        self.next_sequence = Some(message.sequence_num.saturating_add(1));
+        self.next_sequence_by_channel.insert(
+            message.channel.clone(),
+            message.sequence_num.saturating_add(1),
+        );
 
         if message.channel == "heartbeats" {
             self.metrics.heartbeats += 1;
-            return Ok((Vec::new(), true, true));
+            return Ok((Vec::new(), true, true, false));
+        }
+        if message.channel == "l2_data" {
+            return Ok((Vec::new(), true, false, true));
         }
         if message.channel != "market_trades" {
-            return Ok((Vec::new(), false, false));
+            return Ok((Vec::new(), false, false, false));
         }
         let provider_timestamp = parse_rfc3339_nanos(&message.timestamp)?;
         let mut trades = Vec::new();
@@ -196,12 +197,12 @@ impl CoinbaseDecoder {
                 self.metrics.trades += 1;
             }
         }
-        Ok((trades, true, false))
+        Ok((trades, true, false, false))
     }
 
     /// Resets sequence and dedup state for a reconnect.
     pub fn reset(&mut self) {
-        self.next_sequence = None;
+        self.next_sequence_by_channel.clear();
         self.dedup.clear();
         self.dedup_set.clear();
         self.next_trade_sequence = 1;
@@ -405,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_products_without_a_reviewed_instrument_profile() {
+    fn projection_uses_the_catalog_compatible_product_identity() {
         let mut decoder = CoinbaseDecoder::new();
         let mut trade = decoder
             .decode(trade_message(1, "t-1").as_bytes())
@@ -413,7 +414,14 @@ mod tests {
             .pop()
             .expect("message contains one trade");
         trade.product_id = "SOL-USD".to_string();
-        assert!(trade.to_market_trade(2, 8, 1, 1).is_err());
+        assert_eq!(
+            trade
+                .to_market_trade(2, 8, 1, 1)
+                .expect("catalog product projects")
+                .metadata
+                .instrument_id,
+            "instrument:coinbase:sol:usd"
+        );
     }
 
     #[test]
@@ -437,22 +445,22 @@ mod tests {
     }
 
     #[test]
-    fn every_provider_channel_advances_the_connection_sequence() {
+    fn every_provider_channel_has_an_independent_sequence() {
         let mut decoder = CoinbaseDecoder::new();
         decoder
             .decode(subscriptions_message(0).as_bytes())
             .expect("first acknowledgement accepted");
         decoder
-            .decode(trade_message(1, "t-1").as_bytes())
+            .decode(trade_message(0, "t-1").as_bytes())
             .expect("trade baseline accepted");
         decoder
-            .decode(subscriptions_message(2).as_bytes())
+            .decode(subscriptions_message(1).as_bytes())
             .expect("second acknowledgement accepted");
         decoder
-            .decode(heartbeat_message(3).as_bytes())
+            .decode(heartbeat_message(0).as_bytes())
             .expect("heartbeat accepted");
         decoder
-            .decode(trade_message(4, "t-2").as_bytes())
+            .decode(trade_message(1, "t-2").as_bytes())
             .expect("next trade accepted");
         assert_eq!(decoder.metrics().sequence_gaps, 0);
         assert_eq!(decoder.metrics().heartbeats, 1);

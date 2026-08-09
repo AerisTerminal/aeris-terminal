@@ -11,7 +11,9 @@ use axiusflow_application::{
     ReplayStreamUpdate,
 };
 use axiusflow_chart_integration::ReplayRecoveryCommand;
+use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_desktop_provider_runtime::SessionGeneration;
+use axiusflow_market_data::ChartInterval;
 use axiusflow_market_protocol_adapter::{
     BinaryMarketBarStreamDecoder, DecimalConvention, ProjectedMarketBarUpdate,
     encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
@@ -81,12 +83,16 @@ pub(crate) struct MarketWorkerBootstrap {
 
 pub(crate) enum MarketWorkerStartup {
     Shell(crate::rithmic_shell::RithmicShellState),
-    Loading {
-        instrument: axiusflow_instruments::InstrumentRevision,
-        subscription_id: String,
-        worker_label: String,
-    },
+    Loading(Box<CoinbaseWorkerStartup>),
     Ready(Box<MarketWorkerBootstrap>),
+}
+
+pub(crate) struct CoinbaseWorkerStartup {
+    pub coinbase_product: CoinbaseSpotProduct,
+    pub history_root: PathBuf,
+    pub detailed_diagnostics: bool,
+    pub subscription_id: String,
+    pub worker_label: String,
 }
 
 pub(crate) struct MarketWorkerPublication {
@@ -124,6 +130,8 @@ pub(crate) enum MarketWorkerMessage {
         snapshot: ReplaySnapshot,
     },
     RithmicDom(DomFrame),
+    CoinbaseCatalog(Result<Vec<CoinbaseSpotProduct>, String>),
+    CoinbaseDom(DomFrame),
 }
 
 struct MarketWorkerMailbox {
@@ -285,6 +293,14 @@ impl MarketWorkerSender {
                 self.send_rithmic_dom(queue, message);
                 None
             }
+            message @ MarketWorkerMessage::CoinbaseDom(_) => {
+                self.send_coinbase_dom(queue, message);
+                None
+            }
+            message @ MarketWorkerMessage::CoinbaseCatalog(_) => {
+                self.send_coinbase_catalog(queue, message);
+                None
+            }
             message => Some(message),
         }
     }
@@ -430,6 +446,72 @@ impl MarketWorkerSender {
             if replace {
                 queue[index] = message;
             }
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        }
+    }
+
+    fn send_coinbase_dom(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::CoinbaseDom(_)))
+        {
+            let replace = match (&queue[index], &message) {
+                (
+                    MarketWorkerMessage::CoinbaseDom(current),
+                    MarketWorkerMessage::CoinbaseDom(next),
+                ) => {
+                    (next.session_generation, next.revision)
+                        >= (current.session_generation, current.revision)
+                }
+                _ => false,
+            };
+            if replace {
+                queue[index] = message;
+            }
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        }
+    }
+
+    fn send_coinbase_catalog(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| matches!(queued, MarketWorkerMessage::CoinbaseCatalog(_)))
+        {
+            queue[index] = message;
             return;
         }
         if queue.len() >= self.mailbox.capacity
@@ -643,7 +725,9 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         | MarketWorkerMessage::RithmicCatalog(_)
         | MarketWorkerMessage::RithmicHistory { .. }
         | MarketWorkerMessage::RithmicLive { .. }
-        | MarketWorkerMessage::RithmicDom(_) => None,
+        | MarketWorkerMessage::RithmicDom(_)
+        | MarketWorkerMessage::CoinbaseCatalog(_)
+        | MarketWorkerMessage::CoinbaseDom(_) => None,
     }
 }
 
@@ -930,6 +1014,22 @@ impl MarketDataWorker {
         detailed_diagnostics: bool,
     ) -> Result<(MarketWorkerStartup, Self), String> {
         crate::live_market_worker::start(product_id, history_root, ui_thread, detailed_diagnostics)
+    }
+
+    pub fn start_coinbase_product_interval(
+        product: CoinbaseSpotProduct,
+        interval: ChartInterval,
+        history_root: PathBuf,
+        ui_thread: thread::ThreadId,
+        detailed_diagnostics: bool,
+    ) -> Result<(MarketWorkerStartup, Self), String> {
+        crate::live_market_worker::start_product_interval(
+            product,
+            interval,
+            history_root,
+            ui_thread,
+            detailed_diagnostics,
+        )
     }
 
     pub fn start_rithmic(

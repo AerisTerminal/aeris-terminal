@@ -1,4 +1,4 @@
-use crate::{CanonicalTrade, CoinbaseConfig, CoinbaseSession, SessionOutcome};
+use crate::{CanonicalTrade, CoinbaseConfig, CoinbaseError, CoinbaseSession, SessionOutcome};
 use axiusflow_desktop_provider_runtime::{
     DesktopMarketWorker, DesktopMarketWorkerError, DesktopProviderError, DesktopProviderState,
     ProviderCredentialRequirement, ProviderSessionDriver, SessionGeneration,
@@ -19,7 +19,12 @@ use std::{
 /// Coarse reason that a direct Coinbase generation became unusable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoinbaseProviderInvalidReason {
-    Transport,
+    ConnectTransport,
+    StreamTransport,
+    Protocol,
+    InvalidMarketValue,
+    InvalidTimestamp,
+    ProviderRejected,
     SequenceGap,
     ClosedByPeer,
     InactivityTimeout,
@@ -38,6 +43,10 @@ pub enum CoinbaseProviderEvent {
     },
     Heartbeat {
         generation: SessionGeneration,
+    },
+    Level2 {
+        generation: SessionGeneration,
+        payload: Vec<u8>,
     },
     Invalid {
         generation: SessionGeneration,
@@ -60,6 +69,11 @@ impl fmt::Debug for CoinbaseProviderEvent {
             Self::Heartbeat { generation } => formatter
                 .debug_struct("Heartbeat")
                 .field("generation", generation)
+                .finish(),
+            Self::Level2 { generation, .. } => formatter
+                .debug_struct("Level2")
+                .field("generation", generation)
+                .field("payload", &"[REDACTED]")
                 .finish(),
             Self::Invalid { generation, reason } => formatter
                 .debug_struct("Invalid")
@@ -111,6 +125,10 @@ impl CoinbaseProviderFixtureControl {
         self.emitter(generation).heartbeat()
     }
 
+    pub fn level2(&self, generation: SessionGeneration, payload: Vec<u8>) -> bool {
+        self.emitter(generation).level2(payload)
+    }
+
     pub fn trade(&self, generation: SessionGeneration, trade: CanonicalTrade) -> bool {
         self.emitter(generation).trade(trade)
     }
@@ -149,6 +167,16 @@ impl CoinbaseProviderEvents {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.queue.pop_front().or_else(|| state.terminal.take())
     }
+
+    /// Returns the redacted reason the current provider generation became unusable.
+    #[must_use]
+    pub fn invalid_reason(&self) -> Option<CoinbaseProviderInvalidReason> {
+        self.callbacks
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .invalid_reason
+    }
 }
 
 /// Redacted lifecycle failures from the direct Coinbase driver.
@@ -184,6 +212,7 @@ struct CallbackState {
     queue: VecDeque<CoinbaseProviderEvent>,
     terminal: Option<CoinbaseProviderEvent>,
     failed: bool,
+    invalid_reason: Option<CoinbaseProviderInvalidReason>,
 }
 
 struct SharedCallbacks {
@@ -218,6 +247,13 @@ impl SessionEmitter {
         })
     }
 
+    fn level2(&self, payload: Vec<u8>) -> bool {
+        self.send(CoinbaseProviderEvent::Level2 {
+            generation: self.generation,
+            payload,
+        })
+    }
+
     fn send(&self, event: CoinbaseProviderEvent) -> bool {
         let mut state = self
             .callbacks
@@ -228,6 +264,7 @@ impl SessionEmitter {
             (false, false)
         } else if state.queue.len() >= self.callbacks.capacity.get() {
             state.failed = true;
+            state.invalid_reason = Some(CoinbaseProviderInvalidReason::EventQueueOverflow);
             state.terminal = Some(CoinbaseProviderEvent::Invalid {
                 generation: self.generation,
                 reason: CoinbaseProviderInvalidReason::EventQueueOverflow,
@@ -254,6 +291,7 @@ impl SessionEmitter {
             false
         } else {
             state.failed = true;
+            state.invalid_reason = Some(reason);
             state.terminal = Some(CoinbaseProviderEvent::Invalid {
                 generation: self.generation,
                 reason,
@@ -397,6 +435,7 @@ fn new_callbacks(
             queue: VecDeque::with_capacity(event_capacity.get()),
             terminal: None,
             failed: false,
+            invalid_reason: None,
         }),
         wake,
     })
@@ -430,6 +469,7 @@ impl ProviderSessionDriver for CoinbaseProviderDriver {
             callbacks.queue.clear();
             callbacks.terminal = None;
             callbacks.failed = false;
+            callbacks.invalid_reason = None;
         }
         let stop = Arc::new(AtomicBool::new(false));
         let task = Arc::clone(&self.task);
@@ -485,6 +525,18 @@ pub enum CoinbaseDesktopEventError {
     ProductNotRegistered,
     HistoryIdentityMismatch,
     HistoryUnavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoinbaseDesktopMarketEvent {
+    Bar {
+        generation: SessionGeneration,
+        completed: crate::CoinbaseAggregatedBar,
+    },
+    Level2 {
+        generation: SessionGeneration,
+        payload: Vec<u8>,
+    },
 }
 
 impl fmt::Display for CoinbaseDesktopEventError {
@@ -563,6 +615,10 @@ pub fn try_recv_coinbase_trade<T: Clone, V: CredentialVault>(
             worker.record_heartbeat_diagnostics(generation)?;
             Ok(None)
         }
+        CoinbaseProviderEvent::Level2 { generation, .. } => {
+            ensure_coinbase_streaming_generation(worker, generation)?;
+            Ok(None)
+        }
         CoinbaseProviderEvent::Invalid { generation, reason } => {
             if reason == CoinbaseProviderInvalidReason::EventQueueOverflow {
                 worker.session_callback_queue_overflow(generation)?;
@@ -584,6 +640,25 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
     events: &CoinbaseProviderEvents,
     aggregators: &mut [crate::CoinbaseBarAggregator],
 ) -> Result<Option<(SessionGeneration, crate::CoinbaseAggregatedBar)>, CoinbaseDesktopEventError> {
+    try_recv_coinbase_market_event(worker, events, aggregators).map(|event| match event {
+        Some(CoinbaseDesktopMarketEvent::Bar {
+            generation,
+            completed,
+        }) => Some((generation, completed)),
+        Some(CoinbaseDesktopMarketEvent::Level2 { .. }) | None => None,
+    })
+}
+
+/// Applies one bounded Coinbase callback and preserves both bar and Level 2 payloads.
+///
+/// # Errors
+///
+/// Returns a redacted lifecycle, source, or aggregation failure.
+pub fn try_recv_coinbase_market_event<T: Clone, V: CredentialVault>(
+    worker: &mut DesktopMarketWorker<T, V, CoinbaseProviderDriver>,
+    events: &CoinbaseProviderEvents,
+    aggregators: &mut [crate::CoinbaseBarAggregator],
+) -> Result<Option<CoinbaseDesktopMarketEvent>, CoinbaseDesktopEventError> {
     if !worker.callback_source_matches(|driver| driver.owns_events(events))? {
         return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
     }
@@ -614,12 +689,25 @@ pub fn try_recv_coinbase_aggregated_bar<T: Clone, V: CredentialVault>(
                 worker.session_invalid(generation)?;
                 return Err(CoinbaseDesktopEventError::Aggregation);
             };
-            Ok(completed.map(|bar| (generation, bar)))
+            Ok(completed.map(|completed| CoinbaseDesktopMarketEvent::Bar {
+                generation,
+                completed,
+            }))
         }
         CoinbaseProviderEvent::Heartbeat { generation } => {
             ensure_coinbase_streaming_generation(worker, generation)?;
             worker.record_heartbeat_diagnostics(generation)?;
             Ok(None)
+        }
+        CoinbaseProviderEvent::Level2 {
+            generation,
+            payload,
+        } => {
+            ensure_coinbase_streaming_generation(worker, generation)?;
+            Ok(Some(CoinbaseDesktopMarketEvent::Level2 {
+                generation,
+                payload,
+            }))
         }
         CoinbaseProviderEvent::Invalid { generation, reason } => {
             reset_aggregators(aggregators);
@@ -713,8 +801,6 @@ pub fn seed_coinbase_bar_history<V: CredentialVault>(
         || identity.instrument_id != aggregator.instrument_id()
         || identity.data_kind != axiusflow_desktop_storage::DataKind::Bars
         || identity.resolution != "1m"
-        || aggregator.price_scale() != 2
-        || aggregator.quantity_scale() != 8
     {
         return Err(CoinbaseDesktopEventError::HistoryIdentityMismatch);
     }
@@ -746,17 +832,21 @@ pub fn seed_coinbase_bar_history<V: CredentialVault>(
 fn direct_session_task() -> Arc<SessionTask> {
     Arc::new(|config, _generation, stop, emitter| {
         let session = CoinbaseSession::new(config);
-        let Ok(connection) = session.connect_cancellable(Arc::clone(&stop)) else {
-            if !stop.load(Ordering::Acquire) {
-                emitter.invalid(CoinbaseProviderInvalidReason::Transport);
+        let connection = match session.connect_cancellable(Arc::clone(&stop)) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if !stop.load(Ordering::Acquire) {
+                    eprintln!("Coinbase public WebSocket connection failed: {error}");
+                    emitter.invalid(classify_provider_error(&error, true));
+                }
+                return;
             }
-            return;
         };
         if !emitter.established() {
             stop.store(true, Ordering::Release);
             return;
         }
-        let result = connection.collect_until_stopped_with_heartbeat(
+        let result = connection.collect_until_stopped_with_market_events(
             &mut || stop.load(Ordering::Acquire),
             &mut |trade| {
                 if !emitter.trade(trade.clone()) {
@@ -765,6 +855,11 @@ fn direct_session_task() -> Arc<SessionTask> {
             },
             &mut || {
                 if !emitter.heartbeat() {
+                    stop.store(true, Ordering::Release);
+                }
+            },
+            &mut |payload| {
+                if !emitter.level2(payload.to_vec()) {
                     stop.store(true, Ordering::Release);
                 }
             },
@@ -784,12 +879,38 @@ fn direct_session_task() -> Arc<SessionTask> {
                     emitter.invalid(CoinbaseProviderInvalidReason::InactivityTimeout);
                 }
                 SessionOutcome::Completed => {
-                    emitter.invalid(CoinbaseProviderInvalidReason::Transport);
+                    emitter.invalid(CoinbaseProviderInvalidReason::StreamTransport);
                 }
             },
-            Err(_) => emitter.invalid(CoinbaseProviderInvalidReason::Transport),
+            Err(error) => {
+                eprintln!("Coinbase public WebSocket stream failed: {error}");
+                emitter.invalid(classify_provider_error(&error, false));
+            }
         }
     })
+}
+
+fn classify_provider_error(
+    error: &CoinbaseError,
+    during_connect: bool,
+) -> CoinbaseProviderInvalidReason {
+    match error {
+        CoinbaseError::SequenceGap { .. } => CoinbaseProviderInvalidReason::SequenceGap,
+        CoinbaseError::InvalidMessage | CoinbaseError::InvalidConfiguration => {
+            CoinbaseProviderInvalidReason::Protocol
+        }
+        CoinbaseError::InvalidFixedPoint(_) | CoinbaseError::DuplicateTrade => {
+            CoinbaseProviderInvalidReason::InvalidMarketValue
+        }
+        CoinbaseError::InvalidTimestamp(_) => CoinbaseProviderInvalidReason::InvalidTimestamp,
+        CoinbaseError::ServerRejected(_) => CoinbaseProviderInvalidReason::ProviderRejected,
+        CoinbaseError::Transport(_) | CoinbaseError::DeadlineExceeded if during_connect => {
+            CoinbaseProviderInvalidReason::ConnectTransport
+        }
+        CoinbaseError::Transport(_) | CoinbaseError::DeadlineExceeded => {
+            CoinbaseProviderInvalidReason::StreamTransport
+        }
+    }
 }
 
 #[cfg(test)]

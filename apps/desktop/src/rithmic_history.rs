@@ -8,7 +8,10 @@ use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use axiusflow_market_data::{BarDefinition, MarketBar};
+use axiusflow_market_data::{
+    BarDefinition, ChartAggregation, ChartInterval, MarketBar, RithmicChartAggregation,
+    RithmicDailyAggregation, RithmicTimeUnit,
+};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
@@ -19,6 +22,7 @@ use axiusflow_rithmic_protocol_adapter::{
     canonical_rithmic_tick_bar, canonical_rithmic_time_bar,
 };
 use std::{
+    collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
@@ -41,62 +45,92 @@ const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
 const DAILY_SESSION_PADDING_BARS: usize = 150;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RithmicSeries {
-    Tick,
-    Minute1,
-    Minute5,
-    Minute15,
-    Hour1,
-    Daily,
-}
+pub(crate) struct RithmicSeries(ChartInterval);
 
+#[allow(non_upper_case_globals)]
+#[allow(dead_code)]
 impl RithmicSeries {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const Tick: Self = Self(ChartInterval::Tick100);
+    pub(crate) const Minute1: Self = Self(ChartInterval::Minute1);
+    pub(crate) const Minute3: Self = Self(ChartInterval::Minute3);
+    pub(crate) const Minute5: Self = Self(ChartInterval::Minute5);
+    pub(crate) const Minute15: Self = Self(ChartInterval::Minute15);
+    pub(crate) const Minute30: Self = Self(ChartInterval::Minute30);
+    pub(crate) const Hour1: Self = Self(ChartInterval::Hour1);
+    pub(crate) const Hour2: Self = Self(ChartInterval::Hour2);
+    pub(crate) const Hour4: Self = Self(ChartInterval::Hour4);
+    pub(crate) const Hour8: Self = Self(ChartInterval::Hour8);
+    pub(crate) const Hour12: Self = Self(ChartInterval::Hour12);
+    pub(crate) const Daily: Self = Self(ChartInterval::Day1);
+    pub(crate) const Day3: Self = Self(ChartInterval::Day3);
+    pub(crate) const Week1: Self = Self(ChartInterval::Week1);
+    pub(crate) const Month1: Self = Self(ChartInterval::Month1);
+
+    pub(crate) const ALL: [Self; 15] = [
         Self::Tick,
         Self::Minute1,
+        Self::Minute3,
         Self::Minute5,
         Self::Minute15,
+        Self::Minute30,
         Self::Hour1,
+        Self::Hour2,
+        Self::Hour4,
+        Self::Hour8,
+        Self::Hour12,
         Self::Daily,
+        Self::Day3,
+        Self::Week1,
+        Self::Month1,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Tick => "100t",
-            Self::Minute1 => "1m",
-            Self::Minute5 => "5m",
-            Self::Minute15 => "15m",
-            Self::Hour1 => "1h",
-            Self::Daily => "Daily",
-        }
+        self.0.label()
     }
 
-    const fn interval_seconds(self) -> Option<u64> {
-        match self {
-            Self::Tick => None,
-            Self::Minute1 => Some(60),
-            Self::Minute5 => Some(300),
-            Self::Minute15 => Some(900),
-            Self::Hour1 => Some(3_600),
-            Self::Daily => Some(86_400),
+    pub(crate) const fn interval(self) -> ChartInterval {
+        self.0
+    }
+
+    pub(crate) fn supports_native_history(self) -> bool {
+        self.0.rithmic_aggregation().is_some()
+    }
+
+    fn interval_seconds(self) -> Option<u64> {
+        match self.interval().aggregation() {
+            ChartAggregation::FixedSeconds(seconds) => Some(u64::from(seconds.get())),
+            ChartAggregation::CalendarMonth => Some(30 * 24 * 60 * 60),
+            ChartAggregation::Trades(_) => None,
         }
     }
 
     fn resolution(self) -> Result<RithmicTimeBarResolution, String> {
-        let (bar_type, period) = match self {
-            Self::Tick => return Err("Tick series has no time resolution".to_string()),
-            Self::Minute1 => (TimeBarType::Minute, 1),
-            Self::Minute5 => (TimeBarType::Minute, 5),
-            Self::Minute15 => (TimeBarType::Minute, 15),
-            Self::Hour1 => (TimeBarType::Minute, 60),
-            Self::Daily => (TimeBarType::Daily, 1),
+        if !self.supports_native_history() {
+            return Err(format!(
+                "{} has no exact Rithmic time-bar resolution",
+                self.label()
+            ));
+        }
+        let Some(RithmicChartAggregation::Time { unit, period }) =
+            self.interval().rithmic_aggregation()
+        else {
+            return Err(format!(
+                "{} has no exact Rithmic time-bar resolution",
+                self.label()
+            ));
         };
-        RithmicTimeBarResolution::try_new(
-            self.label(),
-            bar_type,
-            NonZeroU16::new(period).unwrap_or(NonZeroU16::MIN),
-        )
-        .map_err(|_| "Rithmic series is unavailable".to_string())
+        let bar_type = match unit {
+            RithmicTimeUnit::Minute => TimeBarType::Minute,
+            RithmicTimeUnit::Day => TimeBarType::Daily,
+        };
+        RithmicTimeBarResolution::try_new(self.label(), bar_type, period)
+            .map_err(|_| "Rithmic series is unavailable".to_string())
+    }
+}
+
+impl From<ChartInterval> for RithmicSeries {
+    fn from(interval: ChartInterval) -> Self {
+        Self(interval)
     }
 }
 
@@ -337,16 +371,19 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
         .map_err(|_| "Rithmic history range is invalid".to_string())?;
     let finish_seconds = i32::try_from(replay.range.end_unix_nanos / NANOS_PER_SECOND)
         .map_err(|_| "Rithmic history range is invalid".to_string())?;
-    let bars = match request.series {
-        RithmicSeries::Tick => collect_tick_history(
-            &mut transport,
-            &provider_instrument,
-            start_seconds,
-            finish_seconds,
-            replay.maximum_bars,
-        )?,
-        series => {
-            let resolution = series.resolution()?;
+    let bars = match request.series.interval().rithmic_aggregation() {
+        Some(RithmicChartAggregation::Trades { trades_per_bar }) => {
+            debug_assert_eq!(trades_per_bar.get(), TICK_TRADES_PER_BAR);
+            collect_tick_history(
+                &mut transport,
+                &provider_instrument,
+                start_seconds,
+                finish_seconds,
+                replay.maximum_bars,
+            )?
+        }
+        Some(RithmicChartAggregation::Time { .. }) => {
+            let resolution = request.series.resolution()?;
             collect_time_history(
                 &mut transport,
                 &provider_instrument,
@@ -356,6 +393,19 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
                 replay.maximum_bars,
             )?
         }
+        Some(RithmicChartAggregation::DailySessions { period }) => {
+            let resolution = daily_resolution()?;
+            let daily = collect_time_history(
+                &mut transport,
+                &provider_instrument,
+                &resolution,
+                start_seconds,
+                finish_seconds,
+                replay.maximum_bars,
+            )?;
+            aggregate_daily_history(daily, period)?
+        }
+        None => return Err("Rithmic history series is unavailable".to_string()),
     };
     let response_bars = bars.len();
     let visible_bars = latest_visible_bars(bars);
@@ -378,6 +428,85 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
 struct CanonicalHistoryBar {
     value: MarketBar,
     exchange_timestamp_unix_nanos: i64,
+}
+
+fn daily_resolution() -> Result<RithmicTimeBarResolution, String> {
+    RithmicTimeBarResolution::try_new(
+        ChartInterval::Day1.label(),
+        TimeBarType::Daily,
+        NonZeroU16::MIN,
+    )
+    .map_err(|_| "Rithmic daily history is unavailable".to_string())
+}
+
+fn aggregate_daily_history(
+    daily: Vec<CanonicalHistoryBar>,
+    period: RithmicDailyAggregation,
+) -> Result<Vec<CanonicalHistoryBar>, String> {
+    let daily = daily
+        .into_iter()
+        .map(|bar| (bar.exchange_timestamp_unix_nanos, bar))
+        .collect::<BTreeMap<_, _>>();
+    let mut aggregated = Vec::<CanonicalHistoryBar>::new();
+    let mut active = None::<(i64, CanonicalHistoryBar)>;
+
+    for (_, daily_bar) in daily {
+        let bucket = daily_bucket(daily_bar.value.exchange_timestamp_seconds, period);
+        match &mut active {
+            Some((active_bucket, aggregate)) if *active_bucket == bucket => {
+                aggregate.value.high = aggregate.value.high.max(daily_bar.value.high);
+                aggregate.value.low = aggregate.value.low.min(daily_bar.value.low);
+                aggregate.value.close = daily_bar.value.close;
+                aggregate.value.volume = aggregate
+                    .value
+                    .volume
+                    .checked_add(daily_bar.value.volume)
+                    .ok_or_else(|| "Rithmic aggregate volume overflowed".to_string())?;
+            }
+            _ => {
+                if let Some((_, completed)) = active.take() {
+                    aggregated.push(completed);
+                }
+                active = Some((bucket, daily_bar));
+            }
+        }
+    }
+    if let Some((_, completed)) = active {
+        aggregated.push(completed);
+    }
+
+    for (index, bar) in aggregated.iter_mut().enumerate() {
+        bar.value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        bar.value.validate().map_err(|error| error.to_string())?;
+    }
+    Ok(aggregated)
+}
+
+fn daily_bucket(timestamp_seconds: i64, period: RithmicDailyAggregation) -> i64 {
+    let unix_day = timestamp_seconds.div_euclid(86_400);
+    match period {
+        RithmicDailyAggregation::Week => unix_day - (unix_day + 3).rem_euclid(7),
+        RithmicDailyAggregation::Month => {
+            let (year, month) = civil_year_month(unix_day);
+            year * 12 + i64::from(month)
+        }
+    }
+}
+
+fn civil_year_month(unix_day: i64) -> (i64, u32) {
+    let day = unix_day + 719_468;
+    let era = day.div_euclid(146_097);
+    let day_of_era = day - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, u32::try_from(month).unwrap_or(1))
 }
 
 fn collect_time_history(
@@ -523,6 +652,11 @@ fn replay_envelope(series: RithmicSeries, now: SystemTime) -> Result<ReplayEnvel
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is invalid".to_string())?
         .as_secs();
+    if let Some(RithmicChartAggregation::DailySessions { period }) =
+        series.interval().rithmic_aggregation()
+    {
+        return aggregate_replay_envelope(now_seconds, period);
+    }
     let interval = series.interval_seconds().unwrap_or(60);
     let end_seconds = if series == RithmicSeries::Tick {
         now_seconds
@@ -564,6 +698,48 @@ fn replay_envelope(series: RithmicSeries, now: SystemTime) -> Result<ReplayEnvel
                 .ok_or_else(|| "Rithmic visible range overflowed".to_string())?,
         },
         maximum_bars: NonZeroUsize::new(theoretical_bars).unwrap_or(NonZeroUsize::MIN),
+    })
+}
+
+fn aggregate_replay_envelope(
+    now_seconds: u64,
+    period: RithmicDailyAggregation,
+) -> Result<ReplayEnvelope, String> {
+    const DAY_SECONDS: u64 = 24 * 60 * 60;
+    let maximum_days_per_bar = match period {
+        RithmicDailyAggregation::Week => 7,
+        RithmicDailyAggregation::Month => 31,
+    };
+    let source_days = MAXIMUM_VISIBLE_BARS
+        .saturating_mul(maximum_days_per_bar)
+        .saturating_add(maximum_days_per_bar)
+        .saturating_add(
+            usize::try_from(MAXIMUM_NON_TRADING_GAP_SECONDS / DAY_SECONDS).unwrap_or(usize::MAX),
+        );
+    let maximum_bars = source_days.saturating_add(3);
+    if maximum_bars > MAXIMUM_REPLAY_BARS {
+        return Err("Rithmic aggregate source exceeds replay capacity".to_string());
+    }
+    let end_seconds = now_seconds - now_seconds % DAY_SECONDS;
+    let span_seconds = u64::try_from(source_days)
+        .ok()
+        .and_then(|days| days.checked_mul(DAY_SECONDS))
+        .ok_or_else(|| "Rithmic aggregate range overflowed".to_string())?;
+    let start_seconds = end_seconds
+        .checked_sub(span_seconds)
+        .ok_or_else(|| "Rithmic aggregate range underflowed".to_string())?;
+    Ok(ReplayEnvelope {
+        range: HistoryRange {
+            start_unix_nanos: i64::try_from(start_seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
+                .ok_or_else(|| "Rithmic aggregate range overflowed".to_string())?,
+            end_unix_nanos: i64::try_from(end_seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
+                .ok_or_else(|| "Rithmic aggregate range overflowed".to_string())?,
+        },
+        maximum_bars: NonZeroUsize::new(maximum_bars).unwrap_or(NonZeroUsize::MIN),
     })
 }
 
@@ -716,6 +892,112 @@ mod tests {
     use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 
     #[test]
+    fn rithmic_series_wraps_the_shared_chart_interval_catalog() {
+        assert_eq!(
+            RithmicSeries::ALL.map(RithmicSeries::interval),
+            ChartInterval::ALL
+        );
+        assert!(RithmicSeries::Tick.supports_native_history());
+        assert!(RithmicSeries::Hour12.supports_native_history());
+        assert!(RithmicSeries::Week1.supports_native_history());
+        assert!(RithmicSeries::Month1.supports_native_history());
+        assert_eq!(
+            RithmicSeries::Hour12
+                .resolution()
+                .expect("12h is a native Rithmic minute period")
+                .period
+                .get(),
+            720
+        );
+    }
+
+    fn daily_bar(timestamp: i64, ohlc: [i64; 4], volume: i64) -> CanonicalHistoryBar {
+        CanonicalHistoryBar {
+            value: MarketBar {
+                source_sequence: 99,
+                exchange_timestamp_seconds: timestamp,
+                open: ohlc[0],
+                high: ohlc[1],
+                low: ohlc[2],
+                close: ohlc[3],
+                volume,
+            },
+            exchange_timestamp_unix_nanos: timestamp * NANOS_PER_SECOND,
+        }
+    }
+
+    #[test]
+    fn weekly_aggregation_uses_monday_boundaries_and_whole_daily_sessions() {
+        let monday = 1_704_067_200;
+        let bars = vec![
+            daily_bar(monday, [100, 110, 90, 105], 10),
+            daily_bar(monday + 86_400, [105, 115, 95, 112], 20),
+            daily_bar(monday + 4 * 86_400, [112, 120, 108, 118], 30),
+            daily_bar(monday + 7 * 86_400, [118, 125, 115, 122], 40),
+        ];
+
+        let weekly = aggregate_daily_history(bars, RithmicDailyAggregation::Week)
+            .expect("weekly aggregation validates");
+
+        assert_eq!(weekly.len(), 2);
+        assert_eq!(weekly[0].value.source_sequence, 1);
+        assert_eq!(weekly[0].value.exchange_timestamp_seconds, monday);
+        assert_eq!(
+            [
+                weekly[0].value.open,
+                weekly[0].value.high,
+                weekly[0].value.low,
+                weekly[0].value.close,
+            ],
+            [100, 120, 90, 118]
+        );
+        assert_eq!(weekly[0].value.volume, 60);
+        assert_eq!(weekly[1].value.source_sequence, 2);
+        assert_eq!(
+            weekly[1].value.exchange_timestamp_seconds,
+            monday + 7 * 86_400
+        );
+    }
+
+    #[test]
+    fn monthly_aggregation_honors_calendar_boundaries_and_leap_day() {
+        let january_31 = 1_706_659_200;
+        let february_1 = 1_706_745_600;
+        let february_29 = 1_709_164_800;
+        let march_1 = 1_709_251_200;
+        let bars = vec![
+            daily_bar(january_31, [90, 100, 80, 95], 5),
+            daily_bar(february_1, [100, 110, 90, 105], 10),
+            daily_bar(february_29, [105, 120, 85, 115], 20),
+            daily_bar(march_1, [115, 130, 110, 125], 30),
+        ];
+
+        let monthly = aggregate_daily_history(bars, RithmicDailyAggregation::Month)
+            .expect("monthly aggregation validates");
+
+        assert_eq!(monthly.len(), 3);
+        assert_eq!(
+            monthly
+                .iter()
+                .map(|bar| bar.value.source_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(monthly[1].value.exchange_timestamp_seconds, february_1);
+        assert_eq!(
+            [
+                monthly[1].value.open,
+                monthly[1].value.high,
+                monthly[1].value.low,
+                monthly[1].value.close,
+            ],
+            [100, 120, 85, 115]
+        );
+        assert_eq!(monthly[1].value.volume, 30);
+        assert_eq!(monthly[2].value.exchange_timestamp_seconds, march_1);
+    }
+
+    #[test]
     fn series_browser_fences_replaced_selection_and_series_generations() {
         let mut browser = RithmicSeriesBrowser::default();
         let selection = NonZeroUsize::MIN;
@@ -769,6 +1051,17 @@ mod tests {
         let tick = replay_envelope(RithmicSeries::Tick, now).expect("tick envelope validates");
         assert_eq!(tick.range.end_unix_nanos, 1_800_123_456 * NANOS_PER_SECOND);
         assert_eq!(tick.maximum_bars.get(), MAXIMUM_REPLAY_BARS);
+
+        for series in [RithmicSeries::Week1, RithmicSeries::Month1] {
+            let replay = replay_envelope(series, now).expect("aggregate envelope validates");
+            assert_eq!(
+                replay.range.start_unix_nanos % (86_400 * NANOS_PER_SECOND),
+                0
+            );
+            assert_eq!(replay.range.end_unix_nanos % (86_400 * NANOS_PER_SECOND), 0);
+            assert!(replay.maximum_bars.get() <= MAXIMUM_REPLAY_BARS);
+            assert!(replay.maximum_bars.get() > MAXIMUM_VISIBLE_BARS);
+        }
     }
 
     #[test]

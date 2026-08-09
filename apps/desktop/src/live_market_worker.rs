@@ -17,13 +17,17 @@ use axiusflow_application::{
     MarketBarClientModel, ProvenancedMarketBar, ReplayStreamUpdate, StreamDelta,
 };
 use axiusflow_chart_integration::ReplayRecoveryCommand;
-use axiusflow_coinbase_market_adapter::{CoinbaseDesktopEventError, CoinbaseProviderEvents};
+use axiusflow_coinbase_market_adapter::{
+    CoinbaseAggregatedBar, CoinbaseDesktopEventError, CoinbaseDesktopMarketEvent,
+    CoinbaseHttpsHistoryTransport, CoinbaseInterval, CoinbaseLevel2Book, CoinbaseLevel2Outcome,
+    CoinbaseProductCatalog, CoinbaseProviderEvents, aggregate_coinbase_bars, coinbase_depth_limit,
+};
 use axiusflow_desktop_provider_runtime::{
     DesktopMarketWorkerError, DesktopProviderError, DesktopProviderState, SessionGeneration,
 };
 use axiusflow_desktop_storage::SegmentEncryptionKey;
-use axiusflow_instruments::InstrumentRevision;
-use axiusflow_market_data::BarDefinition;
+use axiusflow_instruments::{InstrumentPrecision, InstrumentRevision};
+use axiusflow_market_data::{BarDefinition, MarketEvent};
 use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
 use std::{
     collections::VecDeque,
@@ -38,8 +42,9 @@ use std::{
 };
 
 use composition::{
-    CoinbaseDesktopWorker, OpenedWorker, ProductProfile, bar_definition, client_model, instrument,
-    loading_startup, nonzero, open_worker, product_profile, unix_nanos, worker_label,
+    CoinbaseDesktopWorker, OpenedWorker, ProductProfile, bar_definition_for_interval, client_model,
+    instrument, loading_startup, nonzero, open_worker, product_profile, product_profile_from_spot,
+    unix_nanos, worker_label,
 };
 use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
@@ -69,6 +74,7 @@ const SUBSCRIPTION_ID: &str = "desktop_coinbase_one_minute_bars";
 const VAULT_SERVICE: &str = "axiusflow-desktop-market-history";
 const CATALOG_KEY_ID: &str = "history-catalog-key-v1";
 const SEGMENT_KEY_ID: &str = "coinbase-public-bars-key-v1";
+const COINBASE_DISK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 struct LiveLoopState {
     prepared: Option<PreparedHistory>,
@@ -102,6 +108,27 @@ struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault, H: HistoryS
     model: MarketBarClientModel,
     state: LiveLoopState,
     history_source: H,
+    level2: Option<CoinbaseLevel2Book>,
+    dom: axiusflow_terminal_ui::ReadOnlyDom,
+}
+
+impl<V: axiusflow_platform_runtime::CredentialVault, H: HistorySource> RunningWorker<V, H> {
+    fn reconcile_recovery(&mut self, message_tx: &MarketWorkerSender) -> Result<(), String> {
+        request_recovery_if_required(&mut self.worker, &self.events, &mut self.state, message_tx)
+    }
+}
+
+struct CoinbaseCallbackContext<'a> {
+    streaming_generation: Option<SessionGeneration>,
+    retained: &'a mut VecDeque<ProvenancedMarketBar>,
+    model: &'a mut MarketBarClientModel,
+    worker_label: &'a str,
+    profile: &'a ProductProfile,
+    instrument: &'a InstrumentRevision,
+    bar_definition: &'a BarDefinition,
+    level2: &'a mut Option<CoinbaseLevel2Book>,
+    dom: &'a mut axiusflow_terminal_ui::ReadOnlyDom,
+    message_tx: &'a MarketWorkerSender,
 }
 
 pub(crate) fn start(
@@ -111,8 +138,44 @@ pub(crate) fn start(
     detailed_diagnostics: bool,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let profile = product_profile(product_id)?;
-    let startup = loading_startup(&profile)?;
+    start_with_profile(profile, history_root, ui_thread, detailed_diagnostics)
+}
+
+pub(crate) fn start_product_interval(
+    product: axiusflow_coinbase_market_adapter::CoinbaseSpotProduct,
+    interval: axiusflow_market_data::ChartInterval,
+    history_root: PathBuf,
+    ui_thread: ThreadId,
+    detailed_diagnostics: bool,
+) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+    start_with_profile(
+        product_profile_from_spot(product, interval),
+        history_root,
+        ui_thread,
+        detailed_diagnostics,
+    )
+}
+
+fn start_with_profile(
+    profile: ProductProfile,
+    history_root: PathBuf,
+    ui_thread: ThreadId,
+    detailed_diagnostics: bool,
+) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+    enforce_coinbase_disk_cache_quota(&history_root, COINBASE_DISK_CACHE_BYTES)?;
+    let startup = loading_startup(&profile, history_root.clone(), detailed_diagnostics);
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
+    let catalog_message_tx = message_tx.clone();
+    thread::Builder::new()
+        .name("axiusflow-coinbase-product-catalog".to_string())
+        .spawn(move || {
+            let mut catalog = CoinbaseProductCatalog::with_transport(CoinbaseHttpsHistoryTransport);
+            let result = catalog
+                .fetch_active_spot_products()
+                .map_err(|error| error.to_string());
+            let _ = catalog_message_tx.send(MarketWorkerMessage::CoinbaseCatalog(result));
+        })
+        .map_err(|error| error.to_string())?;
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (inbox_tx, inbox_rx) = mpsc::sync_channel(INBOX_CAPACITY);
     let diagnostics_wake_tx = inbox_tx.clone();
@@ -223,7 +286,7 @@ fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: His
     } = opened;
     apply_initial_network(&mut worker, initial_network)?;
     let instrument = instrument(&profile)?;
-    let bar_definition = bar_definition();
+    let bar_definition = bar_definition_for_interval(profile.interval);
     let worker_label = worker_label(monitors_active);
     let mut model = client_model();
     let retained = prepare_initial_history(
@@ -254,6 +317,8 @@ fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: His
             pending_recovery: VecDeque::with_capacity(COMMAND_CAPACITY),
         },
         history_source,
+        level2: None,
+        dom: axiusflow_terminal_ui::ReadOnlyDom::new(coinbase_depth_limit()),
         profile,
         worker,
         events,
@@ -285,10 +350,9 @@ fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault, H: HistorySou
             running.worker.stop().map_err(|error| error.to_string())?;
             return Ok(());
         }
-
         flush_diagnostics(&mut running.worker, ui_diagnostics_rx, message_tx)?;
 
-        reconcile_provider_recovery(&mut running.worker, &mut running.state, message_tx)?;
+        running.reconcile_recovery(message_tx)?;
 
         establish_coinbase_stream_if_ready(
             &mut running.worker,
@@ -317,15 +381,22 @@ fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault, H: HistorySou
             drain_coinbase_callbacks(
                 &mut running.worker,
                 &running.events,
-                running.state.streaming_generation,
-                &mut running.state.retained,
-                &mut running.model,
-                &running.worker_label,
-                message_tx,
+                CoinbaseCallbackContext {
+                    streaming_generation: running.state.streaming_generation,
+                    retained: &mut running.state.retained,
+                    model: &mut running.model,
+                    worker_label: &running.worker_label,
+                    profile: &running.profile,
+                    instrument: &running.instrument,
+                    bar_definition: &running.bar_definition,
+                    level2: &mut running.level2,
+                    dom: &mut running.dom,
+                    message_tx,
+                },
             )?;
         }
 
-        reconcile_provider_recovery(&mut running.worker, &mut running.state, message_tx)?;
+        running.reconcile_recovery(message_tx)?;
 
         if !publish_ready_recovery(
             running.state.streaming_generation,
@@ -360,22 +431,6 @@ fn run_worker_loop<V: axiusflow_platform_runtime::CredentialVault, H: HistorySou
             )),
         )?;
     }
-}
-
-fn reconcile_provider_recovery<V: axiusflow_platform_runtime::CredentialVault>(
-    worker: &mut CoinbaseDesktopWorker<V>,
-    state: &mut LiveLoopState,
-    message_tx: &MarketWorkerSender,
-) -> Result<(), String> {
-    request_recovery_if_required(
-        worker,
-        &mut state.prepared,
-        &mut state.streaming_generation,
-        &mut state.reconnect_backoff,
-        &mut state.recovery_announced,
-        &mut state.retained,
-        message_tx,
-    )
 }
 
 fn discard_provider_events<V: axiusflow_platform_runtime::CredentialVault>(
@@ -460,17 +515,25 @@ fn discard_coinbase_callbacks(events: &CoinbaseProviderEvents) {
 fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
     worker: &mut CoinbaseDesktopWorker<V>,
     events: &CoinbaseProviderEvents,
-    streaming_generation: Option<SessionGeneration>,
-    retained: &mut VecDeque<ProvenancedMarketBar>,
-    model: &mut MarketBarClientModel,
-    worker_label: &str,
-    message_tx: &MarketWorkerSender,
+    context: CoinbaseCallbackContext<'_>,
 ) -> Result<(), String> {
+    let CoinbaseCallbackContext {
+        streaming_generation,
+        retained,
+        model,
+        worker_label,
+        profile,
+        instrument,
+        bar_definition,
+        level2,
+        dom,
+        message_tx,
+    } = context;
     for _ in 0..PROVIDER_EVENT_BATCH {
         if !events.has_ready() {
             break;
         }
-        let received = match worker.try_recv_coinbase_aggregated_bar(events) {
+        let received = match worker.try_recv_coinbase_market_event(events) {
             Ok(received) => received,
             Err(_error)
                 if matches!(
@@ -483,11 +546,41 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
             Err(error) if is_stale_coinbase_callback(&error) => continue,
             Err(error) => return Err(error.to_string()),
         };
-        let Some((generation, completed)) = received else {
+        let Some(received) = received else {
             continue;
+        };
+        if let CoinbaseDesktopMarketEvent::Level2 {
+            generation,
+            payload,
+        } = received
+        {
+            publish_coinbase_depth(profile, generation, &payload, level2, dom, message_tx)?;
+            continue;
+        }
+        let CoinbaseDesktopMarketEvent::Bar {
+            generation,
+            completed,
+        } = received
+        else {
+            unreachable!("Coinbase market event variants are exhaustive")
         };
         if streaming_generation != Some(generation) {
             return Err("completed Coinbase bar arrived before history seeding".to_string());
+        }
+        if profile.interval != axiusflow_market_data::ChartInterval::Minute1 {
+            publish_aggregated_coinbase_interval(
+                worker,
+                generation,
+                completed,
+                retained,
+                model,
+                worker_label,
+                profile,
+                instrument,
+                bar_definition,
+                message_tx,
+            )?;
+            continue;
         }
         let item = live_provenance(completed, generation)?;
         let previous = retained
@@ -509,6 +602,204 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
             worker_label,
             message_tx,
         )?;
+    }
+    Ok(())
+}
+
+fn enforce_coinbase_disk_cache_quota(
+    history_root: &std::path::Path,
+    quota: u64,
+) -> Result<(), String> {
+    let segments = history_root.join("segments");
+    if !segments.exists() {
+        return Ok(());
+    }
+    let root = history_root
+        .canonicalize()
+        .map_err(|error| format!("Coinbase cache root is unavailable: {error}"))?;
+    let segments = segments
+        .canonicalize()
+        .map_err(|error| format!("Coinbase cache segment root is unavailable: {error}"))?;
+    if !segments.starts_with(&root) {
+        return Err("Coinbase cache segment root escaped its configured root".to_string());
+    }
+    let mut files = std::fs::read_dir(&segments)
+        .map_err(|error| format!("Coinbase cache inventory failed: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(|| {
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                (entry.path(), metadata.len(), modified)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut retained_bytes = files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>();
+    files.sort_by_key(|(_, _, modified)| *modified);
+    for (path, bytes, _) in files {
+        if retained_bytes <= quota {
+            break;
+        }
+        let resolved = path
+            .canonicalize()
+            .map_err(|error| format!("Coinbase cache entry is unavailable: {error}"))?;
+        if !resolved.starts_with(&segments) {
+            return Err("Coinbase cache entry escaped its segment root".to_string());
+        }
+        std::fs::remove_file(&resolved)
+            .map_err(|error| format!("Coinbase cache eviction failed: {error}"))?;
+        retained_bytes = retained_bytes.saturating_sub(bytes);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_aggregated_coinbase_interval<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    generation: SessionGeneration,
+    completed: CoinbaseAggregatedBar,
+    retained: &mut VecDeque<ProvenancedMarketBar>,
+    model: &mut MarketBarClientModel,
+    worker_label: &str,
+    profile: &ProductProfile,
+    instrument: &InstrumentRevision,
+    bar_definition: &BarDefinition,
+    message_tx: &MarketWorkerSender,
+) -> Result<(), String> {
+    let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
+    let (bucket, _) = aggregate_coinbase_bars(&[completed.bar], interval)?;
+    let mut bucket = *bucket
+        .first()
+        .ok_or_else(|| "Coinbase live interval aggregation produced no bar".to_string())?;
+    let previous_sequence = retained
+        .back()
+        .ok_or_else(|| "Coinbase live stream has no snapshot predecessor".to_string())?
+        .value()
+        .source_sequence;
+    let replace_last = retained.back().is_some_and(|previous| {
+        previous.value().exchange_timestamp_seconds == bucket.exchange_timestamp_seconds
+    });
+    if replace_last {
+        let previous = *retained
+            .back()
+            .ok_or_else(|| "Coinbase aggregate predecessor disappeared".to_string())?
+            .value();
+        let (combined, _) = aggregate_coinbase_bars(&[previous, completed.bar], interval)?;
+        bucket = *combined
+            .first()
+            .ok_or_else(|| "Coinbase live interval merge produced no bar".to_string())?;
+        bucket.source_sequence = previous_sequence;
+    } else {
+        bucket.source_sequence = previous_sequence
+            .checked_add(1)
+            .ok_or_else(|| "Coinbase live interval sequence overflow".to_string())?;
+    }
+    let item = live_provenance(
+        CoinbaseAggregatedBar {
+            bar: bucket,
+            provider_timestamp_unix_nanos: completed.provider_timestamp_unix_nanos,
+            provider_sequence_num: completed.provider_sequence_num,
+        },
+        generation,
+    )?;
+    if replace_last {
+        retained.pop_back();
+    }
+    retained.push_back(item);
+    if retained.len() > MODEL_ITEM_CAPACITY {
+        retained.pop_front();
+    }
+    let snapshot = axiusflow_application::ReplaySnapshot::try_from_provenanced_values(
+        instrument.clone(),
+        axiusflow_application::ReplayProvenance::LiveProvider,
+        bar_definition.clone(),
+        model
+            .current_generation()
+            .map_or(1, |current| current.generation().saturating_add(1)),
+        retained.iter().cloned().collect(),
+    )
+    .map_err(|error| error.to_string())?;
+    publish_update(
+        worker,
+        generation,
+        model,
+        ReplayStreamUpdate::Snapshot(snapshot),
+        worker_label,
+        message_tx,
+    )
+}
+
+fn publish_coinbase_depth(
+    profile: &ProductProfile,
+    generation: SessionGeneration,
+    payload: &[u8],
+    level2: &mut Option<CoinbaseLevel2Book>,
+    dom: &mut axiusflow_terminal_ui::ReadOnlyDom,
+    message_tx: &MarketWorkerSender,
+) -> Result<(), String> {
+    let generation_value = generation.get();
+    if level2.is_none()
+        || dom.selection().is_none_or(|selection| {
+            selection.session_generation != generation_value
+                || selection.instrument_id != profile.instrument_id
+        })
+    {
+        *level2 = Some(
+            CoinbaseLevel2Book::try_new(
+                profile.product_id.clone(),
+                profile.price_scale,
+                profile.quantity_scale,
+                generation_value,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        dom.select(axiusflow_terminal_ui::DomSelection {
+            provider_id: "coinbase".to_string(),
+            instrument_id: profile.instrument_id.clone(),
+            entitlement_id: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS.to_string(),
+            session_generation: generation_value,
+            selection_generation: generation_value,
+            precision: InstrumentPrecision::try_new(profile.price_scale, profile.quantity_scale)
+                .map_err(|error| error.to_string())?,
+        });
+    }
+    let outcome = level2
+        .as_mut()
+        .ok_or_else(|| "Coinbase Level 2 state is unavailable".to_string())?
+        .apply_message(payload, unix_nanos()?)
+        .map_err(|error| error.to_string())?;
+    let frame = match outcome {
+        CoinbaseLevel2Outcome::Snapshot(snapshot) => match dom
+            .apply_event(&MarketEvent::DepthSnapshot(snapshot))
+            .map_err(|error| error.to_string())?
+        {
+            axiusflow_terminal_ui::DomUpdateOutcome::Published(frame)
+            | axiusflow_terminal_ui::DomUpdateOutcome::RecoveryRequired(frame, _) => Some(frame),
+            axiusflow_terminal_ui::DomUpdateOutcome::Ignored => None,
+        },
+        CoinbaseLevel2Outcome::Deltas { deltas, .. } => {
+            let mut frame = None;
+            for delta in deltas {
+                match dom
+                    .apply_event(&MarketEvent::DepthDelta(delta))
+                    .map_err(|error| error.to_string())?
+                {
+                    axiusflow_terminal_ui::DomUpdateOutcome::Published(next)
+                    | axiusflow_terminal_ui::DomUpdateOutcome::RecoveryRequired(next, _) => {
+                        frame = Some(next);
+                    }
+                    axiusflow_terminal_ui::DomUpdateOutcome::Ignored => {}
+                }
+            }
+            frame
+        }
+        CoinbaseLevel2Outcome::RecoveryRequired => dom.mark_stale(),
+        CoinbaseLevel2Outcome::Ignored => None,
+    };
+    if let Some(frame) = frame {
+        let _ = message_tx.send(MarketWorkerMessage::CoinbaseDom(frame));
     }
     Ok(())
 }
@@ -542,33 +833,29 @@ fn is_stale_coinbase_callback(error: &CoinbaseDesktopEventError) -> bool {
 
 fn request_recovery_if_required<V: axiusflow_platform_runtime::CredentialVault>(
     worker: &mut CoinbaseDesktopWorker<V>,
-    prepared: &mut Option<PreparedHistory>,
-    streaming_generation: &mut Option<SessionGeneration>,
-    reconnect_backoff: &mut ReconnectBackoff,
-    recovery_announced: &mut bool,
-    retained: &mut VecDeque<ProvenancedMarketBar>,
+    events: &CoinbaseProviderEvents,
+    state: &mut LiveLoopState,
     message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
-    if matches!(
-        worker.provider_state().map_err(|error| error.to_string())?,
-        DesktopProviderState::RecoveryRequired { .. }
-    ) {
+    let provider_state = worker.provider_state().map_err(|error| error.to_string())?;
+    if let DesktopProviderState::RecoveryRequired { reason, .. } = provider_state {
         worker.reset_aggregation();
-        *streaming_generation = None;
-        *prepared = None;
-        retained.clear();
-        if !*recovery_announced {
+        state.streaming_generation = None;
+        state.prepared = None;
+        state.retained.clear();
+        if !state.recovery_announced {
             message_tx
                 .send(MarketWorkerMessage::State {
                     state: ChartState::Recovering,
-                    message:
-                        "Coinbase provider recovery required; awaiting a fresh covering snapshot"
-                            .to_string(),
+                    message: format!(
+                        "Coinbase provider recovery required ({reason:?}, source={:?}); awaiting a fresh covering snapshot",
+                        events.invalid_reason()
+                    ),
                 })
                 .map_err(|()| "desktop market UI channel disconnected".to_string())?;
-            *recovery_announced = true;
+            state.recovery_announced = true;
         }
-        if reconnect_backoff.retry_ready(Instant::now()) {
+        if state.reconnect_backoff.retry_ready(Instant::now()) {
             worker
                 .request_connection()
                 .map_err(|error| error.to_string())?;

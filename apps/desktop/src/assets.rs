@@ -62,6 +62,29 @@ impl AssetSource for AxiusflowAssets {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DesktopAssets;
+
+impl AssetSource for DesktopAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path.starts_with(DRAWING_ASSET_PREFIX) {
+            AxiusflowAssets.load(path)
+        } else {
+            gpui_component_assets::Assets.load(path)
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut assets = AxiusflowAssets.list(path)?;
+        for asset in gpui_component_assets::Assets.list(path)? {
+            if !assets.contains(&asset) {
+                assets.push(asset);
+            }
+        }
+        Ok(assets)
+    }
+}
+
 fn drawing_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(DRAWING_ASSET_PREFIX)? {
         "trend-line.svg" => include_bytes!("../assets/icons/drawing/trend-line.svg"),
@@ -145,5 +168,24 @@ mod tests {
                 .expect("unknown lookup")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn desktop_source_composes_drawing_and_window_control_assets() {
+        let assets = DesktopAssets;
+        assert!(
+            assets
+                .load(DrawingIcon::TrendLine.path().as_ref())
+                .unwrap()
+                .is_some()
+        );
+        for path in [
+            "icons/window-minimize.svg",
+            "icons/window-maximize.svg",
+            "icons/window-restore.svg",
+            "icons/window-close.svg",
+        ] {
+            assert!(assets.load(path).unwrap().is_some(), "missing {path}");
+        }
     }
 }

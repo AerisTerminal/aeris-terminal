@@ -56,10 +56,10 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stages C, E, and F** are `blocked_external`: implementation and deterministic gates pass, while completion requires real provider silence, externally instrumented physical scanout, and operator-driven physical lifecycle transitions. |
+| Current stage(s) | **Stage G** is `active`: repair terminal interaction/chrome and productize Coinbase public spot catalog, intervals, history, and live Level 2 data. Stages C, E, and F remain `blocked_external` on their physical/provider evidence only. |
 | Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. |
-| Next | Capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
-| Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
+| Next | Complete and verify Stage G, then resume the remaining provider-path, physical pacing, and physical lifecycle artifacts |
+| Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
 ### Progress snapshot
@@ -67,19 +67,21 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Stage | Status | Progress |
 |---|---|---|
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
-| A — Stabilize Coinbase | `verified` | encrypted history retention/discovery [x]; deterministic shipping recovery [x]; BTC/ETH shipping live smoke [x]; frozen [x] |
+| A — Stabilize Coinbase | `verified` | encrypted history retention/discovery [x]; deterministic shipping recovery [x]; BTC/ETH shipping live smoke [x]; Stage G baseline [x] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
 | C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; provider-observed resilience evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `blocked_external` | implementation [x]; named externally instrumented 60/120/144 Hz pacing [ ] |
 | F — Readiness | `blocked_external` | deterministic failure, burst, and memory evidence [x]; provider/physical transitions [ ] |
+| G — Terminal polish + Coinbase public markets | `active` | interaction/chrome repair [x]; full spot catalog [x]; complete interval menu [x]; paginated history [x]; live Level 2 DOM [x]; bounded 256 MiB cache [x]; physical UI acceptance [ ] |
 
 ### Remaining focus (ordered)
 
 - [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
-- [x] **Stage A:** deterministic shipping conformance [x]; BTC/ETH shipping live smoke [x]; frozen after verification (see §6).
+- [x] **Stage A:** deterministic shipping conformance [x]; BTC/ETH shipping live smoke [x]; retained as the verified Stage G baseline (see §6).
 - [ ] **Stage C:** deterministic headless conformance [x]; authorized core-path evidence [x]; resilience/recovery evidence [ ] (see §8).
 - [x] **Stage E implementation:** the main Rithmic UI vertical is integrated from the verified deterministic Stage C/D contracts; named physical pacing remains an open Stage E gate (see §10).
+- [ ] **Stage G:** restore physically interactive terminal chrome and ship Coinbase as the default public market-data path with full spot discovery, intervals, paginated history, and live Level 2 depth (see §11.1).
 
 
 
@@ -103,7 +105,7 @@ Full scope policy:
 
 | Area                       | Status        | Current reality                                                                                                                                                                                                                                     |
 | -------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Coinbase reference + chart | `verified`    | BTC-USD / ETH-USD 1m cache-first startup, corrupt-cache refetch, reconnect fencing, redaction, history/live continuity, bounded shutdown, and public shipping smoke pass; scope is frozen.                                                           |
+| Coinbase public markets    | `active`      | The verified BTC-USD / ETH-USD 1m path is the baseline for Stage G expansion to all active spot products, provider-neutral intervals, network-first paginated history, bounded acceleration caching, and live Level 2 DOM. |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `verified`    | The kit is installed locally under `provider_kit/`; native-vault credentials, Test login, search/reference, trades, quotes, depth, and history were exercised successfully on 2026-08-07. |
 | Rithmic adapter            | `blocked_external` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented. Authorized authenticated client-local silence injection and clean recovery pass; provider-observed loss evidence remains. |
@@ -123,7 +125,7 @@ Deferred and retired items are listed only in §12.
 
 - Rithmic Test through R|Protocol is the primary provider target; first milestone
 is read-only market data.
-- Coinbase is a correctness and regression reference only.
+- Coinbase is the default credential-free public market-data path; Rithmic Test remains the primary authorized futures provider path.
 - Main UI follows the bounded headless Rithmic gate.
 - Unsupported symbols, periods, systems, or history semantics fail explicitly.
 - No raw protobuf-send escape hatch in the application API.
@@ -243,12 +245,13 @@ New agents: if Stage 0 is not `verified`, do Stage 0 only.
 
 
 
-## 6. Stage A — Stabilize and freeze Coinbase
+## 6. Stage A — Stabilize Coinbase baseline
 
 **Status:** `verified`
 
 Stage 0 and the Stage C deterministic gate are verified. Stage A passed its
-deterministic shipping gate and public BTC/ETH smoke and is now frozen.
+deterministic shipping gate and public BTC/ETH smoke. Stage G now expands this
+verified baseline under an explicitly accepted product decision.
 
 ### Done
 
@@ -270,7 +273,8 @@ deterministic shipping gate and public BTC/ETH smoke and is now frozen.
 ### Gate
 
 - [x] Coinbase shipping desktop path passes deterministic and live smoke coverage with explicit state, bounded event-driven behavior, one recovery owner, nonblocking publication, and no unreviewed warnings.
-- [x] After this gate, Coinbase receives correctness fixes only—no symbols, timeframes, depth, analytics, or cloud routes.
+- [x] The original bounded BTC/ETH one-minute baseline passed before the Stage G
+  expansion was accepted; cloud routes and authenticated trading remain out of scope.
 
 Component evidence command:
 
@@ -811,6 +815,52 @@ same 67,108,864-byte limit.
 
 
 
+## 11.1 Stage G — Terminal polish and Coinbase public markets
+
+**Status:** `active`
+
+This accepted product stage reopens the former Coinbase depth/timeframe freeze
+for credential-free public market data only. Authenticated accounts, orders,
+OMS, and execution remain deferred. Coinbase becomes the default interactive
+startup; `--rithmic-test` remains the explicit authorized futures path.
+
+### Work
+
+- [x] Replace transient framework dialog triggers with application-owned,
+  keyboard-accessible symbol, indicator, and timeframe overlays.
+- [x] Restore token-driven interactive states, delayed tooltips, drawing-tool
+  gestures, icon-only theme switching, and visible functional window controls.
+- [x] Expose the shared 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1D, 3D,
+  1W, and 1M interval catalog; retain 100t as Rithmic-only.
+- [x] Discover every active Coinbase spot product with provider precision and
+  stream only the selected product.
+- [x] Fetch enough bounded 350-candle pages to cover the viewport and overscan,
+  aggregate unsupported UTC/calendar intervals deterministically, and publish
+  range/count/gap diagnostics.
+- [x] Maintain a generation-fenced Coinbase Level 2 book from public snapshots
+  and deltas, bounded to 256 levels per side, with gap-triggered resnapshot.
+- [x] Retain only a disposable 256 MiB LRU acceleration cache; older history is
+  always available by network fetch and corrupt segments are quarantined.
+- [x] Install volume data in Origin and expose the complete native indicator
+  catalog including Volume and VWAP.
+
+### Gate
+
+- [ ] Physical mouse and keyboard interaction opens every palette, operates all
+  header/window/drawing controls, and creates drawings on the chart.
+- [x] Dark muted/accent resolve through the existing token names to `#141414`;
+  text and icons contain no app-owned color bypasses.
+- [ ] Default launch loads Coinbase, fills the visible chart for BTC-USD and
+  ETH-USD, switches every interval category, updates live candles and DOM, and
+  recovers after a network generation change.
+- [x] Dark/light switching updates platform and Origin atomically without
+  replacing data, viewport, drawings, or indicators.
+- [x] Catalog, pagination, aggregation, cache, depth recovery, and interaction
+  regressions pass with bounded queues and a clean shutdown.
+- [ ] Full workspace formatting, clippy, build, and relevant tests pass with no
+  warnings; the release binary is rebuilt and manually exercised.
+
+
 ## 12. Deferred / retired
 
 Reopening any row requires a new accepted decision. Do not reopen via archive
@@ -819,7 +869,6 @@ Stage 3 / 5B checklists.
 
 | Item                          | Status     | Disposition                       | Pointer                                   |
 | ----------------------------- | ---------- | --------------------------------- | ----------------------------------------- |
-| Coinbase depth and timeframes | `deferred` | (c) freeze — no work              | Stage A gate; provider_priority decision  |
 | IQFeed                        | `deferred` | (c) no work                       | provider_priority decision                |
 | CQG                           | `deferred` | (c) no work                       | provider_priority decision                |
 | R|API+                        | `deferred` | (c) no work                       | provider_priority decision                |
@@ -830,7 +879,7 @@ Stage 3 / 5B checklists.
 
 Disposition checklist:
 
-- [x] **(c)** defer-with-no-work accepted for Coinbase depth/timeframes, IQFeed, CQG, RAPI+, OMS/execution.
+- [x] **(c)** defer-with-no-work accepted for IQFeed, CQG, RAPI+, and OMS/execution.
 - [x] **(b)** cloud MD plane (`services/market_data_plane`) quarantined via `workspace.exclude`.
 - [x] **(a)** AF_XDP/DPDK deleted from `main`; history retained by the annotated retirement tag.
 

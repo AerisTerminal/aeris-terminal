@@ -2,7 +2,8 @@
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge, ReplayRecoveryCommand};
 use crate::origin_bridge::{
-    apply_merged_chart_data, chart_data_queue_capacity, install_replay, replay_price_divisor,
+    apply_merged_chart_data, chart_data_queue_capacity, install_replay, install_volume_series,
+    replay_price_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::{
@@ -35,9 +36,11 @@ pub enum ChartThemeMode {
     Dark,
 }
 
-/// A native indicator supported by the chart's current OHLC data bridge.
+/// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ChartIndicator {
+    Volume,
+    Vwap,
     Sma,
     Ema,
     Wma,
@@ -50,7 +53,9 @@ pub enum ChartIndicator {
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
+        Self::Volume,
+        Self::Vwap,
         Self::Sma,
         Self::Ema,
         Self::Wma,
@@ -65,6 +70,8 @@ impl ChartIndicator {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Volume => "Volume",
+            Self::Vwap => "Volume Weighted Average Price",
             Self::Sma => "Moving Average",
             Self::Ema => "Moving Average Exponential",
             Self::Wma => "Weighted Moving Average",
@@ -80,6 +87,8 @@ impl ChartIndicator {
     #[must_use]
     pub const fn parameters(self) -> &'static str {
         match self {
+            Self::Volume => "Up/down volume",
+            Self::Vwap => "Session anchored",
             Self::Sma | Self::Ema | Self::Wma => "Period 20",
             Self::Bollinger => "Period 20 · Deviation 2",
             Self::Rsi | Self::Atr => "Period 14",
@@ -170,6 +179,7 @@ pub struct OriginChartView {
     data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
+    volume_series: usize,
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
     built_for: (f32, f32, f32),
@@ -187,15 +197,20 @@ impl OriginChartView {
     #[must_use]
     pub fn empty() -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
+        let volume_series = install_volume_series(&mut engine);
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(retention_applied);
+        let volume_retention_applied =
+            engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
+        debug_assert!(volume_retention_applied);
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
             data_bridge: None,
             displayed_provenance: DisplayedProvenance::empty(),
             price_divisor: 1.0,
+            volume_series,
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
             built_for: (0.0, 0.0, 0.0),
@@ -231,10 +246,14 @@ impl OriginChartView {
     #[must_use]
     pub fn with_replay(replay: &ReplaySnapshot) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
-        install_replay(&mut engine, replay);
+        let volume_series = install_volume_series(&mut engine);
+        install_replay(&mut engine, volume_series, replay);
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(retention_applied);
+        let volume_retention_applied =
+            engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
+        debug_assert!(volume_retention_applied);
         let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay)
             .expect("a validated replay snapshot establishes chart sequence state");
 
@@ -244,6 +263,7 @@ impl OriginChartView {
             data_bridge: Some(data_bridge),
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
             price_divisor: replay_price_divisor(replay),
+            volume_series,
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
             built_for: (0.0, 0.0, 0.0),
@@ -271,7 +291,7 @@ impl OriginChartView {
                 replay,
             )?);
         }
-        install_replay(&mut self.engine, replay);
+        install_replay(&mut self.engine, self.volume_series, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.invalidate_series_frame();
@@ -323,6 +343,15 @@ impl OriginChartView {
             return Err(ChartIndicatorError::MarketDataUnavailable);
         }
         let ids = match indicator {
+            ChartIndicator::Volume => {
+                self.engine.series[self.volume_series].visible = true;
+                vec![self.volume_series]
+            }
+            ChartIndicator::Vwap => self
+                .engine
+                .add_vwap(0, Some(self.volume_series))
+                .into_iter()
+                .collect(),
             ChartIndicator::Sma => self.engine.add_sma(0, 20).into_iter().collect(),
             ChartIndicator::Ema => self.engine.add_ema(0, 20).into_iter().collect(),
             ChartIndicator::Wma => self.engine.add_wma(0, 20).into_iter().collect(),
@@ -335,7 +364,9 @@ impl OriginChartView {
         let expected_outputs = match indicator {
             ChartIndicator::Bollinger | ChartIndicator::Macd => 3,
             ChartIndicator::Stochastic => 2,
-            ChartIndicator::Sma
+            ChartIndicator::Volume
+            | ChartIndicator::Vwap
+            | ChartIndicator::Sma
             | ChartIndicator::Ema
             | ChartIndicator::Wma
             | ChartIndicator::Rsi
@@ -571,7 +602,7 @@ impl OriginChartView {
         if !bridge.install_recovery_snapshot(request_id, replay)? {
             return Ok(false);
         }
-        install_replay(&mut self.engine, replay);
+        install_replay(&mut self.engine, self.volume_series, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.invalidate_series_frame();
@@ -616,7 +647,12 @@ impl OriginChartView {
                     self.displayed_provenance.replace_snapshot(snapshot);
                 }
                 self.displayed_provenance.extend(update.accepted_deltas());
-                apply_merged_chart_data(&mut self.engine, &mut self.price_divisor, &update);
+                apply_merged_chart_data(
+                    &mut self.engine,
+                    self.volume_series,
+                    &mut self.price_divisor,
+                    &update,
+                );
                 self.invalidate_series_frame();
                 if replaces_snapshot {
                     self.fitted = false;
@@ -1176,28 +1212,51 @@ mod tests {
     }
 
     #[test]
-    fn theme_mode_delegates_to_origin_and_preserves_chart_data() {
+    fn theme_mode_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
         let mut chart = interactive_chart();
-        let bars = chart
+        let volume = chart
+            .add_indicator(ChartIndicator::Volume)
+            .expect("volume is available");
+        let vwap = chart
+            .add_indicator(ChartIndicator::Vwap)
+            .expect("vwap is available");
+        assert!(
+            chart
+                .engine
+                .drawing_create_begin(DrawingKind::HorizontalLine, None)
+        );
+        assert_eq!(
+            chart
+                .engine
+                .drawing_create_click(300.0, 200.0, DrawingModifiers::default()),
+            1
+        );
+        chart.engine.time_scale.zoom(300.0, 0.5);
+        chart.engine.scroll_to_position(-12.0);
+
+        let price_data = chart
             .engine
             .data
             .series_data(0)
-            .map_or(0, |(times, _)| times.len());
+            .map(|(times, columns)| (times.to_vec(), columns.map(<[f64]>::to_vec)))
+            .expect("price data");
+        let volume_data = chart
+            .engine
+            .data
+            .series_data(chart.volume_series)
+            .map(|(times, columns)| (times.to_vec(), columns.map(<[f64]>::to_vec)))
+            .expect("volume data");
+        let spacing = chart.engine.bar_spacing();
+        let offset = chart.engine.right_offset();
+        let drawings = chart.engine.drawings_json();
+        let pane_count = chart.engine.panes.len();
+        let series_count = chart.engine.series.len();
 
         chart.set_theme_mode(ChartThemeMode::Light);
         assert_eq!(
             chart.engine.options.get().layout.background.color,
             "#ffffff"
         );
-        assert_eq!(
-            chart
-                .engine
-                .data
-                .series_data(0)
-                .map_or(0, |(times, _)| times.len()),
-            bars
-        );
-
         chart.set_theme_mode(ChartThemeMode::Dark);
         assert_eq!(
             chart.engine.options.get().layout.background.color,
@@ -1208,8 +1267,27 @@ mod tests {
                 .engine
                 .data
                 .series_data(0)
-                .map_or(0, |(times, _)| times.len()),
-            bars
+                .map(|(times, columns)| { (times.to_vec(), columns.map(<[f64]>::to_vec)) }),
+            Some(price_data)
+        );
+        assert_eq!(
+            chart
+                .engine
+                .data
+                .series_data(chart.volume_series)
+                .map(|(times, columns)| { (times.to_vec(), columns.map(<[f64]>::to_vec)) }),
+            Some(volume_data)
+        );
+        assert_eq!(chart.engine.bar_spacing().to_bits(), spacing.to_bits());
+        assert_eq!(chart.engine.right_offset().to_bits(), offset.to_bits());
+        assert_eq!(chart.engine.drawings_json(), drawings);
+        assert_eq!(chart.engine.panes.len(), pane_count);
+        assert_eq!(chart.engine.series.len(), series_count);
+        assert_eq!(volume, vec![chart.volume_series]);
+        assert!(chart.engine.series[chart.volume_series].visible);
+        assert_eq!(
+            chart.engine.indicator_info(vwap[0]).map(|info| info.kind),
+            Some("vwap")
         );
     }
 
@@ -1354,6 +1432,57 @@ mod tests {
     }
 
     #[test]
+    fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
+        let replay = EmbeddedReplaySource
+            .execute(LoadEmbeddedReplay { bar_count: 16 })
+            .expect("embedded replay validates");
+        let mut chart = OriginChartView::with_replay(&replay);
+        let (_, volume_columns) = chart
+            .engine
+            .data
+            .series_data(chart.volume_series)
+            .expect("parallel volume series");
+        let expected_volume = replay
+            .bars()
+            .iter()
+            .map(|item| {
+                item.value()
+                    .volume
+                    .to_f64()
+                    .expect("fixture volume fits f64")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(volume_columns[3], expected_volume);
+        assert!(!chart.engine.series[chart.volume_series].visible);
+        assert!(chart.engine.series[chart.volume_series].histogram_updown);
+        assert!(chart.engine.series[chart.volume_series].overlay);
+
+        assert_eq!(
+            chart
+                .add_indicator(ChartIndicator::Volume)
+                .expect("volume histogram"),
+            vec![chart.volume_series]
+        );
+        assert!(chart.engine.series[chart.volume_series].visible);
+
+        let vwap = chart
+            .add_indicator(ChartIndicator::Vwap)
+            .expect("volume-weighted average");
+        assert_eq!(vwap.len(), 1);
+        assert_eq!(
+            chart.engine.indicator_info(vwap[0]).map(|info| info.kind),
+            Some("vwap")
+        );
+        let (_, vwap_columns) = chart
+            .engine
+            .data
+            .series_data(vwap[0])
+            .expect("vwap output data");
+        assert_eq!(vwap_columns[3].len(), replay.bars().len());
+        assert!(vwap_columns[3].iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
         let mut chart = OriginChartView::empty();
         let initial_series = chart.engine.series.len();
@@ -1370,7 +1499,9 @@ mod tests {
 
     #[test]
     fn indicator_metadata_matches_the_legacy_picker_copy() {
-        assert_eq!(ChartIndicator::ALL.len(), 8);
+        assert_eq!(ChartIndicator::ALL.len(), 10);
+        assert_eq!(ChartIndicator::Volume.label(), "Volume");
+        assert_eq!(ChartIndicator::Vwap.parameters(), "Session anchored");
         assert_eq!(ChartIndicator::Sma.label(), "Moving Average");
         assert_eq!(ChartIndicator::Sma.parameters(), "Period 20");
         assert_eq!(

@@ -94,7 +94,7 @@ impl CoinbaseSession {
         let (mut socket, _response) =
             tungstenite::client_tls_with_config(WEBSOCKET_ENDPOINT, tcp, None, Some(connector))
                 .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
-        for channel in ["heartbeats", "market_trades"] {
+        for channel in ["heartbeats", "market_trades", "level2"] {
             socket
                 .send(Message::Text(
                     subscribe_frame(&self.config.products, channel).into(),
@@ -162,21 +162,48 @@ impl CoinbaseConnection {
         self.collect_with_deadline(None, should_stop, on_trade, &mut || {})
     }
 
-    pub(crate) fn collect_until_stopped_with_heartbeat(
+    /// Collects trades, heartbeat liveness, and raw bounded Level 2 messages.
+    ///
+    /// The Level 2 callback executes on the provider session thread; callers
+    /// must decode or enqueue it without blocking.
+    /// Collects public trades, heartbeats, and Level 2 payloads until cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol, transport, decoding, sequence, or inactivity failure.
+    pub fn collect_until_stopped_with_market_events(
         self,
         should_stop: &mut impl FnMut() -> bool,
         on_trade: &mut impl FnMut(&CanonicalTrade),
         on_heartbeat: &mut impl FnMut(),
+        on_level2: &mut impl FnMut(&[u8]),
     ) -> Result<SessionHealth, CoinbaseError> {
-        self.collect_with_deadline(None, should_stop, on_trade, on_heartbeat)
+        self.collect_with_deadline_and_level2(None, should_stop, on_trade, on_heartbeat, on_level2)
     }
 
     fn collect_with_deadline(
+        self,
+        deadline: Option<Instant>,
+        should_stop: &mut impl FnMut() -> bool,
+        on_trade: &mut impl FnMut(&CanonicalTrade),
+        on_heartbeat: &mut impl FnMut(),
+    ) -> Result<SessionHealth, CoinbaseError> {
+        self.collect_with_deadline_and_level2(
+            deadline,
+            should_stop,
+            on_trade,
+            on_heartbeat,
+            &mut |_| {},
+        )
+    }
+
+    fn collect_with_deadline_and_level2(
         mut self,
         deadline: Option<Instant>,
         should_stop: &mut impl FnMut() -> bool,
         on_trade: &mut impl FnMut(&CanonicalTrade),
         on_heartbeat: &mut impl FnMut(),
+        on_level2: &mut impl FnMut(&[u8]),
     ) -> Result<SessionHealth, CoinbaseError> {
         self.collect_with_limits(
             deadline,
@@ -184,6 +211,7 @@ impl CoinbaseConnection {
             should_stop,
             on_trade,
             on_heartbeat,
+            on_level2,
         )
     }
 
@@ -194,6 +222,7 @@ impl CoinbaseConnection {
         should_stop: &mut impl FnMut() -> bool,
         on_trade: &mut impl FnMut(&CanonicalTrade),
         on_heartbeat: &mut impl FnMut(),
+        on_level2: &mut impl FnMut(&[u8]),
     ) -> Result<SessionHealth, CoinbaseError> {
         let mut outcome = SessionOutcome::Completed;
         let mut last_message = Instant::now();
@@ -221,12 +250,15 @@ impl CoinbaseConnection {
                         return Err(CoinbaseError::InvalidMessage);
                     }
                     match self.decoder.decode_with_liveness(text.as_bytes()) {
-                        Ok((trades, subscribed_channel, heartbeat)) => {
+                        Ok((trades, subscribed_channel, heartbeat, level2)) => {
                             if subscribed_channel {
                                 last_message = Instant::now();
                             }
                             if heartbeat {
                                 on_heartbeat();
+                            }
+                            if level2 {
+                                on_level2(text.as_bytes());
                             }
                             for trade in &trades {
                                 on_trade(trade);
@@ -333,6 +365,7 @@ mod tests {
                 &mut || false,
                 &mut |_| {},
                 &mut || {},
+                &mut |_| {},
             )
             .expect("silence returns bounded health");
         assert_eq!(health.outcome, SessionOutcome::InactivityTimeout);
@@ -378,6 +411,7 @@ mod tests {
                 &mut || false,
                 &mut |_| {},
                 &mut || {},
+                &mut |_| {},
             )
             .expect("control traffic returns bounded health");
         assert_eq!(health.outcome, SessionOutcome::InactivityTimeout);

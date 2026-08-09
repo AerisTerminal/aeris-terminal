@@ -10,7 +10,8 @@ use axiusflow_application::{
 };
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-    ENTITLEMENT_CLASS, decode_history_bar, decode_history_segment, encode_history_segment,
+    CoinbaseInterval, CoinbaseSpotProduct, ENTITLEMENT_CLASS, aggregate_coinbase_bars,
+    decode_history_bar, decode_history_segment, encode_history_bar, encode_history_segment,
     history_segment_item_count,
 };
 use axiusflow_desktop_history::{
@@ -27,8 +28,8 @@ use axiusflow_desktop_storage::{
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::{BarDefinition, MarketBar};
 use axiusflow_provider_history::{
-    Completion, DataClass, HistoryPageRequest, HistoryRange, HistoryScheduler,
-    ProviderHistoryAdapter, RequestInterest, RequestPriority, SchedulerConfig,
+    Completion, DataClass, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
+    HistoryScheduler, RequestInterest, RequestPriority, SchedulerConfig,
 };
 use std::{
     collections::VecDeque,
@@ -259,7 +260,7 @@ pub(super) fn prepare_initial_history<V: axiusflow_platform_runtime::CredentialV
                 scope: &scope,
                 instrument_id: &context.profile.instrument_id,
                 data_kind: DataKind::Bars,
-                resolution: "1m",
+                resolution: context.profile.interval.label(),
                 source_revision: 1,
                 schema_revision: 1,
                 calendar_revision: 1,
@@ -394,8 +395,11 @@ fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
     now_unix_nanos: i64,
 ) -> Result<(), String> {
     let interest = RequestInterest::new(NonZeroU64::MIN);
-    let now_seconds =
-        history_installation_time(history.identity.range_end_unix_nanos, now_unix_nanos)?;
+    let now_seconds = history_installation_time_for(
+        profile,
+        history.identity.range_end_unix_nanos,
+        now_unix_nanos,
+    )?;
     let binding = worker
         .begin_scheduled_history_handoff(
             generation,
@@ -420,13 +424,17 @@ fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
             |item, _| decode_history_bar(item).map(|bar| (bar, size_of::<MarketBar>())),
         )
         .map_err(|error| error.to_string())?;
-    worker.seed_coinbase_bar_history(
-        generation,
-        &profile.product_id,
-        &history.identity,
-        segment_key,
-        now_seconds,
-    )?;
+    if profile.interval == axiusflow_market_data::ChartInterval::Minute1 {
+        worker.seed_coinbase_bar_history(
+            generation,
+            &profile.product_id,
+            &history.identity,
+            segment_key,
+            now_seconds,
+        )?;
+    } else {
+        worker.reset_aggregation();
+    }
     let payload = encode_history_segment(&history.completion.page().items)?;
     worker
         .persist_history_segment(PublicationRequest {
@@ -441,6 +449,7 @@ fn install_history<V: axiusflow_platform_runtime::CredentialVault>(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn history_installation_time(
     range_end_unix_nanos: i64,
     now_unix_nanos: i64,
@@ -457,11 +466,21 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
     adapter: &mut CoinbaseHistoryCapabilityAdapter<T>,
     now: i64,
 ) -> Result<PreparedHistory, String> {
-    let minute_nanos = 60_000_000_000_i64;
-    let end = now.div_euclid(minute_nanos) * minute_nanos;
+    let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
+    let source_seconds = coinbase_history_source_seconds(interval);
+    let source_nanos = source_seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase history source interval overflow".to_string())?;
+    let source_items = coinbase_history_source_items(interval, HISTORY_BARS)?;
+    let end = now.div_euclid(source_nanos) * source_nanos;
     let start = end
-        .checked_sub(minute_nanos * i64::try_from(HISTORY_BARS).map_err(|error| error.to_string())?)
+        .checked_sub(
+            source_nanos
+                .checked_mul(i64::try_from(source_items).map_err(|error| error.to_string())?)
+                .ok_or_else(|| "Coinbase history range overflow".to_string())?,
+        )
         .ok_or_else(|| "Coinbase history range underflow".to_string())?;
+    register_history_product(adapter, profile);
     let identity = history_identity(profile, start, end);
     let request = HistoryPageRequest {
         provider_id: "coinbase".to_string(),
@@ -469,12 +488,12 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
         entitlement_revision: ENTITLEMENT_CLASS.to_string(),
         instrument_id: profile.instrument_id.clone(),
         data_class: DataClass::Bars,
-        resolution: "1m".to_string(),
+        resolution: profile.interval.label().to_string(),
         range: HistoryRange {
             start_unix_nanos: start,
             end_unix_nanos: end,
         },
-        maximum_items: nonzero(HISTORY_BARS),
+        maximum_items: nonzero(350),
         continuation: None,
     };
     let mut scheduler = HistoryScheduler::try_new(
@@ -498,12 +517,40 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
         .map_err(|error| error.to_string())?
         .dispatch
         .ok_or_else(|| "Coinbase history request was not dispatchable".to_string())?;
-    let page = adapter
-        .fetch_page(&dispatch.request)
-        .map_err(|_| "Coinbase history provider fetch failed".to_string())?;
-    if page.items.is_empty() {
+    let batch = adapter
+        .fetch_paginated(&dispatch.request)
+        .map_err(|error| format!("Coinbase history provider fetch failed: {error}"))?;
+    if batch.items.is_empty() {
         return Err("Coinbase returned no completed history bars".to_string());
     }
+    let source = batch
+        .items
+        .iter()
+        .map(decode_history_bar)
+        .collect::<Result<Vec<_>, _>>()?;
+    let source = materialize_coinbase_continuity(source, source_seconds)?;
+    let (mut bars, _) = aggregate_coinbase_bars(&source, interval)?;
+    if bars.len() > HISTORY_BARS {
+        bars.drain(..bars.len() - HISTORY_BARS);
+    }
+    for (index, bar) in bars.iter_mut().enumerate() {
+        bar.source_sequence = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| "Coinbase history sequence overflow".to_string())?;
+    }
+    let page = HistoryPage {
+        request: dispatch.request.clone(),
+        items: bars
+            .into_iter()
+            .map(|bar| HistoryItem {
+                sequence: bar.source_sequence,
+                event_time_unix_nanos: bar.exchange_timestamp_seconds * 1_000_000_000,
+                payload: encode_history_bar(bar),
+            })
+            .collect(),
+        next: None,
+    };
     let received_unix_nanos = now;
     let completion = scheduler
         .complete(dispatch.dispatch_id, page, received_unix_nanos)
@@ -515,6 +562,97 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
     })
 }
 
+fn register_history_product<T>(
+    adapter: &mut CoinbaseHistoryCapabilityAdapter<T>,
+    profile: &ProductProfile,
+) {
+    adapter.register_product(&CoinbaseSpotProduct {
+        product_id: profile.product_id.clone(),
+        instrument_id: profile.instrument_id.clone(),
+        display_symbol: profile.symbol.clone(),
+        base_currency: profile.base_currency.clone(),
+        quote_currency: profile.quote_currency.clone(),
+        price_scale: profile.price_scale,
+        quantity_scale: profile.quantity_scale,
+    });
+}
+
+fn history_installation_time_for(
+    profile: &ProductProfile,
+    range_end_unix_nanos: i64,
+    now_unix_nanos: i64,
+) -> Result<i64, String> {
+    let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
+    let source_nanos = coinbase_history_source_seconds(interval) * 1_000_000_000;
+    let current_source = now_unix_nanos.div_euclid(source_nanos) * source_nanos;
+    if range_end_unix_nanos != current_source {
+        return Err("Coinbase history became stale before installation".to_string());
+    }
+    Ok(now_unix_nanos / 1_000_000_000)
+}
+
+fn coinbase_history_source_seconds(interval: CoinbaseInterval) -> i64 {
+    match interval {
+        CoinbaseInterval::Minute1 | CoinbaseInterval::Minute3 => 60,
+        CoinbaseInterval::Minute5 => 300,
+        CoinbaseInterval::Minute15 => 900,
+        CoinbaseInterval::Minute30 => 1_800,
+        CoinbaseInterval::Hour1 => 3_600,
+        CoinbaseInterval::Hour2 | CoinbaseInterval::Hour4 | CoinbaseInterval::Hour8 => 7_200,
+        CoinbaseInterval::Hour12 => 21_600,
+        CoinbaseInterval::Day1
+        | CoinbaseInterval::Day3
+        | CoinbaseInterval::Week1
+        | CoinbaseInterval::Month1 => 86_400,
+    }
+}
+
+fn coinbase_history_source_items(
+    interval: CoinbaseInterval,
+    output_items: usize,
+) -> Result<usize, String> {
+    let source_seconds = coinbase_history_source_seconds(interval);
+    let target_seconds = interval.fixed_seconds().unwrap_or(match interval {
+        CoinbaseInterval::Week1 => 7 * 86_400,
+        CoinbaseInterval::Month1 => 31 * 86_400,
+        _ => source_seconds,
+    });
+    let per_output =
+        usize::try_from(target_seconds / source_seconds).map_err(|error| error.to_string())?;
+    output_items
+        .checked_mul(per_output)
+        .ok_or_else(|| "Coinbase history source item count overflow".to_string())
+}
+
+fn materialize_coinbase_continuity(
+    mut bars: Vec<MarketBar>,
+    source_seconds: i64,
+) -> Result<Vec<MarketBar>, String> {
+    bars.sort_by_key(|bar| bar.exchange_timestamp_seconds);
+    let mut output: Vec<MarketBar> = Vec::with_capacity(bars.len());
+    for bar in bars {
+        if let Some(previous) = output.last().copied() {
+            let mut timestamp = previous.exchange_timestamp_seconds + source_seconds;
+            while timestamp < bar.exchange_timestamp_seconds {
+                output.push(MarketBar {
+                    source_sequence: 1,
+                    exchange_timestamp_seconds: timestamp,
+                    open: previous.close,
+                    high: previous.close,
+                    low: previous.close,
+                    close: previous.close,
+                    volume: 0,
+                });
+                timestamp = timestamp
+                    .checked_add(source_seconds)
+                    .ok_or_else(|| "Coinbase continuity timestamp overflow".to_string())?;
+            }
+        }
+        output.push(bar);
+    }
+    Ok(output)
+}
+
 fn history_identity(profile: &ProductProfile, start: i64, end: i64) -> SegmentIdentity {
     SegmentIdentity {
         scope: HistoryScope {
@@ -524,7 +662,7 @@ fn history_identity(profile: &ProductProfile, start: i64, end: i64) -> SegmentId
         },
         instrument_id: profile.instrument_id.clone(),
         data_kind: DataKind::Bars,
-        resolution: "1m".to_string(),
+        resolution: profile.interval.label().to_string(),
         range_start_unix_nanos: start,
         range_end_unix_nanos: end,
         source_revision: 1,

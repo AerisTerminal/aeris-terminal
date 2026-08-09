@@ -190,7 +190,8 @@ fn bounded_retention_check() -> Result<bool, ReplayValidationError> {
     let limit = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let provenance = DisplayedProvenance::from_snapshot_with_limit(&replay, limit);
     let mut engine = ChartEngine::new(320.0, 200.0, 1.0);
-    install_replay(&mut engine, &replay);
+    let volume_series = crate::origin_bridge::install_volume_series(&mut engine);
+    install_replay(&mut engine, volume_series, &replay);
     Ok(engine.set_series_max_points(0, Some(limit.get()))
         && engine.series_max_points(0) == Some(limit.get())
         && provenance.len() == limit.get()

@@ -760,6 +760,7 @@ dependencies = [
  "getrandom 0.4.3",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui-hugeicons",
  "gpui_platform",
  "serde",

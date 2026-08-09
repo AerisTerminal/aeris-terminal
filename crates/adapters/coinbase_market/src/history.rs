@@ -1,14 +1,17 @@
-use crate::{ENTITLEMENT_CLASS, FixedPointValue};
+use crate::{
+    CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS, FixedPointValue,
+    coinbase_instrument_id,
+};
 use axiusflow_market_data::MarketBar;
 use axiusflow_provider_history::{
-    DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
+    Continuation, DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
     HistoryPageRequest, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
     SequencedHistory,
 };
 use rustls::{ClientConfig, ClientConnection, RootCertStore, Stream};
 use serde::Deserialize;
-use socket2::{Domain, Protocol, Socket, Type};
 use std::{
+    collections::{BTreeMap, HashMap},
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -28,10 +31,11 @@ const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ONE_SECOND_NANOS: i64 = 1_000_000_000;
 const ONE_MINUTE_SECONDS: i64 = 60;
-const ONE_MINUTE_NANOS_I64: i64 = 60_000_000_000;
-const ONE_MINUTE_NANOS: u64 = 60_000_000_000;
 const MAXIMUM_PAGE_ITEMS: usize = 350;
-const MAXIMUM_REQUEST_SPAN_NANOS: u64 = ONE_MINUTE_NANOS * MAXIMUM_PAGE_ITEMS as u64;
+const MAXIMUM_PAGINATION_PAGES: usize = 4_096;
+const SUPPORTED_RESOLUTIONS: [&str; 14] = [
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
+];
 const HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXCBH1";
 const HISTORY_PAYLOAD_BYTES: usize = HISTORY_PAYLOAD_MAGIC.len() + 7 * 8;
 const HISTORY_SEGMENT_MAGIC: &[u8; 6] = b"AXCBS1";
@@ -51,6 +55,25 @@ static RESOLVER: OnceLock<Result<mpsc::SyncSender<ResolutionRequest>, &'static s
 
 /// Account scope used by Coinbase's credential-free public market-data APIs.
 pub const COINBASE_PUBLIC_ACCOUNT_ID: &str = "coinbase_public_market_data";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CoinbaseHistoryDiagnostics {
+    pub pages: u64,
+    pub candles_received: u64,
+    pub duplicates_dropped: u64,
+    pub gaps: u64,
+    pub requested_start_unix_nanos: i64,
+    pub requested_end_unix_nanos: i64,
+    pub returned_start_unix_nanos: Option<i64>,
+    pub returned_end_unix_nanos: Option<i64>,
+    pub provider_rejections: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoinbaseHistoryBatch {
+    pub items: Vec<HistoryItem>,
+    pub diagnostics: CoinbaseHistoryDiagnostics,
+}
 
 #[derive(Deserialize)]
 struct CandlesResponse {
@@ -90,6 +113,16 @@ impl CoinbaseHistoryTransport for CoinbaseHttpsHistoryTransport {
 pub struct CoinbaseHistoryCapabilityAdapter<T = CoinbaseHttpsHistoryTransport> {
     capabilities: HistoryCapabilities,
     transport: T,
+    cache: CoinbaseNetworkFirstCache,
+    products: HashMap<String, ProductPrecision>,
+    diagnostics: CoinbaseHistoryDiagnostics,
+}
+
+#[derive(Clone)]
+struct ProductPrecision {
+    product_id: String,
+    price_scale: u8,
+    quantity_scale: u8,
 }
 
 impl CoinbaseHistoryCapabilityAdapter<CoinbaseHttpsHistoryTransport> {
@@ -111,11 +144,11 @@ impl<T> CoinbaseHistoryCapabilityAdapter<T> {
     /// Returns an error if the static capability profile violates shared bounds.
     pub fn try_with_transport(transport: T) -> Result<Self, ProviderHistoryError> {
         let bars = DatasetCapability::supported(
-            ["1m".to_string()],
+            SUPPORTED_RESOLUTIONS.map(str::to_string),
             NonZeroU64::MAX,
-            NonZeroU64::new(MAXIMUM_REQUEST_SPAN_NANOS).unwrap_or(NonZeroU64::MIN),
+            NonZeroU64::MAX,
             NonZeroUsize::new(MAXIMUM_PAGE_ITEMS).unwrap_or(NonZeroUsize::MIN),
-            PaginationStyle::None,
+            PaginationStyle::EndTime,
             RateLimit {
                 requests: NonZeroU32::MIN,
                 window_nanos: NonZeroU64::new(ONE_SECOND_NANOS as u64).unwrap_or(NonZeroU64::MIN),
@@ -128,15 +161,49 @@ impl<T> CoinbaseHistoryCapabilityAdapter<T> {
             DatasetCapability::unsupported("historical ticks are not implemented"),
             DatasetCapability::unsupported("historical depth is not implemented"),
         )?;
+        let products = [("BTC-USD", 2, 8), ("ETH-USD", 2, 8)]
+            .into_iter()
+            .map(|(product_id, price_scale, quantity_scale)| {
+                let instrument_id = coinbase_instrument_id(product_id)
+                    .map_err(|_| ProviderHistoryError::InvalidConfiguration("Coinbase product"))?;
+                Ok((
+                    instrument_id,
+                    ProductPrecision {
+                        product_id: product_id.to_string(),
+                        price_scale,
+                        quantity_scale,
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, ProviderHistoryError>>()?;
         Ok(Self {
             capabilities,
             transport,
+            cache: CoinbaseNetworkFirstCache::new(),
+            products,
+            diagnostics: CoinbaseHistoryDiagnostics::default(),
         })
     }
 
     #[must_use]
     pub const fn capabilities(&self) -> &HistoryCapabilities {
         &self.capabilities
+    }
+
+    pub fn register_product(&mut self, product: &CoinbaseSpotProduct) {
+        self.products.insert(
+            product.instrument_id.clone(),
+            ProductPrecision {
+                product_id: product.product_id.clone(),
+                price_scale: product.price_scale,
+                quantity_scale: product.quantity_scale,
+            },
+        );
+    }
+
+    #[must_use]
+    pub const fn diagnostics(&self) -> CoinbaseHistoryDiagnostics {
+        self.diagnostics
     }
 }
 
@@ -147,20 +214,128 @@ impl<T: CoinbaseHistoryTransport> ProviderHistoryAdapter for CoinbaseHistoryCapa
 
     fn fetch_page(&mut self, request: &HistoryPageRequest) -> Result<HistoryPage, String> {
         validate_request(request)?;
-        let product = product_from_instrument(&request.instrument_id)?;
-        let start_seconds = request.range.start_unix_nanos / ONE_SECOND_NANOS;
-        let end_seconds = request
+        let source = history_source_resolution(&request.resolution)?;
+        let profile = self
+            .products
+            .get(&request.instrument_id)
+            .cloned()
+            .ok_or_else(|| "Coinbase instrument precision profile is unavailable".to_string())?;
+        let effective_end = match request.continuation {
+            Some(Continuation::EndBeforeUnixNanos(end)) => end,
+            _ => request.range.end_unix_nanos,
+        };
+        let source_nanos = source
+            .seconds
+            .checked_mul(ONE_SECOND_NANOS)
+            .ok_or_else(|| "Coinbase history source interval overflow".to_string())?;
+        let page_span = source_nanos
+            .checked_mul(
+                i64::try_from(request.maximum_items.get()).map_err(|error| error.to_string())?,
+            )
+            .ok_or_else(|| "Coinbase history page span overflow".to_string())?;
+        let effective_start = request
             .range
-            .end_unix_nanos
-            .checked_sub(ONE_MINUTE_NANOS_I64)
+            .start_unix_nanos
+            .max(effective_end.saturating_sub(page_span));
+        let start_seconds = effective_start / ONE_SECOND_NANOS;
+        let end_seconds = effective_end
+            .checked_sub(source_nanos)
             .map(|value| value / ONE_SECOND_NANOS)
             .ok_or_else(|| "Coinbase history end underflow".to_string())?;
         let path = format!(
-            "/api/v3/brokerage/market/products/{product}/candles?start={start_seconds}&end={end_seconds}&granularity=ONE_MINUTE&limit={}",
-            request.maximum_items
+            "/api/v3/brokerage/market/products/{}/candles?start={start_seconds}&end={end_seconds}&granularity={}&limit={}",
+            profile.product_id, source.granularity, request.maximum_items
         );
-        let body = self.transport.get(&path)?;
-        parse_page(request, &body)
+        let body = self
+            .cache
+            .network_first(&path, || self.transport.get(&path))?;
+        let page = parse_page(
+            request,
+            &body,
+            effective_start,
+            effective_end,
+            profile.price_scale,
+            profile.quantity_scale,
+            source.seconds,
+        )?;
+        self.diagnostics.pages = self.diagnostics.pages.saturating_add(1);
+        self.diagnostics.candles_received = self
+            .diagnostics
+            .candles_received
+            .saturating_add(page.items.len() as u64);
+        Ok(page)
+    }
+}
+
+impl<T: CoinbaseHistoryTransport> CoinbaseHistoryCapabilityAdapter<T> {
+    /// Fetches every end-time page required to cover the requested range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid requests, transport failures, malformed candles, or bounds.
+    pub fn fetch_paginated(
+        &mut self,
+        request: &HistoryPageRequest,
+    ) -> Result<CoinbaseHistoryBatch, String> {
+        validate_request(request)?;
+        let mut current = request.clone();
+        let mut items = BTreeMap::<i64, HistoryItem>::new();
+        let mut diagnostics = CoinbaseHistoryDiagnostics {
+            requested_start_unix_nanos: request.range.start_unix_nanos,
+            requested_end_unix_nanos: request.range.end_unix_nanos,
+            ..CoinbaseHistoryDiagnostics::default()
+        };
+        for _ in 0..MAXIMUM_PAGINATION_PAGES {
+            let page = match self.fetch_page(&current) {
+                Ok(page) => page,
+                Err(error) => {
+                    self.diagnostics.provider_rejections =
+                        self.diagnostics.provider_rejections.saturating_add(1);
+                    return Err(error);
+                }
+            };
+            diagnostics.pages = diagnostics.pages.saturating_add(1);
+            diagnostics.candles_received = diagnostics
+                .candles_received
+                .saturating_add(page.items.len() as u64);
+            for item in page.items {
+                if items.insert(item.event_time_unix_nanos, item).is_some() {
+                    diagnostics.duplicates_dropped =
+                        diagnostics.duplicates_dropped.saturating_add(1);
+                }
+            }
+            let Some(next) = page.next else {
+                let values = items.into_values().collect::<Vec<_>>();
+                diagnostics.returned_start_unix_nanos =
+                    values.first().map(|item| item.event_time_unix_nanos);
+                diagnostics.returned_end_unix_nanos =
+                    values.last().map(|item| item.event_time_unix_nanos);
+                for pair in values.windows(2) {
+                    if pair[1].event_time_unix_nanos - pair[0].event_time_unix_nanos
+                        != history_source_resolution(&request.resolution)?.seconds
+                            * ONE_SECOND_NANOS
+                    {
+                        diagnostics.gaps = diagnostics.gaps.saturating_add(1);
+                    }
+                }
+                self.diagnostics.duplicates_dropped = self
+                    .diagnostics
+                    .duplicates_dropped
+                    .saturating_add(diagnostics.duplicates_dropped);
+                self.diagnostics.gaps = self.diagnostics.gaps.saturating_add(diagnostics.gaps);
+                self.diagnostics.requested_start_unix_nanos =
+                    diagnostics.requested_start_unix_nanos;
+                self.diagnostics.requested_end_unix_nanos = diagnostics.requested_end_unix_nanos;
+                self.diagnostics.returned_start_unix_nanos = diagnostics.returned_start_unix_nanos;
+                self.diagnostics.returned_end_unix_nanos = diagnostics.returned_end_unix_nanos;
+                return Ok(CoinbaseHistoryBatch {
+                    items: values,
+                    diagnostics,
+                });
+            };
+            current.continuation = Some(next);
+        }
+        Err("Coinbase history pagination exceeds its page bound".to_string())
     }
 }
 
@@ -305,32 +480,33 @@ fn validate_request(request: &HistoryPageRequest) -> Result<(), String> {
     {
         return Err("Coinbase public history identity mismatch".to_string());
     }
-    if request.data_class != DataClass::Bars || request.resolution != "1m" {
+    if request.data_class != DataClass::Bars {
         return Err("unsupported Coinbase history dataset".to_string());
     }
-    if request.continuation.is_some() {
-        return Err("Coinbase history request does not accept continuation".to_string());
+    let source = history_source_resolution(&request.resolution)?;
+    let source_nanos = source.seconds * ONE_SECOND_NANOS;
+    if let Some(Continuation::EndBeforeUnixNanos(end)) = request.continuation {
+        if end <= request.range.start_unix_nanos || end >= request.range.end_unix_nanos {
+            return Err("Coinbase history continuation is invalid".to_string());
+        }
+    } else if request.continuation.is_some() {
+        return Err("Coinbase history continuation is invalid".to_string());
     }
     if request.maximum_items.get() > MAXIMUM_PAGE_ITEMS {
         return Err("Coinbase history page exceeds provider limit".to_string());
     }
-    let span = request
+    request
         .range
         .end_unix_nanos
         .checked_sub(request.range.start_unix_nanos)
         .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value != 0 && *value <= MAXIMUM_REQUEST_SPAN_NANOS)
+        .filter(|value| *value != 0)
         .ok_or_else(|| "Coinbase history range exceeds adapter limit".to_string())?;
     if request.range.start_unix_nanos < 0
-        || request.range.start_unix_nanos % ONE_MINUTE_NANOS_I64 != 0
-        || request.range.end_unix_nanos % ONE_MINUTE_NANOS_I64 != 0
+        || request.range.start_unix_nanos % source_nanos != 0
+        || request.range.end_unix_nanos % source_nanos != 0
     {
         return Err("Coinbase history range is not minute-aligned".to_string());
-    }
-    let requested_items = usize::try_from(span / ONE_MINUTE_NANOS)
-        .map_err(|_| "Coinbase history item count overflow".to_string())?;
-    if requested_items > request.maximum_items.get() {
-        return Err("Coinbase history range exceeds requested item limit".to_string());
     }
     let now_unix_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -340,29 +516,21 @@ fn validate_request(request: &HistoryPageRequest) -> Result<(), String> {
     if request.range.end_unix_nanos > now_unix_nanos {
         return Err("Coinbase history range ends in the future".to_string());
     }
-    product_from_instrument(&request.instrument_id).map(|_| ())
-}
-
-fn product_from_instrument(instrument_id: &str) -> Result<String, String> {
-    let base = instrument_id
-        .strip_prefix("instrument:coinbase:")
-        .and_then(|value| value.strip_suffix(":usd"))
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 16
-                && value
-                    .chars()
-                    .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
-        })
-        .ok_or_else(|| "unsupported Coinbase instrument identity".to_string())?;
-    match base {
-        "btc" => Ok("BTC-USD".to_string()),
-        "eth" => Ok("ETH-USD".to_string()),
-        _ => Err("Coinbase instrument precision profile is unavailable".to_string()),
+    if !request.instrument_id.starts_with("instrument:coinbase:") {
+        return Err("unsupported Coinbase instrument identity".to_string());
     }
+    Ok(())
 }
 
-fn parse_page(request: &HistoryPageRequest, body: &[u8]) -> Result<HistoryPage, String> {
+fn parse_page(
+    request: &HistoryPageRequest,
+    body: &[u8],
+    effective_start: i64,
+    effective_end: i64,
+    price_scale: u8,
+    quantity_scale: u8,
+    source_seconds: i64,
+) -> Result<HistoryPage, String> {
     if body.len() > RESPONSE_BYTE_LIMIT {
         return Err("Coinbase history response exceeds byte limit".to_string());
     }
@@ -374,11 +542,10 @@ fn parse_page(request: &HistoryPageRequest, body: &[u8]) -> Result<HistoryPage, 
     let mut items = parsed
         .candles
         .iter()
-        .map(parse_candle)
+        .map(|candle| parse_candle(candle, price_scale, quantity_scale, source_seconds))
         .collect::<Result<Vec<_>, _>>()?;
     items.retain(|item| {
-        item.event_time_unix_nanos >= request.range.start_unix_nanos
-            && item.event_time_unix_nanos < request.range.end_unix_nanos
+        item.event_time_unix_nanos >= effective_start && item.event_time_unix_nanos < effective_end
     });
     items.sort_by_key(|item| item.sequence);
     if items.len() > request.maximum_items.get() {
@@ -392,16 +559,22 @@ fn parse_page(request: &HistoryPageRequest, body: &[u8]) -> Result<HistoryPage, 
     Ok(HistoryPage {
         request: request.clone(),
         items,
-        next: None,
+        next: (effective_start > request.range.start_unix_nanos)
+            .then_some(Continuation::EndBeforeUnixNanos(effective_start)),
     })
 }
 
-fn parse_candle(candle: &CandleMessage) -> Result<HistoryItem, String> {
+fn parse_candle(
+    candle: &CandleMessage,
+    price_scale: u8,
+    quantity_scale: u8,
+    source_seconds: i64,
+) -> Result<HistoryItem, String> {
     let timestamp = candle
         .start
         .parse::<i64>()
         .ok()
-        .filter(|value| *value >= 0 && *value % ONE_MINUTE_SECONDS == 0)
+        .filter(|value| *value >= 0 && *value % source_seconds == 0)
         .ok_or_else(|| "Coinbase candle timestamp is invalid".to_string())?;
     let sequence = u64::try_from(timestamp / ONE_MINUTE_SECONDS)
         .ok()
@@ -410,11 +583,11 @@ fn parse_candle(candle: &CandleMessage) -> Result<HistoryItem, String> {
     let bar = MarketBar {
         source_sequence: sequence,
         exchange_timestamp_seconds: timestamp,
-        open: fixed_at_scale(&candle.open, 2)?,
-        high: fixed_at_scale(&candle.high, 2)?,
-        low: fixed_at_scale(&candle.low, 2)?,
-        close: fixed_at_scale(&candle.close, 2)?,
-        volume: fixed_at_scale(&candle.volume, 8)?,
+        open: fixed_at_scale(&candle.open, u32::from(price_scale))?,
+        high: fixed_at_scale(&candle.high, u32::from(price_scale))?,
+        low: fixed_at_scale(&candle.low, u32::from(price_scale))?,
+        close: fixed_at_scale(&candle.close, u32::from(price_scale))?,
+        volume: fixed_at_scale(&candle.volume, u32::from(quantity_scale))?,
     };
     bar.validate().map_err(|error| error.to_string())?;
     let event_time_unix_nanos = timestamp
@@ -424,6 +597,30 @@ fn parse_candle(candle: &CandleMessage) -> Result<HistoryItem, String> {
         sequence,
         event_time_unix_nanos,
         payload: encode_history_bar(bar),
+    })
+}
+
+#[derive(Clone, Copy)]
+struct HistorySourceResolution {
+    granularity: &'static str,
+    seconds: i64,
+}
+
+fn history_source_resolution(resolution: &str) -> Result<HistorySourceResolution, String> {
+    let source = match resolution {
+        "1m" | "3m" => ("ONE_MINUTE", 60),
+        "5m" => ("FIVE_MINUTE", 300),
+        "15m" => ("FIFTEEN_MINUTE", 900),
+        "30m" => ("THIRTY_MINUTE", 1_800),
+        "1h" => ("ONE_HOUR", 3_600),
+        "2h" | "4h" | "8h" => ("TWO_HOUR", 7_200),
+        "12h" => ("SIX_HOUR", 21_600),
+        "1D" | "3D" | "1W" | "1M" => ("ONE_DAY", 86_400),
+        _ => return Err("unsupported Coinbase history resolution".to_string()),
+    };
+    Ok(HistorySourceResolution {
+        granularity: source.0,
+        seconds: source.1,
     })
 }
 
@@ -446,7 +643,8 @@ fn fixed_at_scale(source: &str, target_scale: u32) -> Result<i64, String> {
     Ok(value.mantissa / divisor)
 }
 
-fn encode_history_bar(bar: MarketBar) -> Vec<u8> {
+#[must_use]
+pub fn encode_history_bar(bar: MarketBar) -> Vec<u8> {
     let mut payload = Vec::with_capacity(HISTORY_PAYLOAD_BYTES);
     payload.extend_from_slice(HISTORY_PAYLOAD_MAGIC);
     payload.extend_from_slice(&bar.source_sequence.to_le_bytes());
@@ -629,9 +827,13 @@ pub(crate) fn connect_coinbase_endpoint_cancellable(
         let attempt_deadline = Instant::now() + remaining / attempts_left;
         match connect_address_cancellable(*address, attempt_deadline, stop.as_deref()) {
             Ok(stream) => {
-                stream
-                    .set_nodelay(true)
-                    .map_err(|_| "Coinbase endpoint socket setup failed".to_string())?;
+                stream.set_nodelay(true).map_err(|error| {
+                    format!(
+                        "Coinbase endpoint socket setup failed ({:?}, os={:?})",
+                        error.kind(),
+                        error.raw_os_error()
+                    )
+                })?;
                 return Ok(DeadlineTcpStream {
                     stream,
                     deadline,
@@ -652,33 +854,14 @@ fn connect_address_cancellable(
     deadline: Instant,
     stop: Option<&AtomicBool>,
 ) -> io::Result<TcpStream> {
-    let socket = Socket::new(
-        Domain::for_address(address),
-        Type::STREAM,
-        Some(Protocol::TCP),
-    )?;
-    socket.set_nonblocking(true)?;
-    match socket.connect(&address.into()) {
-        Ok(()) => return finish_connected_socket(socket),
-        Err(error) if connection_is_pending(&error) => {}
-        Err(error) => return Err(error),
-    }
+    const MAXIMUM_CONNECT_ATTEMPTS: usize = 4;
+    let mut attempts = 0_usize;
     loop {
         if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "Coinbase endpoint connection cancelled",
             ));
-        }
-        if let Some(error) = socket.take_error()? {
-            return Err(error);
-        }
-        match socket.peer_addr() {
-            Ok(_) => return finish_connected_socket(socket),
-            Err(error)
-                if error.kind() == io::ErrorKind::NotConnected || connection_is_pending(&error) => {
-            }
-            Err(error) => return Err(error),
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -687,47 +870,17 @@ fn connect_address_cancellable(
                 "Coinbase endpoint connection deadline exceeded",
             ));
         }
-        thread::sleep(remaining.min(NETWORK_POLL_INTERVAL));
+        attempts = attempts.saturating_add(1);
+        match TcpStream::connect_timeout(&address, remaining.min(NETWORK_POLL_INTERVAL)) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) && attempts < MAXIMUM_CONNECT_ATTEMPTS => {}
+            Err(error) => return Err(error),
+        }
     }
-}
-
-fn connection_is_pending(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::WouldBlock {
-        return true;
-    }
-    let raw = error.raw_os_error();
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if matches!(raw, Some(114 | 115)) {
-        return true;
-    }
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "watchos",
-        target_os = "visionos",
-        target_os = "freebsd",
-        target_os = "dragonfly",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
-    if matches!(raw, Some(36 | 37)) {
-        return true;
-    }
-    #[cfg(target_os = "windows")]
-    if matches!(raw, Some(10_035..=10_037)) {
-        return true;
-    }
-    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
-    if matches!(raw, Some(149 | 150)) {
-        return true;
-    }
-    false
-}
-
-fn finish_connected_socket(socket: Socket) -> io::Result<TcpStream> {
-    socket.set_nonblocking(false)?;
-    Ok(socket.into())
 }
 
 fn resolve_addresses(
@@ -1118,23 +1271,33 @@ mod tests {
 
     #[test]
     fn retained_segment_rejects_truncation_corruption_and_discontinuity() {
-        let first = super::parse_candle(&super::CandleMessage {
-            start: "1700000040".to_string(),
-            high: "37050.00".to_string(),
-            low: "36950.00".to_string(),
-            open: "37000.00".to_string(),
-            close: "37020.00".to_string(),
-            volume: "0.50000000".to_string(),
-        })
+        let first = super::parse_candle(
+            &super::CandleMessage {
+                start: "1700000040".to_string(),
+                high: "37050.00".to_string(),
+                low: "36950.00".to_string(),
+                open: "37000.00".to_string(),
+                close: "37020.00".to_string(),
+                volume: "0.50000000".to_string(),
+            },
+            2,
+            8,
+            60,
+        )
         .expect("first candle validates");
-        let third = super::parse_candle(&super::CandleMessage {
-            start: "1700000160".to_string(),
-            high: "37100.00".to_string(),
-            low: "37000.00".to_string(),
-            open: "37010.00".to_string(),
-            close: "37090.00".to_string(),
-            volume: "1.25000000".to_string(),
-        })
+        let third = super::parse_candle(
+            &super::CandleMessage {
+                start: "1700000160".to_string(),
+                high: "37100.00".to_string(),
+                low: "37000.00".to_string(),
+                open: "37010.00".to_string(),
+                close: "37090.00".to_string(),
+                volume: "1.25000000".to_string(),
+            },
+            2,
+            8,
+            60,
+        )
         .expect("third candle validates");
         assert!(encode_history_segment(&[first.clone(), third]).is_err());
 
@@ -1161,8 +1324,8 @@ mod tests {
         let mut unaligned = request(3);
         unaligned.range.start_unix_nanos += 1;
         assert!(adapter.fetch_page(&unaligned).is_err());
-        let too_wide_for_page = request(2);
-        assert!(adapter.fetch_page(&too_wide_for_page).is_err());
+        let too_many_page_items = request(351);
+        assert!(adapter.fetch_page(&too_many_page_items).is_err());
         let mut noncanonical = request(3);
         noncanonical.instrument_id = "instrument:coinbase:BTC:usd".to_string();
         assert!(adapter.fetch_page(&noncanonical).is_err());

@@ -12,6 +12,8 @@ pub enum IndicatorKind {
     Ema,
     Wma,
     BollingerBands,
+    Vwap,
+    Volume,
     Rsi,
     Macd,
     Stochastic,
@@ -26,6 +28,8 @@ impl IndicatorKind {
             Self::Ema => "ema",
             Self::Wma => "wma",
             Self::BollingerBands => "bollinger",
+            Self::Vwap => "vwap",
+            Self::Volume => "volume",
             Self::Rsi => "rsi",
             Self::Macd => "macd",
             Self::Stochastic => "stochastic",
@@ -36,6 +40,7 @@ impl IndicatorKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndicatorParameters {
+    None,
     Period {
         period: u16,
     },
@@ -57,6 +62,7 @@ pub enum IndicatorParameters {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndicatorLocation {
     MainChartOverlay,
+    VolumePane,
     OscillatorPane,
 }
 
@@ -65,6 +71,7 @@ impl IndicatorLocation {
     pub const fn description(self) -> &'static str {
         match self {
             Self::MainChartOverlay => "Overlay on the main chart",
+            Self::VolumePane => "Volume histogram pane",
             Self::OscillatorPane => "Separate oscillator pane",
         }
     }
@@ -97,7 +104,7 @@ impl IndicatorSpec {
     }
 }
 
-pub const INDICATOR_SPECS: [IndicatorSpec; 8] = [
+pub const INDICATOR_SPECS: [IndicatorSpec; 10] = [
     IndicatorSpec {
         kind: IndicatorKind::Sma,
         label: "Moving Average",
@@ -128,6 +135,20 @@ pub const INDICATOR_SPECS: [IndicatorSpec; 8] = [
         },
         parameter_description: "Period 20 - Deviation 2",
         location: IndicatorLocation::MainChartOverlay,
+    },
+    IndicatorSpec {
+        kind: IndicatorKind::Vwap,
+        label: "Volume Weighted Average Price",
+        parameters: IndicatorParameters::None,
+        parameter_description: "Session volume weighted price",
+        location: IndicatorLocation::MainChartOverlay,
+    },
+    IndicatorSpec {
+        kind: IndicatorKind::Volume,
+        label: "Volume",
+        parameters: IndicatorParameters::None,
+        parameter_description: "Bar volume",
+        location: IndicatorLocation::VolumePane,
     },
     IndicatorSpec {
         kind: IndicatorKind::Rsi,
@@ -191,6 +212,8 @@ mod tests {
                 IndicatorKind::Ema,
                 IndicatorKind::Wma,
                 IndicatorKind::BollingerBands,
+                IndicatorKind::Vwap,
+                IndicatorKind::Volume,
                 IndicatorKind::Rsi,
                 IndicatorKind::Macd,
                 IndicatorKind::Stochastic,
@@ -211,6 +234,8 @@ mod tests {
                     period: 20,
                     deviation: 2,
                 },
+                IndicatorParameters::None,
+                IndicatorParameters::None,
                 IndicatorParameters::Period { period: 14 },
                 IndicatorParameters::Macd {
                     fast_period: 12,
@@ -225,12 +250,12 @@ mod tests {
             ]
         );
         assert!(
-            INDICATOR_SPECS[..4]
+            INDICATOR_SPECS[..5]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::MainChartOverlay)
         );
         assert!(
-            INDICATOR_SPECS[4..]
+            INDICATOR_SPECS[6..]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::OscillatorPane)
         );

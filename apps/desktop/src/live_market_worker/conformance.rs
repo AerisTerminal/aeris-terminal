@@ -154,7 +154,7 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
     let first_snapshot = wait_for_live_snapshot(&mut worker, 2);
     assert_eq!(first_snapshot, (1, 300));
 
-    control.invalid(first, CoinbaseProviderInvalidReason::Transport);
+    control.invalid(first, CoinbaseProviderInvalidReason::StreamTransport);
     assert_eq!(control.wait_stopped(Duration::from_secs(1)), Some(first));
     let second = control
         .wait_started(Duration::from_secs(2))
@@ -450,6 +450,11 @@ fn assert_message_redacted(message: &MarketWorkerMessage) {
         },
         MarketWorkerMessage::RithmicLive { .. } => "Rithmic live snapshot".to_string(),
         MarketWorkerMessage::RithmicDom(_) => "Rithmic depth frame".to_string(),
+        MarketWorkerMessage::CoinbaseCatalog(result) => match result {
+            Ok(products) => format!("Coinbase catalog products={}", products.len()),
+            Err(error) => error.clone(),
+        },
+        MarketWorkerMessage::CoinbaseDom(_) => "Coinbase depth frame".to_string(),
         MarketWorkerMessage::Update(publication) => format!(
             "{} {} {}",
             publication.subscription_id,

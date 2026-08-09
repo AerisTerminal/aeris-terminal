@@ -1,7 +1,9 @@
 //! Deterministic replay-to-Origin-to-GPUI host preparation sampling.
 
 use crate::bridge::{ChartDataBridge, MergedChartData};
-use crate::origin_bridge::{apply_merged_chart_data, install_replay, replay_price_divisor};
+use crate::origin_bridge::{
+    apply_merged_chart_data, install_replay, install_volume_series, replay_price_divisor,
+};
 use axiusflow_application::{ReplaySnapshot, ReplayStreamUpdate, ReplayValidationError};
 use core::fmt;
 use origin_engine::{ChartEngine, ChartFrame, SeriesKind};
@@ -66,7 +68,8 @@ pub fn run_origin_gpui_host_sample(
     const SCALE_FACTOR: f32 = 1.0;
 
     let mut engine = ChartEngine::new(WIDTH, HEIGHT, f64::from(SCALE_FACTOR));
-    install_replay(&mut engine, baseline);
+    let volume_series = install_volume_series(&mut engine);
+    install_replay(&mut engine, volume_series, baseline);
     engine.series[0].kind = SeriesKind::Candlestick;
     let mut price_divisor = replay_price_divisor(baseline);
     let mut bridge = ChartDataBridge::try_new(NonZeroUsize::MIN, baseline)
@@ -91,7 +94,7 @@ pub fn run_origin_gpui_host_sample(
         },
         |item| item.value().source_sequence,
     );
-    apply_merged_chart_data(&mut engine, &mut price_divisor, &merged);
+    apply_merged_chart_data(&mut engine, volume_series, &mut price_divisor, &merged);
     engine.css_width = WIDTH;
     engine.css_height = HEIGHT;
     engine.dpr = f64::from(SCALE_FACTOR);
