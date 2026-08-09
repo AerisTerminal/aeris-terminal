@@ -262,6 +262,9 @@ impl EngineState {
             return Err("workspace revision is stale".to_string());
         }
         let mut candidate = workspace.clone();
+        if !selection.provider.is_empty() {
+            candidate.provider = selection.provider;
+        }
         candidate.market = selection.market;
         candidate.interval_seconds = selection.interval_seconds;
         candidate.workspace_revision = candidate.workspace_revision.saturating_add(1);
@@ -837,12 +840,34 @@ impl EngineClient {
         workspace_revision: u64,
         selection_generation: u64,
     ) -> Result<WorkspaceState, String> {
+        self.set_provider_selection(
+            String::new(),
+            market,
+            interval_seconds,
+            workspace_revision,
+            selection_generation,
+        )
+    }
+
+    /// Applies a revision-fenced provider and market selection.
+    ///
+    /// # Errors
+    /// Returns an error when the revision is stale, transport fails, or the reply is invalid.
+    pub fn set_provider_selection(
+        &mut self,
+        provider: String,
+        market: String,
+        interval_seconds: u32,
+        workspace_revision: u64,
+        selection_generation: u64,
+    ) -> Result<WorkspaceState, String> {
         self.connection
             .send(envelope::Payload::SetSelection(SetSelection {
                 market,
                 interval_seconds,
                 workspace_revision,
                 selection_generation,
+                provider,
             }))?;
         self.receive_workspace()
     }

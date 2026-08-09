@@ -235,6 +235,9 @@ pub struct SetSelection {
     /// Monotonic client selection generation. Tag 4.
     #[prost(uint64, tag = "4")]
     pub selection_generation: u64,
+    /// Provider to select. Empty preserves the current provider for older clients. Tag 5.
+    #[prost(string, tag = "5")]
+    pub provider: String,
 }
 
 /// Client watchlist replacement.

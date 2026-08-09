@@ -50,6 +50,7 @@ fn all_payloads() -> Vec<envelope::Payload> {
             interval_seconds: 300,
             workspace_revision: 42,
             selection_generation: 9,
+            provider: "coinbase".to_string(),
         }),
         envelope::Payload::SetWatchlist(SetWatchlist {
             markets: vec!["SOL-USD".to_string()],

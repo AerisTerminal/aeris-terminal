@@ -243,19 +243,27 @@ fn workspace_selection_is_durable_across_engine_restart() {
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     let restored = client.restore_workspace().expect("restore workspace");
     let updated = client
-        .set_selection("ETH-USD".to_string(), 300, restored.workspace_revision, 1)
+        .set_provider_selection(
+            "rithmic".to_string(),
+            "MNQU6".to_string(),
+            300,
+            restored.workspace_revision,
+            1,
+        )
         .expect("persist selection");
     assert_eq!(updated.workspace_revision, 1);
     drop(client);
     server.join().expect("join server");
 
     let reopened = EngineState::open(&directory.0).expect("reopen persistent state");
-    assert_eq!(reopened.workspace().market, "ETH-USD");
+    assert_eq!(reopened.workspace().provider, "rithmic");
+    assert_eq!(reopened.workspace().market, "MNQU6");
     assert_eq!(reopened.workspace().interval_seconds, 300);
     assert_eq!(reopened.workspace().workspace_revision, 1);
     assert_eq!(reopened.workspace().schema_revision, 1);
     assert_eq!(reopened.workspace().cache_manifest_revision, 1);
-    assert_eq!(reopened.workspace().hot_series[0].market, "ETH-USD");
+    assert_eq!(reopened.workspace().hot_series[0].provider, "rithmic");
+    assert_eq!(reopened.workspace().hot_series[0].market, "MNQU6");
     assert_eq!(reopened.workspace().hot_series[0].interval_seconds, 300);
 }
 
