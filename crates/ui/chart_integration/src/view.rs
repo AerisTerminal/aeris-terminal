@@ -12,19 +12,141 @@ use axiusflow_application::{
 };
 use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, MouseButton,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
     prelude::*, px, rgb,
 };
 use num_traits::ToPrimitive;
-use origin_engine::{ChartEngine, ChartFrame, PriceScaleTarget};
+use origin_engine::{
+    ChartEngine, ChartFrame, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
+};
 use origin_render::draw_list::Prim;
 use origin_render_gpui::backend::measure_text;
 use origin_render_gpui::{GpuiChartRenderer, OriginViewport, PreparedOriginFrame};
+use std::collections::HashSet;
+use std::fmt;
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
+
+/// A native indicator supported by the chart's current OHLC data bridge.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ChartIndicator {
+    Sma,
+    Ema,
+    Wma,
+    Bollinger,
+    Rsi,
+    Macd,
+    Stochastic,
+    Atr,
+}
+
+impl ChartIndicator {
+    /// All indicators that can be calculated truthfully from the installed OHLC columns.
+    pub const ALL: [Self; 8] = [
+        Self::Sma,
+        Self::Ema,
+        Self::Wma,
+        Self::Bollinger,
+        Self::Rsi,
+        Self::Macd,
+        Self::Stochastic,
+        Self::Atr,
+    ];
+
+    /// Returns the user-facing legacy catalog label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sma => "Moving Average",
+            Self::Ema => "Moving Average Exponential",
+            Self::Wma => "Weighted Moving Average",
+            Self::Bollinger => "Bollinger Bands",
+            Self::Rsi => "Relative Strength Index",
+            Self::Macd => "MACD",
+            Self::Stochastic => "Stochastic",
+            Self::Atr => "Average True Range",
+        }
+    }
+
+    /// Returns the fixed parameters shown by the legacy indicator catalog.
+    #[must_use]
+    pub const fn parameters(self) -> &'static str {
+        match self {
+            Self::Sma | Self::Ema | Self::Wma => "Period 20",
+            Self::Bollinger => "Period 20 · Deviation 2",
+            Self::Rsi | Self::Atr => "Period 14",
+            Self::Macd => "Fast 12 · Slow 26 · Signal 9",
+            Self::Stochastic => "%K 14 · %D 3",
+        }
+    }
+}
+
+/// Failure to create a native indicator on the chart's primary series.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartIndicatorError {
+    MarketDataUnavailable,
+    CreationRejected(ChartIndicator),
+}
+
+impl fmt::Display for ChartIndicatorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MarketDataUnavailable => {
+                formatter.write_str("an indicator requires installed chart market data")
+            }
+            Self::CreationRejected(indicator) => {
+                write!(
+                    formatter,
+                    "Origin rejected the {} indicator",
+                    indicator.label()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChartIndicatorError {}
+
+/// A drawing tool exposed by the native chart surface.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChartDrawingTool {
+    /// Selects, moves, and pans without creating a drawing.
+    #[default]
+    Cursor,
+    TrendLine,
+    HorizontalLine,
+    VerticalLine,
+    Ray,
+    Rectangle,
+    Brush,
+    Text,
+}
+
+impl ChartDrawingTool {
+    const fn drawing_kind(self) -> Option<DrawingKind> {
+        match self {
+            Self::Cursor => None,
+            Self::TrendLine => Some(DrawingKind::TrendLine),
+            Self::HorizontalLine => Some(DrawingKind::HorizontalLine),
+            Self::VerticalLine => Some(DrawingKind::VerticalLine),
+            Self::Ray => Some(DrawingKind::HorizontalRay),
+            Self::Rectangle => Some(DrawingKind::Rectangle),
+            Self::Brush => Some(DrawingKind::Brush),
+            Self::Text => Some(DrawingKind::Text),
+        }
+    }
+}
+
+/// Aggregate state used by drawing-toolbar lock controls.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DrawingsLockSummary {
+    pub total: usize,
+    pub locked_count: usize,
+    pub all_locked: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChartDrag {
@@ -50,6 +172,8 @@ pub struct OriginChartView {
     fitted: bool,
     viewport_origin: (f32, f32),
     drag: Option<ChartDrag>,
+    drawing_tool: ChartDrawingTool,
+    locked_drawings: HashSet<DrawingId>,
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
 }
@@ -77,6 +201,8 @@ impl OriginChartView {
             fitted: false,
             viewport_origin: (0.0, 0.0),
             drag: None,
+            drawing_tool: ChartDrawingTool::Cursor,
+            locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
         }
@@ -132,6 +258,8 @@ impl OriginChartView {
             fitted: false,
             viewport_origin: (0.0, 0.0),
             drag: None,
+            drawing_tool: ChartDrawingTool::Cursor,
+            locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
         }
@@ -176,6 +304,170 @@ impl OriginChartView {
     /// Returns the time scale to the newest bar without changing its zoom.
     pub fn scroll_to_latest(&mut self) {
         self.engine.scroll_to_real_time();
+        self.invalidate_series_frame();
+    }
+
+    /// Adds an indicator with the defaults shown by the legacy native catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no market snapshot has populated the primary series or Origin
+    /// cannot create every output required by the selected indicator.
+    pub fn add_indicator(
+        &mut self,
+        indicator: ChartIndicator,
+    ) -> Result<Vec<usize>, ChartIndicatorError> {
+        if !self.has_market_data() {
+            return Err(ChartIndicatorError::MarketDataUnavailable);
+        }
+        let ids = match indicator {
+            ChartIndicator::Sma => self.engine.add_sma(0, 20).into_iter().collect(),
+            ChartIndicator::Ema => self.engine.add_ema(0, 20).into_iter().collect(),
+            ChartIndicator::Wma => self.engine.add_wma(0, 20).into_iter().collect(),
+            ChartIndicator::Bollinger => self.engine.add_bollinger(0, 20, 2.0),
+            ChartIndicator::Rsi => self.engine.add_rsi(0, 14).into_iter().collect(),
+            ChartIndicator::Macd => self.engine.add_macd(0, 12, 26, 9),
+            ChartIndicator::Stochastic => self.engine.add_stochastic(0, 14, 3),
+            ChartIndicator::Atr => self.engine.add_atr(0, 14).into_iter().collect(),
+        };
+        let expected_outputs = match indicator {
+            ChartIndicator::Bollinger | ChartIndicator::Macd => 3,
+            ChartIndicator::Stochastic => 2,
+            ChartIndicator::Sma
+            | ChartIndicator::Ema
+            | ChartIndicator::Wma
+            | ChartIndicator::Rsi
+            | ChartIndicator::Atr => 1,
+        };
+        if ids.len() != expected_outputs {
+            for &id in &ids {
+                self.engine.remove_series(id);
+            }
+            return Err(ChartIndicatorError::CreationRejected(indicator));
+        }
+        self.invalidate_series_frame();
+        Ok(ids)
+    }
+
+    /// Returns the drawing tool currently armed on the chart surface.
+    #[must_use]
+    pub const fn drawing_tool(&self) -> ChartDrawingTool {
+        self.drawing_tool
+    }
+
+    /// Arms a drawing tool, replacing any unfinished drawing gesture.
+    pub fn set_drawing_tool(&mut self, tool: ChartDrawingTool) {
+        self.end_drag(-1.0, -1.0);
+        self.cancel_drawing_gesture();
+        self.drawing_tool = tool;
+        if let Some(kind) = tool.drawing_kind()
+            && kind != DrawingKind::Brush
+        {
+            let armed = self.engine.drawing_create_begin(kind, None);
+            debug_assert!(armed, "an empty drawing-options template is valid");
+        }
+        self.cursor_style = CursorStyle::Crosshair;
+        self.invalidate_series_frame();
+    }
+
+    /// Cancels creation or movement and returns to the cursor tool.
+    pub fn cancel_drawing(&mut self) {
+        self.end_drag(-1.0, -1.0);
+        self.cancel_drawing_gesture();
+        self.drawing_tool = ChartDrawingTool::Cursor;
+        self.cursor_style = CursorStyle::Crosshair;
+        self.invalidate_series_frame();
+    }
+
+    /// Returns the number of committed drawings.
+    #[must_use]
+    pub fn drawing_count(&self) -> usize {
+        self.engine.drawings().len()
+    }
+
+    /// Returns the selected drawing identifier, if any.
+    #[must_use]
+    pub fn selected_drawing_id(&self) -> Option<DrawingId> {
+        self.engine.selected_drawing()
+    }
+
+    /// Returns whether the selected drawing is locked against pointer movement.
+    #[must_use]
+    pub fn selected_drawing_locked(&self) -> bool {
+        self.engine
+            .selected_drawing()
+            .is_some_and(|id| self.locked_drawings.contains(&id))
+    }
+
+    /// Locks or unlocks the selected drawing against pointer movement.
+    pub fn set_selected_drawing_locked(&mut self, locked: bool) -> bool {
+        let Some(id) = self.engine.selected_drawing() else {
+            return false;
+        };
+        let changed = if locked {
+            self.locked_drawings.insert(id)
+        } else {
+            self.locked_drawings.remove(&id)
+        };
+        if changed {
+            self.engine.drawing_drag_end();
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
+    /// Returns aggregate lock state for the drawing toolbar.
+    #[must_use]
+    pub fn drawings_lock_summary(&self) -> DrawingsLockSummary {
+        let total = self.engine.drawings().len();
+        let locked_count = self
+            .engine
+            .drawings()
+            .iter()
+            .filter(|drawing| self.locked_drawings.contains(&drawing.id))
+            .count();
+        DrawingsLockSummary {
+            total,
+            locked_count,
+            all_locked: total > 0 && total == locked_count,
+        }
+    }
+
+    /// Locks or unlocks every committed drawing against pointer movement.
+    pub fn set_all_drawings_locked(&mut self, locked: bool) -> bool {
+        let previous = self.drawings_lock_summary();
+        if locked {
+            self.locked_drawings
+                .extend(self.engine.drawings().iter().map(|drawing| drawing.id));
+        } else {
+            self.locked_drawings.clear();
+        }
+        let changed = previous.locked_count != self.drawings_lock_summary().locked_count;
+        if changed {
+            self.engine.drawing_drag_end();
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
+    /// Removes the selected drawing, if one exists.
+    pub fn remove_selected_drawing(&mut self) -> bool {
+        let selected = self.engine.selected_drawing();
+        let removed = self.engine.remove_selected_drawing();
+        if removed {
+            if let Some(id) = selected {
+                self.locked_drawings.remove(&id);
+            }
+            self.invalidate_series_frame();
+        }
+        removed
+    }
+
+    /// Removes every committed drawing.
+    pub fn clear_drawings(&mut self) {
+        self.cancel_drawing_gesture();
+        self.engine.clear_drawings();
+        self.locked_drawings.clear();
         self.invalidate_series_frame();
     }
 
@@ -362,6 +654,101 @@ impl OriginChartView {
         (chart_x - self.engine.pane_left, y)
     }
 
+    fn drawing_modifiers(modifiers: Modifiers) -> DrawingModifiers {
+        DrawingModifiers {
+            magnet: modifiers.control || modifiers.platform,
+            straighten: modifiers.shift,
+        }
+    }
+
+    fn cancel_drawing_gesture(&mut self) {
+        self.engine.drawing_drag_end();
+        self.engine.drawing_create_cancel();
+        self.engine.brush_create_cancel();
+    }
+
+    fn rearm_anchored_drawing(&mut self) {
+        let Some(kind) = self.drawing_tool.drawing_kind() else {
+            return;
+        };
+        if kind != DrawingKind::Brush {
+            let armed = self.engine.drawing_create_begin(kind, None);
+            debug_assert!(armed, "an empty drawing-options template is valid");
+        }
+    }
+
+    fn drawing_pointer_down(&mut self, pane_x: f64, y: f64, modifiers: DrawingModifiers) -> bool {
+        match self.drawing_tool {
+            ChartDrawingTool::Cursor => {
+                let hit = self.engine.hit_test_drawing(pane_x, y);
+                if let Some(hit) = hit
+                    && self.locked_drawings.contains(&hit.id)
+                {
+                    self.engine.set_selected_drawing(Some(hit.id));
+                    self.engine.drawing_drag_end();
+                    return true;
+                }
+                if self.engine.drawing_drag_start_at(pane_x, y) {
+                    return true;
+                }
+                self.engine.set_selected_drawing(None);
+                false
+            }
+            ChartDrawingTool::Brush => self.engine.brush_create_start(None, pane_x, y),
+            _ => {
+                let result = self.engine.drawing_create_click(pane_x, y, modifiers);
+                if result > 0 {
+                    self.rearm_anchored_drawing();
+                }
+                result != 0
+            }
+        }
+    }
+
+    fn drawing_pointer_move(
+        &mut self,
+        pane_x: f64,
+        y: f64,
+        dragging: bool,
+        modifiers: DrawingModifiers,
+    ) -> bool {
+        if self.engine.brush_create_active() {
+            if dragging {
+                self.engine.brush_create_add(pane_x, y);
+            } else {
+                self.engine.brush_create_cancel();
+            }
+            return true;
+        }
+        if self.engine.drawing_drag_active() {
+            if dragging {
+                self.engine.drawing_drag_to(pane_x, y, modifiers);
+            } else {
+                self.engine.drawing_drag_end();
+            }
+            return true;
+        }
+        if self.engine.drawing_create_active() {
+            self.engine.drawing_create_move(pane_x, y, modifiers);
+            return true;
+        }
+        false
+    }
+
+    fn drawing_pointer_up(&mut self, pane_x: f64, y: f64, modifiers: DrawingModifiers) -> bool {
+        if self.engine.brush_create_active() {
+            self.engine.brush_create_add(pane_x, y);
+            self.engine.brush_create_end();
+            return true;
+        }
+        if self.engine.drawing_drag_active() {
+            self.engine.drawing_drag_to(pane_x, y, modifiers);
+            self.engine.drawing_drag_end();
+            return true;
+        }
+        false
+    }
+
     fn update_crosshair(&mut self, pane_x: f64, y: f64) {
         self.engine.crosshair =
             (pane_x >= 0.0 && pane_x <= self.engine.pane_w && y >= 0.0 && y <= self.engine.pane_h)
@@ -370,13 +757,29 @@ impl OriginChartView {
     }
 
     fn update_cursor(&mut self, pane_x: f64, y: f64) {
-        self.cursor_style = match self.drag {
-            Some(ChartDrag::Pane) => CursorStyle::ClosedHand,
-            Some(ChartDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
-            Some(ChartDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
-            None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
-            None if pane_x < 0.0 || pane_x > self.engine.pane_w => CursorStyle::ResizeUpDown,
-            None => CursorStyle::Crosshair,
+        self.cursor_style = if self.engine.drawing_drag_active() {
+            CursorStyle::ClosedHand
+        } else if self.drawing_tool != ChartDrawingTool::Cursor {
+            CursorStyle::Crosshair
+        } else if let Some(hit) = self.engine.hit_test_drawing(pane_x, y) {
+            match hit.cursor {
+                "pointer" => CursorStyle::PointingHand,
+                "move" => CursorStyle::OpenHand,
+                "ns-resize" => CursorStyle::ResizeUpDown,
+                "ew-resize" => CursorStyle::ResizeLeftRight,
+                "nwse-resize" => CursorStyle::ResizeUpRightDownLeft,
+                "nesw-resize" => CursorStyle::ResizeUpLeftDownRight,
+                _ => CursorStyle::Crosshair,
+            }
+        } else {
+            match self.drag {
+                Some(ChartDrag::Pane) => CursorStyle::ClosedHand,
+                Some(ChartDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
+                Some(ChartDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
+                None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
+                None if pane_x < 0.0 || pane_x > self.engine.pane_w => CursorStyle::ResizeUpDown,
+                None => CursorStyle::Crosshair,
+            }
         };
     }
 
@@ -489,12 +892,18 @@ impl OriginChartView {
 
     fn cancel_gesture(&mut self) {
         self.end_drag(-1.0, -1.0);
+        self.engine.drawing_drag_end();
+        self.engine.brush_create_cancel();
         self.engine.crosshair = None;
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }
 
-    fn move_pointer(&mut self, pane_x: f64, y: f64, dragging: bool) {
+    fn move_pointer(&mut self, pane_x: f64, y: f64, dragging: bool, modifiers: DrawingModifiers) {
+        if self.drawing_pointer_move(pane_x, y, dragging, modifiers) {
+            self.update_crosshair(pane_x, y);
+            return;
+        }
         if self.drag.is_some() {
             if dragging {
                 self.drag_to(pane_x, y);
@@ -529,7 +938,12 @@ impl OriginChartView {
             "-" | "_" => self.engine.time_scale.zoom(center, -0.5),
             "home" => self.reset_view(),
             "end" => self.scroll_to_latest(),
-            "escape" => self.cancel_gesture(),
+            "delete" | "backspace" => {
+                if !self.remove_selected_drawing() {
+                    return false;
+                }
+            }
+            "escape" => self.cancel_drawing(),
             _ => return false,
         }
         self.invalidate_series_frame();
@@ -546,7 +960,12 @@ impl OriginChartView {
             window.focus(focus_handle, cx);
         }
         let (pane_x, y) = self.local_position(event.position);
-        self.begin_drag(pane_x, y, event.click_count);
+        if self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
+            self.update_cursor(pane_x, y);
+            self.update_crosshair(pane_x, y);
+        } else {
+            self.begin_drag(pane_x, y, event.click_count);
+        }
         cx.stop_propagation();
         cx.notify();
     }
@@ -569,13 +988,20 @@ impl OriginChartView {
         cx: &mut Context<Self>,
     ) {
         let (pane_x, y) = self.local_position(event.position);
-        self.move_pointer(pane_x, y, event.dragging());
+        self.move_pointer(
+            pane_x,
+            y,
+            event.dragging(),
+            Self::drawing_modifiers(event.modifiers),
+        );
         cx.notify();
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let (pane_x, y) = self.local_position(event.position);
-        self.end_drag(pane_x, y);
+        if !self.drawing_pointer_up(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
+            self.end_drag(pane_x, y);
+        }
         cx.stop_propagation();
         cx.notify();
     }
@@ -845,6 +1271,182 @@ mod tests {
     }
 
     #[test]
+    fn indicator_catalog_maps_to_origin_with_legacy_defaults() {
+        let cases = [
+            (ChartIndicator::Sma, 1, "sma", "SMA 20"),
+            (ChartIndicator::Ema, 1, "ema", "EMA 20"),
+            (ChartIndicator::Wma, 1, "wma", "WMA 20"),
+            (ChartIndicator::Bollinger, 3, "bollinger", "Bollinger 20 2"),
+            (ChartIndicator::Rsi, 1, "rsi", "RSI 14"),
+            (ChartIndicator::Macd, 3, "macd", "MACD 12 26 9"),
+            (
+                ChartIndicator::Stochastic,
+                2,
+                "stochastic",
+                "Stochastic 14 3",
+            ),
+            (ChartIndicator::Atr, 1, "atr", "ATR 14"),
+        ];
+
+        for (indicator, output_count, kind, title) in cases {
+            let mut chart = interactive_chart();
+            let ids = chart
+                .add_indicator(indicator)
+                .expect("supported indicator is created");
+
+            assert_eq!(ids.len(), output_count);
+            assert_eq!(chart.engine.series[ids[0]].title, title);
+            for id in ids {
+                assert_eq!(
+                    chart
+                        .engine
+                        .indicator_info(id)
+                        .expect("indicator lineage")
+                        .kind,
+                    kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
+        let mut chart = OriginChartView::empty(AxiusflowTheme::dark());
+        let initial_series = chart.engine.series.len();
+
+        for indicator in ChartIndicator::ALL {
+            assert_eq!(
+                chart.add_indicator(indicator),
+                Err(ChartIndicatorError::MarketDataUnavailable)
+            );
+        }
+
+        assert_eq!(chart.engine.series.len(), initial_series);
+    }
+
+    #[test]
+    fn indicator_metadata_matches_the_legacy_picker_copy() {
+        assert_eq!(ChartIndicator::ALL.len(), 8);
+        assert_eq!(ChartIndicator::Sma.label(), "Moving Average");
+        assert_eq!(ChartIndicator::Sma.parameters(), "Period 20");
+        assert_eq!(
+            ChartIndicator::Bollinger.parameters(),
+            "Period 20 · Deviation 2"
+        );
+        assert_eq!(
+            ChartIndicator::Macd.parameters(),
+            "Fast 12 · Slow 26 · Signal 9"
+        );
+        assert_eq!(ChartIndicator::Stochastic.parameters(), "%K 14 · %D 3");
+        assert_eq!(ChartIndicator::Atr.parameters(), "Period 14");
+    }
+
+    #[test]
+    fn anchored_drawing_tools_commit_real_origin_drawings_and_rearm() {
+        let mut chart = interactive_chart();
+        let tools = [
+            (ChartDrawingTool::TrendLine, 2, 160.0),
+            (ChartDrawingTool::HorizontalLine, 1, 180.0),
+            (ChartDrawingTool::VerticalLine, 1, 200.0),
+            (ChartDrawingTool::Ray, 1, 220.0),
+            (ChartDrawingTool::Rectangle, 2, 240.0),
+            (ChartDrawingTool::Text, 1, 260.0),
+        ];
+        let anchor_x = [260.0, 340.0];
+
+        for (index, (tool, anchors, y)) in tools.into_iter().enumerate() {
+            chart.set_drawing_tool(tool);
+            assert_eq!(chart.drawing_tool(), tool);
+            for &x in anchor_x.iter().take(anchors) {
+                let handled = chart.drawing_pointer_down(x, y, DrawingModifiers::default());
+                assert!(handled);
+            }
+            assert_eq!(chart.drawing_count(), index + 1);
+            assert!(chart.engine.drawing_create_active());
+        }
+    }
+
+    #[test]
+    fn brush_capture_commits_on_release_and_stays_armed() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::Brush);
+
+        assert!(chart.drawing_pointer_down(240.0, 180.0, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_move(280.0, 210.0, true, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_up(320.0, 240.0, DrawingModifiers::default()));
+
+        assert_eq!(chart.drawing_count(), 1);
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Brush);
+        assert!(!chart.engine.brush_create_active());
+    }
+
+    #[test]
+    fn cursor_selects_and_moves_unlocked_drawings_but_locked_drawings_do_not_drag() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+        assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default()));
+        let id = chart.selected_drawing_id().expect("drawing selected");
+        let (_, drawing_y) = chart
+            .engine
+            .drawing_point_to_coordinate(id, 0)
+            .expect("drawing coordinate");
+        chart.set_drawing_tool(ChartDrawingTool::Cursor);
+
+        assert!(chart.set_selected_drawing_locked(true));
+        assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default()));
+        assert!(!chart.engine.drawing_drag_active());
+        assert_eq!(chart.selected_drawing_id(), Some(id));
+
+        assert!(chart.set_selected_drawing_locked(false));
+        assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default()));
+        assert!(chart.engine.drawing_drag_active());
+        assert!(chart.drawing_pointer_up(500.0, drawing_y + 30.0, DrawingModifiers::default()));
+        assert!(!chart.engine.drawing_drag_active());
+    }
+
+    #[test]
+    fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+        assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default()));
+        assert_eq!(chart.drawing_count(), 2);
+
+        assert!(chart.set_all_drawings_locked(true));
+        assert_eq!(
+            chart.drawings_lock_summary(),
+            DrawingsLockSummary {
+                total: 2,
+                locked_count: 2,
+                all_locked: true,
+            }
+        );
+        assert!(chart.apply_key("delete", false));
+        assert_eq!(chart.drawing_count(), 1);
+        assert_eq!(chart.drawings_lock_summary().locked_count, 1);
+
+        assert!(chart.apply_key("escape", false));
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+        assert!(!chart.engine.drawing_create_active());
+        chart.clear_drawings();
+        assert_eq!(
+            chart.drawings_lock_summary(),
+            DrawingsLockSummary::default()
+        );
+        assert!(!chart.apply_key("backspace", false));
+    }
+
+    #[test]
+    fn cursor_mode_still_falls_through_to_chart_pan_on_a_drawing_miss() {
+        let mut chart = interactive_chart();
+        assert!(!chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default()));
+
+        chart.begin_drag(300.0, 200.0, 1);
+
+        assert_eq!(chart.drag, Some(ChartDrag::Pane));
+    }
+
+    #[test]
     fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
         let mut chart = interactive_chart();
         let offset = chart.engine.scroll_position();
@@ -882,7 +1484,7 @@ mod tests {
         chart.begin_drag(300.0, 200.0, 1);
         assert_eq!(chart.drag, Some(ChartDrag::Pane));
 
-        chart.move_pointer(340.0, 200.0, false);
+        chart.move_pointer(340.0, 200.0, false, DrawingModifiers::default());
 
         assert!(chart.drag.is_none());
         assert_eq!(chart.cursor_style, CursorStyle::Crosshair);

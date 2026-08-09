@@ -1,6 +1,7 @@
 /target/
 /origin_charts/
 /.cache/
+/.reference/
 /provider_kit/
 /local-data/
 __pycache__/

@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 36
+**Revision:** 37
 **Last updated:** 2026-08-08
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -492,14 +492,34 @@ deterministic headless gates.
 - [x] Scope keyboard bar navigation, zoom, fit/reset, return-to-latest, and gesture cancellation to the focused chart surface.
 - [x] Render exact crosshair, pan, time-scale, and price-scale cursors for native chart gestures.
 - [x] Bound hidden-window work and retained state.
+- [x] Restore the legacy chart-chrome structure with a token-native symbol palette, indicator palette, and functional drawing rail.
 
-The native header now uses GPUI Component dropdown menus for exact contract and
-series selection. The instrument menu includes a compact symbol query input,
+The native header uses GPUI Component primitives for exact contract and series
+selection. The instrument selector now opens a centered command-palette
+surface with a compact symbol query input,
 remains available after an empty result, and renders only the bounded,
 generation-fenced catalog result set. The current contract and series are
 checked, so selection no longer relies on opaque click-to-cycle behavior. Enter
 submits the query, and the Search action is visibly loading/disabled while the
 single bounded provider search is in flight.
+
+The chart chrome now preserves the legacy 44 px left-rail anatomy using only
+the Rust design system's semantic colors and radius tokens. Eight drawing tools
+drive Origin's real drawing APIs; cursor selection and movement, constrained
+creation modifiers, freehand brush capture, selected/all lock state, delete,
+clear, Escape cancellation, and collapse/expand are native and covered by
+regressions. Five owner-supplied legacy vectors are embedded as theme-neutral
+`currentColor` assets beside three organized future icons; existing MIT
+Hugeicons supply the generic cursor, brush, text, lock, delete, eraser, and
+collapse glyphs. The reference TypeScript clone remains under the ignored
+`.reference/` workspace directory and is not a runtime dependency.
+
+The symbol trigger uses the Rust `Full` (999) radius and muted-surface token.
+The native indicator command palette supports search and installs the eight
+indicators that are truthful for the current OHLC bridge: SMA, EMA, WMA,
+Bollinger Bands, RSI, MACD, Stochastic, and ATR with the legacy defaults.
+Volume and VWAP remain absent until real volume-column plumbing exists. No
+legacy CSS, stylesheet, radius value, or color literal was copied.
 
 The DOM and feed-health rail now uses the GPUI Components resizable-panel
 primitive rather than a fixed-width container. The chart and rail remain flush,

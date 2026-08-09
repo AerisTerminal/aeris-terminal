@@ -21,4 +21,6 @@ pub use host_benchmark::{
     OriginGpuiBenchmarkError, OriginGpuiHostSample, run_origin_gpui_host_sample,
 };
 pub use recovery_conformance::{ChartRecoveryConformance, run_chart_bridge_recovery_conformance};
-pub use view::OriginChartView;
+pub use view::{
+    ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, OriginChartView,
+};
