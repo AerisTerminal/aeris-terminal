@@ -11,7 +11,7 @@ mod rithmic_shell;
 mod rithmic_transition_capture;
 mod windowed_benchmark;
 
-use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
+use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
 };
@@ -47,7 +47,6 @@ use gpui_component::{
 use gpui_hugeicons::{HugeiconsAssets, IconName as HugeIcon};
 use gpui_platform::application;
 use std::{
-    path::PathBuf,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -3860,92 +3859,6 @@ fn gpui_color(color: ThemeColor) -> Hsla {
     resolved
 }
 
-fn run_coinbase_live_smoke(
-    product_id: &str,
-    history_root: std::path::PathBuf,
-) -> Result<(), String> {
-    let (startup, mut worker) = MarketDataWorker::start_coinbase(
-        product_id.to_string(),
-        history_root,
-        std::thread::current().id(),
-        false,
-        true,
-    )?;
-    if !matches!(startup, MarketWorkerStartup::Loading(_)) {
-        return Err("Coinbase shipping worker bypassed the loading state".to_string());
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-    let mut local_cache_observed = false;
-    let mut last_state = None;
-    let mut last_state_message = None;
-    let mut last_snapshot_provenance = None;
-    loop {
-        let (messages, disconnected) = worker.drain_messages();
-        for message in messages {
-            match message {
-                MarketWorkerMessage::Update(publication) => match publication.update {
-                    ReplayStreamUpdate::Snapshot(snapshot)
-                        if snapshot.provenance() == ReplayProvenance::LiveProvider =>
-                    {
-                        drop(worker);
-                        println!(
-                            "coinbase_shipping_live_smoke=passed product={product_id} loading=true local_cache_observed={local_cache_observed} covering_snapshot=true clean_shutdown=true"
-                        );
-                        return Ok(());
-                    }
-                    ReplayStreamUpdate::Snapshot(snapshot)
-                        if snapshot.provenance() == ReplayProvenance::LocalCache =>
-                    {
-                        local_cache_observed = true;
-                        last_snapshot_provenance = Some(snapshot.provenance());
-                    }
-                    ReplayStreamUpdate::Snapshot(snapshot) => {
-                        last_snapshot_provenance = Some(snapshot.provenance());
-                    }
-                    ReplayStreamUpdate::Delta(_) => {}
-                },
-                MarketWorkerMessage::State {
-                    state: ChartState::Error,
-                    message,
-                } => {
-                    return Err(format!(
-                        "{message} (previous_state_message={last_state_message:?})"
-                    ));
-                }
-                MarketWorkerMessage::State { state, message } => {
-                    last_state = Some(state);
-                    last_state_message = Some(message);
-                }
-                _ => {}
-            }
-        }
-        if disconnected {
-            return Err("Coinbase shipping worker disconnected before its snapshot".to_string());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "Coinbase shipping worker timed out before its snapshot (local_cache_observed={local_cache_observed}, last_snapshot_provenance={last_snapshot_provenance:?}, last_state={last_state:?}, last_state_message={last_state_message:?})"
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn run_coinbase_live_smoke_command(
-    mut arguments: impl Iterator<Item = std::ffi::OsString>,
-) -> Result<(), String> {
-    let usage = "usage: axiusflow_desktop --coinbase-live-smoke <BTC-USD|ETH-USD> <history-root>";
-    let product = arguments.next().ok_or_else(|| usage.to_string())?;
-    let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
-    if arguments.next().is_some() {
-        return Err(usage.to_string());
-    }
-    run_coinbase_live_smoke(
-        &product.to_string_lossy(),
-        std::path::PathBuf::from(history_root),
-    )
-}
-
 #[derive(Debug, Eq, PartialEq)]
 struct RithmicTestArguments {
     history_root: std::path::PathBuf,
@@ -4125,40 +4038,6 @@ fn terminal_root(
     cx.new(|cx| Root::new(terminal, window, cx))
 }
 
-fn coinbase_cli_worker(
-    mut arguments: impl Iterator<Item = std::ffi::OsString>,
-) -> (MarketWorkerStartup, MarketDataWorker) {
-    let usage = "usage: axiusflow_desktop --coinbase-live <PRODUCT-ID> <history-root> [--detailed-diagnostics]";
-    let product = arguments.next().unwrap_or_else(|| {
-        eprintln!("{usage}");
-        std::process::exit(2);
-    });
-    let history_root = arguments.next().unwrap_or_else(|| {
-        eprintln!("{usage}");
-        std::process::exit(2);
-    });
-    let detailed_diagnostics = match arguments.next() {
-        Some(flag) if flag == "--detailed-diagnostics" => true,
-        Some(_) => {
-            eprintln!("{usage}");
-            std::process::exit(2);
-        }
-        None => false,
-    };
-    if arguments.next().is_some() {
-        eprintln!("{usage}");
-        std::process::exit(2);
-    }
-    MarketDataWorker::start_coinbase(
-        product.to_string_lossy().into_owned(),
-        PathBuf::from(history_root),
-        std::thread::current().id(),
-        detailed_diagnostics,
-        true,
-    )
-    .expect("the bounded direct Coinbase worker starts")
-}
-
 fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)> {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
@@ -4178,11 +4057,6 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
             run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
             return None;
         }
-        if argument == "--coinbase-live-smoke" {
-            run_coinbase_live_smoke_command(arguments)
-                .expect("the Coinbase shipping live smoke passes");
-            return None;
-        }
         if argument == "--rithmic-test" {
             let parsed = parse_rithmic_test_arguments(arguments).unwrap_or_else(|usage| {
                 eprintln!("{usage}");
@@ -4198,8 +4072,6 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
                 eprintln!("Rithmic Test shell could not start: {error}");
                 std::process::exit(1);
             })
-        } else if argument == "--coinbase-live" {
-            coinbase_cli_worker(arguments)
         } else if argument == "--fixture" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --fixture");

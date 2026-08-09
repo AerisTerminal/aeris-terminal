@@ -18,7 +18,7 @@ use std::{
 
 use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate};
 use axiusflow_coinbase_coordinator::market_worker::{
-    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerPublication,
+    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
 };
 use axiusflow_coinbase_market_adapter::{
     CoinbaseHttpsHistoryTransport, CoinbaseProductCatalog, CoinbaseSpotProduct,
@@ -57,9 +57,107 @@ enum ResourceTransition {
 }
 
 fn main() {
+    let mut arguments = std::env::args_os().skip(1);
+    if let Some(argument) = arguments.next() {
+        if argument != "--coinbase-live-smoke" {
+            eprintln!(
+                "unsupported engine argument: {}",
+                argument.to_string_lossy()
+            );
+            process::exit(2);
+        }
+        if let Err(error) = run_coinbase_live_smoke_command(arguments) {
+            eprintln!("Axiusflow engine live smoke failed: {error}");
+            process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("Axiusflow engine failed: {error}");
         process::exit(1);
+    }
+}
+
+fn run_coinbase_live_smoke_command(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), String> {
+    let usage = "usage: axiusflow_engine --coinbase-live-smoke <BTC-USD|ETH-USD> <history-root>";
+    let product = arguments.next().ok_or_else(|| usage.to_string())?;
+    let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
+    if arguments.next().is_some() {
+        return Err(usage.to_string());
+    }
+    run_coinbase_live_smoke(
+        &product.to_string_lossy(),
+        std::path::PathBuf::from(history_root),
+    )
+}
+
+fn run_coinbase_live_smoke(product_id: &str, history_root: PathBuf) -> Result<(), String> {
+    let (startup, mut worker) = MarketDataWorker::start_coinbase(
+        product_id.to_string(),
+        history_root,
+        thread::current().id(),
+        false,
+        true,
+    )?;
+    if !matches!(startup, MarketWorkerStartup::Loading(_)) {
+        return Err("Coinbase resident worker bypassed the loading state".to_string());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    let mut local_cache_observed = false;
+    let mut last_state = None;
+    let mut last_state_message = None;
+    let mut last_snapshot_provenance = None;
+    loop {
+        let (messages, disconnected) = worker.drain_messages();
+        for message in messages {
+            match message {
+                MarketWorkerMessage::Update(publication) => match publication.update {
+                    ReplayStreamUpdate::Snapshot(snapshot)
+                        if snapshot.provenance() == ReplayProvenance::LiveProvider =>
+                    {
+                        drop(worker);
+                        println!(
+                            "coinbase_shipping_live_smoke=passed product={product_id} loading=true local_cache_observed={local_cache_observed} covering_snapshot=true clean_shutdown=true"
+                        );
+                        return Ok(());
+                    }
+                    ReplayStreamUpdate::Snapshot(snapshot)
+                        if snapshot.provenance() == ReplayProvenance::LocalCache =>
+                    {
+                        local_cache_observed = true;
+                        last_snapshot_provenance = Some(snapshot.provenance());
+                    }
+                    ReplayStreamUpdate::Snapshot(snapshot) => {
+                        last_snapshot_provenance = Some(snapshot.provenance());
+                    }
+                    ReplayStreamUpdate::Delta(_) => {}
+                },
+                MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message,
+                } => {
+                    return Err(format!(
+                        "{message} (previous_state_message={last_state_message:?})"
+                    ));
+                }
+                MarketWorkerMessage::State { state, message } => {
+                    last_state = Some(state);
+                    last_state_message = Some(message);
+                }
+                _ => {}
+            }
+        }
+        if disconnected {
+            return Err("Coinbase resident worker disconnected before its snapshot".to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Coinbase resident worker timed out before its snapshot (local_cache_observed={local_cache_observed}, last_snapshot_provenance={last_snapshot_provenance:?}, last_state={last_state:?}, last_state_message={last_state_message:?})"
+            ));
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -694,7 +792,7 @@ fn default_coinbase_history_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResourceTransition, resource_transition};
+    use super::{ResourceTransition, resource_transition, run_coinbase_live_smoke_command};
     use axiusflow_local_engine_protocol::ResourceMode;
 
     #[test]
@@ -726,6 +824,19 @@ mod tests {
         assert_eq!(
             resource_transition(ResourceMode::Warm, false),
             ResourceTransition::Resume
+        );
+    }
+
+    #[test]
+    fn resident_live_smoke_command_rejects_incomplete_arguments_before_startup() {
+        assert!(run_coinbase_live_smoke_command(std::iter::empty()).is_err());
+        assert!(
+            run_coinbase_live_smoke_command(
+                ["BTC-USD", "history", "extra"]
+                    .map(std::ffi::OsString::from)
+                    .into_iter()
+            )
+            .is_err()
         );
     }
 }
