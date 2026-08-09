@@ -14,7 +14,7 @@ mod windowed_benchmark;
 
 use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
 use axiusflow_chart_integration::{
-    ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
+    ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, ChartThemeMode, OriginChartView,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_observability::{FeedConnectionState, FeedDiagnosticsSnapshot};
@@ -25,13 +25,12 @@ use axiusflow_rithmic_protocol_adapter::{
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Entity, Hsla, MouseButton, Render, Role, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, ClickEvent, Context, Entity, FontWeight, Hsla, MouseButton, Render,
+    Role, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
-    dialog::Dialog,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     resizable::{h_resizable, resizable_panel},
@@ -935,6 +934,16 @@ impl TerminalApp {
         self.dom.update(cx, |dom, dom_cx| {
             dom.set_theme(theme, dom_cx);
         });
+        if let Some(chart) = &self.chart {
+            let chart_mode = match theme.mode {
+                axiusflow_design_system::ThemeMode::Light => ChartThemeMode::Light,
+                axiusflow_design_system::ThemeMode::Dark => ChartThemeMode::Dark,
+            };
+            chart.update(cx, |chart, chart_cx| {
+                chart.set_theme_mode(chart_mode);
+                chart_cx.notify();
+            });
+        }
         self.theme = theme;
         cx.notify();
     }
@@ -1243,6 +1252,7 @@ impl TerminalApp {
             &bootstrap.generation,
         );
         let snapshot = bootstrap.snapshot;
+        let visible_bar_count = snapshot.bars().len();
         self.chart = Some(cx.new(move |_| OriginChartView::with_replay(&snapshot)));
         self.worker_label = bootstrap.worker_label;
         self.subscription_id = bootstrap.subscription_id;
@@ -1251,7 +1261,7 @@ impl TerminalApp {
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
         );
-        self.series_message = "Visible history is current".to_string();
+        self.series_message = format!("{visible_bar_count} visible bars are current");
         self.set_chart_state(
             ChartState::Ready,
             "Rithmic visible history is current".to_string(),
@@ -2081,26 +2091,27 @@ fn terminal_header(
         .relative()
         .h(px(state.theme.dimensions.app_header_height.logical_pixels))
         .flex_none()
-        .child(
-            TitleBar::new()
-                .h(px(state.theme.dimensions.app_header_height.logical_pixels))
-                .child(
-                    div()
-                        .h_full()
-                        .flex()
-                        .flex_1()
-                        .gap_4()
-                        .items_center()
-                        .child(div().text_sm().child("Axiusflow"))
-                        .child(connection),
-                ),
-        )
+        .child(TitleBar::new().h(px(state.theme.dimensions.app_header_height.logical_pixels)))
         .child(
             div()
                 .absolute()
                 .top_0()
                 .bottom_0()
+                .left_0()
                 .right(px(102.0))
+                .occlude()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .child("Axiusflow"),
+                )
+                .child(connection)
                 .child(header_controls(cx, app, state)),
         )
 }
@@ -2139,7 +2150,6 @@ fn header_controls(
         app.clone(),
     );
     div()
-        .occlude()
         .h_full()
         .flex()
         .items_center()
@@ -2156,7 +2166,6 @@ fn header_controls(
                 search_activity: state.search_activity,
                 selection_pending: state.pending.symbol_selection,
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
-                theme: state.theme,
             },
             &state.theme,
         ))
@@ -2209,7 +2218,7 @@ fn header_controls(
 }
 
 fn instrument_selector(
-    cx: &mut Context<TerminalApp>,
+    _cx: &mut Context<TerminalApp>,
     app: Entity<TerminalApp>,
     state: InstrumentSelectorState,
     theme: &AxiusflowTheme,
@@ -2220,6 +2229,8 @@ fn instrument_selector(
         .tooltip("Search or select a Rithmic contract")
         .dropdown_caret(true)
         .ghost()
+        .border_1()
+        .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.muted))
         .text_color(gpui_color(theme.colors.foreground))
         .hover(|style| {
@@ -2238,19 +2249,29 @@ fn instrument_selector(
     let trigger = trigger.when(!state.enabled, |trigger| {
         trigger.text_color(gpui_color(theme.colors.muted_foreground))
     });
-    let theme = state.theme;
-    Dialog::new(cx)
-        .trigger(trigger)
-        .overlay(false)
-        .w(px(896.0))
-        .max_w(px(896.0))
-        .close_button(false)
-        .p_0()
-        .content(move |content, _, _| instrument_dialog_content(content, &app, &state, &theme))
+    let dialog_state = Rc::new(state);
+    let dialog_theme = *theme;
+    button_activation(trigger, dialog_state.enabled, move |window, cx| {
+        let app = app.clone();
+        let state = dialog_state.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let content_app = app.clone();
+            let content_state = state.clone();
+            dialog
+                .overlay(false)
+                .w(px(896.0))
+                .max_w(px(896.0))
+                .close_button(false)
+                .p_0()
+                .content(move |content, _, _| {
+                    instrument_dialog_content(content, &content_app, &content_state, &dialog_theme)
+                })
+        });
+    })
 }
 
 fn indicator_selector(
-    cx: &mut Context<TerminalApp>,
+    _cx: &mut Context<TerminalApp>,
     app: Entity<TerminalApp>,
     input: Entity<InputState>,
     message: Option<String>,
@@ -2269,23 +2290,40 @@ fn indicator_selector(
         .disabled(!enabled)
         .when(enabled, Button::cursor_pointer)
         .when(!enabled, Button::cursor_not_allowed);
-    let theme = *theme;
-    let close_input = input.clone();
-    Dialog::new(cx)
-        .trigger(trigger)
-        .overlay(false)
-        .w(px(896.0))
-        .max_w(px(896.0))
-        .close_button(false)
-        .on_close(move |_, window, cx| {
-            close_input.update(cx, |input, input_cx| {
-                input.set_value("", window, input_cx);
-            });
-        })
-        .p_0()
-        .content(move |content, _, cx| {
-            indicator_dialog_content(content, &app, &input, message.as_deref(), &theme, cx)
-        })
+    let dialog_theme = *theme;
+    button_activation(trigger, enabled, move |window, cx| {
+        let app = app.clone();
+        let input = input.clone();
+        let close_input = input.clone();
+        let message = message.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let on_close_input = close_input.clone();
+            let content_app = app.clone();
+            let content_input = input.clone();
+            let content_message = message.clone();
+            dialog
+                .overlay(false)
+                .w(px(896.0))
+                .max_w(px(896.0))
+                .close_button(false)
+                .on_close(move |_, window, cx| {
+                    on_close_input.update(cx, |input, input_cx| {
+                        input.set_value("", window, input_cx);
+                    });
+                })
+                .p_0()
+                .content(move |content, _, cx| {
+                    indicator_dialog_content(
+                        content,
+                        &content_app,
+                        &content_input,
+                        content_message.as_deref(),
+                        &dialog_theme,
+                        cx,
+                    )
+                })
+        });
+    })
 }
 
 fn indicator_dialog_content(
@@ -2456,7 +2494,6 @@ struct InstrumentSelectorState {
     search_activity: SearchActivity,
     selection_pending: bool,
     enabled: bool,
-    theme: AxiusflowTheme,
 }
 
 fn instrument_dialog_content(
@@ -2676,14 +2713,14 @@ fn connection_badge(
     color: ThemeColor,
     colors: &axiusflow_design_system::ThemeColors,
 ) -> impl IntoElement + use<> {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_xs()
+    Button::new("connection_status")
+        .ghost()
+        .compact()
+        .w(px(20.0))
+        .h(px(20.0))
+        .tooltip(label)
+        .child(div().size(px(7.0)).rounded_full().bg(gpui_color(color)))
         .text_color(gpui_color(colors.muted_foreground))
-        .child(div().size(px(6.0)).rounded_full().bg(gpui_color(color)))
-        .child(label)
 }
 
 #[derive(Clone, Copy)]

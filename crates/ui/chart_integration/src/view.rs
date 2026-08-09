@@ -16,7 +16,7 @@ use gpui::{
 };
 use num_traits::ToPrimitive;
 use origin_engine::{
-    ChartEngine, ChartFrame, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
+    ChartEngine, ChartFrame, ChartTheme, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
 };
 use origin_render::draw_list::Prim;
 use origin_render_gpui::backend::measure_text;
@@ -27,6 +27,13 @@ use std::fmt;
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
+
+/// Platform color mode routed to Origin's own canonical theme implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartThemeMode {
+    Light,
+    Dark,
+}
 
 /// A native indicator supported by the chart's current OHLC data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -284,6 +291,16 @@ impl OriginChartView {
         }
         self.invalidate_series_frame();
         self.fitted = true;
+    }
+
+    /// Switches chart cosmetics through Origin without passing platform color values.
+    pub fn set_theme_mode(&mut self, mode: ChartThemeMode) {
+        let theme = match mode {
+            ChartThemeMode::Light => ChartTheme::Light,
+            ChartThemeMode::Dark => ChartTheme::Dark,
+        };
+        self.engine.set_theme(theme);
+        self.invalidate_series_frame();
     }
 
     /// Returns the time scale to the newest bar without changing its zoom.
@@ -1156,6 +1173,44 @@ mod tests {
         assert!(series.wick_down_color.is_none());
         assert!(series.border_up_color.is_none());
         assert!(series.border_down_color.is_none());
+    }
+
+    #[test]
+    fn theme_mode_delegates_to_origin_and_preserves_chart_data() {
+        let mut chart = interactive_chart();
+        let bars = chart
+            .engine
+            .data
+            .series_data(0)
+            .map_or(0, |(times, _)| times.len());
+
+        chart.set_theme_mode(ChartThemeMode::Light);
+        assert_eq!(
+            chart.engine.options.get().layout.background.color,
+            "#ffffff"
+        );
+        assert_eq!(
+            chart
+                .engine
+                .data
+                .series_data(0)
+                .map_or(0, |(times, _)| times.len()),
+            bars
+        );
+
+        chart.set_theme_mode(ChartThemeMode::Dark);
+        assert_eq!(
+            chart.engine.options.get().layout.background.color,
+            "#0c0c0c"
+        );
+        assert_eq!(
+            chart
+                .engine
+                .data
+                .series_data(0)
+                .map_or(0, |(times, _)| times.len()),
+            bars
+        );
     }
 
     #[test]

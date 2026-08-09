@@ -357,7 +357,21 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
             )?
         }
     };
-    bootstrap_from_bars(request, latest_visible_bars(bars), unix_nanos_now()?)
+    let response_bars = bars.len();
+    let visible_bars = latest_visible_bars(bars);
+    let first_marker = visible_bars
+        .first()
+        .map(|bar| bar.exchange_timestamp_unix_nanos);
+    let last_marker = visible_bars
+        .last()
+        .map(|bar| bar.exchange_timestamp_unix_nanos);
+    eprintln!(
+        "Rithmic history response: series={} response_bars={} visible_bars={} first_marker={first_marker:?} last_marker={last_marker:?}",
+        request.series.label(),
+        response_bars,
+        visible_bars.len(),
+    );
+    bootstrap_from_bars(request, visible_bars, unix_nanos_now()?)
 }
 
 #[derive(Clone, Copy)]
