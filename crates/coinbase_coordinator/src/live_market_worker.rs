@@ -77,7 +77,6 @@ const SUBSCRIPTION_ID: &str = "desktop_coinbase_one_minute_bars";
 const VAULT_SERVICE: &str = "axiusflow-desktop-market-history";
 const CATALOG_KEY_ID: &str = "history-catalog-key-v1";
 const SEGMENT_KEY_ID: &str = "coinbase-public-bars-key-v1";
-const COINBASE_DISK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 struct LiveLoopState {
     history: Option<InflightHistory>,
@@ -327,7 +326,6 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         selection_sequence,
     } = input;
     ensure_history_parent(&history_root)?;
-    enforce_coinbase_disk_cache_quota(&history_root, COINBASE_DISK_CACHE_BYTES)?;
     let (history_command_tx, history_command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let history_inbox_tx = inbox_tx.clone();
     let history_handle = thread::Builder::new()
@@ -849,55 +847,6 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
             worker_label,
             message_tx,
         )?;
-    }
-    Ok(())
-}
-
-fn enforce_coinbase_disk_cache_quota(
-    history_root: &std::path::Path,
-    quota: u64,
-) -> Result<(), String> {
-    let segments = history_root.join("segments");
-    if !segments.exists() {
-        return Ok(());
-    }
-    let root = history_root
-        .canonicalize()
-        .map_err(|error| format!("Coinbase cache root is unavailable: {error}"))?;
-    let segments = segments
-        .canonicalize()
-        .map_err(|error| format!("Coinbase cache segment root is unavailable: {error}"))?;
-    if !segments.starts_with(&root) {
-        return Err("Coinbase cache segment root escaped its configured root".to_string());
-    }
-    let mut files = std::fs::read_dir(&segments)
-        .map_err(|error| format!("Coinbase cache inventory failed: {error}"))?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            metadata.is_file().then(|| {
-                let modified = metadata
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                (entry.path(), metadata.len(), modified)
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut retained_bytes = files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>();
-    files.sort_by_key(|(_, _, modified)| *modified);
-    for (path, bytes, _) in files {
-        if retained_bytes <= quota {
-            break;
-        }
-        let resolved = path
-            .canonicalize()
-            .map_err(|error| format!("Coinbase cache entry is unavailable: {error}"))?;
-        if !resolved.starts_with(&segments) {
-            return Err("Coinbase cache entry escaped its segment root".to_string());
-        }
-        std::fs::remove_file(&resolved)
-            .map_err(|error| format!("Coinbase cache eviction failed: {error}"))?;
-        retained_bytes = retained_bytes.saturating_sub(bytes);
     }
     Ok(())
 }

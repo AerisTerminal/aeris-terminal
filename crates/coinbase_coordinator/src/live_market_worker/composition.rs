@@ -172,7 +172,7 @@ pub(super) fn open_worker(
                 .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
             let catalog_key = load_catalog_key(&runtime_vault)
                 .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
-            let config = worker_config(detailed_diagnostics)
+            let config = worker_config(detailed_diagnostics, include_level2)
                 .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
             let (driver, events) = CoinbaseProviderDriver::new_with_wake(
                 provider_config.clone(),
@@ -230,7 +230,7 @@ pub(super) fn open_test_worker<V: CredentialVault>(
         history_root,
         catalog_key,
         ui_thread,
-        worker_config(false)?,
+        worker_config(false, false)?,
     )
     .map_err(|error| error.to_string())?;
     let aggregator = CoinbaseBarAggregator::new(
@@ -345,7 +345,16 @@ pub(super) fn bar_definition_for_interval(interval: ChartInterval) -> BarDefinit
     }
 }
 
-fn worker_config(detailed_diagnostics: bool) -> Result<DesktopMarketWorkerConfig, String> {
+fn worker_config(
+    detailed_diagnostics: bool,
+    interactive: bool,
+) -> Result<DesktopMarketWorkerConfig, String> {
+    let maximum_cache_entries = if interactive { 8 } else { 2 };
+    let maximum_decoded_bytes = if interactive {
+        8 * 1024 * 1024
+    } else {
+        2 * 1024 * 1024
+    };
     Ok(DesktopMarketWorkerConfig {
         provider: DesktopProviderConfig::new(nonzero(32), nonzero(1))
             .with_diagnostics(
@@ -359,8 +368,8 @@ fn worker_config(detailed_diagnostics: bool) -> Result<DesktopMarketWorkerConfig
             )
             .map_err(|error| error.to_string())?,
         history: HistoryWorkerConfig {
-            maximum_cache_entries: nonzero(2),
-            maximum_decoded_bytes: nonzero(2 * 1024 * 1024),
+            maximum_cache_entries: nonzero(maximum_cache_entries),
+            maximum_decoded_bytes: nonzero(maximum_decoded_bytes),
             maximum_charts: nonzero(1),
             maximum_segment_read_bytes: nonzero(1024 * 1024),
             maximum_buffered_live: nonzero(512),
@@ -427,7 +436,7 @@ pub(super) const fn nonzero(value: usize) -> NonZeroUsize {
 mod tests {
     use super::{
         DesktopMarketWorkerError, SUBSCRIPTION_ID, instrument, loading_startup, nonzero,
-        open_with_store_lock_retry, product_profile,
+        open_with_store_lock_retry, product_profile, worker_config,
     };
     use crate::market_worker::{CoinbaseWorkerStartup, MarketWorkerStartup};
     use axiusflow_coinbase_market_adapter::{
@@ -472,6 +481,22 @@ mod tests {
             immediate,
             Err(DesktopMarketWorkerError::HistoryConfiguration)
         ));
+    }
+
+    #[test]
+    fn resident_resource_mode_scales_the_decoded_cache_without_changing_storage_rights() {
+        let warm = worker_config(false, false).expect("warm worker config validates");
+        let interactive = worker_config(false, true).expect("interactive worker config validates");
+        assert!(warm.history.maximum_cache_entries < interactive.history.maximum_cache_entries);
+        assert!(warm.history.maximum_decoded_bytes < interactive.history.maximum_decoded_bytes);
+        assert_eq!(
+            warm.history.maximum_segment_read_bytes,
+            interactive.history.maximum_segment_read_bytes
+        );
+        assert_eq!(
+            warm.maximum_catalog_entries,
+            interactive.maximum_catalog_entries
+        );
     }
 
     #[test]
