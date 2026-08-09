@@ -31,7 +31,7 @@ use axiusflow_engine::{
 use axiusflow_local_engine_protocol::{
     CatalogEntry, ChartDelta, ChartProvenance, ChartSnapshot, DomBookState, DomLevel,
     DomRecoveryReason, DomRow as WireDomRow, DomSnapshot, EngineFaultCode, Fault,
-    ProviderConnectionState, ProviderState, ViewKind, envelope, split_catalog,
+    ProviderConnectionState, ProviderState, ResourceMode, ViewKind, envelope, split_catalog,
 };
 use axiusflow_market_data::{
     ChartAggregation, ChartInterval, DomColumnLevel, OrderBookRecoveryReason, OrderBookState,
@@ -41,6 +41,13 @@ use axiusflow_market_protocol_adapter::{
     try_encode_replay_snapshot_chunk_envelopes,
 };
 use interprocess::local_socket::traits::Listener as _;
+
+struct ActiveSelection {
+    product: CoinbaseSpotProduct,
+    interval: ChartInterval,
+    market: String,
+    interval_seconds: u32,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -60,7 +67,7 @@ fn run() -> Result<(), String> {
     let state_root = default_engine_state_root()?;
     let state = EngineState::open(&state_root)?;
     let publications = EnginePublicationHub::default();
-    start_market_runtime(
+    let set_resource_mode = start_market_runtime(
         state.clone(),
         publications.clone(),
         engine_epoch,
@@ -69,19 +76,22 @@ fn run() -> Result<(), String> {
     let active_clients = Arc::new(AtomicUsize::new(0));
     loop {
         let stream = listener.accept().map_err(|error| error.to_string())?;
-        if active_clients
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        let Ok(active_before) =
+            active_clients.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAXIMUM_CLIENTS).then_some(active + 1)
             })
-            .is_err()
-        {
+        else {
             drop(stream);
             continue;
+        };
+        if active_before == 0 {
+            set_resource_mode(ResourceMode::Interactive);
         }
         let token = Arc::clone(&token);
         let state = state.clone();
         let publications = publications.clone();
         let active_clients = Arc::clone(&active_clients);
+        let set_resource_mode = Arc::clone(&set_resource_mode);
         thread::Builder::new()
             .name("axiusflow-engine-client".to_string())
             .spawn(move || {
@@ -94,7 +104,9 @@ fn run() -> Result<(), String> {
                 ) {
                     eprintln!("Axiusflow engine rejected a local client: {error}");
                 }
-                active_clients.fetch_sub(1, Ordering::AcqRel);
+                if active_clients.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    set_resource_mode(ResourceMode::Warm);
+                }
             })
             .map_err(|error| error.to_string())?;
     }
@@ -105,9 +117,10 @@ fn start_market_runtime(
     publications: EnginePublicationHub,
     engine_epoch: u64,
     state_root: PathBuf,
-) -> Result<(), String> {
+) -> Result<Arc<dyn Fn(ResourceMode) + Send + Sync>, String> {
     let (selection_tx, selection_rx) = mpsc::channel();
-    thread::Builder::new()
+    let (resource_mode_tx, resource_mode_rx) = mpsc::sync_channel(4);
+    let handle = thread::Builder::new()
         .name("axiusflow-engine-market".to_string())
         .spawn(move || {
             let market_thread = thread::current();
@@ -122,10 +135,16 @@ fn start_market_runtime(
                 engine_epoch,
                 &state_root,
                 &selection_rx,
+                &resource_mode_rx,
             );
         })
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let market_thread = handle.thread().clone();
+    Ok(Arc::new(move |mode| {
+        if resource_mode_tx.try_send(mode).is_ok() {
+            market_thread.unpark();
+        }
+    }))
 }
 
 fn run_market_runtime(
@@ -134,6 +153,7 @@ fn run_market_runtime(
     engine_epoch: u64,
     state_root: &std::path::Path,
     selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
+    resource_modes: &Receiver<ResourceMode>,
 ) {
     let workspace = state.workspace();
     let history_root = default_coinbase_history_root();
@@ -160,17 +180,20 @@ fn run_market_runtime(
         return;
     };
     publish_catalog(publications, &products);
-    let worker = MarketDataWorker::start_coinbase_product(
+    let mut active = ActiveSelection {
         product,
         interval,
-        history_root,
-        thread::current().id(),
-        false,
-        false,
-        true,
-    );
-    let (_startup, mut worker) = match worker {
-        Ok(worker) => worker,
+        market: workspace.market,
+        interval_seconds: workspace.interval_seconds,
+    };
+    let mut include_level2 = false;
+    let mut worker = match start_resident_worker(
+        &active.product,
+        active.interval,
+        &history_root,
+        include_level2,
+    ) {
+        Ok(worker) => Some(worker),
         Err(error) => {
             publish_fault(
                 publications,
@@ -179,8 +202,6 @@ fn run_market_runtime(
             return;
         }
     };
-    let market_thread = thread::current();
-    worker.set_message_wake(Arc::new(move || market_thread.unpark()));
     let catalog_refresh = spawn_catalog_refresh(refresh_catalog);
     let Ok(convention) = DecimalConvention::try_new("price_mantissa", "quantity_mantissa") else {
         return;
@@ -190,10 +211,26 @@ fn run_market_runtime(
         .into_iter()
         .map(|product| (product.product_id.clone(), product))
         .collect::<BTreeMap<_, _>>();
-    let mut active_market = workspace.market;
-    let mut active_interval_seconds = workspace.interval_seconds;
     loop {
-        let (messages, disconnected) = worker.drain_messages();
+        if let Err(error) = apply_resource_mode(
+            resource_modes,
+            &mut worker,
+            &active.product,
+            active.interval,
+            &history_root,
+            &mut include_level2,
+            &mut chart_context,
+        ) {
+            publish_fault(
+                publications,
+                &format!("Market resource transition failed: {error}"),
+            );
+            return;
+        }
+        let Some(active_worker) = worker.as_mut() else {
+            return;
+        };
+        let (messages, disconnected) = active_worker.drain_messages();
         for message in messages {
             publish_market_message(
                 publications,
@@ -204,23 +241,7 @@ fn run_market_runtime(
                 message,
             );
         }
-        for selection in selections.try_iter() {
-            if selection.market == active_market
-                && selection.interval_seconds == active_interval_seconds
-            {
-                continue;
-            }
-            let Some(product) = products.get(&selection.market).cloned() else {
-                continue;
-            };
-            let Some(interval) = interval_from_seconds(selection.interval_seconds) else {
-                continue;
-            };
-            if worker.try_select_coinbase(product, interval).is_ok() {
-                active_market = selection.market;
-                active_interval_seconds = selection.interval_seconds;
-            }
-        }
+        apply_selections(selections, active_worker, &products, &mut active);
         apply_catalog_refresh(
             catalog_refresh.as_ref(),
             state_root,
@@ -232,6 +253,84 @@ fn run_market_runtime(
         }
         thread::park();
     }
+}
+
+fn apply_selections(
+    selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
+    worker: &MarketDataWorker,
+    products: &BTreeMap<String, CoinbaseSpotProduct>,
+    active: &mut ActiveSelection,
+) {
+    for selection in selections.try_iter() {
+        if selection.market == active.market
+            && selection.interval_seconds == active.interval_seconds
+        {
+            continue;
+        }
+        let Some(product) = products.get(&selection.market).cloned() else {
+            continue;
+        };
+        let Some(interval) = interval_from_seconds(selection.interval_seconds) else {
+            continue;
+        };
+        if worker
+            .try_select_coinbase(product.clone(), interval)
+            .is_ok()
+        {
+            active.product = product;
+            active.interval = interval;
+            active.market = selection.market;
+            active.interval_seconds = selection.interval_seconds;
+        }
+    }
+}
+
+fn apply_resource_mode(
+    resource_modes: &Receiver<ResourceMode>,
+    worker: &mut Option<MarketDataWorker>,
+    active_product: &CoinbaseSpotProduct,
+    active_interval: ChartInterval,
+    history_root: &std::path::Path,
+    include_level2: &mut bool,
+    chart_context: &mut Option<ReplaySnapshot>,
+) -> Result<(), String> {
+    let Some(mode) = resource_modes.try_iter().last() else {
+        return Ok(());
+    };
+    let next_include_level2 = mode == ResourceMode::Interactive;
+    if next_include_level2 == *include_level2 {
+        return Ok(());
+    }
+    drop(worker.take());
+    *worker = Some(start_resident_worker(
+        active_product,
+        active_interval,
+        history_root,
+        next_include_level2,
+    )?);
+    *include_level2 = next_include_level2;
+    *chart_context = None;
+    Ok(())
+}
+
+fn start_resident_worker(
+    product: &CoinbaseSpotProduct,
+    interval: ChartInterval,
+    history_root: &std::path::Path,
+    include_level2: bool,
+) -> Result<MarketDataWorker, String> {
+    let (_startup, worker) = MarketDataWorker::start_coinbase_product(
+        product.clone(),
+        interval,
+        history_root.to_path_buf(),
+        thread::current().id(),
+        false,
+        false,
+        include_level2,
+    )?;
+    let market_thread = thread::current();
+    worker.set_message_wake(Arc::new(move || market_thread.unpark()));
+    Ok(worker)
 }
 
 fn bootstrap_catalog(
