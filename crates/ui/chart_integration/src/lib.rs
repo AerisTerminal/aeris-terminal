@@ -22,6 +22,5 @@ pub use host_benchmark::{
 };
 pub use recovery_conformance::{ChartRecoveryConformance, run_chart_bridge_recovery_conformance};
 pub use view::{
-    ChartDrawingTool, ChartIndicator, ChartIndicatorError, ChartThemeMode, DrawingsLockSummary,
-    OriginChartView,
+    ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, OriginChartView,
 };

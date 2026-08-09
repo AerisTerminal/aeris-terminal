@@ -1,0 +1,90 @@
+/*
+ * Axiusflow canonical CSS theme contract.
+ * Neutral values are derived from Twenty's light/dark theme at c520eb39.
+ * Product, trading, and status colors remain Axiusflow-owned.
+ * Keep this manifest in parity with AxiusflowTheme::color_tokens.
+ */
+
+:root,
+.light {
+  --background: color(display-p3 1 1 1);
+  --foreground: color(display-p3 0.2 0.2 0.2);
+  --surface_secondary: color(display-p3 0.988 0.988 0.988);
+  --surface_tertiary: color(display-p3 0.945 0.945 0.945);
+  --surface_quaternary: color(display-p3 0.922 0.922 0.922);
+  --card: var(--surface_secondary);
+  --card_foreground: var(--foreground);
+  --popover: var(--surface_secondary);
+  --popover_foreground: var(--foreground);
+
+  --primary: #3e63dd;
+  --primary_foreground: oklch(0.97 0.014 254.604);
+  --secondary: var(--surface_tertiary);
+  --secondary_foreground: var(--foreground);
+  --muted: var(--surface_tertiary);
+  --muted_foreground: color(display-p3 0.6 0.6 0.6);
+  --accent: var(--surface_tertiary);
+  --accent_foreground: var(--foreground);
+
+  --text_secondary: color(display-p3 0.4 0.4 0.4);
+  --text_muted: color(display-p3 0.6 0.6 0.6);
+  --text_placeholder: color(display-p3 0.702 0.702 0.702);
+  --text_unavailable: color(display-p3 0.8 0.8 0.8);
+  --icon_color: color(display-p3 0.4 0.4 0.4);
+
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive_foreground: oklch(0.985 0 0);
+  --border: color(display-p3 0.945 0.945 0.945);
+  --input: color(display-p3 0.922 0.922 0.922);
+  --input_surface: color(display-p3 0.988 0.988 0.988);
+  --ring: oklch(0.708 0 0);
+
+  --interactive_neutral_hover_bg: color(display-p3 0 0 0 / 0.039);
+  --interactive_neutral_hover_fg: var(--foreground);
+  --interactive_neutral_active_bg: color(display-p3 0 0 0 / 0.078);
+  --interactive_neutral_active_fg: var(--foreground);
+
+  --chart_1: oklch(0.87 0 0);
+  --chart_2: oklch(0.556 0 0);
+  --chart_3: oklch(0.439 0 0);
+  --chart_4: oklch(0.371 0 0);
+  --chart_5: oklch(0.269 0 0);
+  --profit: oklch(0.683 0.151 160.997);
+  --loss: oklch(0.674 0.215 18.124);
+  --warning: oklch(0.769 0.165 70.08);
+  --info: oklch(0.555 0.245 266.681);
+  --feature: oklch(0.541 0.247 293.009);
+  --chart_candle_up: var(--profit);
+  --chart_candle_down: var(--loss);
+  --chart_volume_up: oklch(from var(--profit) l c h / 34%);
+  --chart_volume_down: oklch(from var(--loss) l c h / 30%);
+  --chart_axis_text: #0a0a0a;
+}
+
+.dark {
+  --background: color(display-p3 0.09 0.09 0.09);
+  --foreground: color(display-p3 0.922 0.922 0.922);
+  --surface_secondary: color(display-p3 0.106 0.106 0.106);
+  --surface_tertiary: color(display-p3 0.114 0.114 0.114);
+  --surface_quaternary: color(display-p3 0.133 0.133 0.133);
+  --muted_foreground: color(display-p3 0.506 0.506 0.506);
+
+  --text_secondary: color(display-p3 0.702 0.702 0.702);
+  --text_muted: color(display-p3 0.506 0.506 0.506);
+  --text_placeholder: color(display-p3 0.4 0.4 0.4);
+  --text_unavailable: color(display-p3 0.298 0.298 0.298);
+  --icon_color: color(display-p3 0.702 0.702 0.702);
+
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: color(display-p3 0.114 0.114 0.114);
+  --input: color(display-p3 0.133 0.133 0.133);
+  --input_surface: color(display-p3 0.106 0.106 0.106);
+  --ring: oklch(0.556 0 0);
+
+  --interactive_neutral_hover_bg: color(display-p3 1 1 1 / 0.059);
+  --interactive_neutral_active_bg: color(display-p3 1 1 1 / 0.102);
+
+  --chart_volume_up: oklch(from var(--profit) l c h / 32%);
+  --chart_volume_down: oklch(from var(--loss) l c h / 28%);
+  --chart_axis_text: var(--foreground);
+}

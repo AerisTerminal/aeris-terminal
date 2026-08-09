@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../../application" }
+axiusflow_design_system = { path = "../design_system" }
 axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_protocols = { path = "../../protocols" }
 axiusflow_terminal_ui = { path = "../terminal_ui" }
@@ -16,6 +17,7 @@ num-traits = "=0.2.19"
 origin_engine.workspace = true
 origin_render.workspace = true
 origin_render_gpui.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

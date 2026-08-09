@@ -10,6 +10,7 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError, UseCase,
 };
+use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
@@ -17,7 +18,7 @@ use gpui::{
 };
 use num_traits::ToPrimitive;
 use origin_engine::{
-    ChartEngine, ChartFrame, ChartTheme, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
+    ChartEngine, ChartFrame, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
 };
 use origin_render::draw_list::Prim;
 use origin_render_gpui::backend::measure_text;
@@ -28,13 +29,6 @@ use std::fmt;
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
-
-/// Platform color mode routed to Origin's own canonical theme implementation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartThemeMode {
-    Light,
-    Dark,
-}
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -192,10 +186,55 @@ pub struct OriginChartView {
     cursor_style: CursorStyle,
 }
 
+fn apply_platform_theme(
+    engine: &mut ChartEngine,
+    theme: &AxiusflowTheme,
+) -> Result<(), serde_json::Error> {
+    let colors = theme.colors;
+    let surface = colors.background.css_value();
+    let border = colors.border.css_value();
+    let axis_text = colors.chart_axis_text.css_value();
+    let crosshair = colors.ring.css_value();
+    let separator_hover = colors.interactive_neutral_active_bg.css_value();
+    let patch = serde_json::json!({
+        "layout": {
+            "background": {
+                "type": "solid",
+                "color": surface,
+                "topColor": surface,
+                "bottomColor": surface
+            },
+            "textColor": axis_text,
+            "panes": {
+                "separatorColor": border,
+                "separatorHoverColor": separator_hover
+            }
+        },
+        "grid": {
+            "vertLines": { "color": border },
+            "horzLines": { "color": border }
+        },
+        "crosshair": {
+            "vertLine": { "color": crosshair, "labelBackgroundColor": crosshair },
+            "horzLine": { "color": crosshair, "labelBackgroundColor": crosshair }
+        },
+        "leftPriceScale": { "borderColor": border, "textColor": axis_text },
+        "rightPriceScale": { "borderColor": border, "textColor": axis_text },
+        "timeScale": { "borderColor": border }
+    });
+    engine.apply_options(&patch.to_string())
+}
+
 impl OriginChartView {
     /// Creates an empty Origin-owned surface without inventing market data.
     #[must_use]
     pub fn empty() -> Self {
+        Self::empty_with_theme(&AxiusflowTheme::dark())
+    }
+
+    /// Creates an empty chart with the supplied platform theme applied atomically.
+    #[must_use]
+    pub fn empty_with_theme(theme: &AxiusflowTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         let volume_series = install_volume_series(&mut engine);
         let retention_applied =
@@ -204,6 +243,8 @@ impl OriginChartView {
         let volume_retention_applied =
             engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(volume_retention_applied);
+        let theme_applied = apply_platform_theme(&mut engine, theme).is_ok();
+        debug_assert!(theme_applied);
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
@@ -244,6 +285,12 @@ impl OriginChartView {
     /// without a live bridge instead of panicking the UI thread.
     #[must_use]
     pub fn with_replay(replay: &ReplaySnapshot) -> Self {
+        Self::with_replay_and_theme(replay, &AxiusflowTheme::dark())
+    }
+
+    /// Creates a replay-backed chart with the supplied platform theme applied atomically.
+    #[must_use]
+    pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: &AxiusflowTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         let volume_series = install_volume_series(&mut engine);
         install_replay(&mut engine, volume_series, replay);
@@ -255,6 +302,8 @@ impl OriginChartView {
         debug_assert!(volume_retention_applied);
         let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay).ok();
         debug_assert!(data_bridge.is_some());
+        let theme_applied = apply_platform_theme(&mut engine, theme).is_ok();
+        debug_assert!(theme_applied);
 
         Self {
             engine,
@@ -312,14 +361,15 @@ impl OriginChartView {
         self.fitted = true;
     }
 
-    /// Switches chart cosmetics through Origin without passing platform color values.
-    pub fn set_theme_mode(&mut self, mode: ChartThemeMode) {
-        let theme = match mode {
-            ChartThemeMode::Light => ChartTheme::Light,
-            ChartThemeMode::Dark => ChartTheme::Dark,
-        };
-        self.engine.set_theme(theme);
+    /// Applies the platform's resolved neutral palette without changing chart data or viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if Origin rejects the generated options patch.
+    pub fn set_platform_theme(&mut self, theme: &AxiusflowTheme) -> Result<(), serde_json::Error> {
+        apply_platform_theme(&mut self.engine, theme)?;
         self.invalidate_series_frame();
+        Ok(())
     }
 
     /// Returns the time scale to the newest bar without changing its zoom.
@@ -1183,12 +1233,16 @@ mod tests {
     }
 
     #[test]
-    fn platform_leaves_surface_and_market_styling_owned_by_origin() {
+    fn platform_theme_owns_neutrals_while_origin_keeps_market_series_styling() {
         let chart = OriginChartView::empty();
-        let origin_default = ChartEngine::new(1024.0, 640.0, 1.0);
         let series = &chart.engine.series[0];
 
-        assert_eq!(chart.engine.options.get(), origin_default.options.get());
+        assert_eq!(
+            chart.engine.options.get().layout.background.color,
+            "#171717"
+        );
+        assert_eq!(chart.engine.options.get().layout.text_color, "#ebebeb");
+        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#1d1d1d");
         assert!(series.line_color.is_none());
         assert!(series.up_color.is_none());
         assert!(series.down_color.is_none());
@@ -1199,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_mode_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
+    fn platform_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
         let mut chart = interactive_chart();
         let volume = chart
             .add_indicator(ChartIndicator::Volume)
@@ -1239,15 +1293,19 @@ mod tests {
         let pane_count = chart.engine.panes.len();
         let series_count = chart.engine.series.len();
 
-        chart.set_theme_mode(ChartThemeMode::Light);
+        chart
+            .set_platform_theme(&AxiusflowTheme::light())
+            .expect("platform theme patch is valid");
         assert_eq!(
             chart.engine.options.get().layout.background.color,
             "#ffffff"
         );
-        chart.set_theme_mode(ChartThemeMode::Dark);
+        chart
+            .set_platform_theme(&AxiusflowTheme::dark())
+            .expect("platform theme patch is valid");
         assert_eq!(
             chart.engine.options.get().layout.background.color,
-            "#0c0c0c"
+            "#171717"
         );
         assert_eq!(
             chart

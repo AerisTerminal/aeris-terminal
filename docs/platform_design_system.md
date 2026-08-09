@@ -22,7 +22,7 @@ All Axiusflow-owned identifiers use `snake_case`, including theme fields,
 manifest entries, recipes, serialized names, debug output, and generated
 accessors.
 
-The canonical identifier is stored once. An optional web exporter prefixes that
+The canonical identifier is stored once. The checked CSS manifest prefixes that
 identifier with `--` without changing its spelling:
 
 
@@ -67,34 +67,47 @@ components consume only the typed resolved value.
 
 ### 4.1 Core colors
 
+The neutral hierarchy follows Twenty's Display P3 gray scale. Axiusflow keeps
+its own semantic names and its existing product and financial colors.
 
-| Identifier               | Light                        | Dark                         |
-| ------------------------ | ---------------------------- | ---------------------------- |
-| `background`             | `oklch(1 0 0)`               | `#0c0c0c`                    |
-| `foreground`             | `oklch(0.145 0 0)`           | `#f5f5f5`                    |
-| `card`                   | `oklch(1 0 0)`               | `#0c0c0c`                    |
-| `card_foreground`        | `oklch(0.145 0 0)`           | `#f5f5f5`                    |
-| `popover`                | `oklch(1 0 0)`               | `#0c0c0c`                    |
-| `popover_foreground`     | `oklch(0.145 0 0)`           | `#f5f5f5`                    |
-| `primary`                | `#3e63dd`                    | `#3e63dd`                    |
-| `primary_foreground`     | `oklch(0.97 0.014 254.604)`  | same                         |
-| `secondary`              | `oklch(0.967 0.001 286.375)` | `oklch(0.274 0.006 286.033)` |
-| `secondary_foreground`   | `oklch(0.21 0.006 285.885)`  | `#f5f5f5`                    |
-| `muted`                  | `oklch(0.97 0 0)`            | `oklch(0.269 0 0)`           |
-| `muted_foreground`       | `oklch(0.556 0 0)`           | `#888888`                    |
-| `accent`                 | `oklch(0.97 0 0)`            | `oklch(0.269 0 0)`           |
-| `accent_foreground`      | `oklch(0.205 0 0)`           | `#f5f5f5`                    |
-| `destructive`            | `oklch(0.577 0.245 27.325)`  | `oklch(0.704 0.191 22.216)`  |
-| `destructive_foreground` | `oklch(0.985 0 0)`           | same                         |
-| `border`                 | `#f5f5f5`                    | `#1e1e1e`                    |
-| `input`                  | `#f5f5f5`                    | `#1e1e1e`                    |
-| `ring`                   | `oklch(0.708 0 0)`           | `oklch(0.556 0 0)`           |
+| Identifier             | Light                                      | Dark                                         |
+| ---------------------- | ------------------------------------------ | -------------------------------------------- |
+| `background`           | `color(display-p3 1 1 1)`                  | `color(display-p3 0.09 0.09 0.09)`           |
+| `foreground`           | `color(display-p3 0.2 0.2 0.2)`            | `color(display-p3 0.922 0.922 0.922)`        |
+| `surface_secondary`    | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        |
+| `surface_tertiary`     | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        |
+| `surface_quaternary`   | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        |
+| `card`, `popover`      | `surface_secondary`                        | `surface_secondary`                          |
+| `secondary`, `muted`   | `surface_tertiary`                         | `surface_tertiary`                           |
+| `accent`               | `surface_tertiary`                         | `surface_tertiary`                           |
+| `border`               | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        |
+| `input`                | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        |
+| `input_surface`        | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        |
+| `primary`              | `#3e63dd`                                  | `#3e63dd`                                    |
+| `primary_foreground`   | `oklch(0.97 0.014 254.604)`                | same                                         |
+| `ring`                 | `oklch(0.708 0 0)`                         | `oklch(0.556 0 0)`                           |
+
+### 4.2 Text, icon, and interaction colors
+
+| Identifier                      | Light                                 | Dark                                  |
+| ------------------------------- | ------------------------------------- | ------------------------------------- |
+| `text_secondary`, `icon_color`  | `color(display-p3 0.4 0.4 0.4)`       | `color(display-p3 0.702 0.702 0.702)` |
+| `text_muted`, `muted_foreground` | `color(display-p3 0.6 0.6 0.6)`       | `color(display-p3 0.506 0.506 0.506)` |
+| `text_placeholder`              | `color(display-p3 0.702 0.702 0.702)` | `color(display-p3 0.4 0.4 0.4)`       |
+| `text_unavailable`              | `color(display-p3 0.8 0.8 0.8)`       | `color(display-p3 0.298 0.298 0.298)` |
+| `interactive_neutral_hover_bg`  | black at 3.9%                         | white at 5.9%                         |
+| `interactive_neutral_active_bg` | black at 7.8%                         | white at 10.2%                        |
+
+Neutral hover and active backgrounds are alpha overlays. This makes the same
+state readable on the root, card, popover, and input surfaces without a white
+hover disappearing on a white surface. Their foreground tokens resolve to
+`foreground`.
 
 
 `primary` is the sole product accent. Components may derive interaction states
 from it, but may not create another product-accent family.
 
-### 4.2 Trading and chart colors
+### 4.3 Trading and chart colors
 
 
 | Identifier          | Light                        | Dark                  |
@@ -141,7 +154,7 @@ Origin Charts receives resolved values from the active `AxiusflowTheme`:
 
 Origin renderers do not maintain an independent color theme.
 
-### 4.3 Color resolution
+### 4.4 Color resolution
 
 - OKLCH conversion is centralized and follows CSS Color 4 conversion semantics.
 - Converted channels are gamut-clamped before they become GPUI or Origin values.
@@ -159,7 +172,7 @@ The platform exposes exactly three radii:
 | Identifier       | Logical pixels | Use                                                 |
 | ---------------- | -------------- | --------------------------------------------------- |
 | `radius_sm`      | 4              | Explicitly dense or small controls                  |
-| `radius_default` | 8              | Normal controls, panels, and surfaces               |
+| `radius_default` | 6              | Normal controls, panels, and surfaces               |
 | `radius_full`    | 999            | Pills, circles, avatars, and fully rounded elements |
 
 
@@ -199,9 +212,12 @@ responsive layout inside the component implementation.
 - Use `background` and `foreground` for the application root.
 - Use `card`/`card_foreground` or `popover`/`popover_foreground` for their named
 surfaces.
-- Use `border`, `input`, and `ring` for their semantic roles.
+- Use `input_surface` for input backgrounds and `input` for input borders.
+- Use the dedicated interaction tokens for neutral hover and active states.
+- Use `text_unavailable` for disabled content and `icon_color` for neutral icons.
+- Use `border` and `ring` for their semantic roles.
 - Disabled controls must not respond to activation.
-- Financial charts use Origin Charts and the mapping in section 4.2.
+- Financial charts use Origin Charts and the mapping in section 4.3.
 
 If a new component needs a visual value that is not shared, keep the value
 component-local. Promote it into the design system only after multiple
@@ -216,11 +232,13 @@ The design-system crate provides:
 - `ThemeColors` for shared semantic and chart colors;
 - `ThemeDimensions` for genuinely shared measurements;
 - `RadiusToken` for the closed radius set;
-- canonical token metadata for validation and optional export.
+- canonical token metadata and `axiusflow_theme.css` for CSS consumers.
 
-An optional CSS exporter emits `--{canonical_identifier}`. It does not own a
-second naming table and does not transform underscores. Debug inspectors and
-serialized inventories show the canonical identifier unchanged.
+The CSS manifest emits `--{canonical_identifier}`. It does not own a second
+naming table and does not transform underscores. A parity test requires every
+Rust light and dark source expression to appear in the manifest, preventing the
+native and CSS contracts from drifting. Debug inspectors and serialized
+inventories show the canonical identifier unchanged.
 
 ## 10. Validation
 

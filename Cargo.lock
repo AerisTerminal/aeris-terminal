@@ -704,6 +704,7 @@ name = "axiusflow_chart_integration"
 version = "0.1.0"
 dependencies = [
  "axiusflow_application",
+ "axiusflow_design_system",
  "axiusflow_market_data",
  "axiusflow_protocols",
  "axiusflow_terminal_ui",
@@ -712,6 +713,7 @@ dependencies = [
  "origin_engine",
  "origin_render",
  "origin_render_gpui",
+ "serde_json",
 ]
 
 [[package]]
