@@ -1,7 +1,7 @@
 //! Resident engine process boundary and authenticated local sessions.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -11,15 +11,15 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_local_engine_protocol::{
     CatalogEntry, CatalogReassembler, ClientHello, ClientKind, EngineFaultCode, EngineReady,
-    Envelope, EnvelopeDecoder, Fault, Goodbye, PROTOCOL_VERSION, ResourceMode, RestoreWorkspace,
-    SetSelection, SetWatchlist, SubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
-    split_catalog,
+    Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION, ResourceMode,
+    RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, ViewKind, WorkspaceState,
+    encode_envelope, envelope, split_catalog,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
@@ -36,6 +36,9 @@ pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
 const PUBLICATION_SUBSCRIBER_CAPACITY: usize = 128;
+const WORKSPACE_SCHEMA_REVISION: u32 = 1;
+const CACHE_MANIFEST_REVISION: u32 = 1;
+const MAXIMUM_HOT_SERIES: usize = 32;
 type SelectionCallback = Arc<dyn Fn(WorkspaceState) + Send + Sync>;
 
 /// Bounded latest-state fan-out shared by the engine runtime and authenticated clients.
@@ -196,13 +199,18 @@ impl EngineState {
     pub fn open(workspace_root: impl Into<PathBuf>) -> Result<Self, String> {
         let workspace_root = workspace_root.into();
         fs::create_dir_all(&workspace_root).map_err(redacted_workspace_error)?;
-        let workspace = load_latest_workspace(&workspace_root)?.unwrap_or_else(default_workspace);
+        let mut workspace =
+            load_latest_workspace(&workspace_root)?.unwrap_or_else(default_workspace);
+        let migrated = migrate_workspace(&mut workspace);
+        if migrated {
+            workspace.workspace_revision = workspace.workspace_revision.saturating_add(1);
+        }
         let state = Self {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
             selection_callback: Arc::new(Mutex::new(None)),
         };
-        if state.workspace().workspace_revision == 0 {
+        if state.workspace().workspace_revision == 0 || migrated {
             state.persist(&state.workspace())?;
         }
         Ok(state)
@@ -237,6 +245,7 @@ impl EngineState {
         candidate.market = selection.market;
         candidate.interval_seconds = selection.interval_seconds;
         candidate.workspace_revision = candidate.workspace_revision.saturating_add(1);
+        touch_hot_series(&mut candidate);
         validate_workspace(&candidate)?;
         self.persist(&candidate)?;
         *workspace = candidate.clone();
@@ -286,12 +295,26 @@ fn default_workspace() -> WorkspaceState {
         workspace_revision: 0,
         warm_mode_enabled: true,
         resource_mode: ResourceMode::Warm as i32,
+        schema_revision: WORKSPACE_SCHEMA_REVISION,
+        cache_manifest_revision: CACHE_MANIFEST_REVISION,
+        hot_series: vec![HotSeries {
+            provider: "coinbase".to_string(),
+            market: "BTC-USD".to_string(),
+            interval_seconds: 60,
+            score: 1,
+            last_used_unix_seconds: unix_seconds(),
+            provider_watermark: 0,
+            series_watermark: 0,
+            viewport_start_unix_nanos: None,
+            viewport_end_unix_nanos: None,
+        }],
     }
 }
 
 fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
     const MAXIMUM_MARKET_BYTES: usize = 128;
     const MAXIMUM_WATCHLIST_ITEMS: usize = 256;
+    let mut hot_identities = BTreeSet::new();
 
     if workspace.provider.trim().is_empty()
         || workspace.market.trim().is_empty()
@@ -302,13 +325,112 @@ fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
             .watchlist
             .iter()
             .any(|market| market.trim().is_empty() || market.len() > MAXIMUM_MARKET_BYTES)
+        || workspace.hot_series.len() > MAXIMUM_HOT_SERIES
+        || workspace.hot_series.iter().any(|series| {
+            series.provider.trim().is_empty()
+                || series.market.trim().is_empty()
+                || series.market.len() > MAXIMUM_MARKET_BYTES
+                || series.interval_seconds == 0
+                || series.score == 0
+                || !hot_identities.insert((
+                    series.provider.clone(),
+                    series.market.clone(),
+                    series.interval_seconds,
+                ))
+                || !valid_viewport(series)
+        })
     {
         return Err("workspace state is invalid".to_string());
+    }
+    if !matches!(workspace.schema_revision, 0 | WORKSPACE_SCHEMA_REVISION)
+        || !matches!(
+            workspace.cache_manifest_revision,
+            0 | CACHE_MANIFEST_REVISION
+        )
+    {
+        return Err("workspace revision is unsupported".to_string());
     }
     if ResourceMode::try_from(workspace.resource_mode).is_err() {
         return Err("workspace resource mode is invalid".to_string());
     }
     Ok(())
+}
+
+fn valid_viewport(series: &HotSeries) -> bool {
+    match (
+        series.viewport_start_unix_nanos,
+        series.viewport_end_unix_nanos,
+    ) {
+        (None, None) => true,
+        (Some(start), Some(end)) => start < end,
+        _ => false,
+    }
+}
+
+fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
+    let mut migrated = false;
+    if workspace.schema_revision == 0 {
+        workspace.schema_revision = WORKSPACE_SCHEMA_REVISION;
+        migrated = true;
+    }
+    if workspace.cache_manifest_revision == 0 {
+        workspace.cache_manifest_revision = CACHE_MANIFEST_REVISION;
+        migrated = true;
+    }
+    if workspace.hot_series.is_empty() {
+        touch_hot_series(workspace);
+        migrated = true;
+    }
+    migrated
+}
+
+fn touch_hot_series(workspace: &mut WorkspaceState) {
+    let identity = (
+        &workspace.provider,
+        &workspace.market,
+        workspace.interval_seconds,
+    );
+    let now = unix_seconds();
+    let next_score = workspace
+        .hot_series
+        .iter()
+        .map(|series| series.score)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    if let Some(series) = workspace.hot_series.iter_mut().find(|series| {
+        series.provider == *identity.0
+            && series.market == *identity.1
+            && series.interval_seconds == identity.2
+    }) {
+        series.score = next_score;
+        series.last_used_unix_seconds = now;
+    } else {
+        workspace.hot_series.push(HotSeries {
+            provider: workspace.provider.clone(),
+            market: workspace.market.clone(),
+            interval_seconds: workspace.interval_seconds,
+            score: next_score,
+            last_used_unix_seconds: now,
+            provider_watermark: 0,
+            series_watermark: 0,
+            viewport_start_unix_nanos: None,
+            viewport_end_unix_nanos: None,
+        });
+    }
+    workspace.hot_series.sort_unstable_by(|left, right| {
+        right
+            .last_used_unix_seconds
+            .cmp(&left.last_used_unix_seconds)
+            .then_with(|| right.score.cmp(&left.score))
+    });
+    workspace.hot_series.truncate(MAXIMUM_HOT_SERIES);
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn workspace_filename(revision: u64) -> String {

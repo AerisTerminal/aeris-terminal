@@ -15,7 +15,8 @@ use axiusflow_engine::{
 };
 use axiusflow_local_engine_protocol::{
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, EngineFaultCode, Envelope,
-    EnvelopeDecoder, PROTOCOL_VERSION, ViewKind, encode_envelope, envelope,
+    EnvelopeDecoder, PROTOCOL_VERSION, ResourceMode, ViewKind, WorkspaceState, encode_envelope,
+    envelope,
 };
 use axiusflow_platform_runtime::CredentialVault;
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
@@ -240,6 +241,10 @@ fn workspace_selection_is_durable_across_engine_restart() {
     assert_eq!(reopened.workspace().market, "ETH-USD");
     assert_eq!(reopened.workspace().interval_seconds, 300);
     assert_eq!(reopened.workspace().workspace_revision, 1);
+    assert_eq!(reopened.workspace().schema_revision, 1);
+    assert_eq!(reopened.workspace().cache_manifest_revision, 1);
+    assert_eq!(reopened.workspace().hot_series[0].market, "ETH-USD");
+    assert_eq!(reopened.workspace().hot_series[0].interval_seconds, 300);
 }
 
 #[test]
@@ -256,6 +261,46 @@ fn corrupt_latest_workspace_is_quarantined_and_falls_back() {
         directory
             .0
             .join("workspace-00000000000000000007.corrupt-0")
+            .exists()
+    );
+}
+
+#[test]
+fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
+    let directory = TestDirectory::new();
+    let legacy = WorkspaceState {
+        provider: "coinbase".to_string(),
+        market: "ETH-USD".to_string(),
+        interval_seconds: 300,
+        watchlist: vec!["ETH-USD".to_string()],
+        workspace_revision: 7,
+        warm_mode_enabled: true,
+        resource_mode: ResourceMode::Warm as i32,
+        schema_revision: 0,
+        cache_manifest_revision: 0,
+        hot_series: Vec::new(),
+    };
+    let bytes = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        payload: Some(envelope::Payload::WorkspaceState(legacy)),
+    })
+    .expect("encode legacy workspace");
+    fs::write(
+        directory.0.join("workspace-00000000000000000007.frame"),
+        bytes,
+    )
+    .expect("write legacy workspace");
+    let migrated = EngineState::open(&directory.0).expect("migrate workspace");
+    let workspace = migrated.workspace();
+    assert_eq!(workspace.workspace_revision, 8);
+    assert_eq!(workspace.schema_revision, 1);
+    assert_eq!(workspace.cache_manifest_revision, 1);
+    assert_eq!(workspace.hot_series.len(), 1);
+    assert_eq!(workspace.hot_series[0].market, "ETH-USD");
+    assert!(
+        directory
+            .0
+            .join("workspace-00000000000000000008.frame")
             .exists()
     );
 }

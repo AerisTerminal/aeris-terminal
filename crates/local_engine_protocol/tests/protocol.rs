@@ -2,9 +2,9 @@ use axiusflow_local_engine_protocol::{
     ActivateExistingUi, CatalogEntry, CatalogReassembler, CatalogSnapshot, ChartDelta,
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomBookState, DomLevel, DomRow,
     DomSnapshot, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, ProviderConnectionState, ProviderState,
-    ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, UnsubscribeView,
-    ViewKind, WorkspaceState, encode_envelope, envelope, split_catalog,
+    HotSeries, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, ProviderConnectionState,
+    ProviderState, ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView,
+    UnsubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope, split_catalog,
 };
 use axiusflow_transport::encode_binary_frame;
 use std::num::NonZeroUsize;
@@ -30,6 +30,19 @@ fn all_payloads() -> Vec<envelope::Payload> {
             workspace_revision: 42,
             warm_mode_enabled: true,
             resource_mode: ResourceMode::Warm as i32,
+            schema_revision: 1,
+            cache_manifest_revision: 1,
+            hot_series: vec![HotSeries {
+                provider: "coinbase".to_string(),
+                market: "BTC-USD".to_string(),
+                interval_seconds: 60,
+                score: 1,
+                last_used_unix_seconds: 1,
+                provider_watermark: 0,
+                series_watermark: 0,
+                viewport_start_unix_nanos: None,
+                viewport_end_unix_nanos: None,
+            }],
         }),
         envelope::Payload::SetSelection(SetSelection {
             market: "ETH-USD".to_string(),

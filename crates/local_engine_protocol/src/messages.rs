@@ -153,6 +153,38 @@ pub struct EngineReady {
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct RestoreWorkspace {}
 
+/// Bounded hot-set entry used to prioritize cached restoration and prefetch.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct HotSeries {
+    /// Provider identifier. Tag 1.
+    #[prost(string, tag = "1")]
+    pub provider: String,
+    /// Market identifier. Tag 2.
+    #[prost(string, tag = "2")]
+    pub market: String,
+    /// Chart interval in seconds. Tag 3.
+    #[prost(uint32, tag = "3")]
+    pub interval_seconds: u32,
+    /// Monotonic bounded usage score. Tag 4.
+    #[prost(uint32, tag = "4")]
+    pub score: u32,
+    /// Last wall-clock use in Unix seconds. Tag 5.
+    #[prost(uint64, tag = "5")]
+    pub last_used_unix_seconds: u64,
+    /// Last accepted provider watermark. Tag 6.
+    #[prost(uint64, tag = "6")]
+    pub provider_watermark: u64,
+    /// Last accepted series watermark. Tag 7.
+    #[prost(uint64, tag = "7")]
+    pub series_watermark: u64,
+    /// Last stable visible-range start, when known. Tag 8.
+    #[prost(sint64, optional, tag = "8")]
+    pub viewport_start_unix_nanos: Option<i64>,
+    /// Last stable visible-range end, when known. Tag 9.
+    #[prost(sint64, optional, tag = "9")]
+    pub viewport_end_unix_nanos: Option<i64>,
+}
+
 /// Engine reply describing the persisted workspace.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct WorkspaceState {
@@ -177,6 +209,15 @@ pub struct WorkspaceState {
     /// Resource mode as a [`ResourceMode`] value. Tag 7.
     #[prost(enumeration = "ResourceMode", tag = "7")]
     pub resource_mode: i32,
+    /// Workspace schema revision. Tag 8.
+    #[prost(uint32, tag = "8")]
+    pub schema_revision: u32,
+    /// Cache-manifest identity revision. Tag 9.
+    #[prost(uint32, tag = "9")]
+    pub cache_manifest_revision: u32,
+    /// Most recently used bounded series set. Tag 10.
+    #[prost(message, repeated, tag = "10")]
+    pub hot_series: Vec<HotSeries>,
 }
 
 /// Client selection change; rejected when the revision or generation is stale.
