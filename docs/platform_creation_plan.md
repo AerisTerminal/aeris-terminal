@@ -521,6 +521,13 @@ Bollinger Bands, RSI, MACD, Stochastic, and ATR with the legacy defaults.
 Volume and VWAP remain absent until real volume-column plumbing exists. No
 legacy CSS, stylesheet, radius value, or color literal was copied.
 
+The application palette restores the pre-Cursor Axiusflow semantic surfaces in
+both modes while retaining `#3e63dd` as the product primary. Interactive header
+chrome explicitly occludes the native title-bar drag hit region so Windows does
+not consume button presses. Enabled controls expose pointer cursors, disabled
+controls expose not-allowed cursors, and the drawing rail renders its legacy
+24/28 px tool glyph hierarchy inside fixed 32 px hit targets.
+
 The DOM and feed-health rail now uses the GPUI Components resizable-panel
 primitive rather than a fixed-width container. The chart and rail remain flush,
 the rail is bounded to 240–640 px, and its width persists while switching

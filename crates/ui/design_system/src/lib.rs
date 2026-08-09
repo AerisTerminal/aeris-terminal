@@ -297,81 +297,81 @@ impl AxiusflowTheme {
         [
             ColorToken::new(
                 "background",
-                mode_source(dark, "#f3f3f3", "#141414"),
+                mode_source(dark, "oklch(1 0 0)", "oklch(0.145 0 0)"),
                 colors.background,
             ),
             ColorToken::new(
                 "foreground",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
                 colors.foreground,
             ),
-            ColorToken::new("card", mode_source(dark, "#fcfcfc", "#181818"), colors.card),
+            ColorToken::new(
+                "card",
+                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
+                colors.card,
+            ),
             ColorToken::new(
                 "card_foreground",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
                 colors.card_foreground,
             ),
             ColorToken::new(
                 "popover",
-                mode_source(dark, "#f3f3f3", "#141414"),
+                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
                 colors.popover,
             ),
             ColorToken::new(
                 "popover_foreground",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
                 colors.popover_foreground,
             ),
             ColorToken::new("primary", "#3e63dd", colors.primary),
             ColorToken::new(
                 "primary_foreground",
-                mode_source(dark, "#fcfcfc", "#191c22"),
+                "oklch(0.97 0.014 254.604)",
                 colors.primary_foreground,
             ),
             ColorToken::new(
                 "secondary",
-                mode_source(dark, "rgba(20, 20, 20, 0.141)", "#626262"),
+                mode_source(
+                    dark,
+                    "oklch(0.967 0.001 286.375)",
+                    "oklch(0.274 0.006 286.033)",
+                ),
                 colors.secondary,
             ),
             ColorToken::new(
                 "secondary_foreground",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "oklch(0.21 0.006 285.885)", "oklch(0.985 0 0)"),
                 colors.secondary_foreground,
             ),
             ColorToken::new(
                 "muted",
-                mode_source(
-                    dark,
-                    "rgba(20, 20, 20, 0.078)",
-                    "rgba(240, 240, 240, 0.067)",
-                ),
+                mode_source(dark, "oklch(0.97 0 0)", "oklch(0.269 0 0)"),
                 colors.muted,
             ),
             ColorToken::new(
                 "muted_foreground",
-                mode_source(
-                    dark,
-                    "rgba(20, 20, 20, 0.361)",
-                    "rgba(240, 240, 240, 0.600)",
-                ),
+                mode_source(dark, "oklch(0.556 0 0)", "oklch(0.708 0 0)"),
                 colors.muted_foreground,
             ),
             ColorToken::new(
                 "accent",
-                mode_source(
-                    dark,
-                    "rgba(20, 20, 20, 0.078)",
-                    "rgba(240, 240, 240, 0.118)",
-                ),
+                mode_source(dark, "oklch(0.97 0 0)", "oklch(0.269 0 0)"),
                 colors.accent,
             ),
             ColorToken::new(
                 "accent_foreground",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "oklch(0.205 0 0)", "oklch(0.985 0 0)"),
                 colors.accent_foreground,
             ),
             ColorToken::new(
                 "destructive",
-                mode_source(dark, "#be1744", "#e34671"),
+                mode_source(
+                    dark,
+                    "oklch(0.577 0.245 27.325)",
+                    "oklch(0.704 0.191 22.216)",
+                ),
                 colors.destructive,
             ),
             ColorToken::new(
@@ -381,49 +381,29 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "border",
-                mode_source(dark, "rgba(20, 20, 20, 0.078)", "#202020"),
+                mode_source(dark, "#f5f5f5", "#16191f"),
                 colors.border,
             ),
             ColorToken::new(
                 "input",
-                mode_source(dark, "#fcfcfc", "rgba(240, 240, 240, 0.039)"),
+                mode_source(dark, "#f5f5f5", "#16191f"),
                 colors.input,
             ),
             ColorToken::new(
                 "ring",
-                mode_source(
-                    dark,
-                    "rgba(20, 20, 20, 0.200)",
-                    "rgba(240, 240, 240, 0.149)",
-                ),
+                mode_source(dark, "oklch(0.708 0 0)", "oklch(0.556 0 0)"),
                 colors.ring,
             ),
-            ColorToken::new("chart_1", "var(--primary)", colors.chart_palette[0]),
-            ColorToken::new("chart_2", "var(--profit)", colors.chart_palette[1]),
-            ColorToken::new("chart_3", "var(--warning)", colors.chart_palette[2]),
-            ColorToken::new("chart_4", "var(--feature)", colors.chart_palette[3]),
-            ColorToken::new(
-                "chart_5",
-                "var(--muted_foreground)",
-                colors.chart_palette[4],
-            ),
-            ColorToken::new(
-                "profit",
-                mode_source(dark, "#00854c", "#3fa266"),
-                colors.profit,
-            ),
-            ColorToken::new("loss", mode_source(dark, "#ce405b", "#e34671"), colors.loss),
-            ColorToken::new(
-                "warning",
-                mode_source(dark, "#a46700", "#f1b467"),
-                colors.warning,
-            ),
-            ColorToken::new("info", "var(--primary)", colors.info),
-            ColorToken::new(
-                "feature",
-                mode_source(dark, "#7565cc", "#b48ead"),
-                colors.feature,
-            ),
+            ColorToken::new("chart_1", "oklch(0.87 0 0)", colors.chart_palette[0]),
+            ColorToken::new("chart_2", "oklch(0.556 0 0)", colors.chart_palette[1]),
+            ColorToken::new("chart_3", "oklch(0.439 0 0)", colors.chart_palette[2]),
+            ColorToken::new("chart_4", "oklch(0.371 0 0)", colors.chart_palette[3]),
+            ColorToken::new("chart_5", "oklch(0.269 0 0)", colors.chart_palette[4]),
+            ColorToken::new("profit", "oklch(0.683 0.151 160.997)", colors.profit),
+            ColorToken::new("loss", "oklch(0.674 0.215 18.124)", colors.loss),
+            ColorToken::new("warning", "oklch(0.769 0.165 70.08)", colors.warning),
+            ColorToken::new("info", "oklch(0.555 0.245 266.681)", colors.info),
+            ColorToken::new("feature", "oklch(0.541 0.247 293.009)", colors.feature),
             ColorToken::new("chart_candle_up", "var(--profit)", colors.chart_candle_up),
             ColorToken::new("chart_candle_down", "var(--loss)", colors.chart_candle_down),
             ColorToken::new(
@@ -446,7 +426,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "chart_axis_text",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "#0a0a0a", "#ffffff"),
                 colors.chart_axis_text,
             ),
         ]
@@ -470,34 +450,34 @@ const fn mode_source(
 fn light_colors() -> ThemeColors {
     foundational_colors(
         ThemeMode::Light,
-        ThemeColor::from_rgb8(243, 243, 243),
-        ThemeColor::from_rgb8(20, 20, 20),
-        ThemeColor::from_rgb8(252, 252, 252),
-        ThemeColor::from_rgb8(20, 20, 20).with_alpha(36.0 / 255.0),
-        ThemeColor::from_rgb8(20, 20, 20),
-        ThemeColor::from_rgb8(20, 20, 20).with_alpha(20.0 / 255.0),
-        ThemeColor::from_rgb8(20, 20, 20).with_alpha(92.0 / 255.0),
-        ThemeColor::from_rgb8(20, 20, 20),
-        ThemeColor::from_rgb8(190, 23, 68),
-        ThemeColor::from_rgb8(20, 20, 20).with_alpha(20.0 / 255.0),
-        ThemeColor::from_rgb8(20, 20, 20).with_alpha(51.0 / 255.0),
+        ThemeColor::from_oklch(1.0, 0.0, 0.0),
+        ThemeColor::from_oklch(0.145, 0.0, 0.0),
+        ThemeColor::from_oklch(1.0, 0.0, 0.0),
+        ThemeColor::from_oklch(0.967, 0.001, 286.375),
+        ThemeColor::from_oklch(0.21, 0.006, 285.885),
+        ThemeColor::from_oklch(0.97, 0.0, 0.0),
+        ThemeColor::from_oklch(0.556, 0.0, 0.0),
+        ThemeColor::from_oklch(0.205, 0.0, 0.0),
+        ThemeColor::from_oklch(0.577, 0.245, 27.325),
+        ThemeColor::from_rgb8(245, 245, 245),
+        ThemeColor::from_oklch(0.708, 0.0, 0.0),
     )
 }
 
 fn dark_colors() -> ThemeColors {
     foundational_colors(
         ThemeMode::Dark,
-        ThemeColor::from_rgb8(20, 20, 20),
-        ThemeColor::from_rgb8(240, 240, 240),
-        ThemeColor::from_rgb8(24, 24, 24),
-        ThemeColor::from_rgb8(98, 98, 98),
-        ThemeColor::from_rgb8(240, 240, 240),
-        ThemeColor::from_rgb8(240, 240, 240).with_alpha(17.0 / 255.0),
-        ThemeColor::from_rgb8(240, 240, 240).with_alpha(153.0 / 255.0),
-        ThemeColor::from_rgb8(240, 240, 240),
-        ThemeColor::from_rgb8(227, 70, 113),
-        ThemeColor::from_rgb8(32, 32, 32),
-        ThemeColor::from_rgb8(240, 240, 240).with_alpha(38.0 / 255.0),
+        ThemeColor::from_oklch(0.145, 0.0, 0.0),
+        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_rgb8(7, 10, 15),
+        ThemeColor::from_oklch(0.274, 0.006, 286.033),
+        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_oklch(0.269, 0.0, 0.0),
+        ThemeColor::from_oklch(0.708, 0.0, 0.0),
+        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_oklch(0.704, 0.191, 22.216),
+        ThemeColor::from_rgb8(22, 25, 31),
+        ThemeColor::from_oklch(0.556, 0.0, 0.0),
     )
 }
 
@@ -517,28 +497,10 @@ fn foundational_colors(
     ring: ThemeColor,
 ) -> ThemeColors {
     let primary = ThemeColor::from_rgb8(62, 99, 221);
-    let primary_foreground = match mode {
-        ThemeMode::Light => ThemeColor::from_rgb8(252, 252, 252),
-        ThemeMode::Dark => ThemeColor::from_rgb8(25, 28, 34),
-    };
-    let destructive_foreground = match mode {
-        ThemeMode::Light => ThemeColor::from_rgb8(252, 252, 252),
-        ThemeMode::Dark => ThemeColor::from_rgb8(240, 240, 240),
-    };
-    let (profit, loss, warning, feature) = match mode {
-        ThemeMode::Light => (
-            ThemeColor::from_rgb8(0, 133, 76),
-            ThemeColor::from_rgb8(206, 64, 91),
-            ThemeColor::from_rgb8(164, 103, 0),
-            ThemeColor::from_rgb8(117, 101, 204),
-        ),
-        ThemeMode::Dark => (
-            ThemeColor::from_rgb8(63, 162, 102),
-            ThemeColor::from_rgb8(227, 70, 113),
-            ThemeColor::from_rgb8(241, 180, 103),
-            ThemeColor::from_rgb8(180, 142, 173),
-        ),
-    };
+    let primary_foreground = ThemeColor::from_oklch(0.97, 0.014, 254.604);
+    let destructive_foreground = ThemeColor::from_oklch(0.985, 0.0, 0.0);
+    let profit = ThemeColor::from_oklch(0.683, 0.151, 160.997);
+    let loss = ThemeColor::from_oklch(0.674, 0.215, 18.124);
     let volume_alpha = match mode {
         ThemeMode::Light => (0.34, 0.30),
         ThemeMode::Dark => (0.32, 0.28),
@@ -549,7 +511,7 @@ fn foundational_colors(
         foreground,
         card,
         card_foreground: foreground,
-        popover: background,
+        popover: card,
         popover_foreground: foreground,
         primary,
         primary_foreground,
@@ -557,32 +519,32 @@ fn foundational_colors(
         secondary_foreground,
         muted,
         muted_foreground,
-        accent: match mode {
-            ThemeMode::Light => ThemeColor::from_rgb8(20, 20, 20).with_alpha(20.0 / 255.0),
-            ThemeMode::Dark => ThemeColor::from_rgb8(240, 240, 240).with_alpha(30.0 / 255.0),
-        },
+        accent: muted,
         accent_foreground,
         destructive,
         destructive_foreground,
         border,
-        input: match mode {
-            ThemeMode::Light => ThemeColor::from_rgb8(252, 252, 252),
-            ThemeMode::Dark => ThemeColor::from_rgb8(240, 240, 240).with_alpha(10.0 / 255.0),
-        },
+        input: border,
         ring,
-        chart_palette: [primary, profit, warning, feature, muted_foreground],
+        chart_palette: [
+            ThemeColor::from_oklch(0.87, 0.0, 0.0),
+            ThemeColor::from_oklch(0.556, 0.0, 0.0),
+            ThemeColor::from_oklch(0.439, 0.0, 0.0),
+            ThemeColor::from_oklch(0.371, 0.0, 0.0),
+            ThemeColor::from_oklch(0.269, 0.0, 0.0),
+        ],
         profit,
         loss,
-        warning,
-        info: primary,
-        feature,
+        warning: ThemeColor::from_oklch(0.769, 0.165, 70.08),
+        info: ThemeColor::from_oklch(0.555, 0.245, 266.681),
+        feature: ThemeColor::from_oklch(0.541, 0.247, 293.009),
         chart_candle_up: profit,
         chart_candle_down: loss,
         chart_volume_up: profit.with_alpha(volume_alpha.0),
         chart_volume_down: loss.with_alpha(volume_alpha.1),
         chart_axis_text: match mode {
-            ThemeMode::Light => ThemeColor::from_rgb8(20, 20, 20),
-            ThemeMode::Dark => ThemeColor::from_rgb8(240, 240, 240),
+            ThemeMode::Light => ThemeColor::from_rgb8(10, 10, 10),
+            ThemeMode::Dark => ThemeColor::from_rgb8(255, 255, 255),
         },
     }
 }
@@ -625,24 +587,50 @@ impl RadiusToken {
 
 #[cfg(test)]
 mod tests {
-    use super::{AxiusflowTheme, RadiusToken, ThemeColor};
+    use super::{AxiusflowTheme, ColorToken, RadiusToken, ThemeColor};
+
+    fn token_source<'a>(tokens: &'a [ColorToken], identifier: &str) -> &'a str {
+        tokens
+            .iter()
+            .find(|token| token.canonical_identifier == identifier)
+            .map(|token| token.source_expression)
+            .expect("theme color token exists")
+    }
 
     #[test]
-    fn application_palettes_match_installed_cursor_chrome_and_keep_axiusflow_primary() {
+    fn application_palettes_restore_axiusflow_surfaces_and_keep_primary_blue() {
         let light = AxiusflowTheme::light().colors;
         let dark = AxiusflowTheme::dark().colors;
 
-        assert_eq!(light.background, ThemeColor::from_rgb8(243, 243, 243));
-        assert_eq!(light.card, ThemeColor::from_rgb8(252, 252, 252));
-        assert_eq!(light.foreground, ThemeColor::from_rgb8(20, 20, 20));
-        assert_eq!(dark.background, ThemeColor::from_rgb8(20, 20, 20));
-        assert_eq!(dark.card, ThemeColor::from_rgb8(24, 24, 24));
-        assert_eq!(dark.border, ThemeColor::from_rgb8(32, 32, 32));
-        assert_eq!(dark.foreground, ThemeColor::from_rgb8(240, 240, 240));
+        assert_eq!(light.background, ThemeColor::from_oklch(1.0, 0.0, 0.0));
+        assert_eq!(light.card, ThemeColor::from_oklch(1.0, 0.0, 0.0));
+        assert_eq!(light.foreground, ThemeColor::from_oklch(0.145, 0.0, 0.0));
+        assert_eq!(dark.background, ThemeColor::from_oklch(0.145, 0.0, 0.0));
+        assert_eq!(dark.card, ThemeColor::from_rgb8(7, 10, 15));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(22, 25, 31));
+        assert_eq!(dark.foreground, ThemeColor::from_oklch(0.985, 0.0, 0.0));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
-        assert_eq!(dark.profit, ThemeColor::from_rgb8(63, 162, 102));
-        assert_eq!(dark.loss, ThemeColor::from_rgb8(227, 70, 113));
+        assert_eq!(dark.profit, ThemeColor::from_oklch(0.683, 0.151, 160.997));
+        assert_eq!(dark.loss, ThemeColor::from_oklch(0.674, 0.215, 18.124));
+        assert_eq!(light.popover, light.card);
+        assert_eq!(dark.popover, dark.card);
+        assert_eq!(light.input, light.border);
+        assert_eq!(dark.input, dark.border);
+        assert_eq!(light.accent, light.muted);
+        assert_eq!(dark.accent, dark.muted);
+        assert_eq!(dark.chart_candle_up, dark.profit);
+        assert_eq!(dark.chart_candle_down, dark.loss);
+        assert!((light.chart_volume_up.alpha() - 0.34).abs() < f32::EPSILON);
+        assert!((dark.chart_volume_down.alpha() - 0.28).abs() < f32::EPSILON);
+
+        let light_tokens = AxiusflowTheme::light().color_tokens();
+        let dark_tokens = AxiusflowTheme::dark().color_tokens();
+        assert_eq!(token_source(&light_tokens, "background"), "oklch(1 0 0)");
+        assert_eq!(token_source(&dark_tokens, "card"), "#070a0f");
+        assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
+        assert_eq!(token_source(&dark_tokens, "border"), "#16191f");
+        assert_eq!(token_source(&dark_tokens, "chart_1"), "oklch(0.87 0 0)");
     }
 
     #[test]
