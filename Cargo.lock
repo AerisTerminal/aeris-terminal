@@ -773,9 +773,6 @@ dependencies = [
  "axiusflow_coinbase_coordinator",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_design_system",
- "axiusflow_desktop_history",
- "axiusflow_desktop_provider_runtime",
- "axiusflow_desktop_storage",
  "axiusflow_engine",
  "axiusflow_instruments",
  "axiusflow_local_engine_protocol",
@@ -794,9 +791,7 @@ dependencies = [
  "gpui_platform",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sysinfo",
- "zeroize",
 ]
 
 [[package]]
