@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 33
+**Revision:** 34
 **Last updated:** 2026-08-08
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -600,12 +600,18 @@ diagnostics only as supporting mode evidence. Finalization pins every external
 and supporting artifact by SHA-256 before invoking the matrix verifier. External
 scanout instrumentation is still required; these tools do not synthesize it.
 
-The capture bundle for clean revision `645885f` was prepared on 2026-08-08 with
+The capture bundle for clean revision `f003ebb` was prepared on 2026-08-08 with
 release executable SHA-256
 `5ACB3485508FF602C1BB8B3C94C819ACA39AA0CB71FA56716B8E097C44F6E980`.
-The installed LG display was running at approximately 164 Hz, and no external
-scanout instrument was available to collect the required 60/120/144 Hz physical
-samples. Preparation alone does not satisfy the gate.
+Supporting schema-3 GPUI/DWM profiles passed on the named `LG ULTRAGEAR` at
+59.999 Hz (1920x1080), 119.999 Hz (2560x1440), and 144.000 Hz (2560x1440).
+Their frame-callback p50 values were 16.6649 ms, 8.3364 ms, and 6.9598 ms;
+their SHA-256 hashes are respectively `8F8D2CE79975160390C97214478CF690970E2B812D5A106A428AAFFADDDFE76B`,
+`D36053AD8C8FBE378FAA95A07E067BA157DDE81363D6D60A984A2564D74A9B8C`,
+and `6B72E30D4989CE2477559C15F384320147DF8A1906410FD4A1293AF06681B830`.
+The original 165 Hz display mode was restored after every capture. No external
+scanout instrument was installed or connected, so these supporting compositor
+profiles do not satisfy the physical-presentation gate.
 
 - [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [x] Correct DOM gap recovery.
