@@ -846,6 +846,10 @@ startup; `--rithmic-test` remains the explicit authorized futures path.
 
 ### Gate
 
+Stage G behavior is `unverified` until the P0/P1 findings in
+[`architecture_performance_audit.md`](architecture_performance_audit.md) are
+remediated and its acceptance measurements are recorded.
+
 - [ ] Physical mouse and keyboard interaction opens every palette, operates all
   header/window/drawing controls, and creates drawings on the chart.
 - [x] Dark muted/accent resolve through the existing token names to `#141414`;
@@ -853,7 +857,7 @@ startup; `--rithmic-test` remains the explicit authorized futures path.
 - [ ] Default launch loads Coinbase, fills the visible chart for BTC-USD and
   ETH-USD, switches every interval category, updates live candles and DOM, and
   recovers after a network generation change.
-- [x] Dark/light switching updates platform and Origin atomically without
+- [ ] Dark/light switching updates platform and Origin atomically without
   replacing data, viewport, drawings, or indicators.
 - [x] Catalog, pagination, aggregation, cache, depth recovery, and interaction
   regressions pass with bounded queues and a clean shutdown.
