@@ -8,6 +8,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
@@ -18,8 +19,8 @@ use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument
 use axiusflow_local_engine_protocol::{
     CatalogEntry, CatalogReassembler, ClientHello, ClientKind, EngineFaultCode, EngineReady,
     Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION, ResourceMode,
-    RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, ViewKind, WorkspaceState,
-    encode_envelope, envelope, split_catalog,
+    RestoreWorkspace, SetSelection, SetViewport, SetWatchlist, SubscribeView, ViewKind,
+    WorkspaceState, encode_envelope, envelope, split_catalog,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
@@ -179,6 +180,7 @@ pub struct EngineState {
     workspace: Arc<Mutex<WorkspaceState>>,
     workspace_root: Option<Arc<PathBuf>>,
     selection_callback: Arc<Mutex<Option<SelectionCallback>>>,
+    selection_generation: Arc<AtomicU64>,
 }
 
 impl Default for EngineState {
@@ -187,6 +189,7 @@ impl Default for EngineState {
             workspace: Arc::new(Mutex::new(default_workspace())),
             workspace_root: None,
             selection_callback: Arc::new(Mutex::new(None)),
+            selection_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -201,6 +204,12 @@ impl EngineState {
         fs::create_dir_all(&workspace_root).map_err(redacted_workspace_error)?;
         let mut workspace =
             load_latest_workspace(&workspace_root)?.unwrap_or_else(default_workspace);
+        if let Some(hot_set) = load_latest_hot_set(&workspace_root)?
+            && hot_set.cache_manifest_revision >= workspace.cache_manifest_revision
+        {
+            workspace.cache_manifest_revision = hot_set.cache_manifest_revision;
+            workspace.hot_series = hot_set.hot_series;
+        }
         let migrated = migrate_workspace(&mut workspace);
         if migrated {
             workspace.workspace_revision = workspace.workspace_revision.saturating_add(1);
@@ -209,6 +218,7 @@ impl EngineState {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
             selection_callback: Arc::new(Mutex::new(None)),
+            selection_generation: Arc::new(AtomicU64::new(0)),
         };
         if state.workspace().workspace_revision == 0 || migrated {
             state.persist(&state.workspace())?;
@@ -249,6 +259,8 @@ impl EngineState {
         validate_workspace(&candidate)?;
         self.persist(&candidate)?;
         *workspace = candidate.clone();
+        self.selection_generation
+            .store(selection.selection_generation, Ordering::Release);
         drop(workspace);
         if let Some(callback) = self
             .selection_callback
@@ -258,6 +270,44 @@ impl EngineState {
         {
             callback(candidate.clone());
         }
+        Ok(candidate)
+    }
+
+    fn apply_viewport(&self, viewport: SetViewport) -> Result<WorkspaceState, String> {
+        if viewport.start_unix_nanos >= viewport.end_unix_nanos {
+            return Err("chart viewport is invalid".to_string());
+        }
+        if viewport.selection_generation != self.selection_generation.load(Ordering::Acquire) {
+            return Err("chart viewport selection is stale".to_string());
+        }
+        let mut workspace = self
+            .workspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut candidate = workspace.clone();
+        let provider = candidate.provider.clone();
+        let market = candidate.market.clone();
+        let interval_seconds = candidate.interval_seconds;
+        let Some(series) = candidate.hot_series.iter_mut().find(|series| {
+            series.provider == provider
+                && series.market == market
+                && series.interval_seconds == interval_seconds
+        }) else {
+            return Err("active chart is absent from the hot set".to_string());
+        };
+        if series.viewport_start_unix_nanos == Some(viewport.start_unix_nanos)
+            && series.viewport_end_unix_nanos == Some(viewport.end_unix_nanos)
+        {
+            return Ok(workspace.clone());
+        }
+        series.viewport_start_unix_nanos = Some(viewport.start_unix_nanos);
+        series.viewport_end_unix_nanos = Some(viewport.end_unix_nanos);
+        candidate.cache_manifest_revision = candidate.cache_manifest_revision.saturating_add(1);
+        validate_workspace(&candidate)?;
+        if let Some(root) = &self.workspace_root {
+            persist_hot_set(root, &candidate)?;
+        }
+        *workspace = candidate.clone();
         Ok(candidate)
     }
 
@@ -343,10 +393,7 @@ fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
         return Err("workspace state is invalid".to_string());
     }
     if !matches!(workspace.schema_revision, 0 | WORKSPACE_SCHEMA_REVISION)
-        || !matches!(
-            workspace.cache_manifest_revision,
-            0 | CACHE_MANIFEST_REVISION
-        )
+        || workspace.cache_manifest_revision == u32::MAX
     {
         return Err("workspace revision is unsupported".to_string());
     }
@@ -437,6 +484,10 @@ fn workspace_filename(revision: u64) -> String {
     format!("workspace-{revision:020}.frame")
 }
 
+fn hot_set_filename(revision: u32) -> String {
+    format!("hot-set-{revision:010}.frame")
+}
+
 fn persist_workspace(root: &Path, workspace: &WorkspaceState) -> Result<(), String> {
     validate_workspace(workspace)?;
     let path = root.join(workspace_filename(workspace.workspace_revision));
@@ -481,7 +532,72 @@ fn load_latest_workspace(root: &Path) -> Result<Option<WorkspaceState>, String> 
     Ok(None)
 }
 
+fn persist_hot_set(root: &Path, workspace: &WorkspaceState) -> Result<(), String> {
+    validate_workspace(workspace)?;
+    let path = root.join(hot_set_filename(workspace.cache_manifest_revision));
+    let bytes = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        payload: Some(envelope::Payload::WorkspaceState(workspace.clone())),
+    })
+    .map_err(|_| "workspace hot set could not be encoded".to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(redacted_workspace_error)?;
+    file.write_all(&bytes).map_err(redacted_workspace_error)?;
+    file.sync_all().map_err(redacted_workspace_error)?;
+    for (_, stale) in hot_set_files(root)?.into_iter().skip(2) {
+        fs::remove_file(stale).map_err(redacted_workspace_error)?;
+    }
+    Ok(())
+}
+
+fn load_latest_hot_set(root: &Path) -> Result<Option<WorkspaceState>, String> {
+    for (revision, path) in hot_set_files(root)? {
+        match decode_hot_set_file(&path, revision) {
+            Ok(workspace) => return Ok(Some(workspace)),
+            Err(()) => quarantine_workspace_file(&path)?,
+        }
+    }
+    Ok(None)
+}
+
+fn hot_set_files(root: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
+    let mut files = fs::read_dir(root)
+        .map_err(redacted_workspace_error)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let revision = name
+                .strip_prefix("hot-set-")?
+                .strip_suffix(".frame")?
+                .parse::<u32>()
+                .ok()?;
+            Some((revision, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    files.sort_unstable_by_key(|(revision, _)| std::cmp::Reverse(*revision));
+    Ok(files)
+}
+
+fn decode_hot_set_file(path: &Path, revision: u32) -> Result<WorkspaceState, ()> {
+    let workspace = decode_workspace_payload(path)?;
+    if workspace.cache_manifest_revision != revision || validate_workspace(&workspace).is_err() {
+        return Err(());
+    }
+    Ok(workspace)
+}
+
 fn decode_workspace_file(path: &Path, revision: u64) -> Result<WorkspaceState, ()> {
+    let workspace = decode_workspace_payload(path)?;
+    if workspace.workspace_revision != revision || validate_workspace(&workspace).is_err() {
+        return Err(());
+    }
+    Ok(workspace)
+}
+
+fn decode_workspace_payload(path: &Path) -> Result<WorkspaceState, ()> {
     let bytes = fs::read(path).map_err(|_| ())?;
     let mut decoder = EnvelopeDecoder::try_new().map_err(|_| ())?;
     let mut envelopes = decoder.push(&bytes).map_err(|_| ())?;
@@ -493,9 +609,6 @@ fn decode_workspace_file(path: &Path, revision: u64) -> Result<WorkspaceState, (
     else {
         return Err(());
     };
-    if workspace.workspace_revision != revision || validate_workspace(&workspace).is_err() {
-        return Err(());
-    }
     Ok(workspace)
 }
 
@@ -737,6 +850,25 @@ impl EngineClient {
             .send(envelope::Payload::SetWatchlist(SetWatchlist {
                 markets,
                 workspace_revision,
+            }))?;
+        self.receive_workspace()
+    }
+
+    /// Persists the stable viewport for the active selection without changing its revision.
+    ///
+    /// # Errors
+    /// Returns an error when the selection generation is stale or persistence fails.
+    pub fn set_viewport(
+        &mut self,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+        selection_generation: u64,
+    ) -> Result<WorkspaceState, String> {
+        self.connection
+            .send(envelope::Payload::SetViewport(SetViewport {
+                start_unix_nanos,
+                end_unix_nanos,
+                selection_generation,
             }))?;
         self.receive_workspace()
     }
@@ -1015,6 +1147,9 @@ fn serve_authenticated_session_with_publications(
             envelope::Payload::SetWatchlist(watchlist) => {
                 apply_watchlist(state, watchlist, connection)?;
             }
+            envelope::Payload::SetViewport(viewport) => {
+                apply_viewport(state, viewport, connection)?;
+            }
             envelope::Payload::SubscribeView(subscription) => {
                 let view = ViewKind::try_from(subscription.view)
                     .map_err(|_| "engine view subscription is invalid".to_string())?;
@@ -1058,6 +1193,9 @@ fn serve_authenticated_session(
             envelope::Payload::SetWatchlist(watchlist) => {
                 apply_watchlist(state, watchlist, connection)?;
             }
+            envelope::Payload::SetViewport(viewport) => {
+                apply_viewport(state, viewport, connection)?;
+            }
             envelope::Payload::Goodbye(_) => {
                 connection.send(envelope::Payload::Goodbye(Goodbye {
                     reason: "client session closed".to_string(),
@@ -1100,10 +1238,28 @@ fn apply_watchlist(
     }
 }
 
+fn apply_viewport(
+    state: &EngineState,
+    viewport: SetViewport,
+    connection: &mut FramedConnection,
+) -> Result<(), String> {
+    match state.apply_viewport(viewport) {
+        Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == "chart viewport selection is stale" => {
+            connection.send(cancelled_mutation_fault(error))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn stale_workspace_fault() -> envelope::Payload {
+    cancelled_mutation_fault("workspace revision is stale")
+}
+
+fn cancelled_mutation_fault(detail: impl Into<String>) -> envelope::Payload {
     envelope::Payload::Fault(Fault {
         code: EngineFaultCode::Cancelled as i32,
-        redacted_detail: "workspace revision is stale".to_string(),
+        redacted_detail: detail.into(),
     })
 }
 

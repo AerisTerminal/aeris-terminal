@@ -496,6 +496,7 @@ fn publish_market_message(
         | MarketWorkerMessage::RithmicLive { .. }
         | MarketWorkerMessage::RithmicDom(_)
         | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
+        | MarketWorkerMessage::ChartViewport { .. }
         | MarketWorkerMessage::CoinbaseCatalog(Err(_)) => {}
     }
 }

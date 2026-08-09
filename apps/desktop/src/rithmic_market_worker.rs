@@ -738,7 +738,11 @@ fn process_command(
                 "Rithmic visible history could not be scheduled",
             )
         }
-        Ok(MarketWorkerCommand::Recovery(_) | MarketWorkerCommand::CoinbaseSelect(_))
+        Ok(
+            MarketWorkerCommand::Recovery(_)
+            | MarketWorkerCommand::CoinbaseSelect(_)
+            | MarketWorkerCommand::ChartViewport(_),
+        )
         | Err(TryRecvError::Empty) => return false,
     };
     if dispatch.is_err() {

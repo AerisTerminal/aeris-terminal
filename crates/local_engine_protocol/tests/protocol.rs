@@ -3,8 +3,9 @@ use axiusflow_local_engine_protocol::{
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomBookState, DomLevel, DomRow,
     DomSnapshot, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye,
     HotSeries, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, ProviderConnectionState,
-    ProviderState, ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView,
-    UnsubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope, split_catalog,
+    ProviderState, ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist,
+    SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
+    split_catalog,
 };
 use axiusflow_transport::encode_binary_frame;
 use std::num::NonZeroUsize;
@@ -53,6 +54,11 @@ fn all_payloads() -> Vec<envelope::Payload> {
         envelope::Payload::SetWatchlist(SetWatchlist {
             markets: vec!["SOL-USD".to_string()],
             workspace_revision: 43,
+        }),
+        envelope::Payload::SetViewport(SetViewport {
+            start_unix_nanos: 1_000,
+            end_unix_nanos: 2_000,
+            selection_generation: 9,
         }),
         envelope::Payload::SubscribeView(SubscribeView {
             view: ViewKind::Chart as i32,

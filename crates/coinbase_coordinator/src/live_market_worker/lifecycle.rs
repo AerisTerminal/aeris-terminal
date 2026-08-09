@@ -134,7 +134,8 @@ pub(super) fn forward_commands(
             Ok(
                 MarketWorkerCommand::RithmicSearch(_)
                 | MarketWorkerCommand::RithmicSelect(_)
-                | MarketWorkerCommand::RithmicHistory(_),
+                | MarketWorkerCommand::RithmicHistory(_)
+                | MarketWorkerCommand::ChartViewport(_),
             ) => {}
             Ok(MarketWorkerCommand::Shutdown) | Err(_) => {
                 let _ = inbox_tx.send(WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown));
@@ -164,7 +165,8 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
             | WorkerInboxEvent::Command(
                 MarketWorkerCommand::RithmicSearch(_)
                 | MarketWorkerCommand::RithmicSelect(_)
-                | MarketWorkerCommand::RithmicHistory(_),
+                | MarketWorkerCommand::RithmicHistory(_)
+                | MarketWorkerCommand::ChartViewport(_),
             ) => {}
             WorkerInboxEvent::Environment(event) => {
                 context.state.recovery_announced |= apply_environment_event(

@@ -3,14 +3,16 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicU64, mpsc},
     thread,
+    time::{Duration, Instant},
 };
 
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, ReplayProvenance, ReplayStreamUpdate,
 };
 use axiusflow_coinbase_coordinator::market_worker::{
-    CoinbaseWorkerStartup, MarketDataWorker, MarketWorkerBootstrap, MarketWorkerCommand,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender, market_worker_channel,
+    ChartViewportUpdate, CoinbaseWorkerStartup, MarketDataWorker, MarketWorkerBootstrap,
+    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
+    market_worker_channel,
 };
 use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_engine::{EngineClient, connect_or_start_engine, sibling_engine_executable};
@@ -32,6 +34,7 @@ const MAXIMUM_BUFFERED_BYTES: usize = 2 * MAXIMUM_INNER_FRAME_BYTES;
 const MODEL_ITEM_CAPACITY: usize = 20_000;
 const WORKER_LABEL: &str = "Resident Coinbase market engine";
 const SUBSCRIPTION_ID: &str = "resident_coinbase_market_bars";
+const VIEWPORT_PERSIST_DELAY: Duration = Duration::from_millis(250);
 
 type LatestSnapshot = Arc<Mutex<Option<MarketWorkerBootstrap>>>;
 
@@ -71,16 +74,9 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
             return;
         }
     };
-    let (mut commands, mut workspace) = loop {
-        match connect_commands(&executable) {
-            Ok(connected) => break connected,
-            Err(error) => {
-                if !send_recovering(message_tx, &error) {
-                    return;
-                }
-                thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
+    let Some((mut commands, mut workspace)) = connect_commands_until_ready(message_tx, &executable)
+    else {
+        return;
     };
     let latest_snapshot = Arc::new(Mutex::new(None));
     spawn_session_stream(
@@ -92,10 +88,40 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
         state: axiusflow_coinbase_coordinator::market_worker::ChartState::Loading,
         message: "Attached to the resident market engine".to_string(),
     });
+    publish_restored_viewport(message_tx, &workspace);
 
-    while let Ok(command) = command_rx.recv() {
+    let mut pending_viewport: Option<ChartViewportUpdate> = None;
+    let mut viewport_deadline: Option<Instant> = None;
+    loop {
+        let command = if let Some(deadline) = viewport_deadline {
+            match command_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(command) => command,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    viewport_deadline = None;
+                    if let Some(viewport) = pending_viewport.take()
+                        && let Err(error) = set_viewport_reconnecting(
+                            &mut commands,
+                            &mut workspace,
+                            &executable,
+                            viewport,
+                        )
+                    {
+                        eprintln!("resident viewport was not persisted: {error}");
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            let Ok(command) = command_rx.recv() else {
+                break;
+            };
+            command
+        };
         match command {
             MarketWorkerCommand::CoinbaseSelect(request) => {
+                pending_viewport = None;
+                viewport_deadline = None;
                 let Some(interval_seconds) = interval_seconds(request.interval) else {
                     send_error(message_tx, "unsupported Coinbase interval".to_string());
                     continue;
@@ -113,29 +139,82 @@ fn run_bridge(message_tx: &MarketWorkerSender, command_rx: &mpsc::Receiver<Marke
                         let _ = message_tx.send(MarketWorkerMessage::CoinbaseSwitchMarker {
                             sequence: request.sequence,
                         });
+                        publish_restored_viewport(message_tx, &workspace);
                     }
                     Err(error) => send_error(message_tx, error),
                 }
             }
             MarketWorkerCommand::Recovery(command) => {
-                let result = latest_snapshot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .map(clone_bootstrap)
-                    .ok_or_else(|| {
-                        "resident engine has not published a covering snapshot".to_string()
-                    });
-                let _ = message_tx.send(MarketWorkerMessage::Recovery {
-                    request_id: command.request_id,
-                    result,
-                });
+                publish_recovery(message_tx, &latest_snapshot, command.request_id);
             }
-            MarketWorkerCommand::Shutdown => break,
+            MarketWorkerCommand::ChartViewport(viewport) => {
+                pending_viewport = Some(viewport);
+                viewport_deadline = Some(Instant::now() + VIEWPORT_PERSIST_DELAY);
+            }
+            MarketWorkerCommand::Shutdown => {
+                if let Some(viewport) = pending_viewport.take() {
+                    let _ = set_viewport_reconnecting(
+                        &mut commands,
+                        &mut workspace,
+                        &executable,
+                        viewport,
+                    );
+                }
+                break;
+            }
             MarketWorkerCommand::RithmicSearch(_)
             | MarketWorkerCommand::RithmicSelect(_)
             | MarketWorkerCommand::RithmicHistory(_) => {}
         }
+    }
+}
+
+fn publish_recovery(
+    message_tx: &MarketWorkerSender,
+    latest_snapshot: &LatestSnapshot,
+    request_id: u64,
+) {
+    let result = latest_snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(clone_bootstrap)
+        .ok_or_else(|| "resident engine has not published a covering snapshot".to_string());
+    let _ = message_tx.send(MarketWorkerMessage::Recovery { request_id, result });
+}
+
+fn connect_commands_until_ready(
+    message_tx: &MarketWorkerSender,
+    executable: &Path,
+) -> Option<(EngineClient, WorkspaceState)> {
+    loop {
+        match connect_commands(executable) {
+            Ok(connected) => return Some(connected),
+            Err(error) => {
+                if !send_recovering(message_tx, &error) {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+fn publish_restored_viewport(message_tx: &MarketWorkerSender, workspace: &WorkspaceState) {
+    let viewport = workspace.hot_series.iter().find(|series| {
+        series.provider == workspace.provider
+            && series.market == workspace.market
+            && series.interval_seconds == workspace.interval_seconds
+    });
+    if let Some((start_unix_nanos, end_unix_nanos)) = viewport.and_then(|series| {
+        series
+            .viewport_start_unix_nanos
+            .zip(series.viewport_end_unix_nanos)
+    }) {
+        let _ = message_tx.send(MarketWorkerMessage::ChartViewport {
+            start_unix_nanos,
+            end_unix_nanos,
+        });
     }
 }
 
@@ -286,6 +365,37 @@ fn set_selection_reconnecting(
     )?;
     *commands = replacement;
     Ok(updated)
+}
+
+fn set_viewport_reconnecting(
+    commands: &mut EngineClient,
+    workspace: &mut WorkspaceState,
+    executable: &Path,
+    viewport: ChartViewportUpdate,
+) -> Result<(), String> {
+    if let Ok(updated) = commands.set_viewport(
+        viewport.start_unix_nanos,
+        viewport.end_unix_nanos,
+        viewport.selection_generation,
+    ) {
+        *workspace = updated;
+        return Ok(());
+    }
+    let (mut replacement, restored) = connect_commands(executable)?;
+    replacement.set_selection(
+        workspace.market.clone(),
+        workspace.interval_seconds,
+        restored.workspace_revision,
+        viewport.selection_generation,
+    )?;
+    let updated = replacement.set_viewport(
+        viewport.start_unix_nanos,
+        viewport.end_unix_nanos,
+        viewport.selection_generation,
+    )?;
+    *commands = replacement;
+    *workspace = updated;
+    Ok(())
 }
 
 fn publish_catalog(

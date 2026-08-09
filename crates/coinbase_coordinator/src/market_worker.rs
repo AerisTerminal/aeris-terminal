@@ -148,6 +148,10 @@ pub enum MarketWorkerMessage {
     },
     CoinbaseCatalog(Result<Vec<CoinbaseSpotProduct>, String>),
     CoinbaseDom(DomFrame),
+    ChartViewport {
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+    },
 }
 
 struct MarketWorkerMailbox {
@@ -777,7 +781,8 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<Sessi
         | MarketWorkerMessage::RithmicDom(_)
         | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
         | MarketWorkerMessage::CoinbaseCatalog(_)
-        | MarketWorkerMessage::CoinbaseDom(_) => None,
+        | MarketWorkerMessage::CoinbaseDom(_)
+        | MarketWorkerMessage::ChartViewport { .. } => None,
     }
 }
 
@@ -890,6 +895,7 @@ pub enum MarketWorkerCommand {
     RithmicSelect(RithmicInstrumentSelection),
     RithmicHistory(RithmicSeriesRequest),
     CoinbaseSelect(Box<CoinbaseSelectionRequest>),
+    ChartViewport(ChartViewportUpdate),
     Shutdown,
 }
 
@@ -898,6 +904,13 @@ pub struct CoinbaseSelectionRequest {
     pub sequence: u64,
     pub product: CoinbaseSpotProduct,
     pub interval: ChartInterval,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChartViewportUpdate {
+    pub start_unix_nanos: i64,
+    pub end_unix_nanos: i64,
+    pub selection_generation: u64,
 }
 
 pub struct PendingUiDiagnostics {
@@ -1255,6 +1268,42 @@ impl MarketDataWorker {
         }
     }
 
+    /// Persists a changed chart viewport through the worker boundary without blocking.
+    ///
+    /// # Errors
+    /// Returns the update when the bounded command mailbox is full or disconnected.
+    pub fn try_set_chart_viewport(
+        &self,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+    ) -> Result<(), TrySendError<ChartViewportUpdate>> {
+        let selection_generation = self
+            .coinbase_sequence
+            .as_ref()
+            .map_or(0, |sequence| sequence.load(Ordering::Acquire));
+        let update = ChartViewportUpdate {
+            start_unix_nanos,
+            end_unix_nanos,
+            selection_generation,
+        };
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(update));
+        };
+        commands
+            .try_send(MarketWorkerCommand::ChartViewport(update))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::ChartViewport(update)) => {
+                    TrySendError::Full(update)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::ChartViewport(update)) => {
+                    TrySendError::Disconnected(update)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("viewport send errors retain the viewport command")
+                }
+            })
+    }
+
     #[must_use]
     pub fn ui_diagnostics_sender(&self) -> Option<UiDiagnosticsSender> {
         self.ui_diagnostics.clone()
@@ -1291,14 +1340,16 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::RithmicSearch(_)
                     | MarketWorkerCommand::RithmicSelect(_)
                     | MarketWorkerCommand::RithmicHistory(_)
-                    | MarketWorkerCommand::CoinbaseSelect(_),
+                    | MarketWorkerCommand::CoinbaseSelect(_)
+                    | MarketWorkerCommand::ChartViewport(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::RithmicSearch(_)
                     | MarketWorkerCommand::RithmicSelect(_)
                     | MarketWorkerCommand::RithmicHistory(_)
-                    | MarketWorkerCommand::CoinbaseSelect(_),
+                    | MarketWorkerCommand::CoinbaseSelect(_)
+                    | MarketWorkerCommand::ChartViewport(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }
@@ -1687,7 +1738,8 @@ fn run_worker(
             MarketWorkerCommand::RithmicSearch(_)
             | MarketWorkerCommand::RithmicSelect(_)
             | MarketWorkerCommand::RithmicHistory(_)
-            | MarketWorkerCommand::CoinbaseSelect(_) => {}
+            | MarketWorkerCommand::CoinbaseSelect(_)
+            | MarketWorkerCommand::ChartViewport(_) => {}
             MarketWorkerCommand::Shutdown => return,
         }
     }

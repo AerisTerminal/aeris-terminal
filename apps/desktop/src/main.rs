@@ -251,6 +251,8 @@ struct TerminalApp {
     coinbase_pending_interval: Option<ChartInterval>,
     coinbase_pending_product: Option<CoinbaseSpotProduct>,
     coinbase_pending_sequence: Option<u64>,
+    restored_viewport: Option<(i64, i64)>,
+    last_persisted_viewport: Option<(i64, i64)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,7 +398,20 @@ impl RithmicReconnectState {
 
 fn observe_chart(chart: Option<&Entity<OriginChartView>>, cx: &mut Context<TerminalApp>) {
     if let Some(chart) = chart {
-        cx.observe(chart, |_, _, cx| cx.notify()).detach();
+        cx.observe(chart, |app, chart, cx| {
+            if app.provider == TerminalProvider::Coinbase
+                && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
+                && app.last_persisted_viewport != Some(viewport)
+                && app
+                    .market_worker
+                    .try_set_chart_viewport(viewport.0, viewport.1)
+                    .is_ok()
+            {
+                app.last_persisted_viewport = Some(viewport);
+            }
+            cx.notify();
+        })
+        .detach();
     }
 }
 
@@ -803,6 +818,8 @@ impl TerminalApp {
             coinbase_pending_interval: None,
             coinbase_pending_product: None,
             coinbase_pending_sequence: None,
+            restored_viewport: None,
+            last_persisted_viewport: None,
         };
         let mut async_cx = cx.to_async();
         let this = cx.weak_entity();
@@ -1083,6 +1100,11 @@ impl TerminalApp {
                 let theme = self.theme;
                 let chart =
                     cx.new(move |_| OriginChartView::with_replay_and_theme(&snapshot, &theme));
+                if let Some((start, end)) = self.restored_viewport {
+                    chart.update(cx, |chart, _| {
+                        chart.set_visible_time_range_unix_nanos(start, end);
+                    });
+                }
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
                 (ChartState::Ready, true)
@@ -1294,22 +1316,7 @@ impl TerminalApp {
                 self.set_chart_state(state, message, cx);
             }
             MarketWorkerMessage::CoinbaseSwitchMarker { sequence } => {
-                if self.provider == TerminalProvider::Coinbase
-                    && self.coinbase_switch.is_pending()
-                    && self.coinbase_pending_sequence == Some(sequence)
-                {
-                    if let Some(interval) = self.coinbase_pending_interval.take() {
-                        self.coinbase_interval = interval;
-                    }
-                    if let Some(product) = self.coinbase_pending_product.take() {
-                        self.coinbase_product = Some(product);
-                    }
-                    self.coinbase_pending_sequence = None;
-                    self.coinbase_switch = CoinbaseSwitchState::Idle;
-                    self.chart = None;
-                    self.chart_state = ChartState::Loading;
-                    cx.notify();
-                }
+                self.apply_coinbase_switch_marker(sequence, cx);
             }
             MarketWorkerMessage::Connection { state, message } => {
                 self.apply_connection_state(state, message, cx);
@@ -1354,7 +1361,45 @@ impl TerminalApp {
                 self.dom
                     .update(cx, |dom, dom_cx| dom.replace_frame(frame, dom_cx));
             }
+            MarketWorkerMessage::ChartViewport {
+                start_unix_nanos,
+                end_unix_nanos,
+            } => {
+                let viewport = (start_unix_nanos, end_unix_nanos);
+                self.restored_viewport = Some(viewport);
+                self.last_persisted_viewport = Some(viewport);
+                if let Some(chart) = &self.chart {
+                    chart.update(cx, |chart, chart_cx| {
+                        if chart.set_visible_time_range_unix_nanos(start_unix_nanos, end_unix_nanos)
+                        {
+                            chart_cx.notify();
+                        }
+                    });
+                }
+            }
         }
+    }
+
+    fn apply_coinbase_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
+        if self.provider != TerminalProvider::Coinbase
+            || !self.coinbase_switch.is_pending()
+            || self.coinbase_pending_sequence != Some(sequence)
+        {
+            return;
+        }
+        if let Some(interval) = self.coinbase_pending_interval.take() {
+            self.coinbase_interval = interval;
+        }
+        if let Some(product) = self.coinbase_pending_product.take() {
+            self.coinbase_product = Some(product);
+        }
+        self.coinbase_pending_sequence = None;
+        self.coinbase_switch = CoinbaseSwitchState::Idle;
+        self.chart = None;
+        self.restored_viewport = None;
+        self.last_persisted_viewport = None;
+        self.chart_state = ChartState::Loading;
+        cx.notify();
     }
 
     fn poll_market_worker(&mut self, cx: &mut Context<Self>) -> usize {

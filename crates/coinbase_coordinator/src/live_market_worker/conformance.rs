@@ -751,6 +751,7 @@ fn assert_message_redacted(message: &MarketWorkerMessage) {
         },
         MarketWorkerMessage::CoinbaseDom(_) => "Coinbase depth frame".to_string(),
         MarketWorkerMessage::CoinbaseSwitchMarker { .. } => "Coinbase switch marker".to_string(),
+        MarketWorkerMessage::ChartViewport { .. } => "Chart viewport".to_string(),
         MarketWorkerMessage::Update(publication) => format!(
             "{} {} {}",
             publication.subscription_id,

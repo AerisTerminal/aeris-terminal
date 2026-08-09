@@ -379,6 +379,29 @@ impl OriginChartView {
         self.invalidate_series_frame();
     }
 
+    /// Returns the settled visible time range in Unix nanoseconds.
+    #[must_use]
+    pub fn visible_time_range_unix_nanos(&self) -> Option<(i64, i64)> {
+        let (start, end) = self.engine.visible_time_range()?;
+        let start = (start * 1_000_000_000.0).round().to_i64()?;
+        let end = (end * 1_000_000_000.0).round().to_i64()?;
+        (start < end).then_some((start, end))
+    }
+
+    /// Restores a persisted visible time range without replacing chart data.
+    pub fn set_visible_time_range_unix_nanos(&mut self, start: i64, end: i64) -> bool {
+        if start >= end {
+            return false;
+        }
+        self.engine.set_visible_time_range(
+            start.to_f64().unwrap_or(0.0) / 1_000_000_000.0,
+            end.to_f64().unwrap_or(0.0) / 1_000_000_000.0,
+        );
+        self.invalidate_series_frame();
+        self.fitted = true;
+        true
+    }
+
     /// Adds an indicator with the defaults shown by the legacy native catalog.
     ///
     /// # Errors
@@ -1231,6 +1254,17 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[test]
+    fn visible_time_range_roundtrips_through_persistent_unix_nanos() {
+        let mut chart = interactive_chart();
+        let (start, end) = chart
+            .visible_time_range_unix_nanos()
+            .expect("interactive chart has a viewport");
+        let restored = (start + 60_000_000_000, end - 60_000_000_000);
+        assert!(chart.set_visible_time_range_unix_nanos(restored.0, restored.1));
+        assert_eq!(chart.visible_time_range_unix_nanos(), Some(restored));
     }
 
     #[test]

@@ -248,6 +248,71 @@ fn workspace_selection_is_durable_across_engine_restart() {
 }
 
 #[test]
+fn chart_viewport_is_generation_fenced_and_persisted_independently() {
+    let directory = TestDirectory::new();
+    let state = EngineState::open(&directory.0).expect("open persistent state");
+    let name = unique_name();
+    let listener = bind_listener(&name).expect("bind engine listener");
+    let token = [12_u8; 32];
+    let server = thread::spawn(move || {
+        let stream = listener.accept().expect("accept client");
+        serve_client_with_state(stream, &token, 92, &state).expect("serve client");
+    });
+    let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
+    let restored = client.restore_workspace().expect("restore workspace");
+    let selected = client
+        .set_selection(
+            restored.market,
+            restored.interval_seconds,
+            restored.workspace_revision,
+            7,
+        )
+        .expect("install selection generation");
+    assert_eq!(
+        client
+            .set_viewport(1_000, 2_000, 6)
+            .expect_err("reject stale viewport"),
+        "chart viewport selection is stale"
+    );
+    let first = client
+        .set_viewport(1_000, 2_000, 7)
+        .expect("persist first viewport");
+    let second = client
+        .set_viewport(2_000, 3_000, 7)
+        .expect("persist second viewport");
+    let latest = client
+        .set_viewport(3_000, 4_000, 7)
+        .expect("persist latest viewport");
+    assert_eq!(latest.workspace_revision, selected.workspace_revision);
+    assert_eq!(
+        latest.cache_manifest_revision,
+        first.cache_manifest_revision + 2
+    );
+    assert_eq!(
+        second.cache_manifest_revision,
+        first.cache_manifest_revision + 1
+    );
+    drop(client);
+    server.join().expect("join server");
+
+    let manifests = fs::read_dir(&directory.0)
+        .expect("read workspace directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("hot-set-"))
+        .count();
+    assert_eq!(manifests, 2);
+    let reopened = EngineState::open(&directory.0).expect("reopen persistent state");
+    let active = reopened
+        .workspace()
+        .hot_series
+        .into_iter()
+        .find(|series| series.market == "BTC-USD" && series.interval_seconds == 60)
+        .expect("active hot series");
+    assert_eq!(active.viewport_start_unix_nanos, Some(3_000));
+    assert_eq!(active.viewport_end_unix_nanos, Some(4_000));
+}
+
+#[test]
 fn corrupt_latest_workspace_is_quarantined_and_falls_back() {
     let directory = TestDirectory::new();
     fs::write(

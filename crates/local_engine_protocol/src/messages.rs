@@ -248,6 +248,20 @@ pub struct SetWatchlist {
     pub workspace_revision: u64,
 }
 
+/// Stable chart viewport update for the active selection.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct SetViewport {
+    /// Visible range start in Unix nanoseconds. Tag 1.
+    #[prost(sint64, tag = "1")]
+    pub start_unix_nanos: i64,
+    /// Visible range end in Unix nanoseconds. Tag 2.
+    #[prost(sint64, tag = "2")]
+    pub end_unix_nanos: i64,
+    /// Client selection generation this viewport belongs to. Tag 3.
+    #[prost(uint64, tag = "3")]
+    pub selection_generation: u64,
+}
+
 /// Subscribe to a view's snapshot and delta stream.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct SubscribeView {
@@ -457,10 +471,10 @@ pub struct Envelope {
     /// Protocol version of this envelope; must equal [`crate::PROTOCOL_VERSION`]. Tag 1.
     #[prost(uint32, tag = "1")]
     pub protocol_version: u32,
-    /// Versioned message payload. Tags 2 through 17.
+    /// Versioned message payload. Tags 2 through 18.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -518,5 +532,8 @@ pub mod envelope {
         /// Shutdown notice. Tag 17.
         #[prost(message, tag = "17")]
         Goodbye(super::Goodbye),
+        /// Stable chart viewport update. Tag 18.
+        #[prost(message, tag = "18")]
+        SetViewport(super::SetViewport),
     }
 }
