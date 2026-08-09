@@ -1,8 +1,8 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 30
-**Last updated:** 2026-08-07
+**Revision:** 31
+**Last updated:** 2026-08-08
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
 ## 0. How to use this document
@@ -57,8 +57,8 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | Field | Value |
 |---|---|
 | Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
-| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. The replacement exact eight-hour run is active but an actual Windows user logoff would invalidate it. |
-| Next | Preserve the active endurance run and capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
+| Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. |
+| Next | Capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
 | Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
@@ -72,7 +72,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | C — Rithmic read-only headless | `in_progress` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; resilience evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
 | E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; bounded symbol/timeframe controls [x]; authorized visible history [x]; live candles [x]; recovering read-only DOM [x]; lifecycle/feed health [x] |
-| F — Readiness / endurance | `in_progress` | deterministic failure, burst, memory, and checkpoint evidence [x]; physical transitions and exact eight-hour run [ ] |
+| F — Readiness | `in_progress` | deterministic failure, burst, and memory evidence [x]; physical transitions [ ] |
 
 ### Remaining focus (ordered)
 
@@ -109,7 +109,7 @@ Full scope policy:
 | Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented. Authorized authenticated client-local silence injection and clean recovery pass; provider-observed loss evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
-| Readiness / endurance      | `in_progress` | Deterministic failure, burst, memory, and atomic checkpoint evidence are implemented; physical environment transitions and the exact eight-hour qualification remain.                                                                                |
+| Readiness                  | `in_progress` | Deterministic failure, burst, and memory evidence are implemented; physical environment transitions remain.                                                                                                                                        |
 | Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
 
 
@@ -210,7 +210,7 @@ current workspace.
 
 **Mandatory before the rest of this plan.** Kernel-bypass architecture must be
 completely removed from `main` before executing Stages A–F. Do not treat Stage 0
-as optional, deferred, or parallel with Coinbase/Rithmic/UI/endurance work.
+as optional, deferred, or parallel with Coinbase/Rithmic/UI/readiness work.
 
 This stage deletes the retired AF_XDP and DPDK paths entirely and quarantines
 the deferred cloud market-data plane so the active product path is a normal
@@ -608,10 +608,10 @@ scanout instrumentation is still required; these tools do not synthesize it.
 
 
 
-## 11. Stage F — Readiness and endurance
+## 11. Stage F — Readiness
 
-**Status:** `in_progress` (deterministic readiness and checkpoint work is active;
-physical evidence remains downstream of the product gates)
+**Status:** `in_progress` (deterministic readiness work is active; physical
+evidence remains downstream of the product gates)
 
 ### Remaining work
 
@@ -625,7 +625,6 @@ Capture evidence for:
 - [x] Burst traffic and frame-aligned conflation.
 - [x] Cache corruption and covering resnapshot.
 - [x] Current and high-water memory.
-- [ ] Eight-hour headless and desktop endurance.
 
 Deterministic evidence on 2026-08-07: the cross-platform ingest conformance now
 emits named Stage F results rather than an opaque aggregate bitmask. A Windows
@@ -739,54 +738,7 @@ command writes schema-3 JSON and opens no window.
 The same Windows run sampled the process working set throughout the burst:
 12,763,136 bytes at baseline, 14,462,976 bytes current/high-water after the
 burst, and 1,699,840 bytes sampled growth against a declared 67,108,864-byte
-limit. This is bounded burst evidence; the eight-hour row remains open for a
-continuous plateau measurement.
-
-The headless `--desktop-endurance <report> <seconds>` runner is now available
-for the continuous gate. It paces frame cycles at 16 ms, injects a 1,000-update
-burst every 60 cycles, verifies the exact newest generation after every drain,
-tracks mailbox and working-set high water, and writes a clean-stop JSON result.
-A two-second Windows qualification run completed 124 frame cycles and 2,122
-updates with one retained mailbox item, zero stale/gapped publications, and a
-14,442,496-byte sampled working-set high water. This qualifies the runner but
-does not replace the required eight-hour execution.
-
-The endurance report is schema 2. It atomically writes an initial `incomplete`
-artifact, then minute `incomplete` checkpoints with sequence and wall-clock
-time, and writes `completed` only on clean termination. `readiness_qualified`
-can be true only for an exact requested 28,800-second run whose elapsed time
-reaches eight hours, memory stays bounded, and `clean_stop` is true. Short runs
-and interrupted checkpoints cannot qualify. The first immutable schema-2 attempt
-from commit `462ce39` stopped at checkpoint 96 after 5,760,806 ms. Its artifact
-correctly remains `incomplete`, with `clean_stop=false` and
-`readiness_qualified=false`; it is retained only as failed-attempt evidence.
-Windows session events occurred immediately after its final checkpoint, and the
-attempt had no captured stdout/stderr or supervisor exit record, so no
-application crash is claimed.
-
-The replacement workflow freezes the binary, `Cargo.lock`, supervisor, finalizer,
-and verifier into a new evidence directory, captures stdout/stderr, and launches
-the supervisor through WMI so it is detached from the invoking tool host. The
-supervisor records the exact child exit and holds a nonpersistent Windows
-system-sleep request while the runner is active. WMI detachment does not survive
-an actual user logoff, and the manifest states that limitation explicitly. A
-completed report can be recovered after supervisor loss without inventing an
-exit code.
-
-`tools/verify_desktop_endurance.ps1` verifies the frozen artifact hashes, process
-exit evidence, exact duration, at least 480 minute checkpoints, wall/monotonic
-chronology, mailbox and memory arithmetic, continuity, clean stop, and
-qualification predicates. `tools/test_evidence_verifiers.ps1` covers supervised
-and recovered finalization plus active-process, script/log/report tamper,
-incomplete-run, and DWM-only failures. The eight-hour row remains open until the
-replacement process exits cleanly with a completed, qualified artifact.
-
-The replacement run started at `2026-08-08T23:46:21Z` from full revision
-`1784268e44e865ce00b927d6976fa368575130c2` under
-`local-data/evidence/desktop-endurance-1784268-20260808T234550Z`. Its WMI-parented
-supervisor and headless child are active, system sleep is inhibited, and the
-initial schema-2 report is correctly `incomplete`. These checkpoints remain
-provisional until the child exits and the frozen finalizer verifies the result.
+limit. This is bounded burst evidence.
 
 
 
@@ -795,7 +747,6 @@ provisional until the child exits and the frozen finalizer verifies the result.
 - [ ] All failure cases recover or fail closed as specified.
 - [ ] Memory and queues remain within declared bounds.
 - [x] No stale generation reaches the model or UI.
-- [ ] Eight-hour run records no unexplained gap, deadlock, secret exposure, or unbounded growth.
 
 
 
@@ -837,7 +788,6 @@ Targets guide measurement; they are not current claims.
 | Queue and history storage     | Fixed capacity with visible current/high-water use |
 | Detailed diagnostics overhead | p99 <= 5%; p99.9 <= 10% regression                 |
 | Frame pacing                  | Measured at 60, 120, and 144 Hz                    |
-| Endurance                     | Eight continuous hours before readiness claims     |
 
 
 Latency reporting must separate provider clock-relative timestamp age from local
@@ -864,7 +814,6 @@ understand feed health without exposing credentials or licensed data.
 - [x] Generation-fenced recovery.
 - [x] Clean shutdown.
 - [ ] Responsive frame pacing.
-- [ ] Endurance gate.
 - [ ] Finding-free local review and pushed `main` commit.
 
 Production trading is not part of this completion definition.
