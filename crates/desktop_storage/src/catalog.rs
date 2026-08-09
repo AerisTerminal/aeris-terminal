@@ -2,7 +2,7 @@ use crate::{
     DesktopStorageError,
     model::{CatalogStatistics, RecoveryAction},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::{collections::BTreeSet, path::Path};
 
 const CATALOG_SCHEMA_VERSION: i64 = 2;
@@ -483,6 +483,38 @@ impl Catalog {
         )
     }
 
+    pub fn quarantined_series_records_overlapping(
+        &self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        range: (i64, i64),
+    ) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+        self.query_records(
+            "provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+             AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+             AND source_revision=?7 AND schema_revision=?8 AND calendar_revision=?9
+             AND adjustment_revision=?10 AND correction_revision=?11 AND state=?12
+             AND range_start<?14 AND range_end>?13",
+            params![
+                tokens.provider.as_slice(),
+                tokens.account.as_slice(),
+                tokens.entitlement.as_slice(),
+                tokens.instrument.as_slice(),
+                dimensions.data_kind,
+                tokens.resolution.as_slice(),
+                dimensions.source_revision,
+                dimensions.schema_revision,
+                dimensions.calendar_revision,
+                dimensions.adjustment_revision,
+                i64::try_from(dimensions.correction_revision)
+                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                QUARANTINED_STATE,
+                range.0,
+                range.1,
+            ],
+        )
+    }
+
     fn segment_series_ranges(
         &self,
         tokens: SeriesTokens<'_>,
@@ -637,6 +669,113 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn replace_overlapping_coverage_markers(
+        &mut self,
+        tokens: SeriesTokens<'_>,
+        dimensions: SeriesDimensions,
+        repaired: (i64, i64),
+        replacement_class: Option<i64>,
+        created_at: i64,
+    ) -> Result<(), DesktopStorageError> {
+        let correction_revision = i64::try_from(dimensions.correction_revision)
+            .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?;
+        let mut statement = self.connection.prepare(
+            "SELECT range_start, range_end, class, created_at FROM history_coverage_marker
+             WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+               AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+               AND source_revision=?7 AND schema_revision=?8 AND calendar_revision=?9
+               AND adjustment_revision=?10 AND correction_revision=?11
+               AND range_start<?13 AND range_end>?12",
+        )?;
+        let overlapping = statement
+            .query_map(
+                params![
+                    tokens.provider.as_slice(),
+                    tokens.account.as_slice(),
+                    tokens.entitlement.as_slice(),
+                    tokens.instrument.as_slice(),
+                    dimensions.data_kind,
+                    tokens.resolution.as_slice(),
+                    dimensions.source_revision,
+                    dimensions.schema_revision,
+                    dimensions.calendar_revision,
+                    dimensions.adjustment_revision,
+                    correction_revision,
+                    repaired.0,
+                    repaired.1,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?
+            .collect::<Result<Vec<(i64, i64, i64, i64)>, _>>()?;
+        drop(statement);
+        let residual_count = overlapping
+            .iter()
+            .map(|(start, end, _, _)| {
+                usize::from(*start < repaired.0) + usize::from(*end > repaired.1)
+            })
+            .sum::<usize>();
+        let resulting_count = self
+            .total_count()?
+            .saturating_add(self.coverage_marker_count()?)
+            .saturating_sub(overlapping.len())
+            .saturating_add(residual_count)
+            .saturating_add(usize::from(replacement_class.is_some()));
+        if resulting_count > self.maximum_entries {
+            return Err(DesktopStorageError::CatalogFull {
+                maximum: self.maximum_entries,
+            });
+        }
+        let transaction = self.connection.transaction()?;
+        for (start, end, class, marker_created_at) in overlapping {
+            let marker_parameters = params![
+                tokens.provider.as_slice(),
+                tokens.account.as_slice(),
+                tokens.entitlement.as_slice(),
+                tokens.instrument.as_slice(),
+                dimensions.data_kind,
+                tokens.resolution.as_slice(),
+                start,
+                end,
+                dimensions.source_revision,
+                dimensions.schema_revision,
+                dimensions.calendar_revision,
+                dimensions.adjustment_revision,
+                correction_revision,
+                class,
+            ];
+            transaction.execute(
+                "DELETE FROM history_coverage_marker WHERE provider_token=?1 AND account_token=?2
+                 AND entitlement_token=?3 AND instrument_token=?4 AND data_kind=?5
+                 AND resolution_token=?6 AND range_start=?7 AND range_end=?8
+                 AND source_revision=?9 AND schema_revision=?10 AND calendar_revision=?11
+                 AND adjustment_revision=?12 AND correction_revision=?13 AND class=?14",
+                marker_parameters,
+            )?;
+            for residual in marker_residuals((start, end), repaired) {
+                insert_coverage_marker_in_transaction(
+                    &transaction,
+                    tokens,
+                    dimensions,
+                    residual,
+                    class,
+                    marker_created_at,
+                )?;
+            }
+        }
+        if let Some(class) = replacement_class {
+            insert_coverage_marker_in_transaction(
+                &transaction,
+                tokens,
+                dimensions,
+                repaired,
+                class,
+                created_at,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), DesktopStorageError> {
         let transaction = self.connection.transaction()?;
         for record in records {
@@ -788,6 +927,54 @@ pub(crate) struct SeriesDimensions {
     pub calendar_revision: u32,
     pub adjustment_revision: u32,
     pub correction_revision: u64,
+}
+
+fn marker_residuals(marker: (i64, i64), repaired: (i64, i64)) -> Vec<(i64, i64)> {
+    let mut residuals = Vec::with_capacity(2);
+    if marker.0 < repaired.0 {
+        residuals.push((marker.0, repaired.0.min(marker.1)));
+    }
+    if marker.1 > repaired.1 {
+        residuals.push((repaired.1.max(marker.0), marker.1));
+    }
+    residuals
+}
+
+fn insert_coverage_marker_in_transaction(
+    transaction: &Transaction<'_>,
+    tokens: SeriesTokens<'_>,
+    dimensions: SeriesDimensions,
+    range: (i64, i64),
+    class: i64,
+    created_at: i64,
+) -> Result<(), DesktopStorageError> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO history_coverage_marker(
+             provider_token, account_token, entitlement_token, instrument_token,
+             data_kind, resolution_token, range_start, range_end, source_revision,
+             schema_revision, calendar_revision, adjustment_revision,
+             correction_revision, class, created_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+        params![
+            tokens.provider.as_slice(),
+            tokens.account.as_slice(),
+            tokens.entitlement.as_slice(),
+            tokens.instrument.as_slice(),
+            dimensions.data_kind,
+            tokens.resolution.as_slice(),
+            range.0,
+            range.1,
+            dimensions.source_revision,
+            dimensions.schema_revision,
+            dimensions.calendar_revision,
+            dimensions.adjustment_revision,
+            i64::try_from(dimensions.correction_revision)
+                .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+            class,
+            created_at,
+        ],
+    )?;
+    Ok(())
 }
 
 fn initialize_metadata(

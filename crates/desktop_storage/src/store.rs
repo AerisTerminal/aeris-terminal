@@ -374,6 +374,50 @@ impl HistoryStore {
         self.record_coverage_marker(series, range, INVALIDATED_CLASS, now_unix_seconds)
     }
 
+    /// Supersedes unusable coverage evidence after a provider repair completes.
+    ///
+    /// Invalidated markers are split around the repaired range. Overlapping
+    /// quarantined segments are removed entirely, leaving any unrepaired
+    /// portion missing and therefore eligible for a later fetch.
+    ///
+    /// # Errors
+    /// Returns an error for invalid dimensions, catalog capacity, or cleanup failure.
+    pub fn resolve_repaired_range(
+        &mut self,
+        series: crate::HistorySeriesIdentity<'_>,
+        range: crate::RetainedRange,
+        confirmed_empty: bool,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopStorageError> {
+        series.validate()?;
+        if range.start_unix_nanos >= range.end_unix_nanos {
+            return Err(DesktopStorageError::InvalidIdentity("coverage_range"));
+        }
+        let scope = scope_tokens(&self.catalog_key, series.scope)?;
+        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
+        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
+        let tokens = SeriesTokens {
+            provider: &scope.provider,
+            account: &scope.account,
+            entitlement: &scope.entitlement,
+            instrument: &instrument,
+            resolution: &resolution,
+        };
+        let dimensions = series_dimensions(series);
+        let repaired = (range.start_unix_nanos, range.end_unix_nanos);
+        let quarantined = self
+            .catalog
+            .quarantined_series_records_overlapping(tokens, dimensions, repaired)?;
+        self.remove_records(&quarantined)?;
+        self.catalog.replace_overlapping_coverage_markers(
+            tokens,
+            dimensions,
+            repaired,
+            confirmed_empty.then_some(CONFIRMED_EMPTY_CLASS),
+            now_unix_seconds,
+        )
+    }
+
     fn record_coverage_marker(
         &self,
         series: crate::HistorySeriesIdentity<'_>,

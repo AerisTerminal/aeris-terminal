@@ -326,6 +326,22 @@ where
             .map_err(Into::into)
     }
 
+    /// Resolves invalidated or quarantined evidence after a provider repair.
+    ///
+    /// # Errors
+    /// Returns a redacted wrong-thread, invalid-dimension, or storage failure.
+    pub fn resolve_repaired_history_range(
+        &mut self,
+        series: HistorySeriesIdentity<'_>,
+        range: RetainedRange,
+        confirmed_empty: bool,
+        now_unix_seconds: i64,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.history
+            .resolve_repaired_range(series, range, confirmed_empty, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
     /// Returns active immutable history segments overlapping one requested range.
     ///
     /// # Errors

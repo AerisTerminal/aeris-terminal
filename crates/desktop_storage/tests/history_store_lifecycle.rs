@@ -335,6 +335,145 @@ fn durable_coverage_facts_classify_confirmed_empty_invalidated_and_quarantined_r
 }
 
 #[test]
+fn repaired_ranges_split_invalidations_and_retire_overlapping_quarantine() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-repair");
+    let series = series_identity(&series_scope, "btc-usd");
+    let mut complete = identity(series_scope.clone(), "btc-usd");
+    complete.range_start_unix_nanos = 0;
+    complete.range_end_unix_nanos = 20;
+    let mut corrupt = complete.clone();
+    corrupt.range_start_unix_nanos = 60;
+    corrupt.range_end_unix_nanos = 100;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 16).expect("store opens");
+    publish(
+        &mut store,
+        &complete,
+        &key,
+        b"complete",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    );
+    let corrupt_receipt = receipt(publish(
+        &mut store,
+        &corrupt,
+        &key,
+        b"corrupt",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    ));
+    store
+        .record_invalidated_range(
+            series,
+            RetainedRange {
+                start_unix_nanos: 20,
+                end_unix_nanos: 60,
+            },
+            100,
+        )
+        .expect("invalidation persists");
+    overwrite_for_fault(
+        &root.path().join("segments").join(corrupt_receipt.file_name),
+        b"damaged",
+    );
+    let _ = store
+        .read(&corrupt, &key, 101, RecoveryAction::ProviderRefetch)
+        .expect("corruption becomes quarantine");
+    store
+        .resolve_repaired_range(
+            series,
+            RetainedRange {
+                start_unix_nanos: 30,
+                end_unix_nanos: 50,
+            },
+            true,
+            102,
+        )
+        .expect("invalidated subrange resolves");
+    store
+        .resolve_repaired_range(
+            series,
+            RetainedRange {
+                start_unix_nanos: 70,
+                end_unix_nanos: 90,
+            },
+            true,
+            102,
+        )
+        .expect("quarantined subrange resolves");
+    assert_repaired_coverage(&store, series);
+}
+
+fn assert_repaired_coverage(store: &HistoryStore, series: HistorySeriesIdentity<'_>) {
+    let plan = store
+        .series_coverage_snapshot(series, 103)
+        .expect("resolved coverage reads")
+        .plan(HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 110,
+        })
+        .expect("coverage plans");
+    assert_eq!(
+        plan.spans()
+            .iter()
+            .map(|span| (span.range, span.class))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                HistoryRange {
+                    start_unix_nanos: 0,
+                    end_unix_nanos: 20
+                },
+                CoverageClass::Complete
+            ),
+            (
+                HistoryRange {
+                    start_unix_nanos: 20,
+                    end_unix_nanos: 30
+                },
+                CoverageClass::Invalidated
+            ),
+            (
+                HistoryRange {
+                    start_unix_nanos: 30,
+                    end_unix_nanos: 50
+                },
+                CoverageClass::ConfirmedEmpty
+            ),
+            (
+                HistoryRange {
+                    start_unix_nanos: 50,
+                    end_unix_nanos: 60
+                },
+                CoverageClass::Invalidated
+            ),
+            (
+                HistoryRange {
+                    start_unix_nanos: 60,
+                    end_unix_nanos: 70
+                },
+                CoverageClass::Missing
+            ),
+            (
+                HistoryRange {
+                    start_unix_nanos: 70,
+                    end_unix_nanos: 90
+                },
+                CoverageClass::ConfirmedEmpty
+            ),
+            (
+                HistoryRange {
+                    start_unix_nanos: 90,
+                    end_unix_nanos: 110
+                },
+                CoverageClass::Missing
+            ),
+        ]
+    );
+}
+
+#[test]
 fn legacy_catalog_additively_migrates_to_durable_coverage_markers() {
     let root = TestRoot::create();
     drop(HistoryStore::open(root.path(), catalog_key(), 4).expect("store initializes"));

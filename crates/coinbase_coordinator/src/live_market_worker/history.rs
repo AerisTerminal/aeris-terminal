@@ -444,17 +444,15 @@ fn persist_history_repairs<V: axiusflow_platform_runtime::CredentialVault>(
     };
     let series = history_series(&scope, profile);
     for repair in &history.repairs {
-        if repair.completion.page().items.is_empty() {
-            worker
-                .record_confirmed_empty_history(
-                    series,
-                    RetainedRange {
-                        start_unix_nanos: repair.identity.range_start_unix_nanos,
-                        end_unix_nanos: repair.identity.range_end_unix_nanos,
-                    },
-                    now_seconds,
-                )
-                .map_err(|error| error.to_string())?;
+        let range = RetainedRange {
+            start_unix_nanos: repair.identity.range_start_unix_nanos,
+            end_unix_nanos: repair.identity.range_end_unix_nanos,
+        };
+        let empty = repair.completion.page().items.is_empty();
+        worker
+            .resolve_repaired_history_range(series, range, empty, now_seconds)
+            .map_err(|error| error.to_string())?;
+        if empty {
             continue;
         }
         let payload = encode_history_segment(&repair.completion.page().items)?;
