@@ -129,6 +129,27 @@ impl HistoryStore {
         self.publish_retained(&request, retention_until)
     }
 
+    /// Replaces a bounded copy-on-write active tail after the new encrypted
+    /// generation is durably published. A crash can retain overlap, never lose
+    /// the previously durable prefix.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identities, rights, storage, or catalog failure.
+    pub fn replace_active_tail(
+        &mut self,
+        previous: Option<&crate::SegmentIdentity>,
+        request: PublicationRequest<'_>,
+    ) -> Result<PublicationOutcome, DesktopStorageError> {
+        let outcome = self.publish(request)?;
+        if matches!(outcome, PublicationOutcome::Published(_))
+            && let Some(previous) = previous
+            && previous != request.identity
+        {
+            self.remove_retained_identity(previous)?;
+        }
+        Ok(outcome)
+    }
+
     /// Reads and authenticates one exact scope-bound segment.
     ///
     /// # Errors
@@ -684,6 +705,46 @@ impl HistoryStore {
     /// Returns an error when the catalog cannot be queried.
     pub fn statistics(&self) -> Result<CatalogStatistics, DesktopStorageError> {
         self.catalog.statistics()
+    }
+
+    /// Enforces a payload quota by evicting only oldest derived acceleration
+    /// segments. Raw bars, ticks, and depth are never quota candidates.
+    ///
+    /// # Errors
+    /// Returns an error when catalog or owned-file removal fails.
+    pub fn enforce_derived_quota(
+        &mut self,
+        maximum_payload_bytes: u64,
+    ) -> Result<crate::QuotaEnforcementReport, DesktopStorageError> {
+        let mut derived = self
+            .catalog
+            .active_records()?
+            .into_iter()
+            .filter(|record| record.data_kind == crate::DataKind::Derived.code())
+            .collect::<Vec<_>>();
+        derived.sort_by_key(|record| (record.created_at, record.file_name.clone()));
+        let mut retained = derived.iter().fold(0_u64, |total, record| {
+            total.saturating_add(record.payload_bytes)
+        });
+        let remove_count = derived
+            .iter()
+            .take_while(|record| {
+                if retained <= maximum_payload_bytes {
+                    return false;
+                }
+                retained = retained.saturating_sub(record.payload_bytes);
+                true
+            })
+            .count();
+        let removed_bytes = derived[..remove_count].iter().fold(0_u64, |total, record| {
+            total.saturating_add(record.payload_bytes)
+        });
+        self.remove_records(&derived[..remove_count])?;
+        Ok(crate::QuotaEnforcementReport {
+            entries_removed: remove_count,
+            payload_bytes_removed: removed_bytes,
+            payload_bytes_retained: retained,
+        })
     }
 
     fn publish_retained(

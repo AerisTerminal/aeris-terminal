@@ -48,6 +48,93 @@ pub(super) struct PreparedHistoryBatch {
     pub(super) received_unix_nanos: i64,
 }
 
+#[derive(Default)]
+pub(super) struct ActiveHistoryTail {
+    items: Vec<HistoryItem>,
+    durable_identity: Option<SegmentIdentity>,
+}
+
+impl ActiveHistoryTail {
+    pub(super) fn seal(&mut self) {
+        self.items.clear();
+        self.durable_identity = None;
+    }
+}
+
+const ACTIVE_TAIL_MAXIMUM_BARS: usize = 32;
+const ACTIVE_TAIL_MAXIMUM_NANOS: i64 = 30 * 60 * 1_000_000_000;
+
+pub(super) fn persist_live_tail<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    profile: &ProductProfile,
+    tail: &mut ActiveHistoryTail,
+    bar: MarketBar,
+    segment_key: &SegmentEncryptionKey,
+    now_unix_nanos: i64,
+) -> Result<(), String> {
+    let start = bar
+        .exchange_timestamp_seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase active-tail timestamp overflow".to_string())?;
+    let interval_nanos = history_interval_nanos(profile)?;
+    let end = start
+        .checked_add(interval_nanos)
+        .ok_or_else(|| "Coinbase active-tail range overflow".to_string())?;
+    if tail.items.last().is_some_and(|previous| {
+        previous.event_time_unix_nanos >= start
+            || previous
+                .event_time_unix_nanos
+                .saturating_add(interval_nanos)
+                != start
+    }) {
+        tail.seal();
+    }
+    tail.items.push(HistoryItem {
+        sequence: bar.source_sequence,
+        event_time_unix_nanos: start,
+        payload: encode_history_bar(bar),
+    });
+    let tail_start = tail
+        .items
+        .first()
+        .map_or(start, |item| item.event_time_unix_nanos);
+    let identity = history_identity(profile, tail_start, end);
+    let payload = encode_history_segment(&tail.items)?;
+    worker
+        .replace_active_history_tail(
+            tail.durable_identity.as_ref(),
+            PublicationRequest {
+                identity: &identity,
+                payload: &payload,
+                encryption_key: segment_key,
+                retention: RetentionPolicy::UntilRevoked,
+                recovery: RecoveryAction::ProviderRefetch,
+                now_unix_seconds: now_unix_nanos / 1_000_000_000,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    tail.durable_identity = Some(identity);
+    if tail.items.len() >= ACTIVE_TAIL_MAXIMUM_BARS
+        || end.saturating_sub(tail_start) >= ACTIVE_TAIL_MAXIMUM_NANOS
+    {
+        tail.seal();
+    }
+    Ok(())
+}
+
+fn history_interval_nanos(profile: &ProductProfile) -> Result<i64, String> {
+    let seconds = match profile.interval.aggregation() {
+        axiusflow_market_data::ChartAggregation::FixedSeconds(seconds) => i64::from(seconds.get()),
+        axiusflow_market_data::ChartAggregation::CalendarMonth => 30 * 24 * 60 * 60,
+        axiusflow_market_data::ChartAggregation::Trades(_) => {
+            return Err("Coinbase trade-count tails are unsupported".to_string());
+        }
+    };
+    seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase active-tail interval overflow".to_string())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FetchPhase {
     Recent,

@@ -24,6 +24,8 @@ pub(crate) struct CatalogRecord {
     pub file_checksum: [u8; 32],
     pub payload_checksum: [u8; 32],
     pub payload_bytes: u64,
+    pub data_kind: u8,
+    pub created_at: i64,
     pub key_id: String,
     pub key_verifier: [u8; 32],
     pub retention_until: Option<i64>,
@@ -220,7 +222,7 @@ impl Catalog {
             .query_row(
                 "SELECT segment_id, file_name, file_checksum, payload_checksum,
                         payload_bytes, key_id, key_verifier, retention_until, recovery_action,
-                        state, quarantine_file_name
+                        state, quarantine_file_name, data_kind, created_at
                  FROM history_segment WHERE segment_id=?1",
                 [segment_id.as_slice()],
                 map_record,
@@ -900,7 +902,7 @@ impl Catalog {
         let sql = format!(
             "SELECT segment_id, file_name, file_checksum, payload_checksum,
                     payload_bytes, key_id, key_verifier, retention_until, recovery_action,
-                    state, quarantine_file_name
+                    state, quarantine_file_name, data_kind, created_at
              FROM history_segment WHERE {predicate}"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -1050,6 +1052,8 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogRecord> {
         recovery: RecoveryAction::from_code(recovery).map_err(|_| conversion_error(8))?,
         quarantined: state == QUARANTINED_STATE,
         quarantine_file_name: row.get(10)?,
+        data_kind: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 

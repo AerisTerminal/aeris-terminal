@@ -54,8 +54,9 @@ use composition::{
 };
 use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
-    DirectHistorySource, FetchPhase, HistorySource, InitialHistoryContext, PreparedHistoryBatch,
-    StreamingSeriesContext, history_request_range, needs_recent_phase, prepare_initial_history,
+    ActiveHistoryTail, DirectHistorySource, FetchPhase, HistorySource, InitialHistoryContext,
+    PreparedHistoryBatch, StreamingSeriesContext, history_request_range, needs_recent_phase,
+    persist_live_tail, prepare_initial_history,
 };
 use lifecycle::{
     DrainSignal, EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
@@ -88,6 +89,7 @@ struct LiveLoopState {
     reconnect_backoff: ReconnectBackoff,
     recovery_announced: bool,
     pending_recovery: VecDeque<ReplayRecoveryCommand>,
+    active_tail: ActiveHistoryTail,
 }
 
 pub(super) struct InflightHistory {
@@ -150,6 +152,8 @@ struct CoinbaseCallbackContext<'a> {
     level2: &'a mut Option<CoinbaseLevel2Book>,
     dom: &'a mut axiusflow_terminal_ui::ReadOnlyDom,
     message_tx: &'a MarketWorkerSender,
+    active_tail: &'a mut ActiveHistoryTail,
+    segment_key: &'a SegmentEncryptionKey,
 }
 
 /// Starts the live Coinbase coordinator and its bounded worker set.
@@ -446,6 +450,7 @@ fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: His
             reconnect_backoff: ReconnectBackoff::new(),
             recovery_announced: false,
             pending_recovery: VecDeque::with_capacity(COMMAND_CAPACITY),
+            active_tail: ActiveHistoryTail::default(),
         },
         level2: None,
         dom: axiusflow_terminal_ui::ReadOnlyDom::new(coinbase_depth_limit()),
@@ -715,6 +720,8 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
             level2: &mut running.level2,
             dom: &mut running.dom,
             message_tx,
+            active_tail: &mut running.state.active_tail,
+            segment_key: &running.segment_key,
         },
     )?;
 
@@ -984,6 +991,8 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
         level2,
         dom,
         message_tx,
+        active_tail,
+        segment_key,
     } = context;
     for _ in 0..PROVIDER_EVENT_BATCH {
         if !events.has_ready() {
@@ -1027,7 +1036,7 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
             continue;
         }
         if profile.interval != axiusflow_market_data::ChartInterval::Minute1 {
-            publish_aggregated_coinbase_interval(
+            if let Some(finalized) = publish_aggregated_coinbase_interval(
                 worker,
                 generation,
                 completed,
@@ -1038,10 +1047,13 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
                 instrument,
                 bar_definition,
                 message_tx,
-            )?;
+            )? {
+                persist_tail_bar(worker, profile, active_tail, finalized, segment_key)?;
+            }
             continue;
         }
         let item = live_provenance(completed, generation)?;
+        let durable_bar = *item.value();
         let previous = retained
             .back()
             .ok_or_else(|| "Coinbase live stream has no snapshot predecessor".to_string())?
@@ -1053,6 +1065,7 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
         if retained.len() > MODEL_ITEM_CAPACITY {
             retained.pop_front();
         }
+        persist_tail_bar(worker, profile, active_tail, durable_bar, segment_key)?;
         publish_update(
             worker,
             generation,
@@ -1063,6 +1076,23 @@ fn drain_coinbase_callbacks<V: axiusflow_platform_runtime::CredentialVault>(
         )?;
     }
     Ok(())
+}
+
+fn persist_tail_bar<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    profile: &ProductProfile,
+    active_tail: &mut ActiveHistoryTail,
+    bar: axiusflow_market_data::MarketBar,
+    segment_key: &SegmentEncryptionKey,
+) -> Result<(), String> {
+    persist_live_tail(
+        worker,
+        profile,
+        active_tail,
+        bar,
+        segment_key,
+        unix_nanos()?,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1077,7 +1107,7 @@ fn publish_aggregated_coinbase_interval<V: axiusflow_platform_runtime::Credentia
     instrument: &InstrumentRevision,
     bar_definition: &BarDefinition,
     message_tx: &MarketWorkerSender,
-) -> Result<(), String> {
+) -> Result<Option<axiusflow_market_data::MarketBar>, String> {
     let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
     let (bucket, _) = aggregate_coinbase_bars(&[completed.bar], interval)?;
     let mut bucket = *bucket
@@ -1091,6 +1121,11 @@ fn publish_aggregated_coinbase_interval<V: axiusflow_platform_runtime::Credentia
     let replace_last = retained.back().is_some_and(|previous| {
         previous.value().exchange_timestamp_seconds == bucket.exchange_timestamp_seconds
     });
+    let finalized = if replace_last {
+        None
+    } else {
+        retained.back().map(|previous| *previous.value())
+    };
     if replace_last {
         let previous = *retained
             .back()
@@ -1138,7 +1173,8 @@ fn publish_aggregated_coinbase_interval<V: axiusflow_platform_runtime::Credentia
         ReplayStreamUpdate::Snapshot(snapshot),
         worker_label,
         message_tx,
-    )
+    )?;
+    Ok(finalized)
 }
 
 fn publish_coinbase_depth(

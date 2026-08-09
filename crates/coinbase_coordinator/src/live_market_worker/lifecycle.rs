@@ -169,7 +169,7 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                 | MarketWorkerCommand::ChartViewport(_),
             ) => {}
             WorkerInboxEvent::Environment(event) => {
-                context.state.recovery_announced |= apply_environment_event(
+                let lifecycle_changed = apply_environment_event(
                     context.worker,
                     context.events,
                     event,
@@ -178,6 +178,10 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                     &mut context.state.retained,
                     context.message_tx,
                 )?;
+                context.state.recovery_announced |= lifecycle_changed;
+                if lifecycle_changed {
+                    context.state.active_tail.seal();
+                }
             }
             WorkerInboxEvent::HistoryCompleted {
                 generation,

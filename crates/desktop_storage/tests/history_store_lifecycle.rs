@@ -232,6 +232,127 @@ fn retained_coverage_merges_exact_series_segments_and_reports_gaps() {
 }
 
 #[test]
+fn active_tail_replacement_commits_new_generation_before_retiring_old() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let tail_scope = scope("public", "rights-1");
+    let first = identity(tail_scope.clone(), "btc-usd");
+    let mut replacement = first.clone();
+    replacement.range_end_unix_nanos += 60_000_000_000;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 32).expect("store opens");
+    publish(
+        &mut store,
+        &first,
+        &key,
+        b"first",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    );
+    store
+        .replace_active_tail(
+            Some(&first),
+            PublicationRequest {
+                identity: &replacement,
+                payload: b"first+second",
+                encryption_key: &key,
+                retention: RetentionPolicy::UntilRevoked,
+                recovery: RecoveryAction::ProviderRefetch,
+                now_unix_seconds: 101,
+            },
+        )
+        .expect("replacement commits");
+    assert_eq!(
+        store
+            .read(&first, &key, 102, RecoveryAction::ProviderRefetch)
+            .expect("retired identity reads as a miss"),
+        HistoryRead::Unavailable {
+            reason: AvailabilityReason::NotCached,
+            recovery: RecoveryAction::ProviderRefetch,
+        }
+    );
+    assert_eq!(
+        store
+            .read(&replacement, &key, 102, RecoveryAction::ProviderRefetch)
+            .expect("replacement reads"),
+        HistoryRead::Hit(b"first+second".to_vec())
+    );
+    assert_eq!(
+        store.statistics().expect("statistics read").active_entries,
+        1
+    );
+}
+
+#[test]
+fn quota_evicts_oldest_derived_segments_without_touching_raw_history() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let quota_scope = scope("public", "rights-1");
+    let raw = identity(quota_scope.clone(), "btc-usd");
+    let mut first_derived = raw.clone();
+    first_derived.data_kind = DataKind::Derived;
+    first_derived.resolution = "ema-20-v1".to_string();
+    let mut second_derived = first_derived.clone();
+    second_derived.range_start_unix_nanos = first_derived.range_end_unix_nanos;
+    second_derived.range_end_unix_nanos += 60_000_000_000;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 32).expect("store opens");
+    publish(
+        &mut store,
+        &raw,
+        &key,
+        b"raw-history",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    );
+    publish(
+        &mut store,
+        &first_derived,
+        &key,
+        b"old-checkpoint",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    );
+    store
+        .publish(PublicationRequest {
+            identity: &second_derived,
+            payload: b"new-checkpoint",
+            encryption_key: &key,
+            retention: RetentionPolicy::UntilRevoked,
+            recovery: RecoveryAction::ProviderRefetch,
+            now_unix_seconds: 101,
+        })
+        .expect("new checkpoint publishes");
+    let report = store
+        .enforce_derived_quota(b"new-checkpoint".len() as u64)
+        .expect("quota enforcement succeeds");
+    assert_eq!(report.entries_removed, 1);
+    assert_eq!(
+        report.payload_bytes_retained,
+        b"new-checkpoint".len() as u64
+    );
+    assert_eq!(
+        store
+            .read(&raw, &key, 102, RecoveryAction::ProviderRefetch)
+            .expect("raw history remains"),
+        HistoryRead::Hit(b"raw-history".to_vec())
+    );
+    assert_eq!(
+        store
+            .read(&first_derived, &key, 102, RecoveryAction::ProviderRefetch)
+            .expect("old checkpoint is evicted"),
+        HistoryRead::Unavailable {
+            reason: AvailabilityReason::NotCached,
+            recovery: RecoveryAction::ProviderRefetch,
+        }
+    );
+    assert_eq!(
+        store
+            .read(&second_derived, &key, 102, RecoveryAction::ProviderRefetch)
+            .expect("new checkpoint remains"),
+        HistoryRead::Hit(b"new-checkpoint".to_vec())
+    );
+}
+
+#[test]
 fn durable_coverage_facts_classify_confirmed_empty_invalidated_and_quarantined_ranges() {
     let root = TestRoot::create();
     let key = segment_key();

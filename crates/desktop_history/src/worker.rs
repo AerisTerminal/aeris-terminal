@@ -168,6 +168,36 @@ impl<T: Clone> HistoryWorker<T> {
             .map_err(Into::into)
     }
 
+    /// Publishes a copy-on-write active tail and retires its prior generation.
+    ///
+    /// # Errors
+    /// Returns an error for wrong-thread, identity, rights, bounds, or storage failures.
+    pub fn replace_active_tail(
+        &mut self,
+        previous: Option<&SegmentIdentity>,
+        request: PublicationRequest<'_>,
+    ) -> Result<(), DesktopHistoryError> {
+        self.ensure_owner()?;
+        self.store
+            .replace_active_tail(previous, request)
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    /// Enforces the derived acceleration quota through the sole store owner.
+    ///
+    /// # Errors
+    /// Returns an error for wrong-thread, catalog, or owned-file failure.
+    pub fn enforce_derived_quota(
+        &mut self,
+        maximum_payload_bytes: u64,
+    ) -> Result<axiusflow_desktop_storage::QuotaEnforcementReport, DesktopHistoryError> {
+        self.ensure_owner()?;
+        self.store
+            .enforce_derived_quota(maximum_payload_bytes)
+            .map_err(Into::into)
+    }
+
     /// Returns normalized durable coverage facts for one exact series revision.
     ///
     /// # Errors

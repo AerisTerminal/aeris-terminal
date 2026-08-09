@@ -454,6 +454,14 @@ pub struct CatalogStatistics {
     pub maximum_entries: usize,
 }
 
+/// Deterministic result of evicting only eligible derived acceleration data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuotaEnforcementReport {
+    pub entries_removed: usize,
+    pub payload_bytes_removed: u64,
+    pub payload_bytes_retained: u64,
+}
+
 pub(crate) fn validate_identifier(
     field: &'static str,
     value: &str,

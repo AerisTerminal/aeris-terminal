@@ -282,6 +282,33 @@ where
         self.history.persist_segment(request).map_err(Into::into)
     }
 
+    /// Publishes a copy-on-write active history tail through the sole store owner.
+    ///
+    /// # Errors
+    /// Returns a redacted wrong-thread, identity, rights, bounds, or storage failure.
+    pub fn replace_active_history_tail(
+        &mut self,
+        previous: Option<&SegmentIdentity>,
+        request: PublicationRequest<'_>,
+    ) -> Result<(), DesktopMarketWorkerError> {
+        self.history
+            .replace_active_tail(previous, request)
+            .map_err(Into::into)
+    }
+
+    /// Enforces the derived acceleration quota through the sole history owner.
+    ///
+    /// # Errors
+    /// Returns a redacted wrong-thread, catalog, or owned-file failure.
+    pub fn enforce_derived_history_quota(
+        &mut self,
+        maximum_payload_bytes: u64,
+    ) -> Result<axiusflow_desktop_storage::QuotaEnforcementReport, DesktopMarketWorkerError> {
+        self.history
+            .enforce_derived_quota(maximum_payload_bytes)
+            .map_err(Into::into)
+    }
+
     /// Returns the newest retained identity for one exact history series revision.
     ///
     /// # Errors
