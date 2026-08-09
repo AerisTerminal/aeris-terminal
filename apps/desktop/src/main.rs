@@ -5,10 +5,7 @@ mod chart_chrome;
 mod readiness_conformance;
 mod resident_market_worker;
 mod rithmic_history;
-mod rithmic_live_chart;
-mod rithmic_market_worker;
 mod rithmic_shell;
-mod rithmic_transition_capture;
 mod windowed_benchmark;
 
 use axiusflow_application::ReplayStreamUpdate;
@@ -20,6 +17,7 @@ use axiusflow_coinbase_coordinator::market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
     UiDiagnosticsFeedback,
 };
+use axiusflow_coinbase_coordinator::rithmic_market_worker;
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_market_data::{ChartAggregation, ChartInterval};

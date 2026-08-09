@@ -1,3 +1,4 @@
+use crate as axiusflow_coinbase_coordinator;
 use crate::{
     rithmic_history::{
         InstalledRithmicInstrument, RithmicHistoryResult, RithmicHistoryTask, RithmicSeriesRequest,
@@ -156,7 +157,11 @@ impl RithmicRuntimeState {
     }
 }
 
-pub(crate) fn start(
+/// Starts the bounded Rithmic worker behind the shared coordinator boundary.
+///
+/// # Errors
+/// Returns a redacted configuration, credential, storage, monitor, or worker-start failure.
+pub fn start(
     history_root: PathBuf,
     ui_thread: ThreadId,
     detailed_diagnostics: bool,

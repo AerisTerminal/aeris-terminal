@@ -21,6 +21,9 @@ axiusflow_provider_history = { path = "../provider_history" }
 axiusflow_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 axiusflow_terminal_ui = { path = "../ui/terminal_ui", default-features = false }
 getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

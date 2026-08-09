@@ -4,7 +4,8 @@ use std::num::NonZeroUsize;
 #[cfg(test)]
 use axiusflow_observability::FeedConnectionState;
 
-pub(crate) use axiusflow_coinbase_coordinator::rithmic_shell::RithmicShellState;
+#[cfg(test)]
+use axiusflow_coinbase_coordinator::rithmic_shell::RithmicShellState;
 
 pub(crate) const MAXIMUM_SYMBOL_QUERY_BYTES: usize = 64;
 pub(crate) const MAXIMUM_SYMBOL_RESULTS: usize = 64;

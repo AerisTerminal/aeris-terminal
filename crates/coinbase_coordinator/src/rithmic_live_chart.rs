@@ -9,13 +9,13 @@ const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const MAXIMUM_LIVE_CHART_BARS: usize = 300;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RithmicChartGeneration {
-    pub(crate) selection: NonZeroUsize,
-    pub(crate) series: NonZeroUsize,
+pub struct RithmicChartGeneration {
+    pub selection: NonZeroUsize,
+    pub series: NonZeroUsize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RithmicLiveChartUpdate {
+pub enum RithmicLiveChartUpdate {
     ReplaceForming {
         forming: MarketBar,
     },
@@ -26,13 +26,15 @@ pub(crate) enum RithmicLiveChartUpdate {
 }
 
 impl RithmicLiveChartUpdate {
-    pub(crate) const fn forming(self) -> MarketBar {
+    #[must_use]
+    pub const fn forming(self) -> MarketBar {
         match self {
             Self::ReplaceForming { forming } | Self::CompleteAndStart { forming, .. } => forming,
         }
     }
 
-    pub(crate) const fn completed(self) -> Option<MarketBar> {
+    #[must_use]
+    pub const fn completed(self) -> Option<MarketBar> {
         match self {
             Self::ReplaceForming { .. } => None,
             Self::CompleteAndStart { completed, .. } => Some(completed),
@@ -40,7 +42,8 @@ impl RithmicLiveChartUpdate {
     }
 
     #[cfg(test)]
-    pub(crate) const fn bar_count(self) -> usize {
+    #[must_use]
+    pub const fn bar_count(self) -> usize {
         match self {
             Self::ReplaceForming { .. } => 1,
             Self::CompleteAndStart { .. } => 2,
@@ -49,7 +52,7 @@ impl RithmicLiveChartUpdate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RithmicLiveChartError {
+pub enum RithmicLiveChartError {
     EmptyHistory,
     InvalidTrade,
     StaleGeneration,
@@ -89,7 +92,7 @@ impl fmt::Display for RithmicLiveChartError {
 
 impl std::error::Error for RithmicLiveChartError {}
 
-pub(crate) struct RithmicLiveChart {
+pub struct RithmicLiveChart {
     generation: RithmicChartGeneration,
     instrument: InstrumentRevision,
     replay_provenance: ReplayProvenance,
@@ -117,14 +120,18 @@ enum LiveCadence {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RithmicLiveChartPublication {
-    pub(crate) generation: RithmicChartGeneration,
-    pub(crate) update: RithmicLiveChartUpdate,
-    pub(crate) snapshot: ReplaySnapshot,
+pub struct RithmicLiveChartPublication {
+    pub generation: RithmicChartGeneration,
+    pub update: RithmicLiveChartUpdate,
+    pub snapshot: ReplaySnapshot,
 }
 
 impl RithmicLiveChart {
-    pub(crate) fn from_history(
+    /// Creates a generation-fenced live chart from one covering history snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the snapshot is empty, malformed, or unsupported.
+    pub fn from_history(
         generation: RithmicChartGeneration,
         snapshot: &ReplaySnapshot,
     ) -> Result<Self, RithmicLiveChartError> {
@@ -175,16 +182,22 @@ impl RithmicLiveChart {
         })
     }
 
-    pub(crate) const fn generation(&self) -> RithmicChartGeneration {
+    #[must_use]
+    pub const fn generation(&self) -> RithmicChartGeneration {
         self.generation
     }
 
     #[cfg(test)]
-    pub(crate) const fn forming(&self) -> MarketBar {
+    #[must_use]
+    pub const fn forming(&self) -> MarketBar {
         self.forming
     }
 
-    pub(crate) fn apply_trade(
+    /// Applies one generation-fenced trade and publishes the resulting chart state.
+    ///
+    /// # Errors
+    /// Returns an error for stale identity, ordering, timestamp, or arithmetic failure.
+    pub fn apply_trade(
         &mut self,
         generation: RithmicChartGeneration,
         trade: &MarketTrade,

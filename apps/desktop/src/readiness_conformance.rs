@@ -1,10 +1,12 @@
 //! Headless desktop burst and frame-conflation evidence.
 
-use crate::rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart, RithmicLiveChartError};
 use axiusflow_application::ReplaySnapshot;
 use axiusflow_coinbase_coordinator::market_worker::{
     FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
     market_worker_channel,
+};
+use axiusflow_coinbase_coordinator::rithmic_live_chart::{
+    RithmicChartGeneration, RithmicLiveChart, RithmicLiveChartError,
 };
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{

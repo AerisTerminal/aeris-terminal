@@ -734,6 +734,9 @@ dependencies = [
  "axiusflow_rithmic_protocol_adapter",
  "axiusflow_terminal_ui",
  "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "zeroize",
 ]
 
