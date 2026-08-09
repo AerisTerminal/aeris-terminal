@@ -27,10 +27,13 @@ use axiusflow_coinbase_market_adapter::{
 use axiusflow_desktop_provider_runtime::{
     DesktopMarketWorkerError, DesktopProviderError, DesktopProviderState, SessionGeneration,
 };
-use axiusflow_desktop_storage::SegmentEncryptionKey;
+use axiusflow_desktop_storage::{
+    DataKind, HistoryScope, HistorySeriesIdentity, SegmentEncryptionKey,
+};
 use axiusflow_instruments::{InstrumentPrecision, InstrumentRevision};
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketEvent};
 use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
+use axiusflow_provider_history::CoverageClass;
 use std::{
     collections::VecDeque,
     fs,
@@ -52,7 +55,7 @@ use composition::{
 use diagnostics::{diagnostics_wait_duration, flush_diagnostics};
 use history::{
     DirectHistorySource, FetchPhase, HistorySource, InitialHistoryContext, StreamingSeriesContext,
-    needs_recent_phase, prepare_initial_history,
+    history_request_range, needs_recent_phase, prepare_initial_history,
 };
 use lifecycle::{
     DrainSignal, EnvironmentalEvent, InboxDrainContext, ReconnectBackoff, WorkerInboxEvent,
@@ -594,7 +597,7 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
 
     running.reconcile_recovery(message_tx)?;
 
-    maybe_start_history(running, history_command_tx)?;
+    maybe_start_history(running, history_command_tx, message_tx)?;
 
     drain_coinbase_callbacks(
         &mut running.worker,
@@ -653,6 +656,7 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
 fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
     running: &mut RunningWorker<V>,
     history_command_tx: &SyncSender<HistoryCommand>,
+    message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
     if running.state.streaming_generation.is_some() || running.state.history.is_some() {
         return Ok(());
@@ -664,6 +668,9 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
     else {
         return Ok(());
     };
+    if activate_complete_cached_history(running, generation, message_tx)? {
+        return Ok(());
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     running.state.history = Some(InflightHistory {
         cancel: Arc::clone(&cancel),
@@ -675,6 +682,69 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
             cancel,
         })
         .map_err(|_| "Coinbase history worker stopped".to_string())
+}
+
+fn activate_complete_cached_history<V: axiusflow_platform_runtime::CredentialVault>(
+    running: &mut RunningWorker<V>,
+    generation: SessionGeneration,
+    message_tx: &MarketWorkerSender,
+) -> Result<bool, String> {
+    if running.state.retained.is_empty() {
+        return Ok(false);
+    }
+    let now = unix_nanos()?;
+    let scope = HistoryScope {
+        provider_id: "coinbase".to_string(),
+        account_id: axiusflow_coinbase_market_adapter::COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+        entitlement_revision: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS.to_string(),
+    };
+    let series = HistorySeriesIdentity {
+        scope: &scope,
+        instrument_id: &running.profile.instrument_id,
+        data_kind: DataKind::Bars,
+        resolution: running.profile.interval.label(),
+        source_revision: 1,
+        schema_revision: 1,
+        calendar_revision: 1,
+        adjustment_revision: 1,
+        correction_revision: 1,
+    };
+    let requested = history_request_range(&running.profile, now, FetchPhase::Full)?;
+    let coverage = running
+        .worker
+        .history_coverage_snapshot(series, now / 1_000_000_000)
+        .map_err(|error| error.to_string())?
+        .plan(requested)
+        .map_err(|error| error.to_string())?;
+    if !cache_can_resume_live(coverage.classification(), true) {
+        return Ok(false);
+    }
+    if running.profile.interval == ChartInterval::Minute1 {
+        let latest = running
+            .worker
+            .latest_history_identity(series, now / 1_000_000_000)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "complete Coinbase coverage has no retained tail".to_string())?;
+        running.worker.seed_coinbase_bar_history(
+            generation,
+            &running.profile.product_id,
+            &latest,
+            &running.segment_key,
+            now / 1_000_000_000,
+        )?;
+    }
+    running.state.streaming_generation = Some(generation);
+    running.state.reconnect_backoff.reset();
+    running.state.recovery_announced = false;
+    let _ = message_tx.send(MarketWorkerMessage::State {
+        state: ChartState::Ready,
+        message: "Authenticated local Coinbase coverage is complete; live tail resumed".to_string(),
+    });
+    Ok(true)
+}
+
+const fn cache_can_resume_live(class: CoverageClass, has_predecessor: bool) -> bool {
+    has_predecessor && matches!(class, CoverageClass::Complete)
 }
 
 fn discard_provider_events<V: axiusflow_platform_runtime::CredentialVault>(
@@ -1044,7 +1114,8 @@ fn request_recovery_if_required<V: axiusflow_platform_runtime::CredentialVault>(
 
 #[cfg(test)]
 mod startup_path_tests {
-    use super::ensure_history_parent;
+    use super::{cache_can_resume_live, ensure_history_parent};
+    use axiusflow_provider_history::CoverageClass;
     use std::{fs, path::PathBuf, time::SystemTime};
 
     struct TestRoot(PathBuf);
@@ -1072,5 +1143,20 @@ mod startup_path_tests {
             !history.exists(),
             "storage retains ownership of the final root"
         );
+    }
+
+    #[test]
+    fn only_complete_cached_coverage_with_a_predecessor_bypasses_provider_history() {
+        assert!(cache_can_resume_live(CoverageClass::Complete, true));
+        assert!(!cache_can_resume_live(CoverageClass::Complete, false));
+        for class in [
+            CoverageClass::Partial,
+            CoverageClass::ConfirmedEmpty,
+            CoverageClass::Missing,
+            CoverageClass::Invalidated,
+            CoverageClass::Quarantined,
+        ] {
+            assert!(!cache_can_resume_live(class, true));
+        }
     }
 }

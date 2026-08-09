@@ -547,7 +547,7 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
     })
 }
 
-fn history_request_range(
+pub(super) fn history_request_range(
     profile: &ProductProfile,
     now: i64,
     phase: FetchPhase,
