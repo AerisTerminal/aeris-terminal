@@ -86,7 +86,7 @@ pub(super) fn publish_update<V: axiusflow_platform_runtime::CredentialVault>(
             worker_label: worker_label.to_string(),
             ui_diagnostics: Some(ui_diagnostics),
         }))
-        .map_err(|()| "desktop market UI channel disconnected".to_string())
+        .map_err(|_| "desktop market UI channel disconnected".to_string())
 }
 
 pub(super) fn publish_cached_update(
@@ -104,7 +104,7 @@ pub(super) fn publish_cached_update(
             worker_label: worker_label.to_string(),
             ui_diagnostics: None,
         }))
-        .map_err(|()| "desktop market UI channel disconnected".to_string())
+        .map_err(|_| "desktop market UI channel disconnected".to_string())
 }
 
 fn recovery_snapshot(

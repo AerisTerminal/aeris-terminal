@@ -1,8 +1,8 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 37
-**Last updated:** 2026-08-08
+**Revision:** 38
+**Last updated:** 2026-08-09
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
 ## 0. How to use this document
@@ -56,11 +56,11 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stage G** is `active`: repair terminal interaction/chrome and productize Coinbase public spot catalog, intervals, history, and live Level 2 data. Stages C, E, and F remain `blocked_external` on their physical/provider evidence only. |
+| Current stage(s) | **Stage H** is `active`: move provider, history, workspace, coverage, and scheduling ownership into a resident per-user local engine with authenticated IPC and cached-first startup. Stage G physical UI acceptance continues inside the Stage H end-to-end gate. Stages C, E, and F remain `blocked_external` on their physical/provider evidence only. |
 | Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. |
-| Next | Complete and verify Stage G, then resume the remaining provider-path, physical pacing, and physical lifecycle artifacts |
+| Next | Complete Stage H end to end, including deletion of the in-process desktop data path and physical acceptance, then resume the remaining provider-path and lifecycle artifacts |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, or AF_XDP/DPDK product work |
-| Decision anchors | [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
+| Decision anchors | [`2026_08_09_resident_local_engine.md`](decisions/2026_08_09_resident_local_engine.md), [`2026_08_05_provider_priority_and_terminal_edge.md`](decisions/2026_08_05_provider_priority_and_terminal_edge.md), [`2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md) |
 
 ### Progress snapshot
 
@@ -74,6 +74,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | E — Main Rithmic UI | `blocked_external` | implementation [x]; named externally instrumented 60/120/144 Hz pacing [ ] |
 | F — Readiness | `blocked_external` | deterministic failure, burst, and memory evidence [x]; provider/physical transitions [ ] |
 | G — Terminal polish + Coinbase public markets | `active` | interaction/chrome repair [x]; full spot catalog [x]; complete interval menu [x]; paginated history [x]; live Level 2 DOM [x]; bounded 256 MiB cache [x]; physical UI acceptance [ ] |
+| H — Resident local engine + cached-first startup | `active` | coordinator extraction [x]; versioned protocol [x]; resident process [ ]; authenticated local IPC [ ]; desktop migration [ ]; workspace/hot-set restore [ ]; coverage scheduler [ ]; legacy path removal [ ]; end-to-end evidence [ ] |
 
 ### Remaining focus (ordered)
 
@@ -82,6 +83,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 - [ ] **Stage C:** deterministic headless conformance [x]; authorized core-path evidence [x]; resilience/recovery evidence [ ] (see §8).
 - [x] **Stage E implementation:** the main Rithmic UI vertical is integrated from the verified deterministic Stage C/D contracts; named physical pacing remains an open Stage E gate (see §10).
 - [ ] **Stage G:** restore physically interactive terminal chrome and ship Coinbase as the default public market-data path with full spot discovery, intervals, paginated history, and live Level 2 depth (see §11.1).
+- [ ] **Stage H:** make the resident local engine the sole owner of providers and retained data, then prove cached/offline startup, instant selections, bounded smooth rendering, crash recovery, and the complete Stage G physical UI path (see §11.2).
 
 
 
@@ -839,8 +841,9 @@ startup; `--rithmic-test` remains the explicit authorized futures path.
   range/count/gap diagnostics.
 - [x] Maintain a generation-fenced Coinbase Level 2 book from public snapshots
   and deltas, bounded to 256 levels per side, with gap-triggered resnapshot.
-- [x] Retain only a disposable 256 MiB LRU acceleration cache; older history is
-  always available by network fetch and corrupt segments are quarantined.
+- [x] Bound the Stage G decoded acceleration cache to 256 MiB and quarantine
+  corrupt segments. Stage H replaces network-refetch-as-policy with durable,
+  rights-aware coverage and adaptive decoded caches.
 - [x] Install volume data in Origin and expose the complete native indicator
   catalog including Volume and VWAP.
 
@@ -863,6 +866,65 @@ remediated and its acceptance measurements are recorded.
   regressions pass with bounded queues and a clean shutdown.
 - [ ] Full workspace formatting, clippy, build, and relevant tests pass with no
   warnings; the release binary is rebuilt and manually exercised.
+
+
+## 11.2 Stage H — Resident local engine and cached-first startup
+
+**Status:** `active`
+
+The accepted architecture is defined by
+[`2026_08_09_resident_local_engine.md`](decisions/2026_08_09_resident_local_engine.md).
+This stage preserves the validated store, fencing, recovery, and provider logic
+while changing process ownership. It is complete only as a shipping end-to-end
+path; an engine-shaped library beside the old desktop path is not completion.
+
+### Ordered implementation
+
+- [x] **H0 — Extract the boundary:** move the Coinbase coordinator out of the
+  desktop crate without behavioral changes and define a bounded, append-only,
+  versioned local-engine protocol with generation fences and chunked snapshots.
+- [ ] **H1 — Establish one owner:** ship a per-user `axiusflow_engine` process,
+  authenticated local IPC, protocol negotiation, single-instance ownership,
+  health/readiness reporting, graceful shutdown, and deterministic reconnect.
+- [ ] **H2 — Migrate the desktop:** attach or start the engine without blocking
+  first paint; route catalog, selection, chart, DOM, provider state, and faults
+  through IPC; remove direct Coinbase/provider/store ownership from GPUI.
+- [ ] **H3 — Restore before network:** persist workspace and hot-set state;
+  publish the last valid cached chart immediately; work offline; reconcile live
+  data after presentation without replacing viewport, drawings, or indicators.
+- [ ] **H4 — Know coverage:** maintain complete, partial, confirmed-empty,
+  missing, invalidated, and quarantined interval coverage; coalesce requests;
+  repair visible gaps first; prefetch adjacent selections within strict budgets.
+- [ ] **H5 — Retain eligible work:** keep legally retainable encrypted segments
+  until quota policy evicts them, checkpoint expensive derived series, and use
+  adaptive bounded decoded caches instead of treating the network as storage.
+- [ ] **H6 — Complete provider lifecycle:** move Rithmic ownership behind the
+  same boundary, enforce provider retention rights, and implement interactive,
+  warm, constrained, and offline-suspended resource modes.
+- [ ] **H7 — Remove the bridge:** delete every in-process desktop data path and
+  transitional dependency, package resident lifecycle behavior, and record the
+  full correctness, startup, switching, memory, CPU, and frame-pacing evidence.
+
+### End-to-end gate
+
+- [ ] A warm launch paints the shell within 300 ms, restores workspace within
+  400 ms, and publishes a valid cached chart within 500 ms on named hardware.
+- [ ] Cached symbol/timeframe changes publish locally within one interaction
+  frame plus a 10 ms local query budget; uncached changes show cached/partial
+  state immediately and never block the UI on provider I/O.
+- [ ] Rapid selection, overlapping history/live data, reconnect, suspend/resume,
+  UI crash, engine crash, and corrupt-state tests accept no stale generation,
+  lose no confirmed event, and leave no undetected historical gap.
+- [ ] There is one history-store writer and one provider subscription owner per
+  user session; a second UI attaches instead of opening the store or feed again.
+- [ ] Idle warm CPU and memory remain within recorded budgets; the UI schedules
+  no self-sustaining frames and meets named 60/120/144 Hz frame-pacing evidence.
+- [ ] Header/sidebar/menu surfaces, centralized hover/active tokens, pointer
+  cursors, crosshair styling, movable title bar, and window controls pass dark
+  and light physical acceptance with no hard-coded application colors.
+- [ ] Offline cached startup, rights-aware retention/eviction, coverage repair,
+  IPC authentication/version mismatch, and engine/UI recovery are deterministic
+  regression tests; the full workspace gate passes with zero warnings.
 
 
 ## 12. Deferred / retired

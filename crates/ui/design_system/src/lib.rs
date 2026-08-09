@@ -190,6 +190,7 @@ impl ColorToken {
 pub struct ThemeColors {
     pub background: ThemeColor,
     pub foreground: ThemeColor,
+    pub surface_primary: ThemeColor,
     pub surface_secondary: ThemeColor,
     pub surface_tertiary: ThemeColor,
     pub surface_quaternary: ThemeColor,
@@ -231,6 +232,7 @@ pub struct ThemeColors {
     pub chart_volume_up: ThemeColor,
     pub chart_volume_down: ThemeColor,
     pub chart_axis_text: ThemeColor,
+    pub chart_crosshair: ThemeColor,
 }
 
 /// A canonical logical length token.
@@ -304,7 +306,7 @@ impl AxiusflowTheme {
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn color_tokens(self) -> [ColorToken; 47] {
+    pub fn color_tokens(self) -> [ColorToken; 49] {
         let colors = self.colors;
         let dark = self.mode == ThemeMode::Dark;
         [
@@ -325,6 +327,11 @@ impl AxiusflowTheme {
                     "color(display-p3 0.922 0.922 0.922)",
                 ),
                 colors.foreground,
+            ),
+            ColorToken::new(
+                "surface_primary",
+                "var(--background)",
+                colors.surface_primary,
             ),
             ColorToken::new(
                 "surface_secondary",
@@ -551,6 +558,11 @@ impl AxiusflowTheme {
                 mode_source(dark, "#0a0a0a", "var(--foreground)"),
                 colors.chart_axis_text,
             ),
+            ColorToken::new(
+                "chart_crosshair",
+                mode_source(dark, "#9598a1", "#2e2e2e"),
+                colors.chart_crosshair,
+            ),
         ]
     }
 }
@@ -647,6 +659,7 @@ fn foundational_colors(
     ThemeColors {
         background,
         foreground,
+        surface_primary: background,
         surface_secondary,
         surface_tertiary,
         surface_quaternary,
@@ -696,6 +709,10 @@ fn foundational_colors(
         chart_axis_text: match mode {
             ThemeMode::Light => ThemeColor::from_rgb8(10, 10, 10),
             ThemeMode::Dark => foreground,
+        },
+        chart_crosshair: match mode {
+            ThemeMode::Light => ThemeColor::from_rgb8(149, 152, 161),
+            ThemeMode::Dark => ThemeColor::from_rgb8(46, 46, 46),
         },
     }
 }
@@ -754,6 +771,7 @@ mod tests {
         let dark = AxiusflowTheme::dark().colors;
 
         assert_eq!(light.background, ThemeColor::from_rgb8(255, 255, 255));
+        assert_eq!(light.surface_primary, light.background);
         assert_eq!(light.card, ThemeColor::from_rgb8(252, 252, 252));
         assert_eq!(light.input_surface, ThemeColor::from_rgb8(252, 252, 252));
         assert_eq!(light.foreground, ThemeColor::from_rgb8(51, 51, 51));
@@ -762,6 +780,7 @@ mod tests {
         assert_eq!(light.text_placeholder, ThemeColor::from_rgb8(179, 179, 179));
         assert_eq!(light.text_unavailable, ThemeColor::from_rgb8(204, 204, 204));
         assert_eq!(dark.background, ThemeColor::from_rgb8(23, 23, 23));
+        assert_eq!(dark.surface_primary, dark.background);
         assert_eq!(dark.card, ThemeColor::from_rgb8(27, 27, 27));
         assert_eq!(dark.border, ThemeColor::from_rgb8(29, 29, 29));
         assert_eq!(dark.input, ThemeColor::from_rgb8(34, 34, 34));
@@ -774,6 +793,8 @@ mod tests {
         assert_eq!(dark.accent, ThemeColor::from_rgb8(29, 29, 29));
         assert_eq!(dark.icon_color, dark.text_secondary);
         assert_eq!(dark.chart_axis_text, dark.foreground);
+        assert_eq!(light.chart_crosshair, ThemeColor::from_rgb8(149, 152, 161));
+        assert_eq!(dark.chart_crosshair, ThemeColor::from_rgb8(46, 46, 46));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.profit, ThemeColor::from_oklch(0.683, 0.151, 160.997));

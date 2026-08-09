@@ -96,7 +96,7 @@ pub(super) fn flush_diagnostics<V: axiusflow_platform_runtime::CredentialVault>(
     {
         message_tx
             .send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)))
-            .map_err(|()| "desktop market UI channel disconnected".to_string())?;
+            .map_err(|_| "desktop market UI channel disconnected".to_string())?;
     }
     Ok(())
 }

@@ -1,8 +1,4 @@
 use crate::{
-    market_worker::{
-        MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
-        market_worker_channel,
-    },
     rithmic_history::{
         InstalledRithmicInstrument, RithmicHistoryResult, RithmicHistoryTask, RithmicSeriesRequest,
         history_message,
@@ -15,6 +11,10 @@ use crate::{
     },
 };
 use axiusflow_application::ProvenancedMarketBar;
+use axiusflow_coinbase_coordinator::market_worker::{
+    MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
+    market_worker_channel,
+};
 use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
     AuthenticationState, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig,
@@ -177,8 +177,10 @@ pub(crate) fn start(
 
 fn spawn_worker(
     shell: RithmicShellState,
-    task: impl FnOnce(crate::market_worker::MarketWorkerSender, Receiver<MarketWorkerCommand>)
-    + Send
+    task: impl FnOnce(
+        axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+        Receiver<MarketWorkerCommand>,
+    ) + Send
     + 'static,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
@@ -199,7 +201,7 @@ fn spawn_worker(
 }
 
 fn run(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     commands: &Receiver<MarketWorkerCommand>,
     history_root: PathBuf,
     ui_thread: ThreadId,
@@ -276,7 +278,7 @@ fn run(
 }
 
 fn run_connected(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     commands: &Receiver<MarketWorkerCommand>,
     mut worker: RithmicWorker,
     events: &RithmicEvents,
@@ -391,7 +393,7 @@ fn apply_initial_network_state(
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     initial_network: Option<NetworkEvent>,
 ) {
     if initial_network != Some(NetworkEvent::Unavailable) {
@@ -532,7 +534,7 @@ fn drain_environment_events(
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
     transition_capture: &mut Option<NativeTransitionCapture>,
 ) {
@@ -613,7 +615,7 @@ fn reset_live_state(state: &mut RithmicRuntimeState) {
 }
 
 fn apply_history_result(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
     result: RithmicHistoryResult,
 ) -> bool {
@@ -649,7 +651,7 @@ fn apply_history_result(
     }
     if matching_request && state.history_trade_overflow && reschedule_history(state) {
         let _ = messages.send(MarketWorkerMessage::State {
-            state: crate::market_worker::ChartState::Recovering,
+            state: axiusflow_coinbase_coordinator::market_worker::ChartState::Recovering,
             message: "Rithmic history is covering buffered trade overflow".to_string(),
         });
         return true;
@@ -687,7 +689,7 @@ fn process_command(
     commands: &Receiver<MarketWorkerCommand>,
     worker: &RithmicWorker,
     events: &RithmicEvents,
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
 ) -> bool {
     let (dispatch, rejection, failure_message) = match commands.try_recv() {
@@ -775,7 +777,7 @@ fn drain_events(
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
     transition_capture: &mut Option<NativeTransitionCapture>,
 ) {
@@ -910,7 +912,7 @@ fn apply_capture(
 }
 
 fn publish_dom(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
     dom: &mut ReadOnlyDom,
 ) {
@@ -931,7 +933,7 @@ fn publish_dom(
 }
 
 fn publish_live_chart(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
     state: &mut RithmicRuntimeState,
 ) {
@@ -971,7 +973,7 @@ fn buffer_history_trade(
 }
 
 fn publish_trade(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     chart: &mut RithmicLiveChart,
     trade: &axiusflow_market_data::MarketTrade,
 ) -> bool {
@@ -991,7 +993,7 @@ fn publish_trade(
         ) => true,
         Err(_) => {
             let _ = messages.send(MarketWorkerMessage::State {
-                state: crate::market_worker::ChartState::Recovering,
+                state: axiusflow_coinbase_coordinator::market_worker::ChartState::Recovering,
                 message: "Rithmic live candles require a covering history snapshot".to_string(),
             });
             false
@@ -1060,7 +1062,7 @@ fn open_worker(
 }
 
 fn publish_event(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
     selection_installed: &mut bool,
 ) {
@@ -1245,7 +1247,7 @@ fn retry_presentation(reason: ProviderInvalidationReason) -> (FeedConnectionStat
 }
 
 fn send_connection(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
     state: FeedConnectionState,
     message: &str,
 ) {

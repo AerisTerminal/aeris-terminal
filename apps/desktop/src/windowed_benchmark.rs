@@ -7,8 +7,8 @@
 //! native GPUI window. These callbacks run after the prior render but do not prove
 //! physical scanout, and the report says so.
 
-use crate::market_worker::FixtureMarketWorker;
 use axiusflow_chart_integration::OriginChartView;
+use axiusflow_coinbase_coordinator::market_worker::FixtureMarketWorker;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
 use axiusflow_platform_runtime::{WindowsCompositionProbe, WindowsCompositionTiming};

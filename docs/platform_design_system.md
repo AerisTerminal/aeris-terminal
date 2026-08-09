@@ -74,6 +74,7 @@ its own semantic names and its existing product and financial colors.
 | ---------------------- | ------------------------------------------ | -------------------------------------------- |
 | `background`           | `color(display-p3 1 1 1)`                  | `color(display-p3 0.09 0.09 0.09)`           |
 | `foreground`           | `color(display-p3 0.2 0.2 0.2)`            | `color(display-p3 0.922 0.922 0.922)`        |
+| `surface_primary`      | `background`                               | `background`                                 |
 | `surface_secondary`    | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        |
 | `surface_tertiary`     | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        |
 | `surface_quaternary`   | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        |
@@ -122,6 +123,7 @@ from it, but may not create another product-accent family.
 | `chart_volume_up`   | `profit` at 34% alpha        | `profit` at 32% alpha |
 | `chart_volume_down` | `loss` at 30% alpha          | `loss` at 28% alpha   |
 | `chart_axis_text`   | `#0a0a0a`                    | `var(--foreground)`   |
+| `chart_crosshair`   | `#9598a1`                    | `#2e2e2e`             |
 
 
 The neutral chart palette is:
@@ -210,6 +212,7 @@ measurements remain with the owning component. They are not global tokens.
 - Keep component state, focus behavior, keyboard interaction, animation, and
 responsive layout inside the component implementation.
 - Use `background` and `foreground` for the application root.
+- Use `surface_primary` for the application header and sidebars.
 - Use `card`/`card_foreground` or `popover`/`popover_foreground` for their named
 surfaces.
 - Use `input_surface` for input backgrounds and `input` for input borders.

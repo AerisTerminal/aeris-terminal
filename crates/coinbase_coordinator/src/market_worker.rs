@@ -4,7 +4,7 @@
 //! entitlement service, or production transport. It exercises the same bounded
 //! binary protocol and application model that a future connected adapter will own.
 
-use crate::rithmic_history::RithmicSeriesRequest;
+use crate::rithmic_series::RithmicSeriesRequest;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketBarReplayPort, MarketGeneration, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot,
@@ -38,6 +38,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A bounded coordinator mailbox whose receiving endpoint has been dropped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MailboxDisconnected;
+
+impl std::fmt::Display for MailboxDisconnected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("coordinator mailbox is disconnected")
+    }
+}
+
+impl std::error::Error for MailboxDisconnected {}
+
 const SUBSCRIPTION_ID: &str = "desktop_fixture_market_bars";
 const INITIAL_BAR_COUNT: usize = 576;
 const STARTUP_DELTA_COUNT: usize = 24;
@@ -53,10 +65,10 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub(crate) type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
+pub type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChartState {
+pub enum ChartState {
     Loading,
     Ready,
     Stale,
@@ -65,7 +77,8 @@ pub(crate) enum ChartState {
 }
 
 impl ChartState {
-    pub(crate) const fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Loading => "Loading chart",
             Self::Ready => "Chart ready",
@@ -76,26 +89,26 @@ impl ChartState {
     }
 }
 
-pub(crate) struct MarketWorkerBootstrap {
+pub struct MarketWorkerBootstrap {
     pub snapshot: ReplaySnapshot,
     pub subscription_id: String,
     pub generation: DesktopMarketGeneration,
     pub worker_label: String,
 }
 
-pub(crate) enum MarketWorkerStartup {
+pub enum MarketWorkerStartup {
     Shell(crate::rithmic_shell::RithmicShellState),
     Loading(Box<CoinbaseWorkerStartup>),
     Ready(Box<MarketWorkerBootstrap>),
 }
 
-pub(crate) struct CoinbaseWorkerStartup {
+pub struct CoinbaseWorkerStartup {
     pub coinbase_product: CoinbaseSpotProduct,
     pub subscription_id: String,
     pub worker_label: String,
 }
 
-pub(crate) struct MarketWorkerPublication {
+pub struct MarketWorkerPublication {
     pub update: ReplayStreamUpdate,
     pub generation: DesktopMarketGeneration,
     pub subscription_id: String,
@@ -103,7 +116,7 @@ pub(crate) struct MarketWorkerPublication {
     pub ui_diagnostics: Option<PendingUiDiagnostics>,
 }
 
-pub(crate) enum MarketWorkerMessage {
+pub enum MarketWorkerMessage {
     Update(MarketWorkerPublication),
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
     Recovery {
@@ -165,11 +178,11 @@ fn fire_mailbox_wake(mailbox: &MarketWorkerMailbox) {
     }
 }
 
-pub(crate) struct MarketWorkerSender {
+pub struct MarketWorkerSender {
     mailbox: Arc<MarketWorkerMailbox>,
 }
 
-pub(crate) struct MarketWorkerReceiver {
+pub struct MarketWorkerReceiver {
     mailbox: Arc<MarketWorkerMailbox>,
 }
 
@@ -191,15 +204,20 @@ impl Drop for MarketWorkerSender {
 }
 
 impl MarketWorkerSender {
-    pub(crate) fn send(&self, message: MarketWorkerMessage) -> Result<(), ()> {
+    /// Enqueues a worker publication and wakes the consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailboxDisconnected`] after the receiving endpoint is dropped.
+    pub fn send(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
         self.enqueue(message)?;
         fire_mailbox_wake(&self.mailbox);
         Ok(())
     }
 
-    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), ()> {
+    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(());
+            return Err(MailboxDisconnected);
         }
         let mut queue = self
             .mailbox
@@ -207,7 +225,7 @@ impl MarketWorkerSender {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(());
+            return Err(MailboxDisconnected);
         }
         let Some(message) = self.send_conflated(&mut queue, message) else {
             return Ok(());
@@ -619,7 +637,7 @@ impl MarketWorkerSender {
         }
     }
 
-    pub(crate) fn occupancy(&self) -> (usize, usize) {
+    pub fn occupancy(&self) -> (usize, usize) {
         let current = self
             .mailbox
             .queue
@@ -629,7 +647,7 @@ impl MarketWorkerSender {
         (current, self.mailbox.capacity)
     }
 
-    pub(crate) fn try_take_coalesced_update(&self) -> Option<CoalescedUiUpdates> {
+    pub fn try_take_coalesced_update(&self) -> Option<CoalescedUiUpdates> {
         self.mailbox
             .coalesced_updates
             .lock()
@@ -705,9 +723,9 @@ fn rithmic_message_generation(message: &MarketWorkerMessage) -> Option<(usize, u
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CoalescedUiUpdates {
-    pub(crate) generation: SessionGeneration,
-    pub(crate) count: u64,
+pub struct CoalescedUiUpdates {
+    pub generation: SessionGeneration,
+    pub count: u64,
 }
 
 struct GenerationCoalescingQueue {
@@ -779,7 +797,7 @@ fn take_covering_snapshot(
 }
 
 impl MarketWorkerReceiver {
-    pub(crate) fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+    pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         *self
             .mailbox
             .wake
@@ -796,7 +814,7 @@ impl MarketWorkerReceiver {
         }
     }
 
-    pub(crate) fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
+    pub fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
         let messages = self
             .mailbox
             .queue
@@ -839,9 +857,8 @@ impl Drop for MarketWorkerReceiver {
     }
 }
 
-pub(crate) fn market_worker_channel(
-    capacity: NonZeroUsize,
-) -> (MarketWorkerSender, MarketWorkerReceiver) {
+#[must_use]
+pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, MarketWorkerReceiver) {
     let mailbox = Arc::new(MarketWorkerMailbox {
         queue: Mutex::new(VecDeque::with_capacity(capacity.get().saturating_add(1))),
         capacity: capacity.get(),
@@ -867,7 +884,7 @@ fn mailbox_overflow_state() -> MarketWorkerMessage {
     }
 }
 
-pub(crate) enum MarketWorkerCommand {
+pub enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
     RithmicSearch(RithmicSymbolSearch),
     RithmicSelect(RithmicInstrumentSelection),
@@ -877,13 +894,13 @@ pub(crate) enum MarketWorkerCommand {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CoinbaseSelectionRequest {
+pub struct CoinbaseSelectionRequest {
     pub sequence: u64,
     pub product: CoinbaseSpotProduct,
     pub interval: ChartInterval,
 }
 
-pub(crate) struct PendingUiDiagnostics {
+pub struct PendingUiDiagnostics {
     generation: SessionGeneration,
     origin: Instant,
     ui_enqueue_nanos: i64,
@@ -891,7 +908,8 @@ pub(crate) struct PendingUiDiagnostics {
 }
 
 impl PendingUiDiagnostics {
-    pub(crate) fn new(generation: SessionGeneration) -> Self {
+    #[must_use]
+    pub fn new(generation: SessionGeneration) -> Self {
         Self {
             generation,
             origin: Instant::now(),
@@ -900,15 +918,16 @@ impl PendingUiDiagnostics {
         }
     }
 
-    pub(crate) fn mark_ui_enqueue(&mut self) {
+    pub fn mark_ui_enqueue(&mut self) {
         self.ui_enqueue_nanos = self.elapsed_nanos();
     }
 
-    pub(crate) fn mark_frame_submit(&mut self) {
+    pub fn mark_frame_submit(&mut self) {
         self.frame_submit_nanos = self.elapsed_nanos();
     }
 
-    pub(crate) fn into_presented(self) -> UiDiagnosticsFeedback {
+    #[must_use]
+    pub fn into_presented(self) -> UiDiagnosticsFeedback {
         UiDiagnosticsFeedback::Presented {
             generation: self.generation,
             ui_enqueue_nanos: self.ui_enqueue_nanos,
@@ -917,7 +936,8 @@ impl PendingUiDiagnostics {
         }
     }
 
-    pub(crate) const fn generation(&self) -> SessionGeneration {
+    #[must_use]
+    pub const fn generation(&self) -> SessionGeneration {
         self.generation
     }
 
@@ -926,7 +946,7 @@ impl PendingUiDiagnostics {
     }
 }
 
-pub(crate) enum UiDiagnosticsFeedback {
+pub enum UiDiagnosticsFeedback {
     Presented {
         generation: SessionGeneration,
         ui_enqueue_nanos: i64,
@@ -946,19 +966,24 @@ struct UiDiagnosticsMailbox {
 }
 
 #[derive(Clone)]
-pub(crate) struct UiDiagnosticsSender {
+pub struct UiDiagnosticsSender {
     mailbox: Arc<UiDiagnosticsMailbox>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
-pub(crate) struct UiDiagnosticsReceiver {
+pub struct UiDiagnosticsReceiver {
     mailbox: Arc<UiDiagnosticsMailbox>,
 }
 
 impl UiDiagnosticsSender {
-    pub(crate) fn send(&self, feedback: UiDiagnosticsFeedback) -> Result<(), ()> {
+    /// Enqueues UI presentation feedback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailboxDisconnected`] after the receiving endpoint is dropped.
+    pub fn send(&self, feedback: UiDiagnosticsFeedback) -> Result<(), MailboxDisconnected> {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(());
+            return Err(MailboxDisconnected);
         }
         let mut queue = self
             .mailbox
@@ -966,7 +991,7 @@ impl UiDiagnosticsSender {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(());
+            return Err(MailboxDisconnected);
         }
         if queue.len() >= self.mailbox.capacity
             && let Some(discarded) = queue.pop_front()
@@ -985,7 +1010,7 @@ impl UiDiagnosticsSender {
 }
 
 impl UiDiagnosticsReceiver {
-    pub(crate) fn try_recv(&self) -> Option<UiDiagnosticsFeedback> {
+    pub fn try_recv(&self) -> Option<UiDiagnosticsFeedback> {
         self.mailbox
             .queue
             .lock()
@@ -993,7 +1018,7 @@ impl UiDiagnosticsReceiver {
             .pop_front()
     }
 
-    pub(crate) fn occupancy(&self) -> (usize, usize) {
+    pub fn occupancy(&self) -> (usize, usize) {
         let current = self
             .mailbox
             .queue
@@ -1003,7 +1028,7 @@ impl UiDiagnosticsReceiver {
         (current, self.mailbox.capacity)
     }
 
-    pub(crate) fn try_take_coalesced_feedback(&self) -> Option<CoalescedUiUpdates> {
+    pub fn try_take_coalesced_feedback(&self) -> Option<CoalescedUiUpdates> {
         self.mailbox
             .coalesced_feedback
             .lock()
@@ -1023,7 +1048,7 @@ impl Drop for UiDiagnosticsReceiver {
     }
 }
 
-pub(crate) fn ui_diagnostics_channel(
+pub fn ui_diagnostics_channel(
     capacity: NonZeroUsize,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> (UiDiagnosticsSender, UiDiagnosticsReceiver) {
@@ -1049,7 +1074,7 @@ fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> SessionGeneration {
     }
 }
 
-pub(crate) struct MarketDataWorker {
+pub struct MarketDataWorker {
     commands: Option<SyncSender<MarketWorkerCommand>>,
     messages: Option<MarketWorkerReceiver>,
     shutdown_complete: Receiver<()>,
@@ -1059,6 +1084,10 @@ pub(crate) struct MarketDataWorker {
 }
 
 impl MarketDataWorker {
+    /// Starts the deterministic fixture worker.
+    ///
+    /// # Errors
+    /// Returns an error if its worker thread cannot be created or bootstrapped.
     pub fn start() -> Result<(MarketWorkerStartup, Self), String> {
         let (bootstrap_tx, bootstrap_rx) = mpsc::sync_channel(1);
         let (message_tx, message_rx) =
@@ -1088,6 +1117,10 @@ impl MarketDataWorker {
         ))
     }
 
+    /// Starts the live Coinbase coordinator.
+    ///
+    /// # Errors
+    /// Returns an error if provider configuration, storage, or worker startup fails.
     pub fn start_coinbase(
         product_id: String,
         history_root: PathBuf,
@@ -1104,21 +1137,8 @@ impl MarketDataWorker {
         )
     }
 
-    pub fn start_rithmic(
-        history_root: PathBuf,
-        ui_thread: thread::ThreadId,
-        detailed_diagnostics: bool,
-        native_transition_report: Option<PathBuf>,
-    ) -> Result<(MarketWorkerStartup, Self), String> {
-        crate::rithmic_market_worker::start(
-            history_root,
-            ui_thread,
-            detailed_diagnostics,
-            native_transition_report,
-        )
-    }
-
-    pub(crate) const fn from_channels(
+    #[must_use]
+    pub const fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,
         messages: MarketWorkerReceiver,
         shutdown_complete: Receiver<()>,
@@ -1135,6 +1155,10 @@ impl MarketDataWorker {
         }
     }
 
+    /// Requests a Coinbase selection without blocking.
+    ///
+    /// # Errors
+    /// Returns the request when the command mailbox is full or disconnected.
     pub fn try_select_coinbase(
         &self,
         product: CoinbaseSpotProduct,
@@ -1177,22 +1201,27 @@ impl MarketDataWorker {
         Ok(next)
     }
 
-    pub(crate) fn send_ui_diagnostics(&self, feedback: UiDiagnosticsFeedback) {
+    pub fn send_ui_diagnostics(&self, feedback: UiDiagnosticsFeedback) {
         if let Some(sender) = &self.ui_diagnostics {
             let _ = sender.send(feedback);
         }
     }
 
-    pub(crate) fn ui_diagnostics_sender(&self) -> Option<UiDiagnosticsSender> {
+    #[must_use]
+    pub fn ui_diagnostics_sender(&self) -> Option<UiDiagnosticsSender> {
         self.ui_diagnostics.clone()
     }
 
-    pub(crate) fn set_message_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+    pub fn set_message_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         if let Some(messages) = &self.messages {
             messages.set_wake(wake);
         }
     }
 
+    /// Enqueues replay recovery without blocking.
+    ///
+    /// # Errors
+    /// Returns the command when the command mailbox is full or disconnected.
     pub fn try_send_recovery(
         &self,
         command: ReplayRecoveryCommand,
@@ -1228,6 +1257,10 @@ impl MarketDataWorker {
             })
     }
 
+    /// Enqueues a Rithmic symbol search without blocking.
+    ///
+    /// # Errors
+    /// Returns the search when the command mailbox is full or disconnected.
     pub fn try_search_rithmic(
         &self,
         search: RithmicSymbolSearch,
@@ -1250,6 +1283,10 @@ impl MarketDataWorker {
             })
     }
 
+    /// Enqueues a Rithmic selection without blocking.
+    ///
+    /// # Errors
+    /// Returns the selection when the command mailbox is full or disconnected.
     pub fn try_select_rithmic(
         &self,
         selection: RithmicInstrumentSelection,
@@ -1272,6 +1309,10 @@ impl MarketDataWorker {
             })
     }
 
+    /// Enqueues a Rithmic history request without blocking.
+    ///
+    /// # Errors
+    /// Returns the request when the command mailbox is full or disconnected.
     pub fn try_request_rithmic_history(
         &self,
         request: RithmicSeriesRequest,
@@ -1309,6 +1350,7 @@ impl MarketDataWorker {
         (messages, false)
     }
 
+    #[must_use]
     pub const fn is_connected(&self) -> bool {
         self.connected
     }
@@ -1346,7 +1388,7 @@ impl Drop for MarketDataWorker {
     }
 }
 
-pub(crate) struct FixtureMarketWorker {
+pub struct FixtureMarketWorker {
     expected_subscription_id: String,
     source: EmbeddedReplaySource,
     convention: DecimalConvention,
@@ -1357,14 +1399,19 @@ pub(crate) struct FixtureMarketWorker {
 }
 
 impl FixtureMarketWorker {
-    pub(crate) fn try_new() -> Result<Self, String> {
+    /// Creates a fixture worker with the default decimal convention.
+    ///
+    /// # Errors
+    /// Returns an error if the convention or bounded decoder cannot be created.
+    pub fn try_new() -> Result<Self, String> {
         Self::try_new_with_convention("usd_minor", "shares")
     }
 
-    pub(crate) fn try_new_with_convention(
-        price_unit: &str,
-        quantity_unit: &str,
-    ) -> Result<Self, String> {
+    /// Creates a fixture worker with an explicit decimal convention.
+    ///
+    /// # Errors
+    /// Returns an error if the convention or bounded decoder cannot be created.
+    pub fn try_new_with_convention(price_unit: &str, quantity_unit: &str) -> Result<Self, String> {
         let convention = DecimalConvention::try_new(price_unit, quantity_unit)
             .map_err(|error| error.to_string())?;
         let maximum_frame_bytes =
@@ -1391,10 +1438,11 @@ impl FixtureMarketWorker {
         })
     }
 
-    pub(crate) fn publish_snapshot(
-        &mut self,
-        bar_count: usize,
-    ) -> Result<MarketWorkerBootstrap, String> {
+    /// Loads and publishes a bounded fixture snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if loading, decoding, validation, or publication fails.
+    pub fn publish_snapshot(&mut self, bar_count: usize) -> Result<MarketWorkerBootstrap, String> {
         let snapshot = self
             .source
             .load_snapshot(LoadEmbeddedReplay { bar_count })
@@ -1448,7 +1496,11 @@ impl FixtureMarketWorker {
         })
     }
 
-    pub(crate) fn publish_delta(
+    /// Loads and publishes the fixture delta following `previous_sequence`.
+    ///
+    /// # Errors
+    /// Returns an error if loading, decoding, validation, or publication fails.
+    pub fn publish_delta(
         &mut self,
         previous_sequence: u64,
     ) -> Result<Option<MarketWorkerPublication>, String> {
@@ -2463,10 +2515,10 @@ mod tests {
             .try_select_rithmic(selection)
             .expect("selection enters the bounded channel");
         worker
-            .try_request_rithmic_history(crate::rithmic_history::RithmicSeriesRequest {
+            .try_request_rithmic_history(crate::rithmic_series::RithmicSeriesRequest {
                 selection_generation: NonZeroUsize::MIN,
                 series_generation: NonZeroUsize::MIN,
-                series: crate::rithmic_history::RithmicSeries::Minute1,
+                series: crate::rithmic_series::RithmicSeries::Minute1,
             })
             .expect("history enters the bounded channel");
         assert!(matches!(

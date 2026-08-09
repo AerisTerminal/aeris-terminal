@@ -1,16 +1,18 @@
-use crate::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
     validate_provenanced_market_bar,
+};
+use axiusflow_coinbase_coordinator::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
+pub(crate) use axiusflow_coinbase_coordinator::rithmic_series::{
+    RithmicSeries, RithmicSeriesRequest,
 };
 use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_market_data::{
-    BarDefinition, ChartAggregation, ChartInterval, MarketBar, RithmicChartAggregation,
-    RithmicDailyAggregation, RithmicTimeUnit,
+    BarDefinition, ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_provider_history::HistoryRange;
@@ -43,103 +45,6 @@ const TICK_TRADES_PER_BAR: u16 = 100;
 const MAXIMUM_REPLAY_BARS: usize = 10_000;
 const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
 const DAILY_SESSION_PADDING_BARS: usize = 150;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RithmicSeries(ChartInterval);
-
-#[allow(non_upper_case_globals)]
-#[allow(dead_code)]
-impl RithmicSeries {
-    pub(crate) const Tick: Self = Self(ChartInterval::Tick100);
-    pub(crate) const Minute1: Self = Self(ChartInterval::Minute1);
-    pub(crate) const Minute3: Self = Self(ChartInterval::Minute3);
-    pub(crate) const Minute5: Self = Self(ChartInterval::Minute5);
-    pub(crate) const Minute15: Self = Self(ChartInterval::Minute15);
-    pub(crate) const Minute30: Self = Self(ChartInterval::Minute30);
-    pub(crate) const Hour1: Self = Self(ChartInterval::Hour1);
-    pub(crate) const Hour2: Self = Self(ChartInterval::Hour2);
-    pub(crate) const Hour4: Self = Self(ChartInterval::Hour4);
-    pub(crate) const Hour8: Self = Self(ChartInterval::Hour8);
-    pub(crate) const Hour12: Self = Self(ChartInterval::Hour12);
-    pub(crate) const Daily: Self = Self(ChartInterval::Day1);
-    pub(crate) const Day3: Self = Self(ChartInterval::Day3);
-    pub(crate) const Week1: Self = Self(ChartInterval::Week1);
-    pub(crate) const Month1: Self = Self(ChartInterval::Month1);
-
-    pub(crate) const ALL: [Self; 15] = [
-        Self::Tick,
-        Self::Minute1,
-        Self::Minute3,
-        Self::Minute5,
-        Self::Minute15,
-        Self::Minute30,
-        Self::Hour1,
-        Self::Hour2,
-        Self::Hour4,
-        Self::Hour8,
-        Self::Hour12,
-        Self::Daily,
-        Self::Day3,
-        Self::Week1,
-        Self::Month1,
-    ];
-
-    pub(crate) const fn label(self) -> &'static str {
-        self.0.label()
-    }
-
-    pub(crate) const fn interval(self) -> ChartInterval {
-        self.0
-    }
-
-    pub(crate) fn supports_native_history(self) -> bool {
-        self.0.rithmic_aggregation().is_some()
-    }
-
-    fn interval_seconds(self) -> Option<u64> {
-        match self.interval().aggregation() {
-            ChartAggregation::FixedSeconds(seconds) => Some(u64::from(seconds.get())),
-            ChartAggregation::CalendarMonth => Some(30 * 24 * 60 * 60),
-            ChartAggregation::Trades(_) => None,
-        }
-    }
-
-    fn resolution(self) -> Result<RithmicTimeBarResolution, String> {
-        if !self.supports_native_history() {
-            return Err(format!(
-                "{} has no exact Rithmic time-bar resolution",
-                self.label()
-            ));
-        }
-        let Some(RithmicChartAggregation::Time { unit, period }) =
-            self.interval().rithmic_aggregation()
-        else {
-            return Err(format!(
-                "{} has no exact Rithmic time-bar resolution",
-                self.label()
-            ));
-        };
-        let bar_type = match unit {
-            RithmicTimeUnit::Minute => TimeBarType::Minute,
-            RithmicTimeUnit::Day => TimeBarType::Daily,
-        };
-        RithmicTimeBarResolution::try_new(self.label(), bar_type, period)
-            .map_err(|_| "Rithmic series is unavailable".to_string())
-    }
-}
-
-impl From<ChartInterval> for RithmicSeries {
-    fn from(interval: ChartInterval) -> Self {
-        Self(interval)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RithmicSeriesRequest {
-    pub(crate) selection_generation: NonZeroUsize,
-    pub(crate) series_generation: NonZeroUsize,
-    pub(crate) series: RithmicSeries,
-}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RithmicSeriesBrowser {

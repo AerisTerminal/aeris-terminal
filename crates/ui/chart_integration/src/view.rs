@@ -194,7 +194,7 @@ fn apply_platform_theme(
     let surface = colors.background.css_value();
     let border = colors.border.css_value();
     let axis_text = colors.chart_axis_text.css_value();
-    let crosshair = colors.ring.css_value();
+    let crosshair = colors.chart_crosshair.css_value();
     let separator_hover = colors.interactive_neutral_active_bg.css_value();
     let patch = serde_json::json!({
         "layout": {
@@ -1243,6 +1243,10 @@ mod tests {
         );
         assert_eq!(chart.engine.options.get().layout.text_color, "#ebebeb");
         assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#1d1d1d");
+        assert_eq!(
+            chart.engine.options.get().crosshair.vert_line.color,
+            "#2e2e2e"
+        );
         assert!(series.line_color.is_none());
         assert!(series.up_color.is_none());
         assert!(series.down_color.is_none());
@@ -1300,12 +1304,20 @@ mod tests {
             chart.engine.options.get().layout.background.color,
             "#ffffff"
         );
+        assert_eq!(
+            chart.engine.options.get().crosshair.vert_line.color,
+            "#9598a1"
+        );
         chart
             .set_platform_theme(&AxiusflowTheme::dark())
             .expect("platform theme patch is valid");
         assert_eq!(
             chart.engine.options.get().layout.background.color,
             "#171717"
+        );
+        assert_eq!(
+            chart.engine.options.get().crosshair.vert_line.color,
+            "#2e2e2e"
         );
         assert_eq!(
             chart

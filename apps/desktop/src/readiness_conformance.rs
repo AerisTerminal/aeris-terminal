@@ -1,13 +1,11 @@
 //! Headless desktop burst and frame-conflation evidence.
 
-use crate::{
-    market_worker::{
-        FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
-        market_worker_channel,
-    },
-    rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart, RithmicLiveChartError},
-};
+use crate::rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart, RithmicLiveChartError};
 use axiusflow_application::ReplaySnapshot;
+use axiusflow_coinbase_coordinator::market_worker::{
+    FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
+    market_worker_channel,
+};
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{
     AggressorSide, BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
@@ -207,7 +205,7 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
                 series_generation: generation,
                 snapshot: snapshot.clone(),
             })
-            .map_err(|()| "desktop burst mailbox disconnected")?;
+            .map_err(|_| "desktop burst mailbox disconnected")?;
         if generation.get().is_multiple_of(128) {
             memory.sample()?;
         }
@@ -711,7 +709,7 @@ fn run_endurance_frame(
                 series_generation: generation,
                 snapshot: snapshot.clone(),
             })
-            .map_err(|()| "desktop endurance mailbox disconnected")?;
+            .map_err(|_| "desktop endurance mailbox disconnected")?;
         counters.updates_published = counters.updates_published.saturating_add(1);
     }
     counters.mailbox_high_water_items = counters.mailbox_high_water_items.max(sender.occupancy().0);

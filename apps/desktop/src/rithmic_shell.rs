@@ -1,6 +1,10 @@
-use axiusflow_observability::{FeedConnectionState, FeedIdentity};
-use axiusflow_rithmic_protocol_adapter::{RithmicProviderConfig, SymbolSearchResult};
+use axiusflow_rithmic_protocol_adapter::SymbolSearchResult;
 use std::num::NonZeroUsize;
+
+#[cfg(test)]
+use axiusflow_observability::FeedConnectionState;
+
+pub(crate) use axiusflow_coinbase_coordinator::rithmic_shell::RithmicShellState;
 
 pub(crate) const MAXIMUM_SYMBOL_QUERY_BYTES: usize = 64;
 pub(crate) const MAXIMUM_SYMBOL_RESULTS: usize = 64;
@@ -129,46 +133,6 @@ impl RithmicSymbolBrowser {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RithmicShellState {
-    identity: FeedIdentity,
-    connection: FeedConnectionState,
-    message: String,
-}
-
-impl RithmicShellState {
-    pub(crate) fn local() -> Result<Self, String> {
-        let environment = RithmicProviderConfig::environment();
-        let identity = FeedIdentity::try_new(
-            environment.provider_id,
-            environment.system_id,
-            environment.environment,
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(Self {
-            identity,
-            connection: FeedConnectionState::Disconnected,
-            message: "Local shell ready; provider login has not started".to_string(),
-        })
-    }
-
-    pub(crate) const fn connection(&self) -> FeedConnectionState {
-        self.connection
-    }
-
-    pub(crate) fn profile_label(&self) -> String {
-        let provider = match self.identity.provider() {
-            "rithmic" => "Rithmic",
-            provider => provider,
-        };
-        let system = match self.identity.system() {
-            "RITHMIC_TEST" => "Rithmic Test",
-            system => system,
-        };
-        format!("{provider} · {system} · {}", self.identity.environment())
-    }
-}
-
 #[cfg(test)]
 pub(crate) const fn connection_label(connection: FeedConnectionState) -> &'static str {
     match connection {
@@ -178,12 +142,6 @@ pub(crate) const fn connection_label(connection: FeedConnectionState) -> &'stati
         FeedConnectionState::Streaming => "Live market data",
         FeedConnectionState::Recovering => "Reconnecting",
         FeedConnectionState::Stopped => "Stopped",
-    }
-}
-
-impl RithmicShellState {
-    pub(crate) fn message(&self) -> &str {
-        &self.message
     }
 }
 

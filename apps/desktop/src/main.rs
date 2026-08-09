@@ -2,8 +2,6 @@
 
 mod assets;
 mod chart_chrome;
-mod live_market_worker;
-mod market_worker;
 mod readiness_conformance;
 mod rithmic_history;
 mod rithmic_live_chart;
@@ -16,6 +14,11 @@ use axiusflow_application::{ReplayProvenance, ReplayStreamUpdate};
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
 };
+use axiusflow_coinbase_coordinator::market_worker::{
+    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
+    UiDiagnosticsFeedback,
+};
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_market_data::ChartInterval;
@@ -27,7 +30,7 @@ use axiusflow_rithmic_protocol_adapter::{
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight, Hsla,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
     KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     rgb, size,
 };
@@ -43,11 +46,6 @@ use gpui_component::{
 };
 use gpui_hugeicons::{HugeiconsAssets, IconName as HugeIcon};
 use gpui_platform::application;
-use market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-    UiDiagnosticsFeedback,
-};
 use std::{
     path::PathBuf,
     pin::Pin,
@@ -411,7 +409,6 @@ enum InstrumentMenuSelection {
 #[derive(Clone)]
 struct InstrumentMenuEntry {
     symbol: String,
-    detail: String,
     checked: bool,
     selection: InstrumentMenuSelection,
 }
@@ -455,7 +452,6 @@ struct HeaderState {
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
     indicator_message: Option<String>,
-    symbol_message: String,
     series_message: String,
     pending: HeaderPendingState,
     controls: HeaderControls,
@@ -886,10 +882,6 @@ impl TerminalApp {
                 })
                 .map(|product| InstrumentMenuEntry {
                     symbol: product.display_symbol.clone(),
-                    detail: format!(
-                        "Coinbase spot · price 1e-{} · size 1e-{}",
-                        product.price_scale, product.quantity_scale
-                    ),
                     checked: self
                         .coinbase_product
                         .as_ref()
@@ -904,7 +896,6 @@ impl TerminalApp {
             .enumerate()
             .map(|(index, instrument)| InstrumentMenuEntry {
                 symbol: instrument.symbol.clone(),
-                detail: instrument_menu_detail(instrument),
                 checked: self.symbol_browser.selected().is_some_and(|selected| {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange
@@ -2012,7 +2003,6 @@ fn chrome_overlay_layer(
                 label: terminal_instrument_label(app_state),
                 instruments: app_state.instrument_entries(cx),
                 input: app_state.symbol_input.clone(),
-                message: app_state.symbol_message.clone(),
                 selection_pending: app_state.symbol_selection_pending,
                 enabled: true,
                 provider: app_state.provider,
@@ -2169,7 +2159,6 @@ impl Render for TerminalApp {
                 symbol_input: self.symbol_input.clone(),
                 indicator_input: self.indicator_input.clone(),
                 indicator_message: self.indicator_message.clone(),
-                symbol_message: self.symbol_message.clone(),
                 series_message: self.series_message.clone(),
                 pending: HeaderPendingState {
                     symbol_selection: self.symbol_selection_pending,
@@ -2288,6 +2277,7 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
                 .size_full()
                 .v_flex()
                 .overflow_hidden()
+                .bg(gpui_color(colors.surface_primary))
                 .children(side_panel.map(|panel| side_panel_header(panel, app.clone(), theme)))
                 .child(
                     div()
@@ -2468,7 +2458,7 @@ fn drawing_toolbar(
         .overflow_hidden()
         .border_r_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.card))
+        .bg(gpui_color(colors.surface_primary))
         .child(
             div()
                 .v_flex()
@@ -2627,7 +2617,7 @@ fn drawing_toolbar_expander(
         .bottom_0()
         .border_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.card))
+        .bg(gpui_color(colors.surface_primary))
         .child(chrome_tooltip(
             "drawing_toolbar_expand",
             "Expand drawing toolbar",
@@ -2698,6 +2688,7 @@ fn side_panel_header(
         .border_l_1()
         .border_b_1()
         .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface_primary))
         .text_xs()
         .text_color(gpui_color(colors.muted_foreground))
         .child(div().flex_1().child(panel.title().to_uppercase()))
@@ -2805,19 +2796,12 @@ fn terminal_header(
     app: &Entity<TerminalApp>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
-    div()
-        .relative()
+    TitleBar::new()
         .h(px(state.theme.dimensions.app_header_height.logical_pixels))
-        .flex_none()
-        .child(TitleBar::new().h(px(state.theme.dimensions.app_header_height.logical_pixels)))
         .child(
             div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left_0()
-                .right(px(102.0))
-                .occlude()
+                .h_full()
+                .flex_1()
                 .flex()
                 .items_center()
                 .gap_2()
@@ -2874,7 +2858,6 @@ fn header_controls(
                 label: state.instrument_label,
                 instruments: state.instruments,
                 input: state.symbol_input,
-                message: state.symbol_message,
                 selection_pending: state.pending.symbol_selection,
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 provider: state.provider,
@@ -2978,7 +2961,7 @@ fn instrument_selector(
         .ghost()
         .border_1()
         .border_color(gpui_color(theme.colors.border))
-        .bg(gpui_color(theme.colors.input_surface))
+        .bg(gpui_color(theme.colors.surface_secondary))
         .text_color(gpui_color(theme.colors.foreground))
         .hover(|style| {
             style
@@ -3144,11 +3127,8 @@ fn indicator_dialog_content(
                     },
                 ))
         });
-    div()
-        .w(px(720.0))
-        .bg(gpui_color(colors.card))
-        .text_color(gpui_color(colors.card_foreground))
-        .child(indicator_dialog_header(input, &colors))
+    chrome_menu_surface(&colors)
+        .child(chrome_menu_search_header(input, &colors))
         .child(indicator_status_bar(
             result_count,
             status,
@@ -3156,13 +3136,9 @@ fn indicator_dialog_content(
             &colors,
         ))
         .child(
-            div()
-                .v_flex()
-                .gap_1()
-                .p_2()
-                .max_h(px(480.0))
-                .overflow_y_scrollbar()
-                .children(rows),
+            chrome_menu_scroll_body()
+                .children(rows)
+                .overflow_y_scrollbar(),
         )
         .child(indicator_dialog_footer(&colors))
 }
@@ -3201,25 +3177,15 @@ fn indicator_status_bar(
 fn indicator_dialog_footer(
     colors: &axiusflow_design_system::ThemeColors,
 ) -> impl IntoElement + use<> {
-    div()
-        .h(px(40.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_3()
-        .border_t_1()
-        .border_color(gpui_color(colors.border))
-        .text_xs()
-        .text_color(gpui_color(colors.muted_foreground))
+    chrome_menu_footer(colors)
         .child("Enter Add  ·  Esc Close")
         .child("Publisher: Native")
 }
 
-fn indicator_dialog_header(
+fn chrome_menu_search_header(
     input: &Entity<InputState>,
     colors: &axiusflow_design_system::ThemeColors,
-) -> impl IntoElement + use<> {
+) -> Div {
     div()
         .h(px(chart_chrome::CHART_CHROME_HEIGHT))
         .flex_none()
@@ -3258,7 +3224,6 @@ struct InstrumentSelectorState {
     label: String,
     instruments: Vec<InstrumentMenuEntry>,
     input: Option<Entity<InputState>>,
-    message: String,
     selection_pending: bool,
     enabled: bool,
     provider: TerminalProvider,
@@ -3280,7 +3245,6 @@ fn instrument_dialog_content(
             let checked = instrument.checked;
             let app = app.clone();
             let symbol = instrument.symbol.clone();
-            let detail = instrument.detail.clone();
             let selection = instrument.selection.clone();
             div()
                 .id(("instrument_dialog_row", index))
@@ -3323,49 +3287,22 @@ fn instrument_dialog_content(
                 )
                 .child(
                     div()
-                        .v_flex()
-                        .gap_0p5()
                         .flex_1()
-                        .child(div().text_sm().child(symbol))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(gpui_color(colors.muted_foreground))
-                                .child(detail),
-                        ),
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(symbol),
                 )
                 .children(
                     checked
                         .then(|| header_icon(HugeIcon::CheckmarkCircleIcon01).into_any_element()),
                 )
         });
-    div()
-        .w(px(720.0))
-        .bg(gpui_color(colors.card))
-        .text_color(gpui_color(colors.card_foreground))
+    chrome_menu_surface(&colors)
         .child(header)
         .child(
-            div()
-                .h(px(34.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .px_3()
-                .border_b_1()
-                .border_color(gpui_color(colors.border))
-                .text_xs()
-                .text_color(gpui_color(colors.muted_foreground))
-                .child(div().flex_1().child(state.message.clone()))
-                .child(format!("{} results", state.instruments.len())),
-        )
-        .child(
-            div()
-                .v_flex()
-                .gap_1()
-                .p_2()
-                .max_h(px(480.0))
-                .overflow_y_scrollbar()
-                .children(rows),
+            chrome_menu_scroll_body()
+                .children(rows)
+                .overflow_y_scrollbar(),
         )
         .child(instrument_dialog_footer(&colors, state.provider))
 }
@@ -3374,17 +3311,7 @@ fn instrument_dialog_footer(
     colors: &axiusflow_design_system::ThemeColors,
     provider: TerminalProvider,
 ) -> impl IntoElement + use<> {
-    div()
-        .h(px(40.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_3()
-        .border_t_1()
-        .border_color(gpui_color(colors.border))
-        .text_xs()
-        .text_color(gpui_color(colors.muted_foreground))
+    chrome_menu_footer(colors)
         .child("Enter Search  ·  Esc Close")
         .child(match provider {
             TerminalProvider::Coinbase => "Coinbase public spot catalog",
@@ -3397,37 +3324,32 @@ fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTh
     let Some(input) = state.input.as_ref() else {
         return div().into_any_element();
     };
+    chrome_menu_search_header(input, &theme.colors).into_any_element()
+}
+
+fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
-        .h(px(chart_chrome::CHART_CHROME_HEIGHT))
+        .w(px(720.0))
+        .bg(gpui_color(colors.surface_primary))
+        .text_color(gpui_color(colors.foreground))
+}
+
+fn chrome_menu_scroll_body() -> Div {
+    div().v_flex().gap_1().p_2().max_h(px(480.0))
+}
+
+fn chrome_menu_footer(colors: &axiusflow_design_system::ThemeColors) -> Div {
+    div()
+        .h(px(40.0))
         .flex_none()
         .flex()
         .items_center()
-        .gap_2()
+        .justify_between()
         .px_3()
-        .border_b_1()
-        .border_color(gpui_color(theme.colors.border))
-        .child(header_icon(HugeIcon::SearchIcon01))
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .flex_1(),
-        )
-        .into_any_element()
-}
-
-fn instrument_menu_detail(
-    instrument: &axiusflow_rithmic_protocol_adapter::SymbolSearchResult,
-) -> String {
-    let mut details = vec![instrument.exchange.as_str()];
-    if let Some(instrument_type) = instrument.instrument_type.as_deref() {
-        details.push(instrument_type);
-    }
-    if let Some(expiration) = instrument.expiration_date.as_deref() {
-        details.push(expiration);
-    }
-    details.join(" · ")
+        .border_t_1()
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .text_color(gpui_color(colors.muted_foreground))
 }
 
 #[derive(Clone, Copy)]
@@ -3656,7 +3578,7 @@ fn feed_health_panel(
         .flex_col()
         .border_l_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.card))
+        .bg(gpui_color(colors.surface_primary))
         .children(rows.into_iter().map(move |(label, value)| {
             div()
                 .h(px(28.0))
@@ -3852,13 +3774,13 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
     component.success = gpui_color(colors.profit);
     component.warning = gpui_color(colors.warning);
 
-    component.sidebar = gpui_color(colors.card);
-    component.sidebar_foreground = gpui_color(colors.card_foreground);
+    component.sidebar = gpui_color(colors.surface_primary);
+    component.sidebar_foreground = gpui_color(colors.foreground);
     component.sidebar_border = gpui_color(colors.border);
     component.table = gpui_color(colors.card);
     component.table_head = gpui_color(colors.surface_tertiary);
     component.table_row_border = gpui_color(colors.border);
-    component.title_bar = gpui_color(colors.card);
+    component.title_bar = gpui_color(colors.surface_primary);
     component.title_bar_border = gpui_color(colors.border);
     component.status_bar = gpui_color(colors.card);
     component.status_bar_border = gpui_color(colors.border);
@@ -4215,7 +4137,7 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
                 eprintln!("{usage}");
                 std::process::exit(2);
             });
-            MarketDataWorker::start_rithmic(
+            rithmic_market_worker::start(
                 parsed.history_root,
                 std::thread::current().id(),
                 parsed.detailed_diagnostics,
@@ -4277,10 +4199,10 @@ mod tests {
         RithmicSessionRetirement, SidePanel, TerminalProvider, bounded_status_detail,
         catalog_rejection_domain, chart_status_detail, chart_surface_notice,
         connection_presentation, default_rithmic_contract_index, duration_label, gpui_color,
-        instrument_menu_detail, instrument_selector_label, milli_rate,
-        parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop,
+        instrument_selector_label, milli_rate, parse_rithmic_test_arguments,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        rithmic_production_subscription, rithmic_ready_action, series_selector_label,
+        should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -4641,23 +4563,6 @@ mod tests {
         assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
         assert!(controls.enabled(HeaderControls::LATEST));
-    }
-
-    #[test]
-    fn instrument_menu_detail_keeps_exchange_type_and_expiration_distinct() {
-        let instrument = SymbolSearchResult {
-            symbol: "MNQU6".to_string(),
-            exchange: "CME".to_string(),
-            name: Some("Micro E-mini Nasdaq-100".to_string()),
-            product_code: Some("MNQ".to_string()),
-            instrument_type: Some("Future".to_string()),
-            expiration_date: Some("2026-09".to_string()),
-        };
-
-        assert_eq!(
-            instrument_menu_detail(&instrument),
-            "CME · Future · 2026-09"
-        );
     }
 
     #[test]

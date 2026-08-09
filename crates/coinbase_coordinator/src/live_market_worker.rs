@@ -145,7 +145,11 @@ struct CoinbaseCallbackContext<'a> {
     message_tx: &'a MarketWorkerSender,
 }
 
-pub(crate) fn start(
+/// Starts the live Coinbase coordinator and its bounded worker set.
+///
+/// # Errors
+/// Returns an error if product configuration, storage, or worker startup fails.
+pub fn start(
     product_id: String,
     history_root: PathBuf,
     ui_thread: ThreadId,
@@ -1025,7 +1029,7 @@ fn request_recovery_if_required<V: axiusflow_platform_runtime::CredentialVault>(
                         events.invalid_reason()
                     ),
                 })
-                .map_err(|()| "desktop market UI channel disconnected".to_string())?;
+                .map_err(|_| "desktop market UI channel disconnected".to_string())?;
             state.recovery_announced = true;
         }
         if state.reconnect_backoff.retry_ready(Instant::now()) {

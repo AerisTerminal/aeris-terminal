@@ -9,6 +9,7 @@
 .light {
   --background: color(display-p3 1 1 1);
   --foreground: color(display-p3 0.2 0.2 0.2);
+  --surface_primary: var(--background);
   --surface_secondary: color(display-p3 0.988 0.988 0.988);
   --surface_tertiary: color(display-p3 0.945 0.945 0.945);
   --surface_quaternary: color(display-p3 0.922 0.922 0.922);
@@ -59,6 +60,7 @@
   --chart_volume_up: oklch(from var(--profit) l c h / 34%);
   --chart_volume_down: oklch(from var(--loss) l c h / 30%);
   --chart_axis_text: #0a0a0a;
+  --chart_crosshair: #9598a1;
 }
 
 .dark {
@@ -87,4 +89,5 @@
   --chart_volume_up: oklch(from var(--profit) l c h / 32%);
   --chart_volume_down: oklch(from var(--loss) l c h / 28%);
   --chart_axis_text: var(--foreground);
+  --chart_crosshair: #2e2e2e;
 }
