@@ -9,7 +9,8 @@ use axiusflow_desktop_history::{
     HistoryWorkerConfig, HydrationOutcome, HydrationRequest, StartupCacheState, WorkerMetrics,
 };
 use axiusflow_desktop_storage::{
-    CatalogKey, HistorySeriesIdentity, PublicationRequest, SegmentEncryptionKey, SegmentIdentity,
+    CatalogKey, HistorySeriesIdentity, PublicationRequest, RetainedRange, SegmentEncryptionKey,
+    SegmentIdentity,
 };
 use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::{
@@ -307,6 +308,21 @@ where
     ) -> Result<CoverageSnapshot, DesktopMarketWorkerError> {
         self.history
             .coverage_snapshot(series, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
+    /// Returns active immutable history segments overlapping one requested range.
+    ///
+    /// # Errors
+    /// Returns a redacted wrong-thread, invalid-dimension, or catalog failure.
+    pub fn retained_history_identities_in_range(
+        &self,
+        series: HistorySeriesIdentity<'_>,
+        requested: RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<Vec<SegmentIdentity>, DesktopMarketWorkerError> {
+        self.history
+            .retained_identities_in_range(series, requested, now_unix_seconds)
             .map_err(Into::into)
     }
 

@@ -248,6 +248,58 @@ impl HistoryStore {
         ))
     }
 
+    /// Returns active immutable segment identities that overlap one requested range.
+    /// Results retain segment boundaries and are sorted from oldest to newest.
+    ///
+    /// # Errors
+    /// Returns an error for invalid dimensions, range, or catalog access failure.
+    pub fn retained_identities_in_range(
+        &self,
+        series: crate::HistorySeriesIdentity<'_>,
+        requested: crate::RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<Vec<crate::SegmentIdentity>, DesktopStorageError> {
+        series.validate()?;
+        if requested.start_unix_nanos >= requested.end_unix_nanos {
+            return Err(DesktopStorageError::InvalidIdentity("coverage_range"));
+        }
+        let scope = scope_tokens(&self.catalog_key, series.scope)?;
+        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
+        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
+        let ranges = self.catalog.active_series_ranges(
+            SeriesTokens {
+                provider: &scope.provider,
+                account: &scope.account,
+                entitlement: &scope.entitlement,
+                instrument: &instrument,
+                resolution: &resolution,
+            },
+            series_dimensions(series),
+            now_unix_seconds,
+        )?;
+        Ok(ranges
+            .into_iter()
+            .filter(|(start, end)| {
+                *start < requested.end_unix_nanos && requested.start_unix_nanos < *end
+            })
+            .map(
+                |(range_start_unix_nanos, range_end_unix_nanos)| crate::SegmentIdentity {
+                    scope: series.scope.clone(),
+                    instrument_id: series.instrument_id.to_string(),
+                    data_kind: series.data_kind,
+                    resolution: series.resolution.to_string(),
+                    range_start_unix_nanos,
+                    range_end_unix_nanos,
+                    source_revision: series.source_revision,
+                    schema_revision: series.schema_revision,
+                    calendar_revision: series.calendar_revision,
+                    adjustment_revision: series.adjustment_revision,
+                    correction_revision: series.correction_revision,
+                },
+            )
+            .collect())
+    }
+
     /// Returns complete, confirmed-empty, invalidated, and quarantined facts for
     /// one exact series revision. Missing and partial coverage are derived by the
     /// provider-neutral coverage planner for the caller's requested range.

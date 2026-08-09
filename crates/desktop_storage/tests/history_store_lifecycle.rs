@@ -210,6 +210,25 @@ fn retained_coverage_merges_exact_series_segments_and_reports_gaps() {
             },
         ]
     );
+    assert_eq!(
+        store
+            .retained_identities_in_range(
+                series_identity(&series_scope, "btc-usd"),
+                RetainedRange {
+                    start_unix_nanos: 20,
+                    end_unix_nanos: 55,
+                },
+                101,
+            )
+            .expect("overlapping identities read")
+            .into_iter()
+            .map(|identity| (
+                identity.range_start_unix_nanos,
+                identity.range_end_unix_nanos
+            ))
+            .collect::<Vec<_>>(),
+        vec![(10, 30), (25, 40), (50, 60)]
+    );
 }
 
 #[test]

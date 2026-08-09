@@ -6,7 +6,7 @@ use crate::{
 use axiusflow_desktop_storage::{
     AuthorizedHistoryRead, AvailabilityReason, CatalogKey, DesktopStorageError,
     HistorySeriesIdentity, HistoryStore, MAXIMUM_SEGMENT_BYTES, PublicationRequest, RecoveryAction,
-    SegmentIdentity,
+    RetainedRange, SegmentIdentity,
 };
 use axiusflow_provider_history::{
     CoverageSnapshot, HandoffCoordinator, LiveAcceptance, SequencedHistory, VerifiedHistorySnapshot,
@@ -180,6 +180,22 @@ impl<T: Clone> HistoryWorker<T> {
         self.ensure_owner()?;
         self.store
             .series_coverage_snapshot(series, now_unix_seconds)
+            .map_err(Into::into)
+    }
+
+    /// Returns active immutable segments overlapping one visible range.
+    ///
+    /// # Errors
+    /// Returns an error for wrong-thread access, invalid dimensions, or catalog failure.
+    pub fn retained_identities_in_range(
+        &self,
+        series: HistorySeriesIdentity<'_>,
+        requested: RetainedRange,
+        now_unix_seconds: i64,
+    ) -> Result<Vec<SegmentIdentity>, DesktopHistoryError> {
+        self.ensure_owner()?;
+        self.store
+            .retained_identities_in_range(series, requested, now_unix_seconds)
             .map_err(Into::into)
     }
 
