@@ -172,6 +172,7 @@ fn run() -> Result<(), String> {
 
     let token = Arc::new(native_installation_token()?);
     let listener = bind_listener(ENGINE_SOCKET_NAME).map_err(|error| error.to_string())?;
+    register_engine_autostart();
     let mut epoch_bytes = [0_u8; 8];
     getrandom::fill(&mut epoch_bytes).map_err(|error| error.to_string())?;
     let engine_epoch = u64::from_le_bytes(epoch_bytes).max(1);
@@ -222,6 +223,39 @@ fn run() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
 }
+
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn register_engine_autostart() {
+    use std::os::windows::process::CommandExt as _;
+
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let _ = thread::Builder::new()
+        .name("axiusflow-engine-autostart".to_string())
+        .spawn(move || {
+            let command = format!("\"{}\"", executable.display());
+            let mut process = std::process::Command::new("reg.exe");
+            process.args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "AxiusflowEngine",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &command,
+                "/f",
+            ]);
+            process.creation_flags(0x0800_0000);
+            if !matches!(process.status(), Ok(status) if status.success()) {
+                eprintln!("Axiusflow engine login startup registration failed");
+            }
+        });
+}
+
+#[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+fn register_engine_autostart() {}
 
 fn start_market_runtime(
     state: EngineState,

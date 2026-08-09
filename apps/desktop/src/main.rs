@@ -3856,40 +3856,6 @@ fn gpui_color(color: ThemeColor) -> Hsla {
     resolved
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct RithmicTestArguments {
-    history_root: std::path::PathBuf,
-    detailed_diagnostics: bool,
-    native_transition_report: Option<std::path::PathBuf>,
-}
-
-fn parse_rithmic_test_arguments(
-    mut arguments: impl Iterator<Item = std::ffi::OsString>,
-) -> Result<RithmicTestArguments, String> {
-    let usage = "usage: axiusflow_desktop --rithmic-test <history-root> [--detailed-diagnostics] [--capture-native-transitions <report-path>]";
-    let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
-    let mut detailed_diagnostics = false;
-    let mut native_transition_report = None;
-    while let Some(flag) = arguments.next() {
-        if flag == "--detailed-diagnostics" && !detailed_diagnostics {
-            detailed_diagnostics = true;
-        } else if flag == "--capture-native-transitions" && native_transition_report.is_none() {
-            let report = arguments.next().ok_or_else(|| usage.to_string())?;
-            if report.is_empty() {
-                return Err(usage.to_string());
-            }
-            native_transition_report = Some(std::path::PathBuf::from(report));
-        } else {
-            return Err(usage.to_string());
-        }
-    }
-    Ok(RithmicTestArguments {
-        history_root: std::path::PathBuf::from(history_root),
-        detailed_diagnostics,
-        native_transition_report,
-    })
-}
-
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
@@ -4055,20 +4021,14 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
             return None;
         }
         if argument == "--rithmic-test" {
-            let _parsed = parse_rithmic_test_arguments(arguments).unwrap_or_else(|usage| {
-                eprintln!("{usage}");
+            if arguments.next().is_some() {
+                eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
-            });
+            }
             resident_market_worker::start_rithmic().unwrap_or_else(|error| {
                 eprintln!("Rithmic Test shell could not start: {error}");
                 std::process::exit(1);
             })
-        } else if argument == "--fixture" {
-            if arguments.next().is_some() {
-                eprintln!("usage: axiusflow_desktop --fixture");
-                std::process::exit(2);
-            }
-            MarketDataWorker::start().expect("the bounded binary fixture worker bootstraps")
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
@@ -4106,17 +4066,15 @@ mod tests {
         RithmicSessionRetirement, SidePanel, TerminalProvider, bounded_status_detail,
         catalog_rejection_domain, chart_status_detail, chart_surface_notice,
         connection_presentation, default_rithmic_contract_index, duration_label, gpui_color,
-        instrument_selector_label, milli_rate, parse_rithmic_test_arguments,
-        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
-        rithmic_production_subscription, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop,
+        instrument_selector_label, milli_rate, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
+        series_selector_label, should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
     use axiusflow_rithmic_protocol_adapter::{
         RithmicCatalogRejection, RithmicReadOnlySubscription, SymbolSearchResult,
     };
-    use std::ffi::OsString;
 
     #[test]
     fn publication_is_ready_only_after_bridge_acceptance_without_recovery() {
@@ -4353,48 +4311,6 @@ mod tests {
     fn gpui_theme_attachment_preserves_alpha() {
         let attached = gpui_color(ThemeColor::from_rgb8(240, 240, 240).with_alpha(19.0 / 255.0));
         assert!((attached.a - 19.0 / 255.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn rithmic_test_cli_bounds_diagnostics_and_native_transition_capture() {
-        let parsed = parse_rithmic_test_arguments(
-            [
-                "cache",
-                "--capture-native-transitions",
-                "evidence/transitions.json",
-                "--detailed-diagnostics",
-            ]
-            .into_iter()
-            .map(OsString::from),
-        )
-        .expect("valid Rithmic Test arguments parse");
-        assert_eq!(parsed.history_root, std::path::PathBuf::from("cache"));
-        assert!(parsed.detailed_diagnostics);
-        assert_eq!(
-            parsed.native_transition_report,
-            Some(std::path::PathBuf::from("evidence/transitions.json"))
-        );
-        assert!(parse_rithmic_test_arguments(std::iter::empty()).is_err());
-        assert!(
-            parse_rithmic_test_arguments(
-                [OsString::from("cache"), OsString::from("--unknown")].into_iter()
-            )
-            .is_err()
-        );
-        assert!(
-            parse_rithmic_test_arguments(
-                [
-                    "cache",
-                    "--capture-native-transitions",
-                    "first.json",
-                    "--capture-native-transitions",
-                    "second.json",
-                ]
-                .into_iter()
-                .map(OsString::from)
-            )
-            .is_err()
-        );
     }
 
     #[test]
