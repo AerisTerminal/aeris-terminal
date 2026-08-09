@@ -103,10 +103,29 @@ remediation batch lands.
 | Scenario | Metric | Baseline (pre-remediation) | Post-remediation |
 |---|---|---|---|
 | Live smoke BTC-USD | snapshot within 45 s deadline | passed (~seconds) | passed 2026-08-09 (post P1-1) |
-| Idle window, active | CPU | ~18% avg over 25 min | pending physical exercise |
-| Idle window, active | working set | ~97 MB | pending physical exercise |
+| Idle window, active | CPU | ~18% avg over 25 min | ~3-5% of one core while streaming, message-driven; 2026-08-09 |
+| Idle window, minimized | CPU | not measured | ~4.5% of one core (provider decode only, zero UI work); 2026-08-09 |
+| Idle window, active | working set | ~97 MB | ~93 MB; 2026-08-09 |
 | Timeframe switch | outcome | lock error / stuck | pending physical exercise |
 | Theme toggle | outcome | reported stuck | pending physical exercise |
+
+## Open investigations
+
+- **Intermittent `coinbase-session-1` spin.** Twice on 2026-08-09 (04:47-05:20,
+  ~06:00-06:10) the provider session thread pinned one core (~98%) for 10+
+  minutes while the worker and UI threads stayed idle; the same binary ran
+  healthy (~3-5% of one core, ~15-25 loop iterations/s driven by real messages)
+  before, between, and after those windows, including with per-arm iteration
+  probes attached. The condition is runtime-triggered and not yet root-caused;
+  blocked reads (100 ms socket deadline) make a code-path spin unlikely, so a
+  message-pattern-driven cause is suspected. A background watcher
+  (`spinwatch.ps1` in the machine temp dir) logs CPU and captures a minidump on
+  the next sustained occurrence.
+- **Debug builds panic at startup.** `gpui_component::Button::render` sets
+  `.hover()` twice, tripping the pinned gpui commit's `debug_assert!`
+  (`div.rs:806`). Release builds are unaffected (last style wins). Pre-existing
+  upstream drift between the pinned gpui-component rev and the pinned Zed gpui
+  commit; debug binaries cannot run until the pins are reconciled.
 
 ## Acceptance gates (post-remediation)
 
