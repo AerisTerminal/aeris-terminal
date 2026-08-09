@@ -25,12 +25,12 @@ use axiusflow_rithmic_protocol_adapter::{
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, Hsla, MouseButton, Render, Role, Window,
+    AnyElement, App, Bounds, ClickEvent, Context, Entity, Hsla, MouseButton, Render, Role, Window,
     WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
-    button::{Button, ButtonCustomVariant, ButtonVariants},
+    button::{Button, ButtonVariants},
     dialog::Dialog,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
@@ -45,7 +45,7 @@ use market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
     UiDiagnosticsFeedback,
 };
-use std::sync::mpsc::TrySendError;
+use std::{rc::Rc, sync::mpsc::TrySendError};
 
 const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
@@ -1751,12 +1751,19 @@ fn drawing_toolbar(
     let tool_app = app.clone();
     let tools = DRAWING_TOOLS.into_iter().map(move |spec| {
         let app = tool_app.clone();
-        drawing_toolbar_action(
-            drawing_toolbar_button(spec.id, spec.icon, spec.label, spec.icon_size),
-            state.availability == DrawingToolbarAvailability::Available,
-        )
-        .selected(state.active_tool == spec.tool)
-        .on_click(move |_, _, cx| {
+        let enabled = state.availability == DrawingToolbarAvailability::Available;
+        let button = drawing_toolbar_action(
+            drawing_toolbar_button(
+                spec.id,
+                spec.icon,
+                spec.label,
+                spec.icon_size,
+                theme,
+                state.active_tool == spec.tool,
+            ),
+            enabled,
+        );
+        button_activation(button, enabled, move |_, cx| {
             app.update(cx, |app, app_cx| {
                 app.select_drawing_tool(spec.tool, app_cx);
             });
@@ -1806,76 +1813,89 @@ fn drawing_toolbar_actions(
         .w_full()
         .border_t_1()
         .border_color(gpui_color(theme.colors.border))
-        .child(
+        .child(button_activation(
             drawing_toolbar_action(
                 drawing_toolbar_button(
                     "drawing_delete_selected",
                     DrawingToolIcon::Huge(HugeIcon::DeleteIcon02),
                     "Delete selected drawing",
                     24.0,
+                    theme,
+                    false,
                 ),
                 state.has_selection,
-            )
-            .on_click(move |_, _, cx| {
+            ),
+            state.has_selection,
+            move |_, cx| {
                 delete.update(cx, TerminalApp::remove_selected_drawing);
-            }),
-        )
-        .child(
+            },
+        ))
+        .child(button_activation(
             drawing_toolbar_action(
                 drawing_toolbar_button(
                     "drawing_lock_selected",
                     DrawingToolIcon::Huge(HugeIcon::Lock),
                     "Lock selected drawing",
                     20.0,
+                    theme,
+                    state.selected_locked,
                 ),
                 state.has_selection,
-            )
-            .selected(state.selected_locked)
-            .on_click(move |_, _, cx| {
+            ),
+            state.has_selection,
+            move |_, cx| {
                 selected_lock.update(cx, TerminalApp::toggle_selected_drawing_lock);
-            }),
-        )
-        .child(
+            },
+        ))
+        .child(button_activation(
             drawing_toolbar_action(
                 drawing_toolbar_button(
                     "drawing_lock_all",
                     DrawingToolIcon::Huge(HugeIcon::AiLock),
                     "Lock all drawings",
                     20.0,
+                    theme,
+                    state.all_locked,
                 ),
                 state.drawing_count > 0,
-            )
-            .selected(state.all_locked)
-            .on_click(move |_, _, cx| {
+            ),
+            state.drawing_count > 0,
+            move |_, cx| {
                 all_lock.update(cx, TerminalApp::toggle_all_drawings_lock);
-            }),
-        )
-        .child(
+            },
+        ))
+        .child(button_activation(
             drawing_toolbar_action(
                 drawing_toolbar_button(
                     "drawing_clear_all",
                     DrawingToolIcon::Huge(HugeIcon::AiEraser),
                     "Clear all drawings",
                     24.0,
+                    theme,
+                    false,
                 ),
                 state.drawing_count > 0,
-            )
-            .on_click(move |_, _, cx| {
+            ),
+            state.drawing_count > 0,
+            move |_, cx| {
                 clear.update(cx, TerminalApp::clear_drawings);
-            }),
-        )
-        .child(
+            },
+        ))
+        .child(button_activation(
             drawing_toolbar_button(
                 "drawing_toolbar_collapse",
                 DrawingToolIcon::Huge(HugeIcon::ArrowLeftIcon01),
                 "Collapse drawing toolbar",
                 24.0,
+                theme,
+                false,
             )
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
+            .cursor_pointer(),
+            true,
+            move |_, cx| {
                 collapse.update(cx, TerminalApp::toggle_drawing_toolbar);
-            }),
-        )
+            },
+        ))
 }
 
 fn drawing_toolbar_expander(
@@ -1890,20 +1910,23 @@ fn drawing_toolbar_expander(
         .border_1()
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.card))
-        .child(
+        .child(button_activation(
             drawing_toolbar_button(
                 "drawing_toolbar_expand",
                 DrawingToolIcon::Huge(HugeIcon::ArrowRightIcon01),
                 "Expand drawing toolbar",
                 14.0,
+                theme,
+                false,
             )
             .w(px(24.0))
             .h(px(28.0))
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
+            .cursor_pointer(),
+            true,
+            move |_, cx| {
                 app.update(cx, TerminalApp::toggle_drawing_toolbar);
-            }),
-        )
+            },
+        ))
 }
 
 fn drawing_toolbar_button(
@@ -1911,12 +1934,14 @@ fn drawing_toolbar_button(
     icon: DrawingToolIcon,
     tooltip: &'static str,
     icon_size: f32,
+    theme: &AxiusflowTheme,
+    selected: bool,
 ) -> Button {
     let icon = match icon {
         DrawingToolIcon::Huge(icon) => header_icon(icon),
         DrawingToolIcon::Asset(icon) => Icon::default().path(icon.path()),
     };
-    Button::new(id)
+    let button = Button::new(id)
         .icon(icon)
         .ghost()
         .compact()
@@ -1926,7 +1951,8 @@ fn drawing_toolbar_button(
         .rounded(px(f32::from(
             chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
         )))
-        .tooltip(tooltip)
+        .tooltip(tooltip);
+    chrome_button_style(button, theme, selected, true, true)
 }
 
 fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
@@ -1954,17 +1980,18 @@ fn side_panel_header(
         .text_xs()
         .text_color(gpui_color(colors.muted_foreground))
         .child(div().flex_1().child(panel.title().to_uppercase()))
-        .child(
+        .child(button_activation(
             Button::new("close_side_panel")
                 .icon(header_icon(HugeIcon::CancelIcon01))
                 .ghost()
                 .compact()
                 .cursor_pointer()
-                .tooltip("Close side panel")
-                .on_click(move |_, _, cx| {
-                    app.update(cx, TerminalApp::close_side_panel);
-                }),
-        )
+                .tooltip("Close side panel"),
+            true,
+            move |_, cx| {
+                app.update(cx, TerminalApp::close_side_panel);
+            },
+        ))
 }
 
 fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -2047,16 +2074,6 @@ fn terminal_header(
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let colors = state.theme.colors;
-    let active_button = ButtonCustomVariant::new(cx)
-        .color(gpui_color(colors.secondary))
-        .foreground(gpui_color(colors.secondary_foreground))
-        .hover(gpui_color(colors.accent))
-        .active(gpui_color(colors.muted));
-    let symbol_button = ButtonCustomVariant::new(cx)
-        .color(gpui_color(colors.muted))
-        .foreground(gpui_color(colors.foreground))
-        .hover(gpui_color(colors.accent))
-        .active(gpui_color(colors.muted));
     let (connection_label, connection_color) =
         connection_presentation(state.connection_state, state.chart_state, state.delayed);
     let connection = connection_badge(connection_label, connection_color(&state.theme), &colors);
@@ -2084,13 +2101,7 @@ fn terminal_header(
                 .top_0()
                 .bottom_0()
                 .right(px(102.0))
-                .child(header_controls(
-                    cx,
-                    app,
-                    state,
-                    active_button,
-                    symbol_button,
-                )),
+                .child(header_controls(cx, app, state)),
         )
 }
 
@@ -2098,8 +2109,6 @@ fn header_controls(
     cx: &mut Context<TerminalApp>,
     app: &Entity<TerminalApp>,
     state: HeaderState,
-    active_button: ButtonCustomVariant,
-    symbol_button: ButtonCustomVariant,
 ) -> impl IntoElement + use<> {
     let dom_panel = SidePanel::Dom;
     let dom_toggle = panel_toggle(
@@ -2112,7 +2121,7 @@ fn header_controls(
             tooltip: dom_panel.toggle_tooltip(),
             toggle: TerminalApp::toggle_dom,
         },
-        active_button,
+        &state.theme,
         app.clone(),
     );
     let health_panel = SidePanel::Health;
@@ -2126,12 +2135,11 @@ fn header_controls(
             tooltip: health_panel.toggle_tooltip(),
             toggle: TerminalApp::toggle_health,
         },
-        active_button,
+        &state.theme,
         app.clone(),
     );
     div()
         .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .h_full()
         .flex()
         .items_center()
@@ -2150,7 +2158,7 @@ fn header_controls(
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 theme: state.theme,
             },
-            symbol_button,
+            &state.theme,
         ))
         .child(series_selector(
             app.clone(),
@@ -2158,7 +2166,7 @@ fn header_controls(
             state.selected_series,
             state.series_message,
             state.pending.series,
-            active_button,
+            &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
         ))
         .child(panel_toggle(
@@ -2171,7 +2179,7 @@ fn header_controls(
                 tooltip: "Return to the latest bar (End)",
                 toggle: TerminalApp::scroll_chart_to_latest,
             },
-            active_button,
+            &state.theme,
             app.clone(),
         ))
         .child(panel_toggle(
@@ -2184,7 +2192,7 @@ fn header_controls(
                 tooltip: "Fit chart and reset price scales (Home)",
                 toggle: TerminalApp::reset_chart_view,
             },
-            active_button,
+            &state.theme,
             app.clone(),
         ))
         .child(indicator_selector(
@@ -2197,21 +2205,28 @@ fn header_controls(
         ))
         .child(dom_toggle)
         .child(health_toggle)
-        .child(theme_toggle(app.clone(), &state.theme, active_button))
+        .child(theme_toggle(app.clone(), &state.theme))
 }
 
 fn instrument_selector(
     cx: &mut Context<TerminalApp>,
     app: Entity<TerminalApp>,
     state: InstrumentSelectorState,
-    variant: ButtonCustomVariant,
+    theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
         .icon(header_icon(HugeIcon::ExchangeIcon01))
         .label(state.label.clone())
         .tooltip("Search or select a Rithmic contract")
         .dropdown_caret(true)
-        .custom(variant)
+        .ghost()
+        .bg(gpui_color(theme.colors.muted))
+        .text_color(gpui_color(theme.colors.foreground))
+        .hover(|style| {
+            style
+                .bg(gpui_color(theme.colors.accent))
+                .text_color(gpui_color(theme.colors.foreground))
+        })
         .h(px(28.0))
         .px_3()
         .rounded(px(f32::from(
@@ -2220,6 +2235,9 @@ fn instrument_selector(
         .disabled(!state.enabled)
         .when(state.enabled, Button::cursor_pointer)
         .when(!state.enabled, Button::cursor_not_allowed);
+    let trigger = trigger.when(!state.enabled, |trigger| {
+        trigger.text_color(gpui_color(theme.colors.muted_foreground))
+    });
     let theme = state.theme;
     Dialog::new(cx)
         .trigger(trigger)
@@ -2308,11 +2326,12 @@ fn indicator_dialog_content(
                 )))
                 .cursor_pointer()
                 .hover(|row| row.bg(gpui_color(colors.accent)))
-                .on_click(move |_, window, cx| {
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     let added = row_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
                     if added {
                         close_indicator_dialog(&row_input, window, cx);
                     }
+                    cx.stop_propagation();
                 })
                 .child(
                     div()
@@ -2332,22 +2351,21 @@ fn indicator_dialog_content(
                                 )),
                         ),
                 )
-                .child(
+                .child(button_activation(
                     Button::new(("add_indicator", index))
                         .icon(header_icon(HugeIcon::AddIcon01))
                         .outline()
                         .compact()
                         .cursor_pointer()
-                        .tab_stop(false)
-                        .on_click(move |_, window, cx| {
-                            let added =
-                                add_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
-                            if added {
-                                close_indicator_dialog(&add_input, window, cx);
-                            }
-                            cx.stop_propagation();
-                        }),
-                )
+                        .tab_stop(false),
+                    true,
+                    move |window, cx| {
+                        let added = add_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
+                        if added {
+                            close_indicator_dialog(&add_input, window, cx);
+                        }
+                    },
+                ))
         });
     content
         .bg(gpui_color(colors.card))
@@ -2474,12 +2492,13 @@ fn instrument_dialog_content(
                 .when(!state.selection_pending, |row| {
                     row.cursor_pointer()
                         .hover(|row| row.bg(gpui_color(colors.accent)))
-                        .on_click(move |_, window, cx| {
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             let dispatched =
                                 app.update(cx, |app, cx| app.select_rithmic_symbol(index, cx));
                             if dispatched {
                                 window.close_dialog(cx);
                             }
+                            cx.stop_propagation();
                         })
                 })
                 .when(state.selection_pending, gpui::Styled::cursor_not_allowed)
@@ -2580,7 +2599,7 @@ fn instrument_dialog_header(
         .border_color(gpui_color(theme.colors.border))
         .child(header_icon(HugeIcon::SearchIcon01))
         .child(Input::new(input).flex_1())
-        .child(
+        .child(button_activation(
             Button::new("rithmic_dialog_search")
                 .label("Search")
                 .primary()
@@ -2594,35 +2613,42 @@ fn instrument_dialog_header(
                 .when(
                     state.search_activity.is_pending() || state.selection_pending,
                     Button::cursor_not_allowed,
-                )
-                .on_click(move |_, _, cx| {
-                    app.update(cx, TerminalApp::search_rithmic_input);
-                }),
-        )
+                ),
+            !state.search_activity.is_pending() && !state.selection_pending,
+            move |_, cx| {
+                app.update(cx, TerminalApp::search_rithmic_input);
+            },
+        ))
         .child(dialog_close_button("close_instrument_dialog"))
         .into_any_element()
 }
 
 fn dialog_close_button(id: &'static str) -> Button {
-    Button::new(id)
-        .icon(header_icon(HugeIcon::CancelIcon01))
-        .ghost()
-        .compact()
-        .cursor_pointer()
-        .tooltip("Close")
-        .on_click(|_, window, cx| window.close_dialog(cx))
+    button_activation(
+        Button::new(id)
+            .icon(header_icon(HugeIcon::CancelIcon01))
+            .ghost()
+            .compact()
+            .cursor_pointer()
+            .tooltip("Close"),
+        true,
+        WindowExt::close_dialog,
+    )
 }
 
 fn indicator_dialog_close_button(input: Entity<InputState>) -> Button {
-    Button::new("close_indicator_dialog")
-        .icon(header_icon(HugeIcon::CancelIcon01))
-        .ghost()
-        .compact()
-        .cursor_pointer()
-        .tooltip("Close")
-        .on_click(move |_, window, cx| {
+    button_activation(
+        Button::new("close_indicator_dialog")
+            .icon(header_icon(HugeIcon::CancelIcon01))
+            .ghost()
+            .compact()
+            .cursor_pointer()
+            .tooltip("Close"),
+        true,
+        move |window, cx| {
             close_indicator_dialog(&input, window, cx);
-        })
+        },
+    )
 }
 
 fn close_indicator_dialog(input: &Entity<InputState>, window: &mut Window, cx: &mut App) {
@@ -2673,42 +2699,37 @@ struct PanelToggleState {
 
 fn panel_toggle(
     state: PanelToggleState,
-    variant: ButtonCustomVariant,
+    theme: &AxiusflowTheme,
     app: Entity<TerminalApp>,
 ) -> impl IntoElement {
-    Button::new(state.id)
+    let button = Button::new(state.id)
         .icon(header_icon(state.icon))
         .label(state.label)
-        .custom(variant)
-        .selected(state.selected)
         .tooltip(state.tooltip)
         .disabled(!state.enabled)
         .when(state.enabled, Button::cursor_pointer)
-        .when(!state.enabled, Button::cursor_not_allowed)
-        .on_click(move |_, _, cx| {
-            app.update(cx, state.toggle);
-        })
+        .when(!state.enabled, Button::cursor_not_allowed);
+    let button = button_activation(button, state.enabled, move |_, cx| {
+        app.update(cx, state.toggle);
+    });
+    chrome_button_style(button, theme, state.selected, false, state.enabled)
 }
 
-fn theme_toggle(
-    app: Entity<TerminalApp>,
-    theme: &AxiusflowTheme,
-    variant: ButtonCustomVariant,
-) -> impl IntoElement + use<> {
+fn theme_toggle(app: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
     let next = theme.mode.toggled();
     let icon = match next {
         axiusflow_design_system::ThemeMode::Light => HugeIcon::SunIcon03,
         axiusflow_design_system::ThemeMode::Dark => HugeIcon::MoonIcon02,
     };
-    Button::new("theme_toggle")
+    let button = Button::new("theme_toggle")
         .icon(header_icon(icon))
         .label(next.label())
         .tooltip(format!("Switch to {} theme", next.label()))
-        .custom(variant)
-        .cursor_pointer()
-        .on_click(move |_, window, cx| {
-            app.update(cx, |app, cx| app.toggle_theme(window, cx));
-        })
+        .cursor_pointer();
+    let button = button_activation(button, true, move |window, cx| {
+        app.update(cx, |app, cx| app.toggle_theme(window, cx));
+    });
+    chrome_button_style(button, theme, false, false, true)
 }
 
 fn header_icon(name: HugeIcon) -> Icon {
@@ -2721,45 +2742,105 @@ fn series_selector(
     selected: Option<rithmic_history::RithmicSeries>,
     message: String,
     pending: bool,
-    variant: ButtonCustomVariant,
+    theme: &AxiusflowTheme,
     enabled: bool,
 ) -> impl IntoElement {
-    Button::new("series_selector")
+    let button = Button::new("series_selector")
         .label(label)
         .tooltip("Select chart series")
         .dropdown_caret(true)
-        .custom(variant)
         .disabled(!enabled)
         .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed)
-        .dropdown_menu(move |menu, _, _| {
-            rithmic_history::RithmicSeries::ALL.iter().fold(
-                menu.item(PopupMenuItem::label(message.clone())).separator(),
-                |menu, series| {
-                    let series = *series;
-                    let app = app.clone();
-                    menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .id(series.label())
-                                .w_full()
-                                .h_full()
-                                .mx_neg_2()
-                                .px_2()
-                                .role(Role::Label)
-                                .aria_label(series.label())
-                                .when(!pending, gpui::Styled::cursor_pointer)
-                                .when(pending, gpui::Styled::cursor_not_allowed)
-                                .child(series.label())
-                        })
-                        .checked(selected == Some(series))
-                        .disabled(pending)
-                        .on_click(move |_, _, cx| {
+        .when(!enabled, Button::cursor_not_allowed);
+    chrome_button_style(button, theme, false, false, enabled).dropdown_menu(move |menu, _, _| {
+        rithmic_history::RithmicSeries::ALL.iter().fold(
+            menu.item(PopupMenuItem::label(message.clone())).separator(),
+            |menu, series| {
+                let series = *series;
+                let app = app.clone();
+                let mouse_app = app.clone();
+                menu.item(
+                    PopupMenuItem::element(move |_, _| {
+                        let mouse_app = mouse_app.clone();
+                        div()
+                            .id(series.label())
+                            .w_full()
+                            .h_full()
+                            .mx_neg_2()
+                            .px_2()
+                            .role(Role::Label)
+                            .aria_label(series.label())
+                            .when(!pending, gpui::Styled::cursor_pointer)
+                            .when(pending, gpui::Styled::cursor_not_allowed)
+                            .when(!pending, |row| {
+                                row.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    mouse_app.update(cx, |app, cx| {
+                                        app.select_rithmic_series(series, cx);
+                                    });
+                                })
+                            })
+                            .child(series.label())
+                    })
+                    .checked(selected == Some(series))
+                    .disabled(pending)
+                    .on_click(move |event, _, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
                             app.update(cx, |app, cx| app.select_rithmic_series(series, cx));
-                        }),
-                    )
-                },
-            )
+                        }
+                    }),
+                )
+            },
+        )
+    })
+}
+
+fn chrome_button_style(
+    button: Button,
+    theme: &AxiusflowTheme,
+    selected: bool,
+    muted_when_idle: bool,
+    enabled: bool,
+) -> Button {
+    let colors = theme.colors;
+    let idle = if muted_when_idle || !enabled {
+        colors.muted_foreground
+    } else {
+        colors.foreground
+    };
+    button
+        .selected(selected)
+        .ghost()
+        .text_color(gpui_color(idle))
+        .when(selected, |button| {
+            button
+                .bg(gpui_color(colors.muted))
+                .text_color(gpui_color(colors.foreground))
+        })
+        .hover(|style| {
+            style
+                .bg(gpui_color(colors.accent))
+                .text_color(gpui_color(colors.foreground))
+        })
+}
+
+fn button_activation(
+    button: Button,
+    enabled: bool,
+    handler: impl Fn(&mut Window, &mut App) + 'static,
+) -> Button {
+    let handler = Rc::new(handler);
+    let mouse_handler = handler.clone();
+    button
+        .when(enabled, |button| {
+            button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                mouse_handler(window, cx);
+                cx.stop_propagation();
+            })
+        })
+        .on_click(move |event, window, cx| {
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                handler(window, cx);
+            }
         })
 }
 
