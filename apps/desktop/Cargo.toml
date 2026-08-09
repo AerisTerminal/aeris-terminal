@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+diagnostics = []
+
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }

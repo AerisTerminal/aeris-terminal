@@ -2,10 +2,13 @@
 
 mod assets;
 mod chart_chrome;
+mod frame_poll_gate;
+#[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
 mod resident_market_worker;
 mod rithmic_history;
 mod rithmic_shell;
+#[cfg(feature = "diagnostics")]
 mod windowed_benchmark;
 
 use axiusflow_application::ReplayStreamUpdate;
@@ -212,7 +215,7 @@ struct TerminalApp {
     side_panel: Option<SidePanel>,
     drawing_toolbar: DrawingToolbarVisibility,
     window_active: bool,
-    frame_poll_gate: readiness_conformance::FramePollGate,
+    frame_poll_gate: frame_poll_gate::FramePollGate,
     feed_diagnostics: Option<Box<FeedDiagnosticsSnapshot>>,
     chart_state: ChartState,
     chart_state_message: String,
@@ -775,7 +778,7 @@ impl TerminalApp {
             side_panel: None,
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
             window_active: true,
-            frame_poll_gate: readiness_conformance::FramePollGate::default(),
+            frame_poll_gate: frame_poll_gate::FramePollGate::default(),
             feed_diagnostics: None,
             chart_state,
             chart_state_message,
@@ -823,12 +826,10 @@ impl TerminalApp {
             .spawn(async move {
                 loop {
                     ui_wake.notified().await;
-                    let drained = this.update(&mut async_cx, |app, app_cx| {
-                        if app.poll_market_worker(app_cx) > 0 {
-                            app_cx.notify();
-                        }
-                    });
-                    if drained.is_err() {
+                    if this
+                        .update(&mut async_cx, |_app, app_cx| app_cx.notify())
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2199,6 +2200,7 @@ impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_diagnostics_frame(window);
         self.track_window_activation(window, cx);
+        self.schedule_market_frame(window, cx);
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();
@@ -3856,6 +3858,7 @@ fn gpui_color(color: ThemeColor) -> Hsla {
     resolved
 }
 
+#[cfg(feature = "diagnostics")]
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
@@ -3868,6 +3871,7 @@ fn run_desktop_readiness_command(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(feature = "diagnostics")]
 fn run_desktop_endurance_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
@@ -4004,6 +4008,7 @@ fn terminal_root(
 fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)> {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
+        #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
             let report_path = arguments
                 .next()
@@ -4012,10 +4017,12 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
                 .expect("the windowed benchmark completes");
             return None;
         }
+        #[cfg(feature = "diagnostics")]
         if argument == "--desktop-readiness" {
             run_desktop_readiness_command(arguments).expect("desktop readiness conformance passes");
             return None;
         }
+        #[cfg(feature = "diagnostics")]
         if argument == "--desktop-endurance" {
             run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
             return None;

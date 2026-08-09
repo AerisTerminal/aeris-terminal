@@ -1,5 +1,7 @@
 //! Headless desktop burst and frame-conflation evidence.
 
+use crate::frame_poll_gate::FramePollGate;
+
 use axiusflow_application::ReplaySnapshot;
 use axiusflow_coinbase_coordinator::market_worker::{
     FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
@@ -36,25 +38,6 @@ const ENDURANCE_BURST_UPDATES: usize = 1_000;
 const ENDURANCE_BURST_EVERY_FRAMES: u64 = 60;
 const ENDURANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_mins(1);
 const ENDURANCE_QUALIFICATION_DURATION: Duration = Duration::from_hours(8);
-
-#[derive(Default)]
-pub(crate) struct FramePollGate {
-    scheduled: bool,
-}
-
-impl FramePollGate {
-    pub(crate) const fn try_schedule(&mut self, window_active: bool) -> bool {
-        if !window_active || self.scheduled {
-            return false;
-        }
-        self.scheduled = true;
-        true
-    }
-
-    pub(crate) const fn complete(&mut self) {
-        self.scheduled = false;
-    }
-}
 
 #[derive(Serialize)]
 struct DesktopBurstEvidence {
@@ -602,6 +585,7 @@ fn depth_delta(sequence: u64) -> MarketEvent {
     })
 }
 
+#[cfg(feature = "diagnostics")]
 pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     let report = collect_evidence()?;
     let mut encoded = serde_json::to_vec_pretty(&report)?;
@@ -825,6 +809,7 @@ fn collect_endurance(duration: Duration) -> Result<DesktopEnduranceEvidence, Box
     collect_endurance_with_checkpoints(duration, ENDURANCE_CHECKPOINT_INTERVAL, |_| Ok(()))
 }
 
+#[cfg(feature = "diagnostics")]
 pub(crate) fn run_endurance(report_path: &Path, duration: Duration) -> Result<(), Box<dyn Error>> {
     validate_endurance_duration(duration)?;
     let initial_memory = ProcessMemoryProbe::new()?;
