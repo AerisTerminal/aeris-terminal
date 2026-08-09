@@ -1,0 +1,15 @@
+[package]
+name = "axiusflow_engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_local_engine_protocol = { path = "../../crates/local_engine_protocol" }
+getrandom.workspace = true
+interprocess.workspace = true
+
+[lints]
+workspace = true
