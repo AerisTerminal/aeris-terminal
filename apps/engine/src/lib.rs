@@ -14,10 +14,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_local_engine_protocol::{
-    ClientHello, ClientKind, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault,
-    Goodbye, PROTOCOL_VERSION, ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist,
-    SubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
+    CatalogEntry, CatalogReassembler, ClientHello, ClientKind, EngineFaultCode, EngineReady,
+    Envelope, EnvelopeDecoder, Fault, Goodbye, PROTOCOL_VERSION, ResourceMode, RestoreWorkspace,
+    SetSelection, SetWatchlist, SubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
+    split_catalog,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
@@ -387,6 +389,145 @@ fn quarantine_workspace_file(path: &Path) -> Result<(), String> {
 
 fn redacted_workspace_error<E>(_error: E) -> String {
     "engine workspace storage is unavailable".to_string()
+}
+
+/// Loads the newest valid resident Coinbase catalog, quarantining corrupt revisions.
+///
+/// # Errors
+/// Returns an error when the engine state directory cannot be inspected or quarantine fails.
+pub fn load_coinbase_catalog(root: &Path) -> Result<Option<Vec<CoinbaseSpotProduct>>, String> {
+    for (_, path) in catalog_files(root)? {
+        match decode_catalog_file(&path) {
+            Ok(products) => return Ok(Some(products)),
+            Err(()) => quarantine_workspace_file(&path)?,
+        }
+    }
+    Ok(None)
+}
+
+/// Persists a validated immutable Coinbase catalog revision and bounds old revisions.
+///
+/// # Errors
+/// Returns an error when validation, encoding, or durable storage fails.
+pub fn persist_coinbase_catalog(
+    root: &Path,
+    products: &[CoinbaseSpotProduct],
+) -> Result<(), String> {
+    let entries = products
+        .iter()
+        .map(catalog_entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    if entries.is_empty() || entries.len() > 4_096 {
+        return Err("Coinbase catalog is outside its item bound".to_string());
+    }
+    fs::create_dir_all(root).map_err(redacted_workspace_error)?;
+    if load_coinbase_catalog(root)?.as_deref() == Some(products) {
+        return Ok(());
+    }
+    let files = catalog_files(root)?;
+    let revision = files
+        .first()
+        .map_or(1, |(revision, _)| revision.saturating_add(1));
+    let path = root.join(format!("coinbase-catalog-{revision:020}.frame"));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(redacted_workspace_error)?;
+    for snapshot in split_catalog(entries, revision) {
+        let frame = encode_envelope(&Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            payload: Some(envelope::Payload::CatalogSnapshot(snapshot)),
+        })
+        .map_err(|_| "Coinbase catalog could not be encoded".to_string())?;
+        file.write_all(&frame).map_err(redacted_workspace_error)?;
+    }
+    file.sync_all().map_err(redacted_workspace_error)?;
+    for (_, stale) in catalog_files(root)?.into_iter().skip(2) {
+        fs::remove_file(stale).map_err(redacted_workspace_error)?;
+    }
+    Ok(())
+}
+
+fn catalog_entry(product: &CoinbaseSpotProduct) -> Result<CatalogEntry, String> {
+    validate_catalog_product(product)?;
+    Ok(CatalogEntry {
+        product_id: product.product_id.clone(),
+        base_currency: product.base_currency.clone(),
+        quote_currency: product.quote_currency.clone(),
+        price_scale: u32::from(product.price_scale),
+        quantity_scale: u32::from(product.quantity_scale),
+    })
+}
+
+fn catalog_files(root: &Path) -> Result<Vec<(u64, PathBuf)>, String> {
+    let mut files = fs::read_dir(root)
+        .map_err(redacted_workspace_error)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let revision = name
+                .strip_prefix("coinbase-catalog-")?
+                .strip_suffix(".frame")?
+                .parse::<u64>()
+                .ok()?;
+            Some((revision, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    files.sort_unstable_by_key(|(revision, _)| std::cmp::Reverse(*revision));
+    Ok(files)
+}
+
+fn decode_catalog_file(path: &Path) -> Result<Vec<CoinbaseSpotProduct>, ()> {
+    let bytes = fs::read(path).map_err(|_| ())?;
+    let mut decoder = EnvelopeDecoder::try_new().map_err(|_| ())?;
+    let envelopes = decoder.push(&bytes).map_err(|_| ())?;
+    let mut reassembler = CatalogReassembler::new();
+    let mut completed = None;
+    for envelope in envelopes {
+        let Some(envelope::Payload::CatalogSnapshot(snapshot)) = envelope.payload else {
+            return Err(());
+        };
+        if let Some(entries) = reassembler.push(snapshot).map_err(|_| ())? {
+            if completed.is_some() {
+                return Err(());
+            }
+            completed = Some(entries);
+        }
+    }
+    completed
+        .ok_or(())?
+        .into_iter()
+        .map(catalog_product)
+        .collect()
+}
+
+fn catalog_product(entry: CatalogEntry) -> Result<CoinbaseSpotProduct, ()> {
+    let product = CoinbaseSpotProduct {
+        instrument_id: coinbase_instrument_id(&entry.product_id).map_err(|_| ())?,
+        display_symbol: format!("{}/{}", entry.base_currency, entry.quote_currency),
+        product_id: entry.product_id,
+        base_currency: entry.base_currency,
+        quote_currency: entry.quote_currency,
+        price_scale: u8::try_from(entry.price_scale).map_err(|_| ())?,
+        quantity_scale: u8::try_from(entry.quantity_scale).map_err(|_| ())?,
+    };
+    validate_catalog_product(&product).map_err(|_| ())?;
+    Ok(product)
+}
+
+fn validate_catalog_product(product: &CoinbaseSpotProduct) -> Result<(), String> {
+    let expected = format!("{}-{}", product.base_currency, product.quote_currency);
+    if product.product_id != expected
+        || product.instrument_id
+            != coinbase_instrument_id(&product.product_id)
+                .map_err(|_| "Coinbase catalog contains an invalid product identity".to_string())?
+        || product.price_scale > 18
+        || product.quantity_scale > 18
+    {
+        return Err("Coinbase catalog contains an invalid product".to_string());
+    }
+    Ok(())
 }
 
 /// Authenticated local-engine client connection.

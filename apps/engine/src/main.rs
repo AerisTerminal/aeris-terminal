@@ -25,7 +25,8 @@ use axiusflow_coinbase_market_adapter::{
 };
 use axiusflow_engine::{
     ENGINE_SOCKET_NAME, EnginePublicationHub, EngineState, bind_listener,
-    default_engine_state_root, native_installation_token, serve_client_with_publications,
+    default_engine_state_root, load_coinbase_catalog, native_installation_token,
+    persist_coinbase_catalog, serve_client_with_publications,
 };
 use axiusflow_local_engine_protocol::{
     CatalogEntry, ChartDelta, ChartProvenance, ChartSnapshot, DomBookState, DomLevel,
@@ -56,9 +57,15 @@ fn run() -> Result<(), String> {
     let mut epoch_bytes = [0_u8; 8];
     getrandom::fill(&mut epoch_bytes).map_err(|error| error.to_string())?;
     let engine_epoch = u64::from_le_bytes(epoch_bytes).max(1);
-    let state = EngineState::open(default_engine_state_root()?)?;
+    let state_root = default_engine_state_root()?;
+    let state = EngineState::open(&state_root)?;
     let publications = EnginePublicationHub::default();
-    start_market_runtime(state.clone(), publications.clone(), engine_epoch)?;
+    start_market_runtime(
+        state.clone(),
+        publications.clone(),
+        engine_epoch,
+        state_root,
+    )?;
     let active_clients = Arc::new(AtomicUsize::new(0));
     loop {
         let stream = listener.accept().map_err(|error| error.to_string())?;
@@ -97,6 +104,7 @@ fn start_market_runtime(
     state: EngineState,
     publications: EnginePublicationHub,
     engine_epoch: u64,
+    state_root: PathBuf,
 ) -> Result<(), String> {
     let (selection_tx, selection_rx) = mpsc::channel();
     thread::Builder::new()
@@ -108,7 +116,13 @@ fn start_market_runtime(
                     market_thread.unpark();
                 }
             }));
-            run_market_runtime(&state, &publications, engine_epoch, &selection_rx);
+            run_market_runtime(
+                &state,
+                &publications,
+                engine_epoch,
+                &state_root,
+                &selection_rx,
+            );
         })
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -118,6 +132,7 @@ fn run_market_runtime(
     state: &EngineState,
     publications: &EnginePublicationHub,
     engine_epoch: u64,
+    state_root: &std::path::Path,
     selections: &Receiver<axiusflow_local_engine_protocol::WorkspaceState>,
 ) {
     let workspace = state.workspace();
@@ -126,8 +141,7 @@ fn run_market_runtime(
         publish_fault(publications, "Workspace interval is unsupported");
         return;
     };
-    let mut catalog = CoinbaseProductCatalog::with_transport(CoinbaseHttpsHistoryTransport::new());
-    let products = match catalog.fetch_active_spot_products() {
+    let (products, refresh_catalog) = match bootstrap_catalog(state_root) {
         Ok(products) => products,
         Err(error) => {
             publish_fault(publications, &format!("Catalog bootstrap failed: {error}"));
@@ -167,6 +181,7 @@ fn run_market_runtime(
     };
     let market_thread = thread::current();
     worker.set_message_wake(Arc::new(move || market_thread.unpark()));
+    let catalog_refresh = spawn_catalog_refresh(refresh_catalog);
     let Ok(convention) = DecimalConvention::try_new("price_mantissa", "quantity_mantissa") else {
         return;
     };
@@ -206,11 +221,78 @@ fn run_market_runtime(
                 active_interval_seconds = selection.interval_seconds;
             }
         }
+        apply_catalog_refresh(
+            catalog_refresh.as_ref(),
+            state_root,
+            publications,
+            &mut products,
+        );
         if disconnected {
             return;
         }
         thread::park();
     }
+}
+
+fn bootstrap_catalog(
+    state_root: &std::path::Path,
+) -> Result<(Vec<CoinbaseSpotProduct>, bool), String> {
+    if let Some(products) = load_coinbase_catalog(state_root)? {
+        return Ok((products, true));
+    }
+    let products = fetch_coinbase_catalog()?;
+    if let Err(error) = persist_coinbase_catalog(state_root, &products) {
+        eprintln!("Axiusflow engine catalog persistence failed: {error}");
+    }
+    Ok((products, false))
+}
+
+fn spawn_catalog_refresh(
+    enabled: bool,
+) -> Option<Receiver<Result<Vec<CoinbaseSpotProduct>, String>>> {
+    enabled.then(|| {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let market_thread = thread::current();
+        let _ = thread::Builder::new()
+            .name("axiusflow-engine-catalog-refresh".to_string())
+            .spawn(move || {
+                let _ = sender.send(fetch_coinbase_catalog());
+                market_thread.unpark();
+            });
+        receiver
+    })
+}
+
+fn apply_catalog_refresh(
+    refresh: Option<&Receiver<Result<Vec<CoinbaseSpotProduct>, String>>>,
+    state_root: &std::path::Path,
+    publications: &EnginePublicationHub,
+    products: &mut BTreeMap<String, CoinbaseSpotProduct>,
+) {
+    let Some(refresh) = refresh else {
+        return;
+    };
+    for refreshed in refresh.try_iter() {
+        let Ok(refreshed) = refreshed else {
+            continue;
+        };
+        if let Err(error) = persist_coinbase_catalog(state_root, &refreshed) {
+            eprintln!("Axiusflow engine catalog persistence failed: {error}");
+        }
+        *products = refreshed
+            .iter()
+            .cloned()
+            .map(|product| (product.product_id.clone(), product))
+            .collect();
+        publish_catalog(publications, &refreshed);
+    }
+}
+
+fn fetch_coinbase_catalog() -> Result<Vec<CoinbaseSpotProduct>, String> {
+    let mut catalog = CoinbaseProductCatalog::with_transport(CoinbaseHttpsHistoryTransport::new());
+    catalog
+        .fetch_active_spot_products()
+        .map_err(|error| error.to_string())
 }
 
 fn publish_market_message(

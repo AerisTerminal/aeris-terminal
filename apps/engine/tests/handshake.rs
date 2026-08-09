@@ -7,10 +7,11 @@ use std::{
     thread,
 };
 
+use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_engine::{
-    EngineClient, EnginePublicationHub, EngineState, bind_listener,
-    load_or_create_installation_token, serve_client, serve_client_with_publications,
-    serve_client_with_state,
+    EngineClient, EnginePublicationHub, EngineState, bind_listener, load_coinbase_catalog,
+    load_or_create_installation_token, persist_coinbase_catalog, serve_client,
+    serve_client_with_publications, serve_client_with_state,
 };
 use axiusflow_local_engine_protocol::{
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, EngineFaultCode, Envelope,
@@ -257,4 +258,59 @@ fn corrupt_latest_workspace_is_quarantined_and_falls_back() {
             .join("workspace-00000000000000000007.corrupt-0")
             .exists()
     );
+}
+
+#[test]
+fn resident_catalog_roundtrips_exact_product_precision() {
+    let directory = TestDirectory::new();
+    let products = vec![coinbase_product("BTC", "USD", 2, 8)];
+    persist_coinbase_catalog(&directory.0, &products).expect("persist catalog");
+    assert_eq!(
+        load_coinbase_catalog(&directory.0).expect("load catalog"),
+        Some(products)
+    );
+}
+
+#[test]
+fn corrupt_latest_catalog_is_quarantined_and_falls_back() {
+    let directory = TestDirectory::new();
+    let first = vec![coinbase_product("BTC", "USD", 2, 8)];
+    persist_coinbase_catalog(&directory.0, &first).expect("persist first catalog");
+    persist_coinbase_catalog(&directory.0, &[coinbase_product("ETH", "USD", 2, 8)])
+        .expect("persist second catalog");
+    fs::write(
+        directory
+            .0
+            .join("coinbase-catalog-00000000000000000002.frame"),
+        b"corrupt",
+    )
+    .expect("corrupt latest catalog");
+    assert_eq!(
+        load_coinbase_catalog(&directory.0).expect("load fallback catalog"),
+        Some(first)
+    );
+    assert!(
+        directory
+            .0
+            .join("coinbase-catalog-00000000000000000002.corrupt-0")
+            .exists()
+    );
+}
+
+fn coinbase_product(
+    base: &str,
+    quote: &str,
+    price_scale: u8,
+    quantity_scale: u8,
+) -> CoinbaseSpotProduct {
+    let product_id = format!("{base}-{quote}");
+    CoinbaseSpotProduct {
+        instrument_id: coinbase_instrument_id(&product_id).expect("valid product identity"),
+        display_symbol: format!("{base}/{quote}"),
+        product_id,
+        base_currency: base.to_string(),
+        quote_currency: quote.to_string(),
+        price_scale,
+        quantity_scale,
+    }
 }
