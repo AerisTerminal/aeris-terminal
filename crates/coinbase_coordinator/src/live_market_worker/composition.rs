@@ -159,7 +159,7 @@ pub(super) fn open_worker(
             wake_pending.store(false, Ordering::Release);
         }
     });
-    let (runtime, events) = open_with_store_lock_retry(
+    let (mut runtime, events) = open_with_store_lock_retry(
         || {
             let runtime_vault = NativeCredentialVault::new(VAULT_SERVICE)
                 .map_err(|_| DesktopMarketWorkerError::HistoryConfiguration)?;
@@ -187,6 +187,11 @@ pub(super) fn open_worker(
         STORE_LOCK_RETRY_INTERVAL,
     )
     .map_err(|error| error.to_string())?;
+    runtime
+        .enforce_derived_history_quota(
+            axiusflow_desktop_storage::DEFAULT_DERIVED_PAYLOAD_QUOTA_BYTES,
+        )
+        .map_err(|error| error.to_string())?;
     let aggregator = CoinbaseBarAggregator::new(
         CoinbaseBarAggregatorConfig::try_new(
             profile.product_id.clone(),

@@ -1046,7 +1046,7 @@ fn open_worker(
                     .then_some(NonZeroU64::new(10_000_000_000).unwrap_or(NonZeroU64::MIN)),
             )
             .map_err(|_| "Rithmic diagnostics configuration is invalid".to_string())?;
-    let worker = DesktopMarketWorker::try_open(
+    let mut worker = DesktopMarketWorker::try_open(
         credential_vault,
         driver,
         RITHMIC_TEST_VAULT_KEY,
@@ -1067,6 +1067,11 @@ fn open_worker(
         },
     )
     .map_err(|_| "Rithmic desktop runtime is unavailable".to_string())?;
+    worker
+        .enforce_derived_history_quota(
+            axiusflow_desktop_storage::DEFAULT_DERIVED_PAYLOAD_QUOTA_BYTES,
+        )
+        .map_err(|_| "Rithmic derived-data maintenance failed".to_string())?;
     Ok((worker, events))
 }
 

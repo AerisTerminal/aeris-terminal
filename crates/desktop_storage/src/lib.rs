@@ -19,3 +19,6 @@ pub use model::{
     SegmentIdentity, SegmentReceipt,
 };
 pub use store::{CatalogKey, HistoryStore, MAXIMUM_CATALOG_ENTRIES, MAXIMUM_SEGMENT_BYTES};
+
+/// Default disk budget for recomputable derived checkpoints and acceleration data.
+pub const DEFAULT_DERIVED_PAYLOAD_QUOTA_BYTES: u64 = 128 * 1024 * 1024;

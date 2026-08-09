@@ -118,6 +118,11 @@ pub(super) fn persist_live_tail<V: axiusflow_platform_runtime::CredentialVault>(
         || end.saturating_sub(tail_start) >= ACTIVE_TAIL_MAXIMUM_NANOS
     {
         tail.seal();
+        worker
+            .enforce_derived_history_quota(
+                axiusflow_desktop_storage::DEFAULT_DERIVED_PAYLOAD_QUOTA_BYTES,
+            )
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
