@@ -2990,10 +2990,18 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
     component.primary_foreground = gpui_color(colors.primary_foreground);
     component.primary_hover = gpui_color(colors.primary);
     component.primary_active = gpui_color(colors.primary);
+    component.button_primary = gpui_color(colors.primary);
+    component.button_primary_foreground = gpui_color(colors.primary_foreground);
+    component.button_primary_hover = gpui_color(colors.primary);
+    component.button_primary_active = gpui_color(colors.primary);
     component.secondary = gpui_color(colors.secondary);
     component.secondary_foreground = gpui_color(colors.secondary_foreground);
     component.secondary_hover = gpui_color(colors.accent);
     component.secondary_active = gpui_color(colors.muted);
+    component.button_secondary = gpui_color(colors.secondary);
+    component.button_secondary_foreground = gpui_color(colors.secondary_foreground);
+    component.button_secondary_hover = gpui_color(colors.accent);
+    component.button_secondary_active = gpui_color(colors.muted);
 
     component.chart_1 = gpui_color(colors.chart_palette[0]);
     component.chart_2 = gpui_color(colors.chart_palette[1]);

@@ -70,24 +70,24 @@ components consume only the typed resolved value.
 
 | Identifier               | Light                        | Dark                         |
 | ------------------------ | ---------------------------- | ---------------------------- |
-| `background`             | `oklch(1 0 0)`               | `oklch(0.145 0 0)`           |
-| `foreground`             | `oklch(0.145 0 0)`           | `oklch(0.985 0 0)`           |
-| `card`                   | `oklch(1 0 0)`               | `#070a0f`                    |
-| `card_foreground`        | `oklch(0.145 0 0)`           | `oklch(0.985 0 0)`           |
-| `popover`                | `oklch(1 0 0)`               | `#070a0f`                    |
-| `popover_foreground`     | `oklch(0.145 0 0)`           | `oklch(0.985 0 0)`           |
+| `background`             | `oklch(1 0 0)`               | `#0c0c0c`                    |
+| `foreground`             | `oklch(0.145 0 0)`           | `#f5f5f5`                    |
+| `card`                   | `oklch(1 0 0)`               | `#0c0c0c`                    |
+| `card_foreground`        | `oklch(0.145 0 0)`           | `#f5f5f5`                    |
+| `popover`                | `oklch(1 0 0)`               | `#0c0c0c`                    |
+| `popover_foreground`     | `oklch(0.145 0 0)`           | `#f5f5f5`                    |
 | `primary`                | `#3e63dd`                    | `#3e63dd`                    |
 | `primary_foreground`     | `oklch(0.97 0.014 254.604)`  | same                         |
 | `secondary`              | `oklch(0.967 0.001 286.375)` | `oklch(0.274 0.006 286.033)` |
-| `secondary_foreground`   | `oklch(0.21 0.006 285.885)`  | `oklch(0.985 0 0)`           |
+| `secondary_foreground`   | `oklch(0.21 0.006 285.885)`  | `#f5f5f5`                    |
 | `muted`                  | `oklch(0.97 0 0)`            | `oklch(0.269 0 0)`           |
-| `muted_foreground`       | `oklch(0.556 0 0)`           | `oklch(0.708 0 0)`           |
+| `muted_foreground`       | `oklch(0.556 0 0)`           | `#888888`                    |
 | `accent`                 | `oklch(0.97 0 0)`            | `oklch(0.269 0 0)`           |
-| `accent_foreground`      | `oklch(0.205 0 0)`           | `oklch(0.985 0 0)`           |
+| `accent_foreground`      | `oklch(0.205 0 0)`           | `#f5f5f5`                    |
 | `destructive`            | `oklch(0.577 0.245 27.325)`  | `oklch(0.704 0.191 22.216)`  |
 | `destructive_foreground` | `oklch(0.985 0 0)`           | same                         |
-| `border`                 | `#f5f5f5`                    | `#16191f`                    |
-| `input`                  | `#f5f5f5`                    | `#16191f`                    |
+| `border`                 | `#f5f5f5`                    | `#1e1e1e`                    |
+| `input`                  | `#f5f5f5`                    | `#1e1e1e`                    |
 | `ring`                   | `oklch(0.708 0 0)`           | `oklch(0.556 0 0)`           |
 
 
@@ -108,7 +108,7 @@ from it, but may not create another product-accent family.
 | `chart_candle_down` | `loss`                       | `loss`                |
 | `chart_volume_up`   | `profit` at 34% alpha        | `profit` at 32% alpha |
 | `chart_volume_down` | `loss` at 30% alpha          | `loss` at 28% alpha   |
-| `chart_axis_text`   | `#0a0a0a`                    | `#ffffff`             |
+| `chart_axis_text`   | `#0a0a0a`                    | `var(--foreground)`   |
 
 
 The neutral chart palette is:

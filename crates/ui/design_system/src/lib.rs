@@ -297,32 +297,32 @@ impl AxiusflowTheme {
         [
             ColorToken::new(
                 "background",
-                mode_source(dark, "oklch(1 0 0)", "oklch(0.145 0 0)"),
+                mode_source(dark, "oklch(1 0 0)", "#0c0c0c"),
                 colors.background,
             ),
             ColorToken::new(
                 "foreground",
-                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
+                mode_source(dark, "oklch(0.145 0 0)", "#f5f5f5"),
                 colors.foreground,
             ),
             ColorToken::new(
                 "card",
-                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
+                mode_source(dark, "oklch(1 0 0)", "#0c0c0c"),
                 colors.card,
             ),
             ColorToken::new(
                 "card_foreground",
-                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
+                mode_source(dark, "oklch(0.145 0 0)", "#f5f5f5"),
                 colors.card_foreground,
             ),
             ColorToken::new(
                 "popover",
-                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
+                mode_source(dark, "oklch(1 0 0)", "#0c0c0c"),
                 colors.popover,
             ),
             ColorToken::new(
                 "popover_foreground",
-                mode_source(dark, "oklch(0.145 0 0)", "oklch(0.985 0 0)"),
+                mode_source(dark, "oklch(0.145 0 0)", "#f5f5f5"),
                 colors.popover_foreground,
             ),
             ColorToken::new("primary", "#3e63dd", colors.primary),
@@ -342,7 +342,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "secondary_foreground",
-                mode_source(dark, "oklch(0.21 0.006 285.885)", "oklch(0.985 0 0)"),
+                mode_source(dark, "oklch(0.21 0.006 285.885)", "#f5f5f5"),
                 colors.secondary_foreground,
             ),
             ColorToken::new(
@@ -352,7 +352,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "muted_foreground",
-                mode_source(dark, "oklch(0.556 0 0)", "oklch(0.708 0 0)"),
+                mode_source(dark, "oklch(0.556 0 0)", "#888888"),
                 colors.muted_foreground,
             ),
             ColorToken::new(
@@ -362,7 +362,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "accent_foreground",
-                mode_source(dark, "oklch(0.205 0 0)", "oklch(0.985 0 0)"),
+                mode_source(dark, "oklch(0.205 0 0)", "#f5f5f5"),
                 colors.accent_foreground,
             ),
             ColorToken::new(
@@ -381,12 +381,12 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "border",
-                mode_source(dark, "#f5f5f5", "#16191f"),
+                mode_source(dark, "#f5f5f5", "#1e1e1e"),
                 colors.border,
             ),
             ColorToken::new(
                 "input",
-                mode_source(dark, "#f5f5f5", "#16191f"),
+                mode_source(dark, "#f5f5f5", "#1e1e1e"),
                 colors.input,
             ),
             ColorToken::new(
@@ -426,7 +426,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "chart_axis_text",
-                mode_source(dark, "#0a0a0a", "#ffffff"),
+                mode_source(dark, "#0a0a0a", "var(--foreground)"),
                 colors.chart_axis_text,
             ),
         ]
@@ -467,16 +467,16 @@ fn light_colors() -> ThemeColors {
 fn dark_colors() -> ThemeColors {
     foundational_colors(
         ThemeMode::Dark,
-        ThemeColor::from_oklch(0.145, 0.0, 0.0),
-        ThemeColor::from_oklch(0.985, 0.0, 0.0),
-        ThemeColor::from_rgb8(7, 10, 15),
+        ThemeColor::from_rgb8(12, 12, 12),
+        ThemeColor::from_rgb8(245, 245, 245),
+        ThemeColor::from_rgb8(12, 12, 12),
         ThemeColor::from_oklch(0.274, 0.006, 286.033),
-        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_rgb8(245, 245, 245),
         ThemeColor::from_oklch(0.269, 0.0, 0.0),
-        ThemeColor::from_oklch(0.708, 0.0, 0.0),
-        ThemeColor::from_oklch(0.985, 0.0, 0.0),
+        ThemeColor::from_rgb8(136, 136, 136),
+        ThemeColor::from_rgb8(245, 245, 245),
         ThemeColor::from_oklch(0.704, 0.191, 22.216),
-        ThemeColor::from_rgb8(22, 25, 31),
+        ThemeColor::from_rgb8(30, 30, 30),
         ThemeColor::from_oklch(0.556, 0.0, 0.0),
     )
 }
@@ -544,7 +544,7 @@ fn foundational_colors(
         chart_volume_down: loss.with_alpha(volume_alpha.1),
         chart_axis_text: match mode {
             ThemeMode::Light => ThemeColor::from_rgb8(10, 10, 10),
-            ThemeMode::Dark => ThemeColor::from_rgb8(255, 255, 255),
+            ThemeMode::Dark => foreground,
         },
     }
 }
@@ -605,10 +605,12 @@ mod tests {
         assert_eq!(light.background, ThemeColor::from_oklch(1.0, 0.0, 0.0));
         assert_eq!(light.card, ThemeColor::from_oklch(1.0, 0.0, 0.0));
         assert_eq!(light.foreground, ThemeColor::from_oklch(0.145, 0.0, 0.0));
-        assert_eq!(dark.background, ThemeColor::from_oklch(0.145, 0.0, 0.0));
-        assert_eq!(dark.card, ThemeColor::from_rgb8(7, 10, 15));
-        assert_eq!(dark.border, ThemeColor::from_rgb8(22, 25, 31));
-        assert_eq!(dark.foreground, ThemeColor::from_oklch(0.985, 0.0, 0.0));
+        assert_eq!(dark.background, ThemeColor::from_rgb8(12, 12, 12));
+        assert_eq!(dark.card, ThemeColor::from_rgb8(12, 12, 12));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(30, 30, 30));
+        assert_eq!(dark.foreground, ThemeColor::from_rgb8(245, 245, 245));
+        assert_eq!(dark.muted_foreground, ThemeColor::from_rgb8(136, 136, 136));
+        assert_eq!(dark.chart_axis_text, dark.foreground);
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.profit, ThemeColor::from_oklch(0.683, 0.151, 160.997));
@@ -627,9 +629,16 @@ mod tests {
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "background"), "oklch(1 0 0)");
-        assert_eq!(token_source(&dark_tokens, "card"), "#070a0f");
+        assert_eq!(token_source(&dark_tokens, "background"), "#0c0c0c");
+        assert_eq!(token_source(&dark_tokens, "card"), "#0c0c0c");
+        assert_eq!(token_source(&dark_tokens, "foreground"), "#f5f5f5");
+        assert_eq!(token_source(&dark_tokens, "muted_foreground"), "#888888");
         assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
-        assert_eq!(token_source(&dark_tokens, "border"), "#16191f");
+        assert_eq!(token_source(&dark_tokens, "border"), "#1e1e1e");
+        assert_eq!(
+            token_source(&dark_tokens, "chart_axis_text"),
+            "var(--foreground)"
+        );
         assert_eq!(token_source(&dark_tokens, "chart_1"), "oklch(0.87 0 0)");
     }
 
