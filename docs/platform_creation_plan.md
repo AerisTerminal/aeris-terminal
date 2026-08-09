@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 32
+**Revision:** 33
 **Last updated:** 2026-08-08
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -56,7 +56,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Field | Value |
 |---|---|
-| Current stage(s) | **Stage E** (`in_progress` — interactive controls, live candles, recovering DOM, explicit Test lifecycle state, and optional feed health are integrated). **Stage C** is `in_progress` after deterministic conformance and an authorized core-path Test run. |
+| Current stage(s) | **Stages C, E, and F** are `blocked_external`: implementation and deterministic gates pass, while completion requires real provider silence, externally instrumented physical scanout, and operator-driven physical lifecycle transitions. |
 | Blocked | Provider-observed silence needs a real provider event or Rithmic-coordinated fault; named physical pacing and lifecycle captures need matching hardware/operator transitions. |
 | Next | Capture the remaining provider-path, physical pacing, and physical lifecycle artifacts |
 | Do not start | OMS/execution, cloud market-data features, IQFeed, CQG, R|API+, Coinbase depth/timeframes, or AF_XDP/DPDK product work |
@@ -69,10 +69,10 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
 | A — Stabilize Coinbase | `verified` | encrypted history retention/discovery [x]; deterministic shipping recovery [x]; BTC/ETH shipping live smoke [x]; frozen [x] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
-| C — Rithmic read-only headless | `in_progress` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; resilience evidence [ ] |
+| C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; provider-observed resilience evidence [ ] |
 | D — Lightweight diagnostics | `verified` | [x] complete |
-| E — Main Rithmic UI | `in_progress` | pre-login shell/profile/state [x]; bounded symbol/timeframe controls [x]; authorized visible history [x]; live candles [x]; recovering read-only DOM [x]; lifecycle/feed health [x] |
-| F — Readiness | `in_progress` | deterministic failure, burst, and memory evidence [x]; physical transitions [ ] |
+| E — Main Rithmic UI | `blocked_external` | implementation [x]; named externally instrumented 60/120/144 Hz pacing [ ] |
+| F — Readiness | `blocked_external` | deterministic failure, burst, and memory evidence [x]; provider/physical transitions [ ] |
 
 ### Remaining focus (ordered)
 
@@ -106,10 +106,10 @@ Full scope policy:
 | Coinbase reference + chart | `verified`    | BTC-USD / ETH-USD 1m cache-first startup, corrupt-cache refetch, reconnect fencing, redaction, history/live continuity, bounded shutdown, and public shipping smoke pass; scope is frozen.                                                           |
 | Provider-neutral runtime   | `verified`    | Shared runtime passes Coinbase and deterministic Rithmic fixture conformance.                                                                                                                                                                       |
 | Rithmic access             | `verified`    | The kit is installed locally under `provider_kit/`; native-vault credentials, Test login, search/reference, trades, quotes, depth, and history were exercised successfully on 2026-08-07. |
-| Rithmic adapter            | `in_progress` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented. Authorized authenticated client-local silence injection and clean recovery pass; provider-observed loss evidence remains. |
+| Rithmic adapter            | `blocked_external` | Kit-backed bounded codecs, ticker/history TLS WSS lifecycles, fail-closed search/replay collectors, complete-depth-image assembly, vault-backed runtime callbacks, canonical mapping, subscriptions, silence detection, retry fencing, native environment fencing, exact covering history pages, and generation-fenced bar continuity recovery with overlap deduplication are implemented. Authorized authenticated client-local silence injection and clean recovery pass; provider-observed loss evidence remains. |
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
-| Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
-| Readiness                  | `in_progress` | Deterministic failure, burst, and memory evidence are implemented; physical environment transitions remain.                                                                                                                                        |
+| Main Rithmic UI            | `blocked_external` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Externally instrumented named pacing evidence remains. |
+| Readiness                  | `blocked_external` | Deterministic failure, burst, and memory evidence are implemented; provider-observed loss and operator-driven physical environment transitions remain.                                                                                              |
 | Descope cleanup            | `verified`    | AF_XDP/DPDK paths are removed from `main`, the cloud market-data plane is quarantined, and the Stage 0 workspace gate passes.                                                                                                                        |
 
 
@@ -300,7 +300,7 @@ None — gate met.
 
 ## 8. Stage C — Rithmic read-only headless core
 
-**Status:** `in_progress`
+**Status:** `blocked_external`
 
 Stage 0 and Stage C deterministic conformance are verified. Authorized Test
 core-path evidence is complete; authorized resilience/recovery evidence remains.
@@ -458,7 +458,7 @@ None — gate met.
 
 ## 10. Stage E — Main Rithmic UI vertical
 
-**Status:** `in_progress` (interactive controls, live candles, and read-only DOM landed)
+**Status:** `blocked_external` (implementation is complete; external physical pacing evidence remains)
 
 Begin only after Stage 0 is `verified` and Stages C and D pass their
 deterministic headless gates.
@@ -600,6 +600,13 @@ diagnostics only as supporting mode evidence. Finalization pins every external
 and supporting artifact by SHA-256 before invoking the matrix verifier. External
 scanout instrumentation is still required; these tools do not synthesize it.
 
+The capture bundle for clean revision `645885f` was prepared on 2026-08-08 with
+release executable SHA-256
+`5ACB3485508FF602C1BB8B3C94C819ACA39AA0CB71FA56716B8E097C44F6E980`.
+The installed LG display was running at approximately 164 Hz, and no external
+scanout instrument was available to collect the required 60/120/144 Hz physical
+samples. Preparation alone does not satisfy the gate.
+
 - [x] No GPUI-thread network, storage, protobuf, or aggregation work.
 - [x] Correct DOM gap recovery.
 - [x] Responsive symbol/timeframe replacement.
@@ -610,8 +617,8 @@ scanout instrumentation is still required; these tools do not synthesize it.
 
 ## 11. Stage F — Readiness
 
-**Status:** `in_progress` (deterministic readiness work is active; physical
-evidence remains downstream of the product gates)
+**Status:** `blocked_external` (deterministic readiness evidence passes;
+provider-observed loss and physical lifecycle evidence require external events)
 
 ### Remaining work
 
@@ -658,11 +665,21 @@ ordering with checked arithmetic: heartbeat silence is feasible only when
 short-window timing fails closed. No real provider-path silence artifact has
 been captured, so the row remains open.
 
+A passive 180-second run from clean revision `645885f` on 2026-08-08 loaded the
+native-vault credentials, authenticated generation 1, and observed the
+unmodified production receive loop without local suppression or fault
+injection. The session remained healthy until the observation deadline, so the
+schema-3 artifact failed closed with `observation_timeout`, no observed
+invalidation, and `qualified=false`. The negotiated heartbeat was 60 seconds,
+with the shipping five-second response deadline and two-minute message-silence
+deadline. This was a real attempted run, not qualifying loss evidence.
+
 The passive heartbeat observation uses the shipping two-minute message-silence
-window and a five-second heartbeat-response deadline. The observed Rithmic Test
-ten-second negotiated heartbeat can therefore reach `HeartbeatSilence` before
-the broader message timeout; a regression locks that ordering without changing
-production behavior or claiming provider causation. With that exact Test timing,
+window and a five-second heartbeat-response deadline. An earlier observed
+Rithmic Test ten-second negotiated heartbeat can therefore reach
+`HeartbeatSilence` before the broader message timeout; a regression locks that
+ordering without changing production behavior or claiming provider causation.
+With that exact Test timing,
 passive `MessageSilence` cannot win the production timeout race; its evidence
 remains externally unavailable unless a provider session negotiates a feasible
 heartbeat interval and the corresponding raw invalidation is actually observed.
