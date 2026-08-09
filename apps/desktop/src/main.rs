@@ -48,7 +48,76 @@ use market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
     UiDiagnosticsFeedback,
 };
-use std::{path::PathBuf, rc::Rc, sync::mpsc::TrySendError, time::Duration};
+use std::{
+    path::PathBuf,
+    pin::Pin,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::TrySendError,
+    },
+    task::{Context as TaskContext, Poll, Waker},
+    time::Duration,
+};
+
+#[derive(Default)]
+struct UiWakeState {
+    pending: AtomicBool,
+    waker: std::sync::Mutex<Option<Waker>>,
+}
+
+#[derive(Clone, Default)]
+struct UiWake {
+    state: Arc<UiWakeState>,
+}
+
+impl UiWake {
+    fn callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let state = Arc::clone(&self.state);
+        Arc::new(move || {
+            state.pending.store(true, Ordering::Release);
+            let waker = state
+                .waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        })
+    }
+
+    fn notified(&self) -> UiWakeNotified {
+        UiWakeNotified {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+struct UiWakeNotified {
+    state: Arc<UiWakeState>,
+}
+
+impl std::future::Future for UiWakeNotified {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<()> {
+        if self.state.pending.swap(false, Ordering::AcqRel) {
+            return Poll::Ready(());
+        }
+        *self
+            .state
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cx.waker().clone());
+        if self.state.pending.swap(false, Ordering::AcqRel) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
 
 const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
@@ -56,6 +125,23 @@ const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
+
+static COINBASE_INTERVALS: &[ChartInterval] = &[
+    ChartInterval::Minute1,
+    ChartInterval::Minute3,
+    ChartInterval::Minute5,
+    ChartInterval::Minute15,
+    ChartInterval::Minute30,
+    ChartInterval::Hour1,
+    ChartInterval::Hour2,
+    ChartInterval::Hour4,
+    ChartInterval::Hour8,
+    ChartInterval::Hour12,
+    ChartInterval::Day1,
+    ChartInterval::Day3,
+    ChartInterval::Week1,
+    ChartInterval::Month1,
+];
 
 fn generation_status(
     worker_label: &str,
@@ -665,7 +751,9 @@ impl TerminalApp {
         );
         observe_chart(chart.as_ref(), cx);
         let dom = cx.new(move |_| ReadOnlyDomView::new(theme));
-        Self {
+        let ui_wake = UiWake::default();
+        market_worker.set_message_wake(ui_wake.callback());
+        let app = Self {
             chart,
             dom,
             side_panel: None,
@@ -710,16 +798,33 @@ impl TerminalApp {
             coinbase_pending_interval: None,
             coinbase_pending_product: None,
             coinbase_pending_sequence: None,
-        }
+        };
+        let mut async_cx = cx.to_async();
+        let this = cx.weak_entity();
+        cx.foreground_executor()
+            .spawn(async move {
+                loop {
+                    ui_wake.notified().await;
+                    let drained = this.update(&mut async_cx, |app, app_cx| {
+                        if app.poll_market_worker(app_cx) > 0 {
+                            app_cx.notify();
+                        }
+                    });
+                    if drained.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        app
     }
 
-    fn available_intervals(&self) -> Vec<ChartInterval> {
-        ChartInterval::ALL
-            .into_iter()
-            .filter(|interval| {
-                self.provider != TerminalProvider::Coinbase || *interval != ChartInterval::Tick100
-            })
-            .collect()
+    fn available_intervals(&self) -> &'static [ChartInterval] {
+        if self.provider == TerminalProvider::Coinbase {
+            COINBASE_INTERVALS
+        } else {
+            &ChartInterval::ALL
+        }
     }
 
     fn selected_interval(&self) -> ChartInterval {
@@ -1230,11 +1335,12 @@ impl TerminalApp {
         }
     }
 
-    fn poll_market_worker(&mut self, cx: &mut Context<Self>) {
+    fn poll_market_worker(&mut self, cx: &mut Context<Self>) -> usize {
         if !self.window_active {
-            return;
+            return 0;
         }
         let (messages, disconnected) = self.market_worker.drain_messages();
+        let applied = messages.len();
         for message in messages {
             self.apply_market_worker_message(message, cx);
         }
@@ -1278,6 +1384,7 @@ impl TerminalApp {
             self.bridge_label = status;
             cx.notify();
         }
+        applied + usize::from(disconnected)
     }
 
     fn apply_connection_state(
@@ -1361,6 +1468,15 @@ impl TerminalApp {
         }
     }
 
+    fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let window_active = window.is_window_active();
+        let became_active = window_active && !self.window_active;
+        self.window_active = window_active;
+        if became_active {
+            self.schedule_market_frame(window, cx);
+        }
+    }
+
     fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.frame_poll_gate.try_schedule(self.window_active) {
             return;
@@ -1369,8 +1485,9 @@ impl TerminalApp {
         window.on_next_frame(move |_, cx| {
             app.update(cx, |app, cx| {
                 app.frame_poll_gate.complete();
-                app.poll_market_worker(cx);
-                cx.notify();
+                if app.poll_market_worker(cx) > 0 {
+                    cx.notify();
+                }
             });
         });
     }
@@ -1959,7 +2076,7 @@ fn chrome_overlay_layer(
 
 fn timeframe_overlay_content(
     app: &Entity<TerminalApp>,
-    intervals: Vec<ChartInterval>,
+    intervals: &'static [ChartInterval],
     selected: ChartInterval,
     keyboard_selection: usize,
     pending: bool,
@@ -1973,7 +2090,8 @@ fn timeframe_overlay_content(
         .gap_1()
         .children(
             intervals
-                .into_iter()
+                .iter()
+                .copied()
                 .enumerate()
                 .map(move |(index, interval)| {
                     let row_app = app.clone();
@@ -2017,8 +2135,7 @@ fn timeframe_overlay_content(
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_diagnostics_frame(window);
-        self.window_active = window.is_window_active();
-        self.schedule_market_frame(window, cx);
+        self.track_window_activation(window, cx);
         let theme = self.theme;
         let colors = theme.colors;
         let app = cx.entity();

@@ -143,6 +143,26 @@ struct MarketWorkerMailbox {
     sender_count: AtomicUsize,
     receiver_alive: AtomicBool,
     coalesced_updates: Mutex<GenerationCoalescingQueue>,
+    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    wake_pending: AtomicBool,
+}
+
+fn fire_mailbox_wake(mailbox: &MarketWorkerMailbox) {
+    if !mailbox.receiver_alive.load(Ordering::Acquire) {
+        return;
+    }
+    if mailbox.wake_pending.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let wake = mailbox
+        .wake
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match wake {
+        Some(wake) => wake(),
+        None => mailbox.wake_pending.store(false, Ordering::Release),
+    }
 }
 
 pub(crate) struct MarketWorkerSender {
@@ -164,12 +184,20 @@ impl Clone for MarketWorkerSender {
 
 impl Drop for MarketWorkerSender {
     fn drop(&mut self) {
-        self.mailbox.sender_count.fetch_sub(1, Ordering::Release);
+        if self.mailbox.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            fire_mailbox_wake(&self.mailbox);
+        }
     }
 }
 
 impl MarketWorkerSender {
     pub(crate) fn send(&self, message: MarketWorkerMessage) -> Result<(), ()> {
+        self.enqueue(message)?;
+        fire_mailbox_wake(&self.mailbox);
+        Ok(())
+    }
+
+    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), ()> {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(());
         }
@@ -751,14 +779,46 @@ fn take_covering_snapshot(
 }
 
 impl MarketWorkerReceiver {
-    pub(crate) fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
-        let mut queue = self
+    pub(crate) fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .mailbox
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
+        let pending = !self
             .mailbox
             .queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let messages = queue.drain(..).collect::<Vec<_>>();
-        let disconnected = self.mailbox.sender_count.load(Ordering::Acquire) == 0;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        if pending {
+            fire_mailbox_wake(&self.mailbox);
+        }
+    }
+
+    pub(crate) fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
+        let messages = self
+            .mailbox
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect::<Vec<_>>();
+        self.mailbox.wake_pending.store(false, Ordering::Release);
+        let (queued, disconnected) = {
+            let queue = self
+                .mailbox
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                !queue.is_empty(),
+                self.mailbox.sender_count.load(Ordering::Acquire) == 0,
+            )
+        };
+        if queued {
+            fire_mailbox_wake(&self.mailbox);
+        }
         (messages, disconnected)
     }
 }
@@ -766,6 +826,11 @@ impl MarketWorkerReceiver {
 impl Drop for MarketWorkerReceiver {
     fn drop(&mut self) {
         self.mailbox.receiver_alive.store(false, Ordering::Release);
+        *self
+            .mailbox
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.mailbox
             .queue
             .lock()
@@ -783,6 +848,8 @@ pub(crate) fn market_worker_channel(
         sender_count: AtomicUsize::new(1),
         receiver_alive: AtomicBool::new(true),
         coalesced_updates: Mutex::new(GenerationCoalescingQueue::new(capacity.get())),
+        wake: Mutex::new(None),
+        wake_pending: AtomicBool::new(false),
     });
     (
         MarketWorkerSender {
@@ -1118,6 +1185,12 @@ impl MarketDataWorker {
 
     pub(crate) fn ui_diagnostics_sender(&self) -> Option<UiDiagnosticsSender> {
         self.ui_diagnostics.clone()
+    }
+
+    pub(crate) fn set_message_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(messages) = &self.messages {
+            messages.set_wake(wake);
+        }
     }
 
     pub fn try_send_recovery(
@@ -1752,6 +1825,86 @@ mod tests {
         assert!(ui_enqueue_nanos >= 0);
         assert!(frame_submit_nanos >= ui_enqueue_nanos);
         assert!(present_nanos >= frame_submit_nanos);
+    }
+
+    #[test]
+    fn mailbox_wake_fires_once_per_edge_until_drained() {
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+        receiver.set_wake(Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        }));
+        assert_eq!(wake_count.load(Ordering::Acquire), 0);
+
+        let message = || MarketWorkerMessage::State {
+            state: ChartState::Ready,
+            message: "ready".to_string(),
+        };
+        sender.send(message()).expect("first state sends");
+        sender.send(message()).expect("second state sends");
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+
+        let (drained, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert_eq!(drained.len(), 1);
+        sender.send(message()).expect("state after drain sends");
+        assert_eq!(wake_count.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn mailbox_wake_fires_for_queued_messages_on_registration() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        sender
+            .send(MarketWorkerMessage::State {
+                state: ChartState::Loading,
+                message: "loading".to_string(),
+            })
+            .expect("state sends before wake registration");
+
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        receiver.set_wake(Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        }));
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn mailbox_wake_fires_when_last_sender_drops() {
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        receiver.set_wake(Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        }));
+        let cloned = sender.clone();
+        drop(sender);
+        assert_eq!(wake_count.load(Ordering::Acquire), 0);
+        drop(cloned);
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn mailbox_wake_stops_after_receiver_drops() {
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        receiver.set_wake(Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        }));
+        drop(receiver);
+        assert!(
+            sender
+                .send(MarketWorkerMessage::State {
+                    state: ChartState::Ready,
+                    message: "ready".to_string(),
+                })
+                .is_err()
+        );
+        drop(sender);
+        assert_eq!(wake_count.load(Ordering::Acquire), 0);
     }
 
     #[test]
