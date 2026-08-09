@@ -282,18 +282,6 @@ fn session_subscription_receives_retained_covering_chart_state() {
         .expect("subscribe session");
     assert_eq!(stream.receive().expect("receive retained chart"), covering);
     drop(stream);
-    publications.publish_transient(
-        ViewKind::Chart,
-        &envelope::Payload::ChartSnapshot(ChartSnapshot {
-            market: "BTC-USD".to_string(),
-            interval_seconds: 60,
-            engine_epoch: 101,
-            selection_generation: 1,
-            provider_generation: 3,
-            payload: vec![4],
-            provenance: ChartProvenance::LiveProvider as i32,
-        }),
-    );
     server.join().expect("join server");
 }
 

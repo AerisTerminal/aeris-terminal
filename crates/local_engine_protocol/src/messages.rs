@@ -149,6 +149,14 @@ pub struct EngineReady {
     pub workspace_revision: u64,
 }
 
+/// Periodic liveness frame for a subscribed view connection.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct EngineHeartbeat {
+    /// Engine process epoch; changes on every engine restart. Tag 1.
+    #[prost(uint64, tag = "1")]
+    pub engine_epoch: u64,
+}
+
 /// Client request for the persisted workspace. Tag-less empty message.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct RestoreWorkspace {}
@@ -584,10 +592,10 @@ pub struct Envelope {
     /// Protocol version of this envelope; must equal [`crate::PROTOCOL_VERSION`]. Tag 1.
     #[prost(uint32, tag = "1")]
     pub protocol_version: u32,
-    /// Versioned message payload. Tags 2 through 23.
+    /// Versioned message payload. Tags 2 through 24.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -663,5 +671,8 @@ pub mod envelope {
         /// Rithmic chart publication. Tag 23.
         #[prost(message, tag = "23")]
         RithmicChart(super::RithmicChart),
+        /// Subscribed-view liveness frame. Tag 24.
+        #[prost(message, tag = "24")]
+        EngineHeartbeat(super::EngineHeartbeat),
     }
 }

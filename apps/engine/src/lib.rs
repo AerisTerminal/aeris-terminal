@@ -17,10 +17,10 @@ use std::{
 
 use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_local_engine_protocol::{
-    CatalogEntry, CatalogReassembler, ClientHello, ClientKind, EngineFaultCode, EngineReady,
-    Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION, ResourceMode,
-    RestoreWorkspace, SetSelection, SetViewport, SetWatchlist, SubscribeView, ViewKind,
-    WorkspaceState, encode_envelope, envelope, split_catalog,
+    CatalogEntry, CatalogReassembler, ClientHello, ClientKind, EngineFaultCode, EngineHeartbeat,
+    EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION,
+    ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist, SubscribeView,
+    ViewKind, WorkspaceState, encode_envelope, envelope, split_catalog,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
@@ -37,6 +37,7 @@ pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
 const PUBLICATION_SUBSCRIBER_CAPACITY: usize = 128;
+const SUBSCRIBER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const WORKSPACE_SCHEMA_REVISION: u32 = 1;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
@@ -1217,11 +1218,17 @@ pub fn serve_client_with_publications(
         engine_epoch,
         workspace_revision: state.workspace().workspace_revision,
     }))?;
-    serve_authenticated_session_with_publications(&mut connection, state, publications)
+    serve_authenticated_session_with_publications(
+        &mut connection,
+        engine_epoch,
+        state,
+        publications,
+    )
 }
 
 fn serve_authenticated_session_with_publications(
     connection: &mut FramedConnection,
+    engine_epoch: u64,
     state: &EngineState,
     publications: &EnginePublicationHub,
 ) -> Result<(), String> {
@@ -1253,10 +1260,17 @@ fn serve_authenticated_session_with_publications(
                 let view = ViewKind::try_from(subscription.view)
                     .map_err(|_| "engine view subscription is invalid".to_string())?;
                 let receiver = publications.subscribe(view);
-                while let Ok(publication) = receiver.recv() {
-                    connection.send(publication)?;
+                loop {
+                    match receiver.recv_timeout(SUBSCRIBER_HEARTBEAT_INTERVAL) {
+                        Ok(publication) => connection.send(publication)?,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            connection.send(envelope::Payload::EngineHeartbeat(
+                                EngineHeartbeat { engine_epoch },
+                            ))?;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
                 }
-                return Ok(());
             }
             envelope::Payload::Goodbye(_) => {
                 connection.send(envelope::Payload::Goodbye(Goodbye {

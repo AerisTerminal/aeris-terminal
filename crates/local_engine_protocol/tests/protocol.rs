@@ -1,12 +1,12 @@
 use axiusflow_local_engine_protocol::{
     ActivateExistingUi, CatalogEntry, CatalogReassembler, CatalogSnapshot, ChartDelta,
     ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomBookState, DomLevel, DomRow,
-    DomSnapshot, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye,
-    HotSeries, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, ProviderConnectionState,
-    ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog, RithmicChart, RithmicHistory,
-    RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection, SetViewport, SetWatchlist,
-    SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, encode_envelope, envelope,
-    split_catalog,
+    DomSnapshot, EngineFaultCode, EngineHeartbeat, EngineReady, Envelope, EnvelopeDecoder, Fault,
+    Fence, Goodbye, HotSeries, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError,
+    ProviderConnectionState, ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog,
+    RithmicChart, RithmicHistory, RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection,
+    SetViewport, SetWatchlist, SubscribeView, UnsubscribeView, ViewKind, WorkspaceState,
+    encode_envelope, envelope, split_catalog,
 };
 use axiusflow_transport::encode_binary_frame;
 use std::num::NonZeroUsize;
@@ -23,6 +23,7 @@ fn all_payloads() -> Vec<envelope::Payload> {
             engine_epoch: 7,
             workspace_revision: 42,
         }),
+        envelope::Payload::EngineHeartbeat(EngineHeartbeat { engine_epoch: 7 }),
         envelope::Payload::RestoreWorkspace(RestoreWorkspace {}),
         envelope::Payload::WorkspaceState(WorkspaceState {
             provider: "coinbase".to_string(),

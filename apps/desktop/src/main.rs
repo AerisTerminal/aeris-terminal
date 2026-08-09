@@ -11,6 +11,7 @@ mod rithmic_shell;
 #[cfg(feature = "diagnostics")]
 mod windowed_benchmark;
 
+use assets::UiIcon as HugeIcon;
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
@@ -44,7 +45,6 @@ use gpui_component::{
     scroll::ScrollableElement,
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
-use gpui_hugeicons::{HugeiconsAssets, IconName as HugeIcon};
 use gpui_platform::application;
 use std::{
     pin::Pin,
@@ -4051,7 +4051,7 @@ fn main() {
         return;
     };
     application()
-        .with_assets(HugeiconsAssets::with_fallback(assets::DesktopAssets))
+        .with_assets(assets::DesktopAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);

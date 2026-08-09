@@ -2,6 +2,86 @@ use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
 const DRAWING_ASSET_PREFIX: &str = "axiusflow/icons/drawing/";
+const UI_ASSET_PREFIX: &str = "axiusflow/icons/ui/";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiIcon {
+    ActivityIcon01,
+    AddIcon01,
+    AiEraser,
+    AiLock,
+    ArrowLeftIcon01,
+    ArrowRightDouble,
+    ArrowRightIcon01,
+    Brush,
+    CancelIcon01,
+    ChartLineDataIcon02,
+    CheckmarkCircleIcon01,
+    CursorIcon01,
+    DeleteIcon02,
+    ExchangeIcon01,
+    FitToScreen,
+    Lock,
+    MoonIcon02,
+    SearchIcon01,
+    SidebarRightIcon01,
+    SunIcon03,
+    Text,
+}
+
+impl UiIcon {
+    pub const ALL: [Self; 21] = [
+        Self::ActivityIcon01,
+        Self::AddIcon01,
+        Self::AiEraser,
+        Self::AiLock,
+        Self::ArrowLeftIcon01,
+        Self::ArrowRightDouble,
+        Self::ArrowRightIcon01,
+        Self::Brush,
+        Self::CancelIcon01,
+        Self::ChartLineDataIcon02,
+        Self::CheckmarkCircleIcon01,
+        Self::CursorIcon01,
+        Self::DeleteIcon02,
+        Self::ExchangeIcon01,
+        Self::FitToScreen,
+        Self::Lock,
+        Self::MoonIcon02,
+        Self::SearchIcon01,
+        Self::SidebarRightIcon01,
+        Self::SunIcon03,
+        Self::Text,
+    ];
+
+    #[must_use]
+    pub fn path(self) -> SharedString {
+        let name = match self {
+            Self::ActivityIcon01 => "activity-01.svg",
+            Self::AddIcon01 => "add-01.svg",
+            Self::AiEraser => "ai-eraser.svg",
+            Self::AiLock => "ai-lock.svg",
+            Self::ArrowLeftIcon01 => "arrow-left-01.svg",
+            Self::ArrowRightDouble => "arrow-right-double.svg",
+            Self::ArrowRightIcon01 => "arrow-right-01.svg",
+            Self::Brush => "brush.svg",
+            Self::CancelIcon01 => "cancel-01.svg",
+            Self::ChartLineDataIcon02 => "chart-line-data-02.svg",
+            Self::CheckmarkCircleIcon01 => "checkmark-circle-01.svg",
+            Self::CursorIcon01 => "cursor-01.svg",
+            Self::DeleteIcon02 => "delete-02.svg",
+            Self::ExchangeIcon01 => "exchange-01.svg",
+            Self::FitToScreen => "fit-to-screen.svg",
+            Self::Lock => "lock.svg",
+            Self::MoonIcon02 => "moon-02.svg",
+            Self::SearchIcon01 => "search-01.svg",
+            Self::SidebarRightIcon01 => "sidebar-right-01.svg",
+            Self::SunIcon03 => "sun-03.svg",
+            Self::Text => "text.svg",
+        };
+        format!("{UI_ASSET_PREFIX}{name}").into()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DrawingIcon {
@@ -50,13 +130,16 @@ pub struct AxiusflowAssets;
 
 impl AssetSource for AxiusflowAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(drawing_asset(path).map(Cow::Borrowed))
+        Ok(drawing_asset(path)
+            .or_else(|| ui_asset(path))
+            .map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(DrawingIcon::ALL
             .into_iter()
             .map(DrawingIcon::path)
+            .chain(UiIcon::ALL.into_iter().map(UiIcon::path))
             .filter(|asset| path.is_empty() || asset.starts_with(path))
             .collect())
     }
@@ -67,7 +150,7 @@ pub struct DesktopAssets;
 
 impl AssetSource for DesktopAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path.starts_with(DRAWING_ASSET_PREFIX) {
+        if path.starts_with(DRAWING_ASSET_PREFIX) || path.starts_with(UI_ASSET_PREFIX) {
             AxiusflowAssets.load(path)
         } else {
             gpui_component_assets::Assets.load(path)
@@ -95,6 +178,39 @@ fn drawing_asset(path: &str) -> Option<&'static [u8]> {
         "ruler.svg" => include_bytes!("../assets/icons/drawing/ruler.svg"),
         "fibonacci.svg" => include_bytes!("../assets/icons/drawing/fibonacci.svg"),
         "extended-line.svg" => include_bytes!("../assets/icons/drawing/extended-line.svg"),
+        _ => return None,
+    })
+}
+
+fn ui_asset(path: &str) -> Option<&'static [u8]> {
+    Some(match path.strip_prefix(UI_ASSET_PREFIX)? {
+        "activity-01.svg" => include_bytes!("../assets/icons/ui/activity-01.svg"),
+        "add-01.svg" => include_bytes!("../assets/icons/ui/add-01.svg"),
+        "ai-eraser.svg" => include_bytes!("../assets/icons/ui/ai-eraser.svg"),
+        "ai-lock.svg" => include_bytes!("../assets/icons/ui/ai-lock.svg"),
+        "arrow-left-01.svg" => include_bytes!("../assets/icons/ui/arrow-left-01.svg"),
+        "arrow-right-double.svg" => {
+            include_bytes!("../assets/icons/ui/arrow-right-double.svg")
+        }
+        "arrow-right-01.svg" => include_bytes!("../assets/icons/ui/arrow-right-01.svg"),
+        "brush.svg" => include_bytes!("../assets/icons/ui/brush.svg"),
+        "cancel-01.svg" => include_bytes!("../assets/icons/ui/cancel-01.svg"),
+        "chart-line-data-02.svg" => {
+            include_bytes!("../assets/icons/ui/chart-line-data-02.svg")
+        }
+        "checkmark-circle-01.svg" => {
+            include_bytes!("../assets/icons/ui/checkmark-circle-01.svg")
+        }
+        "cursor-01.svg" => include_bytes!("../assets/icons/ui/cursor-01.svg"),
+        "delete-02.svg" => include_bytes!("../assets/icons/ui/delete-02.svg"),
+        "exchange-01.svg" => include_bytes!("../assets/icons/ui/exchange-01.svg"),
+        "fit-to-screen.svg" => include_bytes!("../assets/icons/ui/fit-to-screen.svg"),
+        "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
+        "moon-02.svg" => include_bytes!("../assets/icons/ui/moon-02.svg"),
+        "search-01.svg" => include_bytes!("../assets/icons/ui/search-01.svg"),
+        "sidebar-right-01.svg" => include_bytes!("../assets/icons/ui/sidebar-right-01.svg"),
+        "sun-03.svg" => include_bytes!("../assets/icons/ui/sun-03.svg"),
+        "text.svg" => include_bytes!("../assets/icons/ui/text.svg"),
         _ => return None,
     })
 }
@@ -148,7 +264,7 @@ mod tests {
         let assets = AxiusflowAssets;
         assert_eq!(
             assets.list("").expect("all assets").len(),
-            DrawingIcon::ALL.len()
+            DrawingIcon::ALL.len() + UiIcon::ALL.len()
         );
         assert_eq!(
             assets
@@ -159,7 +275,7 @@ mod tests {
         assert!(
             assets
                 .list("hugeicons/")
-                .expect("foreign namespace")
+                .expect("removed namespace")
                 .is_empty()
         );
         assert!(
@@ -168,6 +284,21 @@ mod tests {
                 .expect("unknown lookup")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn ui_icon_inventory_is_embedded_and_theme_neutral() {
+        let assets = AxiusflowAssets;
+        let mut paths = HashSet::new();
+        for icon in UiIcon::ALL {
+            let path = icon.path();
+            assert!(paths.insert(path.clone()), "duplicate asset path: {path}");
+            let bytes = assets.load(path.as_ref()).unwrap().expect("UI icon");
+            let svg = std::str::from_utf8(&bytes).expect("UTF-8 SVG");
+            assert!(svg.contains("viewBox=\"0 0 24 24\""));
+            assert!(svg.contains("currentColor"));
+            assert!(!svg.contains('#'));
+        }
     }
 
     #[test]

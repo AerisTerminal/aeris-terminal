@@ -17,10 +17,10 @@ pub use fence::Fence;
 pub use messages::{
     ActivateExistingUi, CatalogEntry, CatalogSnapshot, ChartDelta, ChartProvenance, ChartSnapshot,
     ClientHello, ClientKind, DomBookState, DomLevel, DomRecoveryReason, DomRow, DomSnapshot,
-    EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, HotSeries, ProviderConnectionState,
-    ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog, RithmicChart, RithmicHistory,
-    RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection, SetViewport, SetWatchlist,
-    SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, envelope,
+    EngineFaultCode, EngineHeartbeat, EngineReady, Envelope, Fault, Goodbye, HotSeries,
+    ProviderConnectionState, ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog,
+    RithmicChart, RithmicHistory, RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection,
+    SetViewport, SetWatchlist, SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, envelope,
 };
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
