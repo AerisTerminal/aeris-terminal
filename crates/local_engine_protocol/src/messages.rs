@@ -69,6 +69,32 @@ pub enum ChartProvenance {
     EmbeddedFixture = 2,
 }
 
+/// Coarse order-book state carried by a DOM snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum DomBookState {
+    /// A complete book is ready. Tag 0.
+    Ready = 0,
+    /// The last complete book is stale. Tag 1.
+    Stale = 1,
+    /// A covering snapshot is required. Tag 2.
+    Recovering = 2,
+}
+
+/// Recovery reason when [`DomBookState::Recovering`] is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum DomRecoveryReason {
+    /// No covering snapshot has arrived. Tag 0.
+    AwaitingSnapshot = 0,
+    /// An ordered update was missing. Tag 1.
+    SequenceGap = 1,
+    /// The candidate book crossed. Tag 2.
+    CrossedBook = 2,
+    /// A provider update was invalid. Tag 3.
+    InvalidUpdate = 3,
+}
+
 /// Machine-readable fault classification shared by protocol errors and faults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
@@ -287,7 +313,33 @@ pub struct ChartDelta {
     pub provenance: i32,
 }
 
-/// Depth-of-market snapshot; `payload` is coordinator-encoded and opaque.
+/// One display-ready DOM column level.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct DomLevel {
+    #[prost(sint64, tag = "1")]
+    pub price: i64,
+    #[prost(sint64, tag = "2")]
+    pub quantity: i64,
+    #[prost(uint32, optional, tag = "3")]
+    pub order_count: Option<u32>,
+    #[prost(string, tag = "4")]
+    pub price_text: String,
+    #[prost(string, tag = "5")]
+    pub quantity_text: String,
+    #[prost(uint32, tag = "6")]
+    pub relative_size_bps: u32,
+}
+
+/// One horizontally aligned DOM row.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct DomRow {
+    #[prost(message, optional, tag = "1")]
+    pub bid: Option<DomLevel>,
+    #[prost(message, optional, tag = "2")]
+    pub ask: Option<DomLevel>,
+}
+
+/// Complete, bounded depth-of-market snapshot.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct DomSnapshot {
     /// Market this book belongs to. Tag 1.
@@ -305,6 +357,22 @@ pub struct DomSnapshot {
     /// Coordinator-encoded book. Tag 5.
     #[prost(bytes = "vec", tag = "5")]
     pub payload: Vec<u8>,
+    #[prost(string, tag = "6")]
+    pub provider_id: String,
+    #[prost(string, tag = "7")]
+    pub instrument_id: String,
+    #[prost(string, tag = "8")]
+    pub entitlement_id: String,
+    #[prost(uint64, tag = "9")]
+    pub revision: u64,
+    #[prost(uint64, tag = "10")]
+    pub source_watermark: u64,
+    #[prost(enumeration = "DomBookState", tag = "11")]
+    pub state: i32,
+    #[prost(enumeration = "DomRecoveryReason", optional, tag = "12")]
+    pub recovery_reason: Option<i32>,
+    #[prost(message, repeated, tag = "13")]
+    pub rows: Vec<DomRow>,
 }
 
 /// Provider connection state transition.

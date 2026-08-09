@@ -17,9 +17,13 @@ use axiusflow_engine::{
     sibling_engine_executable,
 };
 use axiusflow_local_engine_protocol::{
-    CatalogReassembler, ChartProvenance, ProviderConnectionState, ViewKind, envelope,
+    CatalogReassembler, ChartProvenance, DomBookState, DomRecoveryReason, DomSnapshot,
+    ProviderConnectionState, ViewKind, envelope,
 };
-use axiusflow_market_data::{ChartAggregation, ChartInterval};
+use axiusflow_market_data::{
+    ChartAggregation, ChartInterval, DomColumnLevel, DomFrame, DomRow, OrderBookRecoveryReason,
+    OrderBookState,
+};
 use axiusflow_market_protocol_adapter::{BinaryMarketBarStreamDecoder, DecimalConvention};
 use axiusflow_observability::FeedConnectionState;
 
@@ -170,6 +174,10 @@ fn spawn_session_stream(message_tx: MarketWorkerSender, latest_snapshot: LatestS
                         publish_provider_state(&message_tx, provider.state)?;
                         continue;
                     }
+                    envelope::Payload::DomSnapshot(snapshot) => {
+                        publish_dom(&message_tx, snapshot)?;
+                        continue;
+                    }
                     envelope::Payload::Fault(fault) => {
                         send_error(&message_tx, fault.redacted_detail);
                         continue;
@@ -260,6 +268,64 @@ fn publish_provider_state(message_tx: &MarketWorkerSender, provider: i32) -> Res
             },
         })
         .map_err(|_| "desktop market mailbox disconnected".to_string())
+}
+
+fn publish_dom(message_tx: &MarketWorkerSender, snapshot: DomSnapshot) -> Result<(), String> {
+    let state = match DomBookState::try_from(snapshot.state)
+        .map_err(|_| "resident DOM state is invalid".to_string())?
+    {
+        DomBookState::Ready => OrderBookState::Ready,
+        DomBookState::Stale => OrderBookState::Stale,
+        DomBookState::Recovering => {
+            let reason = DomRecoveryReason::try_from(
+                snapshot
+                    .recovery_reason
+                    .ok_or_else(|| "resident recovering DOM has no recovery reason".to_string())?,
+            )
+            .map_err(|_| "resident DOM recovery reason is invalid".to_string())?;
+            OrderBookState::Recovering(match reason {
+                DomRecoveryReason::AwaitingSnapshot => OrderBookRecoveryReason::AwaitingSnapshot,
+                DomRecoveryReason::SequenceGap => OrderBookRecoveryReason::SequenceGap,
+                DomRecoveryReason::CrossedBook => OrderBookRecoveryReason::CrossedBook,
+                DomRecoveryReason::InvalidUpdate => OrderBookRecoveryReason::InvalidUpdate,
+            })
+        }
+    };
+    let rows = snapshot
+        .rows
+        .into_iter()
+        .map(|row| {
+            Ok(DomRow {
+                bid: row.bid.map(dom_level).transpose()?,
+                ask: row.ask.map(dom_level).transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    message_tx
+        .send(MarketWorkerMessage::CoinbaseDom(DomFrame {
+            provider_id: snapshot.provider_id,
+            instrument_id: snapshot.instrument_id,
+            entitlement_id: snapshot.entitlement_id,
+            session_generation: snapshot.provider_generation,
+            selection_generation: snapshot.selection_generation,
+            revision: snapshot.revision,
+            source_watermark: snapshot.source_watermark,
+            state,
+            rows,
+        }))
+        .map_err(|_| "desktop market mailbox disconnected".to_string())
+}
+
+fn dom_level(level: axiusflow_local_engine_protocol::DomLevel) -> Result<DomColumnLevel, String> {
+    Ok(DomColumnLevel {
+        price: level.price,
+        quantity: level.quantity,
+        order_count: level.order_count,
+        price_text: level.price_text,
+        quantity_text: level.quantity_text,
+        relative_size_bps: u16::try_from(level.relative_size_bps)
+            .map_err(|_| "resident DOM relative size is invalid".to_string())?,
+    })
 }
 
 fn spawn_stream(

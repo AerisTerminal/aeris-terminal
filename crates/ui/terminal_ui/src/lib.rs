@@ -10,7 +10,8 @@ mod dom;
 #[cfg(feature = "gpui")]
 mod dom_view;
 
-pub use dom::{DomColumnLevel, DomFrame, DomRow, DomSelection, DomUpdateOutcome, ReadOnlyDom};
+pub use axiusflow_market_data::{DomColumnLevel, DomFrame, DomRow};
+pub use dom::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 #[cfg(feature = "gpui")]
 pub use dom_view::ReadOnlyDomView;
 

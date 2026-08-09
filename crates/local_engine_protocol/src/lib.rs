@@ -16,9 +16,10 @@ pub use error::ProtocolError;
 pub use fence::Fence;
 pub use messages::{
     ActivateExistingUi, CatalogEntry, CatalogSnapshot, ChartDelta, ChartProvenance, ChartSnapshot,
-    ClientHello, ClientKind, DomSnapshot, EngineFaultCode, EngineReady, Envelope, Fault, Goodbye,
-    ProviderConnectionState, ProviderState, ResourceMode, RestoreWorkspace, SetSelection,
-    SetWatchlist, SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, envelope,
+    ClientHello, ClientKind, DomBookState, DomLevel, DomRecoveryReason, DomRow, DomSnapshot,
+    EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, ProviderConnectionState, ProviderState,
+    ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, UnsubscribeView,
+    ViewKind, WorkspaceState, envelope,
 };
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.

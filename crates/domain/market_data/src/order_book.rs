@@ -32,6 +32,39 @@ pub struct OrderBookPublication {
     pub state: OrderBookState,
 }
 
+/// One display-ready depth level with authoritative fixed-point values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomColumnLevel {
+    pub price: i64,
+    pub quantity: i64,
+    pub order_count: Option<u32>,
+    pub price_text: String,
+    pub quantity_text: String,
+    /// Relative bar width in basis points (`0..=10_000`) within this frame.
+    pub relative_size_bps: u16,
+}
+
+/// One horizontally aligned DOM row, best prices first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomRow {
+    pub bid: Option<DomColumnLevel>,
+    pub ask: Option<DomColumnLevel>,
+}
+
+/// Immutable bounded provider-neutral DOM frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomFrame {
+    pub provider_id: String,
+    pub instrument_id: String,
+    pub entitlement_id: String,
+    pub session_generation: u64,
+    pub selection_generation: u64,
+    pub revision: u64,
+    pub source_watermark: u64,
+    pub state: OrderBookState,
+    pub rows: Vec<DomRow>,
+}
+
 /// Result of applying a snapshot or ordered delta.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OrderBookApplyOutcome {

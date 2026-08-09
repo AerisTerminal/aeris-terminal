@@ -1,10 +1,10 @@
 use axiusflow_local_engine_protocol::{
     ActivateExistingUi, CatalogEntry, CatalogReassembler, CatalogSnapshot, ChartDelta,
-    ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomSnapshot, EngineFaultCode,
-    EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye, MAX_FRAME_BYTES,
-    PROTOCOL_VERSION, ProtocolError, ProviderConnectionState, ProviderState, ResourceMode,
-    RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, UnsubscribeView, ViewKind,
-    WorkspaceState, encode_envelope, envelope, split_catalog,
+    ChartProvenance, ChartSnapshot, ClientHello, ClientKind, DomBookState, DomLevel, DomRow,
+    DomSnapshot, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Fence, Goodbye,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, ProviderConnectionState, ProviderState,
+    ResourceMode, RestoreWorkspace, SetSelection, SetWatchlist, SubscribeView, UnsubscribeView,
+    ViewKind, WorkspaceState, encode_envelope, envelope, split_catalog,
 };
 use axiusflow_transport::encode_binary_frame;
 use std::num::NonZeroUsize;
@@ -77,13 +77,7 @@ fn all_payloads() -> Vec<envelope::Payload> {
             payload: vec![8, 8],
             provenance: ChartProvenance::LiveProvider as i32,
         }),
-        envelope::Payload::DomSnapshot(DomSnapshot {
-            market: "BTC-USD".to_string(),
-            engine_epoch: 7,
-            selection_generation: 9,
-            provider_generation: 3,
-            payload: vec![7, 7, 7, 7],
-        }),
+        dom_payload(),
         envelope::Payload::ProviderState(ProviderState {
             state: ProviderConnectionState::Connected as i32,
             generation: 3,
@@ -97,6 +91,34 @@ fn all_payloads() -> Vec<envelope::Payload> {
             reason: "engine shutting down".to_string(),
         }),
     ]
+}
+
+fn dom_payload() -> envelope::Payload {
+    envelope::Payload::DomSnapshot(DomSnapshot {
+        market: "BTC-USD".to_string(),
+        engine_epoch: 7,
+        selection_generation: 9,
+        provider_generation: 3,
+        payload: Vec::new(),
+        provider_id: "coinbase".to_string(),
+        instrument_id: "coinbase:BTC-USD".to_string(),
+        entitlement_id: "public".to_string(),
+        revision: 12,
+        source_watermark: 42,
+        state: DomBookState::Ready as i32,
+        recovery_reason: None,
+        rows: vec![DomRow {
+            bid: Some(DomLevel {
+                price: 10,
+                quantity: 2,
+                order_count: None,
+                price_text: "10".to_string(),
+                quantity_text: "2".to_string(),
+                relative_size_bps: 10_000,
+            }),
+            ask: None,
+        }],
+    })
 }
 
 fn wrap(payload: envelope::Payload) -> Envelope {

@@ -17,7 +17,8 @@ pub use contracts::{
     QualifiedTimestamp, TopOfBookQuote,
 };
 pub use order_book::{
-    OrderBook, OrderBookApplyOutcome, OrderBookPublication, OrderBookRecoveryReason, OrderBookState,
+    DomColumnLevel, DomFrame, DomRow, OrderBook, OrderBookApplyOutcome, OrderBookPublication,
+    OrderBookRecoveryReason, OrderBookState,
 };
 
 /// Versioned rules used to construct one deterministic bar series.

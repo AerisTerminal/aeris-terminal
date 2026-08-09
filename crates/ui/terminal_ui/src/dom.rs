@@ -1,7 +1,7 @@
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{
-    DepthDelta, DepthSnapshot, MarketDataValidationError, MarketEvent, OrderBook,
-    OrderBookApplyOutcome, OrderBookPublication, OrderBookRecoveryReason, OrderBookState,
+    DepthDelta, DepthSnapshot, DomColumnLevel, DomFrame, DomRow, MarketDataValidationError,
+    MarketEvent, OrderBook, OrderBookApplyOutcome, OrderBookPublication, OrderBookRecoveryReason,
 };
 use std::num::NonZeroUsize;
 
@@ -47,39 +47,6 @@ impl DomSelection {
             && self.entitlement_id == entitlement_id
             && self.session_generation == session_generation
     }
-}
-
-/// One display-ready depth level. Authoritative fixed-point values remain available.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomColumnLevel {
-    pub price: i64,
-    pub quantity: i64,
-    pub order_count: Option<u32>,
-    pub price_text: String,
-    pub quantity_text: String,
-    /// Relative bar width in basis points (`0..=10_000`) within this frame.
-    pub relative_size_bps: u16,
-}
-
-/// One horizontally aligned DOM row, best prices first.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomRow {
-    pub bid: Option<DomColumnLevel>,
-    pub ask: Option<DomColumnLevel>,
-}
-
-/// Immutable bounded frame consumed by a read-only DOM view.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomFrame {
-    pub provider_id: String,
-    pub instrument_id: String,
-    pub entitlement_id: String,
-    pub session_generation: u64,
-    pub selection_generation: u64,
-    pub revision: u64,
-    pub source_watermark: u64,
-    pub state: OrderBookState,
-    pub rows: Vec<DomRow>,
 }
 
 /// Result of offering a canonical event to the selected DOM runtime.
@@ -271,7 +238,8 @@ fn fixed_point_text(value: i64, scale: u8) -> String {
 mod tests {
     use super::*;
     use axiusflow_market_data::{
-        AggressorSide, BookSide, DepthLevel, EventMetadata, MarketTrade, QualifiedTimestamp,
+        AggressorSide, BookSide, DepthLevel, EventMetadata, MarketTrade, OrderBookState,
+        QualifiedTimestamp,
     };
 
     fn selection(generation: u64, instrument_id: &str) -> DomSelection {

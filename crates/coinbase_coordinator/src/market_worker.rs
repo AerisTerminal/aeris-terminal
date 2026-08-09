@@ -14,6 +14,7 @@ use axiusflow_application::{
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_desktop_provider_runtime::SessionGeneration;
 use axiusflow_market_data::ChartInterval;
+use axiusflow_market_data::DomFrame;
 use axiusflow_market_protocol_adapter::{
     BinaryMarketBarStreamDecoder, DecimalConvention, ProjectedMarketBarUpdate,
     encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
@@ -24,7 +25,6 @@ use axiusflow_observability::FeedDiagnosticsSnapshot;
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicInstrumentSelection, RithmicSymbolSearch,
 };
-use axiusflow_terminal_ui::DomFrame;
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
@@ -1702,13 +1702,13 @@ mod tests {
     };
     use axiusflow_application::ReplayStreamUpdate;
     use axiusflow_desktop_provider_runtime::SessionGeneration;
+    use axiusflow_market_data::DomFrame;
     use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
     use axiusflow_rithmic_protocol_adapter::{
         RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
         RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
     };
-    use axiusflow_terminal_ui::DomFrame;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{

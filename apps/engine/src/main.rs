@@ -28,10 +28,13 @@ use axiusflow_engine::{
     default_engine_state_root, native_installation_token, serve_client_with_publications,
 };
 use axiusflow_local_engine_protocol::{
-    CatalogEntry, ChartDelta, ChartProvenance, ChartSnapshot, EngineFaultCode, Fault,
+    CatalogEntry, ChartDelta, ChartProvenance, ChartSnapshot, DomBookState, DomLevel,
+    DomRecoveryReason, DomRow as WireDomRow, DomSnapshot, EngineFaultCode, Fault,
     ProviderConnectionState, ProviderState, ViewKind, envelope, split_catalog,
 };
-use axiusflow_market_data::{ChartAggregation, ChartInterval};
+use axiusflow_market_data::{
+    ChartAggregation, ChartInterval, DomColumnLevel, OrderBookRecoveryReason, OrderBookState,
+};
 use axiusflow_market_protocol_adapter::{
     DecimalConvention, encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
     try_encode_replay_snapshot_chunk_envelopes,
@@ -150,7 +153,7 @@ fn run_market_runtime(
         thread::current().id(),
         false,
         false,
-        false,
+        true,
     );
     let (_startup, mut worker) = match worker {
         Ok(worker) => worker,
@@ -269,6 +272,42 @@ fn publish_market_message(
                 }),
             );
         }
+        MarketWorkerMessage::CoinbaseDom(frame) => {
+            let market = product_catalog
+                .values()
+                .find(|product| product.instrument_id == frame.instrument_id)
+                .map_or_else(
+                    || frame.instrument_id.clone(),
+                    |product| product.product_id.clone(),
+                );
+            let (state, recovery_reason) = dom_wire_state(frame.state);
+            let rows = frame
+                .rows
+                .into_iter()
+                .map(|row| WireDomRow {
+                    bid: row.bid.map(dom_wire_level),
+                    ask: row.ask.map(dom_wire_level),
+                })
+                .collect();
+            publications.publish(
+                ViewKind::Dom,
+                &envelope::Payload::DomSnapshot(DomSnapshot {
+                    market,
+                    engine_epoch,
+                    selection_generation: frame.selection_generation,
+                    provider_generation: frame.session_generation,
+                    payload: Vec::new(),
+                    provider_id: frame.provider_id,
+                    instrument_id: frame.instrument_id,
+                    entitlement_id: frame.entitlement_id,
+                    revision: frame.revision,
+                    source_watermark: frame.source_watermark,
+                    state: state as i32,
+                    recovery_reason,
+                    rows,
+                }),
+            );
+        }
         MarketWorkerMessage::Diagnostics(_)
         | MarketWorkerMessage::Recovery { .. }
         | MarketWorkerMessage::RithmicCatalog(_)
@@ -276,8 +315,34 @@ fn publish_market_message(
         | MarketWorkerMessage::RithmicLive { .. }
         | MarketWorkerMessage::RithmicDom(_)
         | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
-        | MarketWorkerMessage::CoinbaseCatalog(Err(_))
-        | MarketWorkerMessage::CoinbaseDom(_) => {}
+        | MarketWorkerMessage::CoinbaseCatalog(Err(_)) => {}
+    }
+}
+
+fn dom_wire_level(level: DomColumnLevel) -> DomLevel {
+    DomLevel {
+        price: level.price,
+        quantity: level.quantity,
+        order_count: level.order_count,
+        price_text: level.price_text,
+        quantity_text: level.quantity_text,
+        relative_size_bps: u32::from(level.relative_size_bps),
+    }
+}
+
+fn dom_wire_state(state: OrderBookState) -> (DomBookState, Option<i32>) {
+    match state {
+        OrderBookState::Ready => (DomBookState::Ready, None),
+        OrderBookState::Stale => (DomBookState::Stale, None),
+        OrderBookState::Recovering(reason) => (
+            DomBookState::Recovering,
+            Some(match reason {
+                OrderBookRecoveryReason::AwaitingSnapshot => DomRecoveryReason::AwaitingSnapshot,
+                OrderBookRecoveryReason::SequenceGap => DomRecoveryReason::SequenceGap,
+                OrderBookRecoveryReason::CrossedBook => DomRecoveryReason::CrossedBook,
+                OrderBookRecoveryReason::InvalidUpdate => DomRecoveryReason::InvalidUpdate,
+            } as i32),
+        ),
     }
 }
 
