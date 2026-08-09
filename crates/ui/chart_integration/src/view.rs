@@ -658,7 +658,7 @@ impl Default for OriginChartView {
 }
 
 impl Render for OriginChartView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
         let hover_entity = entity.clone();
@@ -666,17 +666,11 @@ impl Render for OriginChartView {
             .focus_handle
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
-        let is_focused = focus_handle.is_focused(window);
 
         div()
             .id("origin_chart_surface")
             .size_full()
             .bg(rgb(self.theme.colors.background.rgb_u32()))
-            .when(is_focused, |surface| {
-                surface
-                    .border_1()
-                    .border_color(rgb(self.theme.colors.ring.rgb_u32()))
-            })
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
             .key_context("OriginChart")

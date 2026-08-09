@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 35
+**Revision:** 36
 **Last updated:** 2026-08-08
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -517,8 +517,8 @@ their existing bounded search/selection/history status in the relevant dropdown,
 and visibly gate duplicate single-flight requests. Sanitized authentication and
 recovery context appears only in the existing empty/stale/error chart notice;
 Ready remains overlay-free. Reconnect, stop, channel loss, and catalog-session
-invalidation clear pending interaction state, and chart focus is marked by a
-flush square theme-ring border for keyboard navigation.
+invalidation clear pending interaction state. Chart focus remains scoped for
+keyboard navigation without drawing a container outline over the chart.
 
 The always-mounted empty Origin entity now reports whether a real provider
 snapshot is installed. Empty loading/error surfaces show a centered status;
