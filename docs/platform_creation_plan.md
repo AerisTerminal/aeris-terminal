@@ -1,7 +1,7 @@
 # Axiusflow Platform Creation Plan
 
 **Document:** authoritative active roadmap
-**Revision:** 31
+**Revision:** 32
 **Last updated:** 2026-08-08
 **Primary target:** Rithmic Test through R|Protocol WSS/Protobuf
 
@@ -110,7 +110,7 @@ Full scope policy:
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `in_progress` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Named pacing evidence remains. |
 | Readiness                  | `in_progress` | Deterministic failure, burst, and memory evidence are implemented; physical environment transitions remain.                                                                                                                                        |
-| Descope cleanup            | `ready`       | **Hard first gate.** Stage 0 must remove AF_XDP/DPDK kernel bypass from `main` and quarantine the cloud MD plane before any further A–F execution.                                                                                                  |
+| Descope cleanup            | `verified`    | AF_XDP/DPDK paths are removed from `main`, the cloud market-data plane is quarantined, and the Stage 0 workspace gate passes.                                                                                                                        |
 
 
 Deferred and retired items are listed only in §12.
@@ -740,12 +740,17 @@ The same Windows run sampled the process working set throughout the burst:
 burst, and 1,699,840 bytes sampled growth against a declared 67,108,864-byte
 limit. This is bounded burst evidence.
 
+A 2026-08-08 repeat after the catalog dispatch-fencing fix again retained one
+item in the 32-item mailbox after 10,000 publications, admitted one pending
+frame callback, and measured 1,413,120 bytes of working-set growth against the
+same 67,108,864-byte limit.
+
 
 
 ### Gate
 
 - [ ] All failure cases recover or fail closed as specified.
-- [ ] Memory and queues remain within declared bounds.
+- [x] Memory and queues remain within declared bounds.
 - [x] No stale generation reaches the model or UI.
 
 
@@ -803,14 +808,14 @@ understand feed health without exposing credentials or licensed data.
 
 ### Roadmap completion checklist
 
-- [ ] Launch native shell and authenticate securely to Rithmic Test.
-- [ ] Discover and switch supported instruments.
-- [ ] View tick and supported time-based charts.
-- [ ] Inspect a recovering read-only DOM.
-- [ ] Understand feed health without exposing credentials or licensed data.
+- [x] Launch native shell and authenticate securely to Rithmic Test.
+- [x] Discover and switch supported instruments.
+- [x] View tick and supported time-based charts.
+- [x] Inspect a recovering read-only DOM.
+- [x] Understand feed health without exposing credentials or licensed data.
 - [x] Deterministic replay evidence.
 - [x] Authorized Test core-path evidence.
-- [ ] Bounded queues and memory.
+- [x] Bounded queues and memory.
 - [x] Generation-fenced recovery.
 - [x] Clean shutdown.
 - [ ] Responsive frame pacing.

@@ -1910,7 +1910,7 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::RithmicCatalog(
                     RithmicCatalogEvent::CommandRejected {
-                        session_generation: generation,
+                        session_generation: Some(generation),
                         command_generation: NonZeroUsize::MIN,
                         reason: RithmicCatalogRejection::SupersededSearch,
                     },
@@ -1922,7 +1922,7 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::RithmicCatalog(
                     RithmicCatalogEvent::CommandRejected {
-                        session_generation: generation,
+                        session_generation: Some(generation),
                         command_generation: latest_generation,
                         reason: RithmicCatalogRejection::InstrumentUnavailable,
                     },
@@ -1954,7 +1954,7 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::RithmicCatalog(
                     RithmicCatalogEvent::CommandRejected {
-                        session_generation: generation,
+                        session_generation: Some(generation),
                         command_generation: latest_generation,
                         reason: RithmicCatalogRejection::SubscriptionRejected,
                     },

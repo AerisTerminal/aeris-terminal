@@ -94,6 +94,12 @@ impl fmt::Debug for RithmicSymbolSearch {
 }
 
 impl RithmicSymbolSearch {
+    /// Returns the UI-owned command generation.
+    #[must_use]
+    pub const fn generation(&self) -> NonZeroUsize {
+        self.search_generation
+    }
+
     /// Creates one bounded search without retaining provider text in diagnostics.
     ///
     /// # Errors
@@ -214,6 +220,12 @@ impl fmt::Debug for RithmicInstrumentSelection {
 }
 
 impl RithmicInstrumentSelection {
+    /// Returns the UI-owned command generation.
+    #[must_use]
+    pub const fn generation(&self) -> NonZeroUsize {
+        self.selection_generation
+    }
+
     /// Creates one bounded read-only selection.
     ///
     /// # Errors
@@ -257,6 +269,8 @@ pub enum RithmicCatalogRejection {
     SupersededSearch,
     InstrumentUnavailable,
     SubscriptionRejected,
+    SearchDispatchUnavailable,
+    SelectionDispatchUnavailable,
 }
 
 /// Adapter-local catalog output, fenced by session and UI generations.
@@ -274,7 +288,7 @@ pub enum RithmicCatalogEvent {
         entitlement_id: String,
     },
     CommandRejected {
-        session_generation: SessionGeneration,
+        session_generation: Option<SessionGeneration>,
         command_generation: NonZeroUsize,
         reason: RithmicCatalogRejection,
     },
@@ -939,7 +953,7 @@ impl SessionEmitter {
     }
 
     fn send_catalog(&self, event: RithmicCatalogEvent) -> bool {
-        if catalog_event_generation(&event) != self.generation {
+        if catalog_event_generation(&event) != Some(self.generation) {
             self.invalid(
                 ProviderInvalidationReason::MalformedMessage,
                 RetryDisposition::Terminal,
@@ -2186,7 +2200,7 @@ fn send_rejection(
     reason: RithmicCatalogRejection,
 ) -> bool {
     emitter.send_catalog(RithmicCatalogEvent::CommandRejected {
-        session_generation,
+        session_generation: Some(session_generation),
         command_generation,
         reason,
     })
@@ -2613,15 +2627,15 @@ fn retained_catalog_event_bytes(event: &RithmicCatalogEvent) -> Option<usize> {
     Some(bytes)
 }
 
-const fn catalog_event_generation(event: &RithmicCatalogEvent) -> SessionGeneration {
+const fn catalog_event_generation(event: &RithmicCatalogEvent) -> Option<SessionGeneration> {
     match event {
         RithmicCatalogEvent::SearchCompleted {
             session_generation, ..
         }
         | RithmicCatalogEvent::SelectionInstalled {
             session_generation, ..
-        }
-        | RithmicCatalogEvent::CommandRejected {
+        } => Some(*session_generation),
+        RithmicCatalogEvent::CommandRejected {
             session_generation, ..
         } => *session_generation,
     }

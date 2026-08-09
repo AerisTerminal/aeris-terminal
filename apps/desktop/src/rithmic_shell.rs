@@ -89,11 +89,15 @@ impl RithmicSymbolBrowser {
         true
     }
 
-    pub(crate) fn reject_command(&mut self, generation: NonZeroUsize) -> bool {
+    pub(crate) fn reject_search(&mut self, generation: NonZeroUsize) -> bool {
         if self.pending_search_id == Some(generation) {
             self.pending_search_id = None;
             return true;
         }
+        false
+    }
+
+    pub(crate) fn reject_selection(&mut self, generation: NonZeroUsize) -> bool {
         self.pending_selection
             .take_if(|selection| selection.generation == generation)
             .is_some()
@@ -265,5 +269,41 @@ mod tests {
         assert!(!browser.apply_results(search.request_id, vec![result("ESM7")]));
         let next = browser.begin_search("ES").expect("new session can search");
         assert!(next.request_id > search.request_id);
+    }
+
+    #[test]
+    fn search_and_selection_rejections_have_distinct_generation_domains() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let first_search = browser.begin_search("ES").expect("search validates");
+        assert!(browser.apply_results(first_search.request_id, vec![result("ESM7")]));
+        let first_selection = browser.select(0).expect("first selection");
+        let second_selection = browser.select(0).expect("second selection");
+        let second_search = browser.begin_search("NQ").expect("second search validates");
+        assert_eq!(second_search.request_id, second_selection.generation);
+
+        assert!(browser.reject_search(second_search.request_id));
+        assert!(browser.confirm_selection(second_selection.generation));
+
+        let third_search = browser.begin_search("YM").expect("third search validates");
+        assert!(browser.apply_results(third_search.request_id, vec![result("YMM7")]));
+        let third_selection = browser.select(0).unwrap_or(first_selection);
+        let fourth_search = browser
+            .begin_search("RTY")
+            .expect("fourth search validates");
+        assert!(browser.reject_selection(third_selection.generation));
+        assert!(browser.apply_results(fourth_search.request_id, vec![result("RTYM7")]));
+    }
+
+    #[test]
+    fn rejected_replacement_preserves_the_confirmed_selection() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let search = browser.begin_search("ES").expect("search validates");
+        assert!(browser.apply_results(search.request_id, vec![result("ESM7"), result("ESU7")]));
+        let current = browser.select(0).expect("current selection");
+        assert!(browser.confirm_selection(current.generation));
+        let replacement = browser.select(1).expect("replacement selection");
+
+        assert!(browser.reject_selection(replacement.generation));
+        assert_eq!(browser.selected(), Some(&current));
     }
 }

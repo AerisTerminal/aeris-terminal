@@ -30,9 +30,9 @@ use axiusflow_platform_runtime::{
 };
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicEnvironmentEvent,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicRetryScheduler, RithmicSessionLimits,
-    apply_rithmic_environment_event, try_recv_rithmic_event,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicCatalogEvent,
+    RithmicEnvironmentEvent, RithmicProviderConfig, RithmicProviderDriver, RithmicRetryScheduler,
+    RithmicSessionLimits, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use std::{
@@ -78,6 +78,12 @@ struct TransitionCaptureContext<'a> {
     overflow: &'a AtomicU64,
     monitor_failures: &'a AtomicU8,
     capture: &'a mut Option<NativeTransitionCapture>,
+}
+
+#[derive(Clone, Copy)]
+enum CatalogDispatchDomain {
+    Search,
+    Selection,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -684,20 +690,32 @@ fn process_command(
     messages: &crate::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
 ) -> bool {
-    let (dispatch, failure_message) = match commands.try_recv() {
+    let (dispatch, rejection, failure_message) = match commands.try_recv() {
         Ok(MarketWorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => return true,
-        Ok(MarketWorkerCommand::RithmicSearch(search)) => (
-            dispatch_catalog_command(worker, events, |events, generation| {
-                events.search_symbols(generation, search)
-            }),
-            "Rithmic symbol search could not be scheduled",
-        ),
+        Ok(MarketWorkerCommand::RithmicSearch(search)) => {
+            let command_generation = search.generation();
+            (
+                dispatch_catalog_command(worker, events, |events, generation| {
+                    events.search_symbols(generation, search)
+                }),
+                Some(catalog_dispatch_rejection(
+                    command_generation,
+                    CatalogDispatchDomain::Search,
+                )),
+                "Rithmic symbol search could not be scheduled",
+            )
+        }
         Ok(MarketWorkerCommand::RithmicSelect(selection)) => {
+            let command_generation = selection.generation();
             state.live_chart = None;
             (
                 dispatch_catalog_command(worker, events, |events, generation| {
                     events.select_instrument(generation, selection)
                 }),
+                Some(catalog_dispatch_rejection(
+                    command_generation,
+                    CatalogDispatchDomain::Selection,
+                )),
                 "Rithmic symbol selection could not be scheduled",
             )
         }
@@ -714,12 +732,16 @@ fn process_command(
                         .ok_or(())
                         .and_then(|instrument| history.request(request, instrument).map_err(|_| ()))
                 }),
+                None,
                 "Rithmic visible history could not be scheduled",
             )
         }
         Ok(MarketWorkerCommand::Recovery(_)) | Err(TryRecvError::Empty) => return false,
     };
     if dispatch.is_err() {
+        if let Some(rejection) = rejection {
+            let _ = messages.send(MarketWorkerMessage::RithmicCatalog(rejection));
+        }
         send_connection(
             messages,
             catalog_connection_state(state.selection_installed),
@@ -727,6 +749,25 @@ fn process_command(
         );
     }
     false
+}
+
+fn catalog_dispatch_rejection(
+    command_generation: NonZeroUsize,
+    domain: CatalogDispatchDomain,
+) -> RithmicCatalogEvent {
+    let reason = match domain {
+        CatalogDispatchDomain::Search => {
+            axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SearchDispatchUnavailable
+        }
+        CatalogDispatchDomain::Selection => {
+            axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SelectionDispatchUnavailable
+        }
+    };
+    RithmicCatalogEvent::CommandRejected {
+        session_generation: None,
+        command_generation,
+        reason,
+    }
 }
 
 fn drain_events(
@@ -1259,6 +1300,29 @@ mod tests {
 
     fn generation() -> SessionGeneration {
         SessionGeneration::new(NonZeroU64::MIN)
+    }
+
+    #[test]
+    fn local_catalog_dispatch_failures_are_unfenced_and_domain_specific() {
+        let generation = nonzero(7);
+        let search = catalog_dispatch_rejection(generation, CatalogDispatchDomain::Search);
+        let selection = catalog_dispatch_rejection(generation, CatalogDispatchDomain::Selection);
+        assert!(matches!(
+            search,
+            RithmicCatalogEvent::CommandRejected {
+                session_generation: None,
+                command_generation,
+                reason: axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SearchDispatchUnavailable,
+            } if command_generation == generation
+        ));
+        assert!(matches!(
+            selection,
+            RithmicCatalogEvent::CommandRejected {
+                session_generation: None,
+                command_generation,
+                reason: axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SelectionDispatchUnavailable,
+            } if command_generation == generation
+        ));
     }
 
     #[test]

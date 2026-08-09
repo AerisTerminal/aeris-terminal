@@ -955,7 +955,7 @@ impl TerminalApp {
                 .unwrap_or(std::num::NonZeroUsize::MIN),
         );
         let Ok(search) = search else {
-            self.symbol_browser.reject_command(request.request_id);
+            self.symbol_browser.reject_search(request.request_id);
             self.symbol_message = "Symbol search request is invalid".to_string();
             cx.notify();
             return false;
@@ -964,7 +964,7 @@ impl TerminalApp {
             self.symbol_message = "Searching Rithmic Test symbols".to_string();
             true
         } else {
-            self.symbol_browser.reject_command(request.request_id);
+            self.symbol_browser.reject_search(request.request_id);
             self.symbol_message = "Symbol search is busy; try again".to_string();
             false
         };
@@ -1029,7 +1029,7 @@ impl TerminalApp {
             )
         });
         let Ok(request) = request else {
-            self.symbol_browser.reject_command(selection.generation);
+            self.symbol_browser.reject_selection(selection.generation);
             self.symbol_message = "Symbol selection is invalid".to_string();
             cx.notify();
             return;
@@ -1043,7 +1043,7 @@ impl TerminalApp {
                 selection.instrument.symbol, selection.instrument.exchange
             );
         } else {
-            self.symbol_browser.reject_command(selection.generation);
+            self.symbol_browser.reject_selection(selection.generation);
             self.symbol_message = "Symbol selection is busy; try again".to_string();
         }
         cx.notify();
@@ -1118,8 +1118,19 @@ impl TerminalApp {
                 reason,
                 ..
             } => {
-                if self.symbol_browser.reject_command(command_generation) {
-                    self.symbol_selection_pending = false;
+                let (rejected, selection_rejected) = match catalog_rejection_domain(reason) {
+                    CatalogCommandDomain::Search => {
+                        (self.symbol_browser.reject_search(command_generation), false)
+                    }
+                    CatalogCommandDomain::Selection => (
+                        self.symbol_browser.reject_selection(command_generation),
+                        true,
+                    ),
+                };
+                if rejected {
+                    if selection_rejected {
+                        self.symbol_selection_pending = false;
+                    }
                     self.symbol_message = catalog_rejection_message(reason).to_string();
                     if let Some(target) = self.rithmic_reconnect.target().cloned() {
                         self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
@@ -1547,6 +1558,29 @@ fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
         RithmicCatalogRejection::SubscriptionRejected => {
             "Rithmic Test rejected the market subscription"
         }
+        RithmicCatalogRejection::SearchDispatchUnavailable => {
+            "The Rithmic search could not be scheduled"
+        }
+        RithmicCatalogRejection::SelectionDispatchUnavailable => {
+            "The Rithmic selection could not be scheduled"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogCommandDomain {
+    Search,
+    Selection,
+}
+
+const fn catalog_rejection_domain(reason: RithmicCatalogRejection) -> CatalogCommandDomain {
+    match reason {
+        RithmicCatalogRejection::SearchRejected
+        | RithmicCatalogRejection::SupersededSearch
+        | RithmicCatalogRejection::SearchDispatchUnavailable => CatalogCommandDomain::Search,
+        RithmicCatalogRejection::InstrumentUnavailable
+        | RithmicCatalogRejection::SubscriptionRejected
+        | RithmicCatalogRejection::SelectionDispatchUnavailable => CatalogCommandDomain::Selection,
     }
 }
 
@@ -2417,9 +2451,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls, RithmicReadyAction,
-        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
-        bounded_status_detail, chart_status_detail, chart_surface_notice, connection_presentation,
+        CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls,
+        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        RithmicSessionRetirement, SidePanel, bounded_status_detail, catalog_rejection_domain,
+        chart_status_detail, chart_surface_notice, connection_presentation,
         default_rithmic_contract_index, duration_label, gpui_color, instrument_selector_label,
         milli_rate, parse_rithmic_test_arguments, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
@@ -2427,7 +2462,9 @@ mod tests {
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
-    use axiusflow_rithmic_protocol_adapter::{RithmicReadOnlySubscription, SymbolSearchResult};
+    use axiusflow_rithmic_protocol_adapter::{
+        RithmicCatalogRejection, RithmicReadOnlySubscription, SymbolSearchResult,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -2435,6 +2472,30 @@ mod tests {
         assert_eq!(publication_chart_state(true, false), ChartState::Ready);
         assert_eq!(publication_chart_state(false, true), ChartState::Recovering);
         assert_eq!(publication_chart_state(true, true), ChartState::Recovering);
+    }
+
+    #[test]
+    fn catalog_rejections_preserve_search_and_selection_generation_domains() {
+        for reason in [
+            RithmicCatalogRejection::SearchRejected,
+            RithmicCatalogRejection::SupersededSearch,
+            RithmicCatalogRejection::SearchDispatchUnavailable,
+        ] {
+            assert_eq!(
+                catalog_rejection_domain(reason),
+                CatalogCommandDomain::Search
+            );
+        }
+        for reason in [
+            RithmicCatalogRejection::InstrumentUnavailable,
+            RithmicCatalogRejection::SubscriptionRejected,
+            RithmicCatalogRejection::SelectionDispatchUnavailable,
+        ] {
+            assert_eq!(
+                catalog_rejection_domain(reason),
+                CatalogCommandDomain::Selection
+            );
+        }
     }
 
     #[test]
