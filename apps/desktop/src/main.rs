@@ -2896,6 +2896,7 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             "minimize",
             "\u{e921}",
             WindowControlArea::Min,
+            WindowCommand::Minimize,
             false,
             theme,
         ))
@@ -2903,6 +2904,7 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             maximize.0,
             maximize.1,
             WindowControlArea::Max,
+            WindowCommand::MaximizeOrRestore,
             false,
             theme,
         ))
@@ -2910,6 +2912,7 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             "close",
             "\u{e8bb}",
             WindowControlArea::Close,
+            WindowCommand::Close,
             true,
             theme,
         ))
@@ -2920,6 +2923,7 @@ fn windows_caption_button(
     id: &'static str,
     glyph: &'static str,
     area: WindowControlArea,
+    command: WindowCommand,
     close: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
@@ -2959,6 +2963,11 @@ fn windows_caption_button(
         .hover(move |style| style.bg(hover).text_color(hover_foreground))
         .active(move |style| style.bg(active).text_color(active_foreground))
         .window_control_area(area)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.prevent_default();
+            command.execute(window);
+            cx.stop_propagation();
+        })
         .child(glyph)
 }
 
