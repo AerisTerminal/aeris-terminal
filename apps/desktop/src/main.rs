@@ -26,6 +26,8 @@ use axiusflow_rithmic_protocol_adapter::{
     RithmicSymbolSearch, SearchPattern,
 };
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
+#[cfg(target_os = "windows")]
+use gpui::WindowControlArea;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
     KeyBinding, KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowOptions, actions,
@@ -2807,24 +2809,32 @@ fn execute_in_active_window(cx: &mut App, command: WindowCommand) {
 }
 
 fn terminal_header(
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<TerminalApp>,
     app: &Entity<TerminalApp>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
     let controls = header_controls(cx, app, state);
-    TitleBar::new()
+
+    #[cfg(target_os = "windows")]
+    return div()
+        .w_full()
         .h(px(theme.dimensions.app_header_height.logical_pixels))
+        .flex()
+        .items_center()
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface_primary))
+        .window_control_area(WindowControlArea::Drag)
         .child(
             div()
                 .h_full()
+                .min_w_0()
                 .flex_1()
                 .flex()
                 .items_center()
+                .overflow_x_hidden()
                 .child(
                     div()
                         .flex_none()
@@ -2837,6 +2847,119 @@ fn terminal_header(
                 .child(controls)
                 .child(div().h_full().min_w(px(12.0)).flex_1()),
         )
+        .child(windows_window_controls(window, &theme));
+
+    #[cfg(not(target_os = "windows"))]
+    TitleBar::new()
+        .w_full()
+        .h(px(theme.dimensions.app_header_height.logical_pixels))
+        .border_b_1()
+        .border_color(gpui_color(theme.colors.border))
+        .bg(gpui_color(theme.colors.surface_primary))
+        .child(
+            div()
+                .h_full()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .items_center()
+                .overflow_x_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .pl_4()
+                        .pr_2()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .child("Axiusflow"),
+                )
+                .child(controls)
+                .child(div().h_full().min_w(px(12.0)).flex_1()),
+        )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl IntoElement {
+    let maximize = if window.is_maximized() {
+        ("restore", "\u{e923}")
+    } else {
+        ("maximize", "\u{e922}")
+    };
+
+    div()
+        .id("windows-window-controls")
+        .h_full()
+        .flex_none()
+        .flex()
+        .font_family("Segoe MDL2 Assets")
+        .child(windows_caption_button(
+            "minimize",
+            "\u{e921}",
+            WindowControlArea::Min,
+            false,
+            theme,
+        ))
+        .child(windows_caption_button(
+            maximize.0,
+            maximize.1,
+            WindowControlArea::Max,
+            false,
+            theme,
+        ))
+        .child(windows_caption_button(
+            "close",
+            "\u{e8bb}",
+            WindowControlArea::Close,
+            true,
+            theme,
+        ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_caption_button(
+    id: &'static str,
+    glyph: &'static str,
+    area: WindowControlArea,
+    close: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let hover = if close {
+        Hsla::from(rgb(0xe8_11_23))
+    } else {
+        gpui_color(theme.colors.interactive_neutral_hover_bg)
+    };
+    let active = if close {
+        hover.opacity(0.8)
+    } else {
+        gpui_color(theme.colors.interactive_neutral_active_bg)
+    };
+    let hover_foreground = if close {
+        gpui::white()
+    } else {
+        gpui_color(theme.colors.icon_active)
+    };
+    let active_foreground = if close {
+        gpui::white().opacity(0.8)
+    } else {
+        gpui_color(theme.colors.icon_active)
+    };
+
+    div()
+        .id(id)
+        .h_full()
+        .w(px(36.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .content_center()
+        .occlude()
+        .text_size(px(10.0))
+        .text_color(gpui_color(theme.colors.icon_active))
+        .hover(move |style| style.bg(hover).text_color(hover_foreground))
+        .active(move |style| style.bg(active).text_color(active_foreground))
+        .window_control_area(area)
+        .child(glyph)
 }
 
 fn header_controls(
