@@ -33,12 +33,12 @@ use axiusflow_rithmic_protocol_adapter::{
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
-    KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size,
+    KeyBinding, KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowControlArea,
+    WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
-    button::{Button, ButtonVariants},
+    ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
@@ -122,6 +122,11 @@ const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
+
+actions!(
+    axiusflow,
+    [MinimizeWindow, ZoomWindow, ToggleFullscreen, CloseWindow]
+);
 
 static COINBASE_INTERVALS: &[ChartInterval] = &[
     ChartInterval::Minute1,
@@ -1017,12 +1022,19 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn on_chrome_key_down(
+    fn on_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(command) =
+            fullscreen_escape_command(event.keystroke.key.as_str(), window.is_fullscreen())
+        {
+            command.execute(window);
+            cx.stop_propagation();
+            return;
+        }
         if self.chrome_overlay.is_none() {
             return;
         }
@@ -2202,8 +2214,10 @@ impl Render for TerminalApp {
         self.track_window_activation(window, cx);
         self.schedule_market_frame(window, cx);
         let theme = self.theme;
-        let colors = theme.colors;
         let app = cx.entity();
+        let connection_state = self
+            .connection_state
+            .unwrap_or(FeedConnectionState::Disconnected);
         let chart_has_market_data = self
             .chart
             .as_ref()
@@ -2211,6 +2225,7 @@ impl Render for TerminalApp {
         let drawing_state = self.drawing_toolbar_state(cx);
         let overlay = chrome_overlay_layer(self, &app, &theme, cx);
         let header = terminal_header(
+            window,
             cx,
             &app,
             HeaderState {
@@ -2246,9 +2261,7 @@ impl Render for TerminalApp {
                 .with_chart_controls(chart_has_market_data),
                 dom_visible: self.side_panel == Some(SidePanel::Dom),
                 health_visible: self.side_panel == Some(SidePanel::Health),
-                connection_state: self
-                    .connection_state
-                    .unwrap_or(FeedConnectionState::Disconnected),
+                connection_state,
                 chart_state: self.chart_state,
                 delayed: self
                     .feed_diagnostics
@@ -2267,8 +2280,7 @@ impl Render for TerminalApp {
             chart_state: self.chart_state,
             chart_status_detail: chart_status_detail(
                 self.chart_state,
-                self.connection_state
-                    .unwrap_or(FeedConnectionState::Disconnected),
+                connection_state,
                 &self.chart_state_message,
                 self.connection_message.as_deref(),
             )
@@ -2284,15 +2296,15 @@ impl Render for TerminalApp {
             .v_flex()
             .size_full()
             .track_focus(&self.chrome_focus)
-            .on_key_down(cx.listener(Self::on_chrome_key_down))
-            .bg(gpui_color(colors.background))
-            .text_color(gpui_color(colors.foreground))
+            .on_key_down(cx.listener(Self::on_terminal_key_down))
+            .bg(gpui_color(theme.colors.background))
+            .text_color(gpui_color(theme.colors.foreground))
             .child(header)
             .child(
                 div()
                     .flex_1()
                     .overflow_hidden()
-                    .bg(gpui_color(colors.background))
+                    .bg(gpui_color(theme.colors.background))
                     .child(workspace),
             )
             .children(overlay)
@@ -2862,30 +2874,162 @@ const fn catalog_rejection_domain(reason: RithmicCatalogRejection) -> CatalogCom
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowCommand {
+    Minimize,
+    MaximizeOrRestore,
+    ToggleFullscreen,
+    Close,
+}
+
+impl WindowCommand {
+    fn execute(self, window: &mut Window) {
+        match self {
+            Self::Minimize => window.minimize_window(),
+            Self::MaximizeOrRestore => window.zoom_window(),
+            Self::ToggleFullscreen => window.toggle_fullscreen(),
+            Self::Close => window.remove_window(),
+        }
+    }
+}
+
+fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCommand> {
+    if key.eq_ignore_ascii_case("escape") && is_fullscreen {
+        return Some(WindowCommand::ToggleFullscreen);
+    }
+    None
+}
+
+fn execute_in_active_window(cx: &mut App, command: WindowCommand) {
+    let Some(window) = cx.active_window() else {
+        return;
+    };
+    let _ = window.update(cx, move |_, window, _| command.execute(window));
+}
+
 fn terminal_header(
+    window: &mut Window,
     cx: &mut Context<TerminalApp>,
     app: &Entity<TerminalApp>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
-    TitleBar::new()
-        .h(px(state.theme.dimensions.app_header_height.logical_pixels))
+    let theme = state.theme;
+    let controls = header_controls(cx, app, state);
+    let window_controls = terminal_window_controls(window.is_maximized(), cx, &theme);
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .h(px(theme.dimensions.app_header_height.logical_pixels))
+        .border_b_1()
+        .border_color(gpui_color(theme.colors.border))
+        .bg(gpui_color(theme.colors.surface_primary))
         .child(
             div()
                 .h_full()
-                .flex_1()
                 .flex()
                 .items_center()
-                .gap_2()
-                .px_4()
+                .pl_4()
+                .pr_2()
+                .window_control_area(WindowControlArea::Drag)
                 .child(
                     div()
                         .flex_none()
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .child("Axiusflow"),
-                )
-                .child(header_controls(cx, app, state)),
+                ),
         )
+        .child(controls)
+        .child(
+            div()
+                .h_full()
+                .min_w(px(12.0))
+                .flex_1()
+                .window_control_area(WindowControlArea::Drag),
+        )
+        .child(window_controls)
+}
+
+fn terminal_window_controls(
+    is_maximized: bool,
+    cx: &App,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    div()
+        .id("window_controls")
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(window_control_button(
+            "window_minimize",
+            IconName::WindowMinimize,
+            WindowCommand::Minimize,
+            false,
+            cx,
+            theme,
+        ))
+        .child(window_control_button(
+            "window_maximize_restore",
+            if is_maximized {
+                IconName::WindowRestore
+            } else {
+                IconName::WindowMaximize
+            },
+            WindowCommand::MaximizeOrRestore,
+            false,
+            cx,
+            theme,
+        ))
+        .child(window_control_button(
+            "window_close",
+            IconName::WindowClose,
+            WindowCommand::Close,
+            true,
+            cx,
+            theme,
+        ))
+}
+
+fn window_control_button(
+    id: &'static str,
+    icon: IconName,
+    command: WindowCommand,
+    destructive: bool,
+    cx: &App,
+    theme: &AxiusflowTheme,
+) -> Button {
+    let colors = theme.colors;
+    let (hover, active) = if destructive {
+        (colors.loss, colors.loss.with_alpha(0.82))
+    } else {
+        (
+            colors.interactive_neutral_hover_bg,
+            colors.interactive_neutral_active_bg,
+        )
+    };
+    let button = Button::new(id)
+        .icon(Icon::new(icon))
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(gpui_color(colors.icon_color))
+                .hover(gpui_color(hover))
+                .active(gpui_color(active)),
+        )
+        .h_full()
+        .w(px(46.0))
+        .rounded(px(0.0))
+        .cursor_pointer();
+    button
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            command.execute(window);
+            if command != WindowCommand::Close {
+                window.refresh();
+            }
+            cx.stop_propagation();
+        })
 }
 
 fn header_controls(
@@ -4054,6 +4198,25 @@ fn main() {
         .with_assets(assets::DesktopAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("f11", ToggleFullscreen, None),
+                KeyBinding::new("alt-enter", ToggleFullscreen, None),
+                KeyBinding::new("alt-f9", MinimizeWindow, None),
+                KeyBinding::new("alt-f10", ZoomWindow, None),
+                KeyBinding::new("alt-f4", CloseWindow, None),
+            ]);
+            cx.on_action(|_: &MinimizeWindow, cx| {
+                execute_in_active_window(cx, WindowCommand::Minimize);
+            });
+            cx.on_action(|_: &ZoomWindow, cx| {
+                execute_in_active_window(cx, WindowCommand::MaximizeOrRestore);
+            });
+            cx.on_action(|_: &ToggleFullscreen, cx| {
+                execute_in_active_window(cx, WindowCommand::ToggleFullscreen);
+            });
+            cx.on_action(|_: &CloseWindow, cx| {
+                execute_in_active_window(cx, WindowCommand::Close);
+            });
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
             let options = desktop_window_options(cx);
 
@@ -4070,18 +4233,28 @@ mod tests {
     use super::{
         CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls,
         RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-        RithmicSessionRetirement, SidePanel, TerminalProvider, bounded_status_detail,
-        catalog_rejection_domain, chart_status_detail, chart_surface_notice,
-        connection_presentation, default_rithmic_contract_index, duration_label, gpui_color,
-        instrument_selector_label, milli_rate, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop,
+        RithmicSessionRetirement, SidePanel, TerminalProvider, WindowCommand,
+        bounded_status_detail, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
+        connection_presentation, default_rithmic_contract_index, duration_label,
+        fullscreen_escape_command, gpui_color, instrument_selector_label, milli_rate,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        rithmic_production_subscription, rithmic_ready_action, series_selector_label,
+        should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
     use axiusflow_rithmic_protocol_adapter::{
         RithmicCatalogRejection, RithmicReadOnlySubscription, SymbolSearchResult,
     };
+    #[test]
+    fn escape_exits_fullscreen_without_stealing_regular_escape() {
+        assert_eq!(
+            fullscreen_escape_command("escape", true),
+            Some(WindowCommand::ToggleFullscreen)
+        );
+        assert_eq!(fullscreen_escape_command("escape", false), None);
+        assert_eq!(fullscreen_escape_command("enter", true), None);
+    }
 
     #[test]
     fn publication_is_ready_only_after_bridge_acceptance_without_recovery() {
