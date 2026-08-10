@@ -29,19 +29,10 @@ cargo build --locked -p axiusflow_desktop
 cargo run --locked -p axiusflow_desktop
 ```
 
-The current desktop is intentionally a disconnected binary-fixture path. A healthy launch
-opens a native GPUI window containing the Origin chart and keeps the event loop running without
-a backend-selection panic.
+The desktop connects to the resident local engine over authenticated local IPC. A healthy launch
+starts or attaches to that engine, restores cached workspace state, and opens the native GPUI
+terminal.
 
-## Low-latency checks
-
-The Linux conformance path validates the active portable and tuned socket contracts:
-
-```sh
-cargo run --locked --package axiusflow_ingest_conformance
-```
-
-AF_XDP and DPDK are retired and their adapters, vendored dependencies, fuzz targets, and
-privileged harnesses have been deleted from `main`. The annotated retirement tag and git history
-retain the historical engineering evidence; neither technology is a supported development or
-release target.
+AF_XDP, DPDK, and the superseded socket/conformance harnesses have been deleted from `main`.
+The annotated retirement tag and git history retain the historical engineering evidence; none is
+a supported development or release target.

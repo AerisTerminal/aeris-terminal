@@ -290,15 +290,6 @@ impl ProviderFeedDiagnostics {
         Ok(())
     }
 
-    pub fn record_duplicate(&mut self) {
-        self.diagnostics.increment(FeedCounter::Duplicates);
-    }
-
-    pub fn record_ui_coalescing(&mut self, count: u64) {
-        self.diagnostics
-            .increment_by(FeedCounter::CoalescedUiUpdates, count);
-    }
-
     pub const fn set_history_state(&mut self, state: HistoryDiagnosticsState) {
         self.diagnostics.set_history_state(state);
     }

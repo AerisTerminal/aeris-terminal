@@ -11,7 +11,6 @@ axiusflow_application = { path = "../../application" }
 axiusflow_instruments = { path = "../../domain/instruments" }
 axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_protocols = { path = "../../protocols" }
-axiusflow_realtime = { path = "../../realtime" }
 axiusflow_transport = { path = "../../transport" }
 prost.workspace = true
 

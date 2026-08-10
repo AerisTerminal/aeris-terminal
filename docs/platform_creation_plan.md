@@ -66,7 +66,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 
 | Stage | Status | Progress |
 |---|---|---|
-| 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses deleted; cloud plane quarantined; workspace gate green |
+| 0 — Descope cleanup (kernel bypass out) | `verified` | [x] adapters/harnesses and deferred cloud plane deleted; workspace gate green |
 | A — Stabilize Coinbase | `verified` | encrypted history retention/discovery [x]; deterministic shipping recovery [x]; BTC/ETH shipping live smoke [x]; Stage G baseline [x] |
 | B — Provider-neutral runtime | `verified` | [x] complete |
 | C — Rithmic read-only headless | `blocked_external` | deterministic headless conformance [x]; authorized login/search/reference/trade/quote/depth/history [x]; provider-observed resilience evidence [ ] |
@@ -74,11 +74,11 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | E — Main Rithmic UI | `blocked_external` | implementation [x]; named externally instrumented 60/120/144 Hz pacing [ ] |
 | F — Readiness | `blocked_external` | deterministic failure, burst, and memory evidence [x]; provider/physical transitions [ ] |
 | G — Terminal polish + Coinbase public markets | `active` | interaction/chrome repair [x]; full spot catalog [x]; complete interval menu [x]; paginated history [x]; live Level 2 DOM [x]; bounded 256 MiB cache [x]; physical UI acceptance [ ] |
-| H — Resident local engine + cached-first startup | `active` | coordinator extraction [x]; versioned protocol [x]; resident process [x]; authenticated local IPC [x]; desktop migration [x]; workspace/hot-set restore [x]; coverage scheduler [x]; Rithmic lifecycle migration [x]; derived checkpointing [ ]; legacy dependency removal [ ]; end-to-end evidence [ ] |
+| H — Resident local engine + cached-first startup | `active` | coordinator extraction [x]; versioned protocol [x]; resident process [x]; authenticated local IPC [x]; desktop migration [x]; workspace/hot-set restore [x]; coverage scheduler [x]; Rithmic lifecycle migration [x]; derived checkpointing [ ]; legacy dependency removal [x]; end-to-end evidence [ ] |
 
 ### Remaining focus (ordered)
 
-- [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture removed from `main`, cloud MD plane quarantined, Linux docs updated (see §5).
+- [x] **Stage 0:** AF_XDP/DPDK kernel-bypass architecture and the deferred cloud MD plane removed from `main`; Linux docs updated (see §5).
 - [x] **Stage A:** deterministic shipping conformance [x]; BTC/ETH shipping live smoke [x]; retained as the verified Stage G baseline (see §6).
 - [ ] **Stage C:** deterministic headless conformance [x]; authorized core-path evidence [x]; resilience/recovery evidence [ ] (see §8).
 - [x] **Stage E implementation:** the main Rithmic UI vertical is integrated from the verified deterministic Stage C/D contracts; named physical pacing remains an open Stage E gate (see §10).
@@ -114,7 +114,7 @@ Full scope policy:
 | Lightweight diagnostics    | `verified`    | Feed-health path ships through the live desktop worker and UI; deterministic tests cover cadence, bounds, redaction, counters, latency labels, and queue/memory snapshots; named disabled/enabled overhead evidence passes the p99 / p99.9 budgets. |
 | Main Rithmic UI            | `blocked_external` | `--rithmic-test` opens a flush GPUI shell with integrated contract/timeframe/DOM/health/theme controls. The entitled MNQ contract hydrates automatically; bounded time or 100-trade history seeds Origin, canonical trades replace forming bars and append completed bars off-thread, and complete Rithmic depth images feed a generation-fenced read-only DOM. The history/live handoff buffers trades to a fixed bound and requests a new covering replay on overflow. Native Windows network and power events now retire the active session, history, chart, DOM, and selection before a fresh generation rediscovers and reinstalls the exact contract and timeframe. The title bar exposes coarse Test lifecycle state and the optional health panel consumes redacted immutable diagnostics. Active windows drain conflated chart/depth updates once per display frame; inactive windows stop applying UI work while bounded mailboxes retain the latest state. Externally instrumented named pacing evidence remains. |
 | Readiness                  | `blocked_external` | Deterministic failure, burst, and memory evidence are implemented; provider-observed loss and operator-driven physical environment transitions remain.                                                                                              |
-| Descope cleanup            | `verified`    | AF_XDP/DPDK paths are removed from `main`, the cloud market-data plane is quarantined, and the Stage 0 workspace gate passes.                                                                                                                        |
+| Descope cleanup            | `verified`    | AF_XDP/DPDK paths and the deferred cloud market-data plane are removed from `main`, and the Stage 0 workspace gate passes.                                                                                                                          |
 
 
 Deferred and retired items are listed only in §12.
@@ -216,9 +216,8 @@ current workspace.
 completely removed from `main` before executing Stages A–F. Do not treat Stage 0
 as optional, deferred, or parallel with Coinbase/Rithmic/UI/readiness work.
 
-This stage deletes the retired AF_XDP and DPDK paths entirely and quarantines
-the deferred cloud market-data plane so the active product path is a normal
-userspace terminal stack only.
+This stage deletes the retired AF_XDP and DPDK paths and the deferred cloud
+market-data plane so the active product path is a normal userspace terminal stack only.
 
 Decision:
 [`decisions/2026_08_04_acceleration_retirement.md`](decisions/2026_08_04_acceleration_retirement.md).
@@ -232,9 +231,9 @@ New agents: if Stage 0 is not `verified`, do Stage 0 only.
 ### Completed work
 
 - [x] Created annotated tag `retired/af_xdp_dpdk_5c13262`; deleted the AF_XDP/DPDK adapters, vendored dependency, fuzz target, privileged harnesses, and related workspace exclusions.
-- [x] Quarantined `services/market_data_plane` via `workspace.exclude` without deleting `crates/domain/market_data`.
+- [x] Deleted `services/market_data_plane` without deleting the active `crates/domain/market_data` crate.
 - [x] Updated `docs/linux_development.md` to point historical investigation at the tag and git history.
-- [x] Added and passed `tools/run_acceleration_retirement_conformance.sh` checks for retired paths, workspace membership, readiness, installer, and CI absence.
+- [x] Retired-path absence is enforced by the workspace manifest and the standard workspace gate.
 
 ### Gate
 
@@ -939,14 +938,14 @@ Stage 3 / 5B checklists.
 | CQG                           | `deferred` | (c) no work                       | provider_priority decision                |
 | R|API+                        | `deferred` | (c) no work                       | provider_priority decision                |
 | Orders / OMS / execution      | `deferred` | (c) no work                       | provider_priority; amended store decision |
-| Cloud market data             | `deferred` | (b) quarantine crate in Stage 0   | provider_priority; Stage 0                |
+| Cloud market data             | `deferred` | (a) delete from `main` in Stage 0 | provider_priority; Stage 0                |
 | AF_XDP and DPDK               | `retired`  | (a) delete from `main` in Stage 0 | acceleration_retirement; Stage 0          |
 
 
 Disposition checklist:
 
 - [x] **(c)** defer-with-no-work accepted for IQFeed, CQG, RAPI+, and OMS/execution.
-- [x] **(b)** cloud MD plane (`services/market_data_plane`) quarantined via `workspace.exclude`.
+- [x] **(a)** cloud MD plane (`services/market_data_plane`) deleted from `main`; history retains the deferred implementation.
 - [x] **(a)** AF_XDP/DPDK deleted from `main`; history retained by the annotated retirement tag.
 
 

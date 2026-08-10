@@ -1399,7 +1399,7 @@ mod tests {
     };
     use axiusflow_application::{
         EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
-        MarketBarReplayPort, MarketStreamPublication, ReplayStreamUpdate,
+        MarketStreamPublication, ReplayStreamUpdate,
     };
     use axiusflow_observability::{
         DiagnosticsQueue, FeedConnectionState, FeedRecoveryReason, LatencyBoundary,

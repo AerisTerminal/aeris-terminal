@@ -154,19 +154,6 @@ impl CoinbaseConnection {
     }
 
     /// Collects trades until the provider invalidates the stream or
-    /// `should_stop` requests cooperative shutdown.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for transport or protocol failure.
-    pub fn collect_until_stopped(
-        self,
-        should_stop: &mut impl FnMut() -> bool,
-        on_trade: &mut impl FnMut(&CanonicalTrade),
-    ) -> Result<SessionHealth, CoinbaseError> {
-        self.collect_with_deadline(None, should_stop, on_trade, &mut || {})
-    }
-
     /// Collects trades, heartbeat liveness, and raw bounded Level 2 messages.
     ///
     /// The Level 2 callback executes on the provider session thread; callers

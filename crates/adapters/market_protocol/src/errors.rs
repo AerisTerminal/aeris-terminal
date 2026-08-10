@@ -1,128 +1,16 @@
 //! Error types for the market protocol conversion boundary.
 //!
-//! Each error names the boundary that rejected the input: canonical realtime projection,
-//! bounded binary framing plus Protobuf decoding, or generated-DTO validation against
+//! Each error names the boundary that rejected the input: bounded binary framing plus
+//! Protobuf decoding, or generated-DTO validation against
 //! domain invariants. Callers match on these variants rather than parsing message text.
 
-use crate::CANONICAL_MARKET_BAR_PAYLOAD_BYTES;
 use axiusflow_application::ReplayValidationError;
 use axiusflow_instruments::InstrumentValidationError;
 use axiusflow_market_data::MarketDataValidationError;
 use axiusflow_protocols::StreamProtocolError;
-use axiusflow_realtime::SemanticClass;
 use axiusflow_transport::BinaryFrameError;
 use core::fmt;
 use std::error::Error;
-
-/// Projection failures between canonical realtime events and validated market bars.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CanonicalMarketBarProjectionError {
-    InvalidPayloadLength { actual: usize },
-    InstrumentIdMismatch { expected: String, actual: String },
-    VenueIdMismatch { expected: String, actual: String },
-    MissingSeriesIdentity,
-    SeriesIdentityMismatch(&'static str),
-    TimestampNotWholeSecond(i64),
-    UnsupportedSemanticClass(SemanticClass),
-    NicTimestampProvenanceMismatch,
-    Instrument(InstrumentValidationError),
-    MarketData(MarketDataValidationError),
-    Stream(StreamProtocolError),
-    Application(ReplayValidationError),
-}
-
-impl From<InstrumentValidationError> for CanonicalMarketBarProjectionError {
-    fn from(error: InstrumentValidationError) -> Self {
-        Self::Instrument(error)
-    }
-}
-
-impl From<MarketDataValidationError> for CanonicalMarketBarProjectionError {
-    fn from(error: MarketDataValidationError) -> Self {
-        Self::MarketData(error)
-    }
-}
-
-impl From<StreamProtocolError> for CanonicalMarketBarProjectionError {
-    fn from(error: StreamProtocolError) -> Self {
-        Self::Stream(error)
-    }
-}
-
-impl From<ReplayValidationError> for CanonicalMarketBarProjectionError {
-    fn from(error: ReplayValidationError) -> Self {
-        Self::Application(error)
-    }
-}
-
-impl fmt::Display for CanonicalMarketBarProjectionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidPayloadLength { actual } => write!(
-                formatter,
-                "canonical market-bar payload must be {CANONICAL_MARKET_BAR_PAYLOAD_BYTES} bytes; received {actual}"
-            ),
-            Self::InstrumentIdMismatch { expected, actual } => write!(
-                formatter,
-                "canonical instrument id mismatch: expected {expected}, received {actual}"
-            ),
-            Self::VenueIdMismatch { expected, actual } => write!(
-                formatter,
-                "canonical venue id mismatch: expected {expected}, received {actual}"
-            ),
-            Self::MissingSeriesIdentity => {
-                formatter.write_str("canonical market-bar series identity is required")
-            }
-            Self::SeriesIdentityMismatch(field) => {
-                write!(
-                    formatter,
-                    "canonical market-bar series identity mismatch: {field}"
-                )
-            }
-            Self::TimestampNotWholeSecond(value) => write!(
-                formatter,
-                "canonical exchange timestamp {value} nanoseconds cannot be represented as whole seconds"
-            ),
-            Self::UnsupportedSemanticClass(class) => {
-                write!(
-                    formatter,
-                    "unsupported canonical market-bar semantic class {class:?}"
-                )
-            }
-            Self::NicTimestampProvenanceMismatch => formatter.write_str(
-                "canonical NIC receive timestamp and timestamp source must be present together",
-            ),
-            Self::Instrument(error) => write!(formatter, "invalid projection instrument: {error}"),
-            Self::MarketData(error) => write!(formatter, "invalid projected market bar: {error}"),
-            Self::Stream(error) => write!(formatter, "invalid projected market stream: {error}"),
-            Self::Application(error) => {
-                write!(
-                    formatter,
-                    "invalid projected application market bar: {error}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for CanonicalMarketBarProjectionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Instrument(error) => Some(error),
-            Self::MarketData(error) => Some(error),
-            Self::Stream(error) => Some(error),
-            Self::Application(error) => Some(error),
-            Self::InvalidPayloadLength { .. }
-            | Self::InstrumentIdMismatch { .. }
-            | Self::VenueIdMismatch { .. }
-            | Self::MissingSeriesIdentity
-            | Self::SeriesIdentityMismatch(_)
-            | Self::TimestampNotWholeSecond(_)
-            | Self::UnsupportedSemanticClass(_)
-            | Self::NicTimestampProvenanceMismatch => None,
-        }
-    }
-}
 
 /// Failures in bounded binary framing, Protobuf decoding, or semantic projection.
 #[derive(Debug)]
@@ -315,7 +203,6 @@ pub enum ProtobufAdapterError {
         expected: u64,
         actual: u64,
     },
-    CanonicalProjection(CanonicalMarketBarProjectionError),
     Instrument(InstrumentValidationError),
     MarketData(MarketDataValidationError),
     Stream(StreamProtocolError),
@@ -524,9 +411,6 @@ impl fmt::Display for ProtobufAdapterError {
                 formatter,
                 "delta predecessor mismatch: expected {expected}, received {actual}"
             ),
-            Self::CanonicalProjection(error) => {
-                write!(formatter, "canonical market-bar projection failed: {error}")
-            }
             Self::Instrument(error) => write!(formatter, "invalid instrument: {error}"),
             Self::MarketData(error) => write!(formatter, "invalid market data: {error}"),
             Self::Stream(error) => write!(formatter, "invalid market stream: {error}"),
@@ -540,7 +424,6 @@ impl fmt::Display for ProtobufAdapterError {
 impl Error for ProtobufAdapterError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::CanonicalProjection(error) => Some(error),
             Self::Instrument(error) => Some(error),
             Self::MarketData(error) => Some(error),
             Self::Stream(error) => Some(error),

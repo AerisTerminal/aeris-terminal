@@ -55,14 +55,6 @@ impl DisplayedProvenance {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.by_source_sequence.len()
-    }
-
-    pub(crate) fn get(&self, source_sequence: u64) -> Option<&MarketEventProvenance> {
-        self.by_source_sequence.get(&source_sequence)
-    }
-
     pub(crate) fn latest(&self) -> Option<&MarketEventProvenance> {
         self.by_source_sequence
             .last_key_value()

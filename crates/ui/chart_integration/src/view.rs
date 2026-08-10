@@ -9,7 +9,7 @@ use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
-    ReplayStreamUpdate, ReplayValidationError, UseCase,
+    ReplayStreamUpdate, ReplayValidationError,
 };
 use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
@@ -276,7 +276,7 @@ impl OriginChartView {
     #[must_use]
     pub fn new() -> Self {
         let replay = EmbeddedReplaySource
-            .execute(LoadEmbeddedReplay { bar_count: 600 })
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 600 })
             .expect("the embedded replay is validated application data");
         Self::with_replay(&replay)
     }
@@ -613,14 +613,6 @@ impl OriginChartView {
             .map_or(0, ChartDataBridge::queued_update_count)
     }
 
-    /// Returns whether a detected stream gap requires a replacement snapshot.
-    #[must_use]
-    pub fn replay_requires_snapshot(&self) -> bool {
-        self.data_bridge
-            .as_ref()
-            .is_some_and(ChartDataBridge::requires_snapshot)
-    }
-
     /// Returns the next sequence expected by the chart bridge.
     #[must_use]
     pub fn expected_replay_sequence(&self) -> Option<u64> {
@@ -635,14 +627,6 @@ impl OriginChartView {
         self.data_bridge
             .as_ref()
             .map_or_else(ChartBridgeMetrics::default, ChartDataBridge::metrics)
-    }
-
-    /// Peeks one retryable correlated recovery command without marking it dispatched.
-    #[must_use]
-    pub fn pending_replay_resnapshot_request(&self) -> Option<ReplayRecoveryCommand> {
-        self.data_bridge
-            .as_ref()
-            .and_then(ChartDataBridge::pending_resnapshot_request)
     }
 
     /// Offers recovery to a bounded worker queue and marks dispatch only after acceptance.
@@ -695,12 +679,6 @@ impl OriginChartView {
         if let Some(bridge) = &mut self.data_bridge {
             bridge.mark_stream_invalid();
         }
-    }
-
-    /// Returns canonical evidence for a displayed value by its source sequence.
-    #[must_use]
-    pub fn market_provenance(&self, source_sequence: u64) -> Option<&MarketEventProvenance> {
-        self.displayed_provenance.get(source_sequence)
     }
 
     /// Returns canonical evidence for the latest value installed into Origin.
@@ -1246,7 +1224,7 @@ mod tests {
         assert!(chart.latest_market_provenance().is_none());
 
         let replay = EmbeddedReplaySource
-            .execute(LoadEmbeddedReplay { bar_count: 16 })
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
             .expect("embedded replay validates");
         chart.load_replay(&replay).expect("first snapshot installs");
         assert!(chart.has_market_data());
@@ -1531,7 +1509,7 @@ mod tests {
     #[test]
     fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
         let replay = EmbeddedReplaySource
-            .execute(LoadEmbeddedReplay { bar_count: 16 })
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
             .expect("embedded replay validates");
         let mut chart = OriginChartView::with_replay(&replay);
         let (_, volume_columns) = chart

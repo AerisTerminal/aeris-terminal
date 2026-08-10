@@ -1,6 +1,6 @@
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
-    MarketBarReplayPort, MarketStreamPublication, ReplayStreamUpdate,
+    MarketStreamPublication, ReplayStreamUpdate,
 };
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,

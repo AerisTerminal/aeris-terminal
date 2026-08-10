@@ -1,6 +1,6 @@
 //! Bounded provider-neutral market stream command and event boundary.
 
-use crate::generation::{MarketGeneration, ResnapshotReason};
+use crate::generation::MarketGeneration;
 use crate::provenance::ProvenancedMarketBar;
 use crate::replay_snapshot::ReplayStreamUpdate;
 use axiusflow_protocols::Provenanced;
@@ -161,105 +161,4 @@ fn validate_stream_publication(
         return Err(mismatch("generation item sequence range"));
     }
     Ok(predecessor_generation)
-}
-
-/// Commands accepted by a bounded market-stream runtime port.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MarketStreamCommand {
-    Connect,
-    Recover {
-        request_id: u64,
-        reason: ResnapshotReason,
-    },
-    Shutdown,
-}
-
-/// Result of offering one command without blocking or increasing capacity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MarketStreamCommandOffer {
-    Accepted,
-    Full,
-}
-
-/// Transport keepalive activity exposed without binding consumers to one wire protocol.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MarketStreamControlSignal {
-    KeepaliveRequest,
-    KeepaliveResponse,
-}
-
-/// Provider-neutral lifecycle output from one bounded market-stream runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MarketStreamEvent {
-    Connected {
-        connection_epoch: u64,
-        attempt: usize,
-    },
-    Publication(Box<MarketStreamPublication>),
-    RecoverySnapshot {
-        request_id: u64,
-        publication: Box<MarketStreamPublication>,
-    },
-    Control(MarketStreamControlSignal),
-    StreamInvalid {
-        connection_epoch: Option<u64>,
-        reason: ResnapshotReason,
-        dropped_events: usize,
-    },
-    RecoveryAttemptFailed {
-        request_id: Option<u64>,
-        attempt: usize,
-        remaining: usize,
-    },
-    RecoveryExhausted {
-        request_id: Option<u64>,
-        attempts: usize,
-        reason: ResnapshotReason,
-        dropped_events: usize,
-    },
-    RecoveryRejected {
-        request_id: u64,
-        active_request_id: u64,
-    },
-    Stopped {
-        graceful: bool,
-        dropped_events: usize,
-    },
-}
-
-/// Bounded provider-neutral command/event boundary implemented by stream adapters.
-pub trait MarketStreamRuntimePort {
-    type Error;
-
-    /// Offers one command without blocking or hidden buffering.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the runtime command boundary is disconnected.
-    fn try_send_stream_command(
-        &self,
-        command: MarketStreamCommand,
-    ) -> Result<MarketStreamCommandOffer, Self::Error>;
-
-    /// Receives at most one ready event without blocking.
-    ///
-    /// `Ok(None)` means no event is currently ready and does not imply disconnection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the runtime failed or disconnected.
-    fn try_recv_stream_event(&self) -> Result<Option<MarketStreamEvent>, Self::Error>;
-}
-
-/// Transport-neutral live/replay model port consumed by background application workers.
-pub trait MarketGenerationPort<T> {
-    type Error;
-
-    /// Loads a bounded immutable generation suitable for atomic publication.
-    ///
-    /// # Errors
-    ///
-    /// Returns adapter, entitlement, validation, or availability failures.
-    fn load_generation(&self, reason: ResnapshotReason)
-    -> Result<MarketGeneration<T>, Self::Error>;
 }

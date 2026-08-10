@@ -926,23 +926,6 @@ impl EngineClient {
         self.receive_workspace()
     }
 
-    /// Replaces the engine-owned watchlist under workspace revision fencing.
-    ///
-    /// # Errors
-    /// Returns an error when the revision is stale, transport fails, or the reply is invalid.
-    pub fn set_watchlist(
-        &mut self,
-        markets: Vec<String>,
-        workspace_revision: u64,
-    ) -> Result<WorkspaceState, String> {
-        self.connection
-            .send(envelope::Payload::SetWatchlist(SetWatchlist {
-                markets,
-                workspace_revision,
-            }))?;
-        self.receive_workspace()
-    }
-
     /// Persists the stable viewport for the active selection without changing its revision.
     ///
     /// # Errors

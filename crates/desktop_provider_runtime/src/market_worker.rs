@@ -1,7 +1,7 @@
 use crate::{
     ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderEvent,
-    DesktopProviderMetrics, DesktopProviderRuntime, DesktopProviderState, NetworkEvent,
-    ProviderInvalidationReason, ProviderSessionDriver, SessionGeneration,
+    DesktopProviderRuntime, DesktopProviderState, NetworkEvent, ProviderInvalidationReason,
+    ProviderSessionDriver, SessionGeneration,
 };
 use axiusflow_application::MarketStreamPublication;
 use axiusflow_desktop_history::{
@@ -246,15 +246,6 @@ where
         self.provider.driver_matches(predicate).map_err(Into::into)
     }
 
-    /// Returns redacted provider metrics.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for wrong-thread access.
-    pub fn provider_metrics(&self) -> Result<DesktopProviderMetrics, DesktopMarketWorkerError> {
-        self.provider.metrics().map_err(Into::into)
-    }
-
     /// Publishes the production feed diagnostics snapshot when cadence allows.
     ///
     /// # Errors
@@ -335,21 +326,6 @@ where
     ) -> Result<CoverageSnapshot, DesktopMarketWorkerError> {
         self.history
             .coverage_snapshot(series, now_unix_seconds)
-            .map_err(Into::into)
-    }
-
-    /// Records provider-proven empty coverage through the sole history owner.
-    ///
-    /// # Errors
-    /// Returns a redacted wrong-thread, invalid-dimension, or catalog failure.
-    pub fn record_confirmed_empty_history(
-        &mut self,
-        series: HistorySeriesIdentity<'_>,
-        range: RetainedRange,
-        now_unix_seconds: i64,
-    ) -> Result<(), DesktopMarketWorkerError> {
-        self.history
-            .record_confirmed_empty(series, range, now_unix_seconds)
             .map_err(Into::into)
     }
 
@@ -546,17 +522,6 @@ where
             Ok(())
         };
         Self::finish_fence(provider_result, history_result)
-    }
-
-    /// Returns the last accepted market publication.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for wrong-thread access.
-    pub fn current_market_publication(
-        &self,
-    ) -> Result<Option<Arc<MarketStreamPublication>>, DesktopMarketWorkerError> {
-        self.provider.current_publication().map_err(Into::into)
     }
 
     /// Receives at most one provider event without blocking.
@@ -991,15 +956,6 @@ where
         self.history
             .current_publication(identity, encryption_key, now_unix_seconds)
             .map_err(Into::into)
-    }
-
-    /// Returns the bounded history cache entry count.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for wrong-thread access.
-    pub fn cached_history_entries(&self) -> Result<usize, DesktopMarketWorkerError> {
-        self.history.cached_entries().map_err(Into::into)
     }
 
     /// Verifies that an adapter callback belongs to the active streaming generation.

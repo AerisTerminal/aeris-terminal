@@ -1,18 +1,18 @@
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, atomic::AtomicU64, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use axiusflow_application::{
-    MarketBarClientModel, MarketBarModelOutcome, ReplayProvenance, ReplayStreamUpdate,
-};
-use axiusflow_coinbase_coordinator::market_worker::{
-    ChartViewportUpdate, CoinbaseWorkerStartup, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
-    market_worker_channel,
+    MarketBarClientModel, MarketBarModelOutcome, MarketGeneration, ProvenancedMarketBar,
+    ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate,
 };
 use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_engine::{EngineClient, connect_or_start_engine, sibling_engine_executable};
@@ -28,9 +28,12 @@ use axiusflow_market_data::{
 use axiusflow_market_protocol_adapter::{BinaryMarketBarStreamDecoder, DecimalConvention};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_rithmic_protocol_adapter::{
-    CollectedSymbols, RithmicCatalogEvent, RithmicCatalogRejection, SymbolSearchResult,
+    CollectedSymbols, RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
+    RithmicProviderConfig, RithmicSymbolSearch, SymbolSearchResult,
 };
 use axiusflow_rithmic_protocol_adapter::{InstrumentType, SearchPattern};
+
+use crate::rithmic_history::RithmicSeriesRequest;
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
@@ -48,58 +51,347 @@ enum ResidentProvider {
 }
 
 type LatestSnapshot = Arc<Mutex<Option<MarketWorkerBootstrap>>>;
+type MessageWake = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
-pub(super) fn start() -> (
-    axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
-    MarketDataWorker,
-) {
+pub(super) type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChartState {
+    Loading,
+    Ready,
+    Stale,
+    Recovering,
+    Error,
+}
+
+impl ChartState {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "Loading chart",
+            Self::Ready => "Chart ready",
+            Self::Stale => "Chart stale",
+            Self::Recovering => "Reconnecting chart",
+            Self::Error => "Chart unavailable",
+        }
+    }
+}
+
+pub(super) struct MarketWorkerBootstrap {
+    pub(super) snapshot: ReplaySnapshot,
+    pub(super) subscription_id: String,
+    pub(super) generation: DesktopMarketGeneration,
+    pub(super) worker_label: String,
+}
+
+pub(super) struct CoinbaseWorkerStartup {
+    pub(super) coinbase_product: CoinbaseSpotProduct,
+    pub(super) subscription_id: String,
+    pub(super) worker_label: String,
+}
+
+pub(super) struct RithmicWorkerStartup {
+    profile: String,
+    connection: FeedConnectionState,
+    message: String,
+}
+
+impl RithmicWorkerStartup {
+    pub(super) fn profile_label(&self) -> &str {
+        &self.profile
+    }
+
+    pub(super) const fn connection(&self) -> FeedConnectionState {
+        self.connection
+    }
+
+    pub(super) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+pub(super) enum MarketWorkerStartup {
+    Rithmic(RithmicWorkerStartup),
+    Coinbase(CoinbaseWorkerStartup),
+}
+
+pub(super) struct MarketWorkerPublication {
+    pub(super) update: ReplayStreamUpdate,
+    pub(super) generation: DesktopMarketGeneration,
+    pub(super) subscription_id: String,
+    pub(super) worker_label: String,
+}
+
+pub(super) enum MarketWorkerMessage {
+    Update(MarketWorkerPublication),
+    Recovery {
+        request_id: u64,
+        result: Result<MarketWorkerBootstrap, String>,
+    },
+    State {
+        state: ChartState,
+        message: String,
+    },
+    Connection {
+        state: FeedConnectionState,
+        message: String,
+    },
+    RithmicCatalog(RithmicCatalogEvent),
+    RithmicHistory {
+        selection_generation: NonZeroUsize,
+        series_generation: NonZeroUsize,
+        result: Result<Box<MarketWorkerBootstrap>, String>,
+    },
+    RithmicLive {
+        selection_generation: NonZeroUsize,
+        series_generation: NonZeroUsize,
+        snapshot: ReplaySnapshot,
+    },
+    RithmicDom(DomFrame),
+    CoinbaseSwitchMarker {
+        sequence: u64,
+    },
+    CoinbaseCatalog(Result<Vec<CoinbaseSpotProduct>, String>),
+    CoinbaseDom(DomFrame),
+    ChartViewport {
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+    },
+}
+
+struct CoinbaseSelectionRequest {
+    sequence: u64,
+    product: CoinbaseSpotProduct,
+    interval: ChartInterval,
+}
+
+#[derive(Clone, Copy)]
+struct ChartViewportUpdate {
+    start_unix_nanos: i64,
+    end_unix_nanos: i64,
+    selection_generation: u64,
+}
+
+enum MarketWorkerCommand {
+    Recovery(ReplayRecoveryCommand),
+    RithmicSearch(RithmicSymbolSearch),
+    RithmicSelect(RithmicInstrumentSelection),
+    RithmicHistory(RithmicSeriesRequest),
+    CoinbaseSelect(Box<CoinbaseSelectionRequest>),
+    ChartViewport(ChartViewportUpdate),
+    Shutdown,
+}
+
+#[derive(Clone)]
+struct MarketWorkerSender {
+    messages: SyncSender<MarketWorkerMessage>,
+    wake: MessageWake,
+}
+
+impl MarketWorkerSender {
+    fn send(&self, message: MarketWorkerMessage) -> Result<(), ()> {
+        self.messages.send(message).map_err(|_| ())?;
+        if let Some(wake) = self
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            wake();
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct MarketDataWorker {
+    commands: Option<SyncSender<MarketWorkerCommand>>,
+    messages: Option<Receiver<MarketWorkerMessage>>,
+    wake: MessageWake,
+    connected: bool,
+    coinbase_sequence: Arc<AtomicU64>,
+}
+
+impl MarketDataWorker {
+    pub(super) fn set_message_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
+    }
+
+    pub(super) fn try_select_coinbase(
+        &self,
+        product: CoinbaseSpotProduct,
+        interval: ChartInterval,
+    ) -> Result<u64, ()> {
+        let next = self
+            .coinbase_sequence
+            .load(Ordering::Acquire)
+            .saturating_add(1);
+        let request = Box::new(CoinbaseSelectionRequest {
+            sequence: next,
+            product,
+            interval,
+        });
+        self.try_send_command(MarketWorkerCommand::CoinbaseSelect(request))
+            .map_err(|_| ())?;
+        self.coinbase_sequence.store(next, Ordering::Release);
+        Ok(next)
+    }
+
+    pub(super) fn try_set_chart_viewport(
+        &self,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+    ) -> Result<(), ()> {
+        let update = ChartViewportUpdate {
+            start_unix_nanos,
+            end_unix_nanos,
+            selection_generation: self.coinbase_sequence.load(Ordering::Acquire),
+        };
+        self.try_send_command(MarketWorkerCommand::ChartViewport(update))
+            .map_err(|_| ())
+    }
+
+    pub(super) fn try_send_recovery(
+        &self,
+        command: ReplayRecoveryCommand,
+    ) -> Result<(), TrySendError<ReplayRecoveryCommand>> {
+        self.try_send_command(MarketWorkerCommand::Recovery(command))
+            .map_err(|error| {
+                map_command_error(error, |command| match command {
+                    MarketWorkerCommand::Recovery(command) => command,
+                    _ => unreachable!(),
+                })
+            })
+    }
+
+    pub(super) fn try_search_rithmic(&self, search: RithmicSymbolSearch) -> Result<(), ()> {
+        self.try_send_command(MarketWorkerCommand::RithmicSearch(search))
+            .map_err(|_| ())
+    }
+
+    pub(super) fn try_select_rithmic(
+        &self,
+        selection: RithmicInstrumentSelection,
+    ) -> Result<(), ()> {
+        self.try_send_command(MarketWorkerCommand::RithmicSelect(selection))
+            .map_err(|_| ())
+    }
+
+    pub(super) fn try_request_rithmic_history(
+        &self,
+        request: RithmicSeriesRequest,
+    ) -> Result<(), ()> {
+        self.try_send_command(MarketWorkerCommand::RithmicHistory(request))
+            .map_err(|_| ())
+    }
+
+    fn try_send_command(
+        &self,
+        command: MarketWorkerCommand,
+    ) -> Result<(), TrySendError<MarketWorkerCommand>> {
+        match &self.commands {
+            Some(commands) => commands.try_send(command),
+            None => Err(TrySendError::Disconnected(command)),
+        }
+    }
+
+    pub(super) fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
+        let Some(messages) = &self.messages else {
+            return (Vec::new(), false);
+        };
+        let mut drained = Vec::new();
+        loop {
+            match messages.try_recv() {
+                Ok(message) => drained.push(message),
+                Err(TryRecvError::Empty) => return (drained, false),
+                Err(TryRecvError::Disconnected) => {
+                    let newly_disconnected = self.connected;
+                    self.connected = false;
+                    return (drained, newly_disconnected);
+                }
+            }
+        }
+    }
+
+    pub(super) const fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    pub(super) fn mark_disconnected(&mut self) {
+        self.connected = false;
+    }
+}
+
+fn map_command_error<T>(
+    error: TrySendError<MarketWorkerCommand>,
+    extract: impl FnOnce(MarketWorkerCommand) -> T,
+) -> TrySendError<T> {
+    match error {
+        TrySendError::Full(command) => TrySendError::Full(extract(command)),
+        TrySendError::Disconnected(command) => TrySendError::Disconnected(extract(command)),
+    }
+}
+
+impl Drop for MarketDataWorker {
+    fn drop(&mut self) {
+        if let Some(commands) = self.commands.take() {
+            let _ = commands.try_send(MarketWorkerCommand::Shutdown);
+        }
+        self.messages.take();
+    }
+}
+
+pub(super) fn start() -> (MarketWorkerStartup, MarketDataWorker) {
     start_provider(
         ResidentProvider::Coinbase,
-        axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup::Loading(Box::new(
-            CoinbaseWorkerStartup {
-                coinbase_product: placeholder_product("BTC-USD"),
-                subscription_id: SUBSCRIPTION_ID.to_string(),
-                worker_label: WORKER_LABEL.to_string(),
-            },
-        )),
+        MarketWorkerStartup::Coinbase(CoinbaseWorkerStartup {
+            coinbase_product: placeholder_product("BTC-USD"),
+            subscription_id: SUBSCRIPTION_ID.to_string(),
+            worker_label: WORKER_LABEL.to_string(),
+        }),
     )
 }
 
-pub(super) fn start_rithmic() -> Result<
-    (
-        axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
-        MarketDataWorker,
-    ),
-    String,
-> {
-    let shell = axiusflow_coinbase_coordinator::rithmic_shell::RithmicShellState::local()?;
-    Ok(start_provider(
+pub(super) fn start_rithmic() -> (MarketWorkerStartup, MarketDataWorker) {
+    let environment = RithmicProviderConfig::environment();
+    let shell = RithmicWorkerStartup {
+        profile: format!("Rithmic · Rithmic Test · {}", environment.environment),
+        connection: FeedConnectionState::Disconnected,
+        message: "Local shell ready; provider login has not started".to_string(),
+    };
+    start_provider(
         ResidentProvider::Rithmic,
-        axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup::Shell(shell),
-    ))
+        MarketWorkerStartup::Rithmic(shell),
+    )
 }
 
 fn start_provider(
     provider: ResidentProvider,
-    startup: axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
-) -> (
-    axiusflow_coinbase_coordinator::market_worker::MarketWorkerStartup,
-    MarketDataWorker,
-) {
-    let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
+    startup: MarketWorkerStartup,
+) -> (MarketWorkerStartup, MarketDataWorker) {
+    let (message_tx, message_rx) = mpsc::sync_channel(MESSAGE_CAPACITY);
+    let wake = Arc::new(Mutex::new(None));
+    let message_tx = MarketWorkerSender {
+        messages: message_tx,
+        wake: Arc::clone(&wake),
+    };
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-    let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let sequence = Arc::new(AtomicU64::new(0));
     thread::Builder::new()
         .name("axiusflow-resident-engine-bridge".to_string())
         .spawn(move || {
             run_bridge(&message_tx, &command_rx, provider);
-            let _ = shutdown_tx.send(());
         })
         .expect("resident engine bridge thread starts");
 
-    let worker =
-        MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, Some(sequence));
+    let worker = MarketDataWorker {
+        commands: Some(command_tx),
+        messages: Some(message_rx),
+        wake,
+        connected: true,
+        coinbase_sequence: sequence,
+    };
     (startup, worker)
 }
 
@@ -130,7 +422,7 @@ fn run_bridge(
         executable.clone(),
     );
     let _ = message_tx.send(MarketWorkerMessage::State {
-        state: axiusflow_coinbase_coordinator::market_worker::ChartState::Loading,
+        state: ChartState::Loading,
         message: "Attached to the resident market engine".to_string(),
     });
     publish_restored_viewport(message_tx, &workspace);
@@ -502,9 +794,8 @@ fn publish_chart_payload(
                 generation,
                 subscription_id: projected.subscription_id,
                 worker_label: WORKER_LABEL.to_string(),
-                ui_diagnostics: None,
             }))
-            .map_err(|_| "desktop market mailbox disconnected".to_string())?;
+            .map_err(|()| "desktop market mailbox disconnected".to_string())?;
     }
     Ok(())
 }
@@ -555,7 +846,7 @@ fn publish_rithmic_chart(
         };
         message_tx
             .send(message)
-            .map_err(|_| "desktop market mailbox disconnected".to_string())?;
+            .map_err(|()| "desktop market mailbox disconnected".to_string())?;
     }
     Ok(())
 }
@@ -612,7 +903,7 @@ fn publish_rithmic_catalog(
     };
     message_tx
         .send(MarketWorkerMessage::RithmicCatalog(event))
-        .map_err(|_| "desktop market mailbox disconnected".to_string())
+        .map_err(|()| "desktop market mailbox disconnected".to_string())
 }
 
 fn required<T>(value: Option<T>) -> Result<T, String> {
@@ -731,7 +1022,7 @@ fn publish_catalog(
         .collect::<Result<Vec<_>, String>>()?;
     message_tx
         .send(MarketWorkerMessage::CoinbaseCatalog(Ok(products)))
-        .map_err(|_| "desktop market mailbox disconnected".to_string())
+        .map_err(|()| "desktop market mailbox disconnected".to_string())
 }
 
 fn publish_provider_state(message_tx: &MarketWorkerSender, provider: i32) -> Result<(), String> {
@@ -752,7 +1043,7 @@ fn publish_provider_state(message_tx: &MarketWorkerSender, provider: i32) -> Res
                 _ => "Resident provider stream is reconnecting".to_string(),
             },
         })
-        .map_err(|_| "desktop market mailbox disconnected".to_string())
+        .map_err(|()| "desktop market mailbox disconnected".to_string())
 }
 
 fn publish_dom(message_tx: &MarketWorkerSender, snapshot: DomSnapshot) -> Result<(), String> {
@@ -804,7 +1095,7 @@ fn publish_dom(message_tx: &MarketWorkerSender, snapshot: DomSnapshot) -> Result
         } else {
             MarketWorkerMessage::CoinbaseDom(frame)
         })
-        .map_err(|_| "desktop market mailbox disconnected".to_string())
+        .map_err(|()| "desktop market mailbox disconnected".to_string())
 }
 
 fn dom_level(level: axiusflow_local_engine_protocol::DomLevel) -> Result<DomColumnLevel, String> {
@@ -875,7 +1166,7 @@ fn interval_seconds(interval: ChartInterval) -> Option<u32> {
 
 fn send_error(message_tx: &MarketWorkerSender, message: String) {
     let _ = message_tx.send(MarketWorkerMessage::State {
-        state: axiusflow_coinbase_coordinator::market_worker::ChartState::Error,
+        state: ChartState::Error,
         message,
     });
 }
@@ -883,7 +1174,7 @@ fn send_error(message_tx: &MarketWorkerSender, message: String) {
 fn send_recovering(message_tx: &MarketWorkerSender, message: &str) -> bool {
     message_tx
         .send(MarketWorkerMessage::State {
-            state: axiusflow_coinbase_coordinator::market_worker::ChartState::Recovering,
+            state: ChartState::Recovering,
             message: format!("Resident engine reconnecting: {message}"),
         })
         .is_ok()

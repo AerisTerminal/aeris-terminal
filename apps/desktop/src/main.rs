@@ -16,15 +16,10 @@ use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
 };
-use axiusflow_coinbase_coordinator::market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-    UiDiagnosticsFeedback,
-};
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
-use axiusflow_observability::{FeedConnectionState, FeedDiagnosticsSnapshot};
+use axiusflow_observability::FeedConnectionState;
 use axiusflow_rithmic_protocol_adapter::{
     RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
     RithmicProviderCommandError as RithmicCommandError, RithmicReadOnlySubscription,
@@ -47,6 +42,10 @@ use gpui_component::{
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
+use resident_market_worker::{
+    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+};
 use std::{
     borrow::Cow,
     pin::Pin,
@@ -223,7 +222,6 @@ struct TerminalApp {
     drawing_toolbar: DrawingToolbarVisibility,
     window_active: bool,
     frame_poll_gate: frame_poll_gate::FramePollGate,
-    feed_diagnostics: Option<Box<FeedDiagnosticsSnapshot>>,
     chart_state: ChartState,
     chart_state_message: String,
     theme: AxiusflowTheme,
@@ -232,7 +230,6 @@ struct TerminalApp {
     subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
-    pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
@@ -265,7 +262,6 @@ struct TerminalApp {
 enum TerminalProvider {
     Coinbase,
     Rithmic,
-    Fixture,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -477,7 +473,6 @@ struct HeaderState {
     pending: HeaderPendingState,
     controls: HeaderControls,
     dom_visible: bool,
-    health_visible: bool,
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
@@ -492,28 +487,24 @@ struct HeaderPendingState {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SidePanel {
     Dom,
-    Health,
 }
 
 impl SidePanel {
     const fn title(self) -> &'static str {
         match self {
             Self::Dom => "Order book",
-            Self::Health => "Feed health",
         }
     }
 
     const fn toggle_label(self) -> &'static str {
         match self {
             Self::Dom => "DOM",
-            Self::Health => "Health",
         }
     }
 
     const fn toggle_tooltip(self) -> &'static str {
         match self {
             Self::Dom => "Toggle read-only depth panel",
-            Self::Health => "Toggle feed health panel",
         }
     }
 }
@@ -650,24 +641,20 @@ impl HeaderControls {
     const INSTRUMENT: u8 = 1;
     const SERIES: u8 = 2;
     const DOM: u8 = 4;
-    const HEALTH: u8 = 8;
-    const FIT: u8 = 16;
-    const LATEST: u8 = 32;
+    const FIT: u8 = 8;
+    const LATEST: u8 = 16;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
     }
 
-    fn from_state(instrument: bool, selection: bool, health: bool) -> Self {
+    fn from_state(instrument: bool, selection: bool) -> Self {
         let mut controls = 0;
         if instrument {
             controls |= Self::INSTRUMENT;
         }
         if selection {
             controls |= Self::SERIES | Self::DOM;
-        }
-        if health {
-            controls |= Self::HEALTH;
         }
         Self(controls)
     }
@@ -698,7 +685,7 @@ fn terminal_startup_state(
     cx: &mut Context<TerminalApp>,
 ) -> TerminalStartupState {
     match startup {
-        MarketWorkerStartup::Shell(shell) => {
+        MarketWorkerStartup::Rithmic(shell) => {
             let profile = shell.profile_label();
             let connection = shell.connection();
             let message = shell.message().to_string();
@@ -706,7 +693,7 @@ fn terminal_startup_state(
                 chart: Some(cx.new(move |_| OriginChartView::empty())),
                 chart_state: ChartState::Loading,
                 chart_state_message: message.clone(),
-                replay_label: profile,
+                replay_label: profile.to_string(),
                 worker_label: "Rithmic market worker".to_string(),
                 subscription_id: "Loading chart".to_string(),
                 connection_state: Some(connection),
@@ -715,7 +702,7 @@ fn terminal_startup_state(
                 coinbase_product: None,
             }
         }
-        MarketWorkerStartup::Loading(startup) => TerminalStartupState {
+        MarketWorkerStartup::Coinbase(startup) => TerminalStartupState {
             chart: None,
             chart_state: ChartState::Loading,
             chart_state_message: "waiting for a covering market snapshot".to_string(),
@@ -727,26 +714,6 @@ fn terminal_startup_state(
             provider: TerminalProvider::Coinbase,
             coinbase_product: Some(startup.coinbase_product),
         },
-        MarketWorkerStartup::Ready(bootstrap) => {
-            let replay_label = generation_status(
-                &bootstrap.worker_label,
-                &bootstrap.subscription_id,
-                &bootstrap.generation,
-            );
-            let snapshot = bootstrap.snapshot;
-            TerminalStartupState {
-                chart: Some(cx.new(move |_| OriginChartView::with_replay(&snapshot))),
-                chart_state: ChartState::Ready,
-                chart_state_message: "market snapshot is current".to_string(),
-                replay_label,
-                worker_label: bootstrap.worker_label,
-                subscription_id: bootstrap.subscription_id,
-                connection_state: None,
-                connection_message: None,
-                provider: TerminalProvider::Fixture,
-                coinbase_product: None,
-            }
-        }
     }
 }
 
@@ -786,7 +753,6 @@ impl TerminalApp {
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
             window_active: true,
             frame_poll_gate: frame_poll_gate::FramePollGate::default(),
-            feed_diagnostics: None,
             chart_state,
             chart_state_message,
             theme,
@@ -795,7 +761,6 @@ impl TerminalApp {
             subscription_id,
             bridge_label,
             market_worker,
-            pending_ui_diagnostics: None,
             connection_state,
             connection_message,
             symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
@@ -1074,11 +1039,7 @@ impl TerminalApp {
         cx.stop_propagation();
     }
 
-    fn apply_publication(
-        &mut self,
-        mut publication: MarketWorkerPublication,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
         if self.provider == TerminalProvider::Coinbase
             && let ReplayStreamUpdate::Snapshot(snapshot) = &publication.update
         {
@@ -1098,7 +1059,6 @@ impl TerminalApp {
                 self.coinbase_interval = interval;
             }
         }
-        let ui_diagnostics = publication.ui_diagnostics.take();
         self.worker_label = publication.worker_label;
         self.subscription_id = publication.subscription_id;
         self.replay_label = generation_status(
@@ -1106,7 +1066,7 @@ impl TerminalApp {
             &self.subscription_id,
             &publication.generation,
         );
-        let (next_state, accepted) = match (&self.chart, publication.update) {
+        let next_state = match (&self.chart, publication.update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
                 let theme = self.theme;
                 let chart =
@@ -1118,7 +1078,7 @@ impl TerminalApp {
                 }
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
-                (ChartState::Ready, true)
+                ChartState::Ready
             }
             (Some(chart), update) => {
                 let (accepted, recovery_pending) = chart.update(cx, |chart, chart_cx| {
@@ -1129,13 +1089,9 @@ impl TerminalApp {
                     chart_cx.notify();
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
                 });
-                (
-                    publication_chart_state(accepted, recovery_pending),
-                    accepted,
-                )
+                publication_chart_state(accepted, recovery_pending)
             }
             (None, axiusflow_application::ReplayStreamUpdate::Delta(_)) => {
-                self.finish_ui_diagnostics(ui_diagnostics, false);
                 self.set_chart_state(
                     ChartState::Error,
                     "market delta arrived before the initial covering snapshot".to_string(),
@@ -1144,7 +1100,6 @@ impl TerminalApp {
                 return;
             }
         };
-        self.finish_ui_diagnostics(ui_diagnostics, accepted);
         if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = "market snapshot is current".to_string();
@@ -1165,25 +1120,6 @@ impl TerminalApp {
             );
         }
         cx.notify();
-    }
-
-    fn finish_ui_diagnostics(&mut self, incoming: Option<PendingUiDiagnostics>, accepted: bool) {
-        let Some(incoming) = incoming else {
-            return;
-        };
-        if !accepted {
-            self.market_worker
-                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
-                    generation: incoming.generation(),
-                });
-            return;
-        }
-        if let Some(replaced) = self.pending_ui_diagnostics.replace(incoming) {
-            self.market_worker
-                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
-                    generation: replaced.generation(),
-                });
-        }
     }
 
     fn apply_recovery(
@@ -1301,10 +1237,6 @@ impl TerminalApp {
         match message {
             MarketWorkerMessage::Update(publication) => {
                 self.apply_publication(publication, cx);
-            }
-            MarketWorkerMessage::Diagnostics(snapshot) => {
-                self.feed_diagnostics = Some(snapshot);
-                cx.notify();
             }
             MarketWorkerMessage::Recovery { request_id, result } => {
                 self.apply_recovery(request_id, result, cx);
@@ -1434,7 +1366,6 @@ impl TerminalApp {
             let message = match self.provider {
                 TerminalProvider::Coinbase => "Coinbase market worker stopped",
                 TerminalProvider::Rithmic => "Rithmic market worker stopped",
-                TerminalProvider::Fixture => "Fixture market worker stopped",
             }
             .to_string();
             self.connection_state = Some(FeedConnectionState::Stopped);
@@ -1530,17 +1461,6 @@ impl TerminalApp {
         }
         self.theme = theme;
         cx.notify();
-    }
-
-    fn schedule_diagnostics_frame(&mut self, window: &mut Window) {
-        if let Some(mut diagnostics) = self.pending_ui_diagnostics.take()
-            && let Some(sender) = self.market_worker.ui_diagnostics_sender()
-        {
-            diagnostics.mark_frame_submit();
-            window.on_next_frame(move |_window, _cx| {
-                let _ = sender.send(diagnostics.into_presented());
-            });
-        }
     }
 
     fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1652,7 +1572,6 @@ impl TerminalApp {
         self.symbol_selection_pending = false;
         self.symbol_browser.invalidate_session();
         self.series_browser.reset();
-        self.feed_diagnostics = None;
         self.dom
             .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
     }
@@ -1943,14 +1862,6 @@ impl TerminalApp {
         }
     }
 
-    fn toggle_health(&mut self, cx: &mut Context<Self>) {
-        if self.feed_diagnostics.is_some() {
-            self.side_panel =
-                (self.side_panel != Some(SidePanel::Health)).then_some(SidePanel::Health);
-            cx.notify();
-        }
-    }
-
     fn close_side_panel(&mut self, cx: &mut Context<Self>) {
         if self.side_panel.take().is_some() {
             cx.notify();
@@ -2212,7 +2123,6 @@ fn timeframe_overlay_content(
 
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.schedule_diagnostics_frame(window);
         self.track_window_activation(window, cx);
         self.schedule_market_frame(window, cx);
         let theme = self.theme;
@@ -2258,18 +2168,12 @@ impl Render for TerminalApp {
                         || !self.symbol_browser.results().is_empty()
                         || !self.coinbase_products.is_empty(),
                     self.symbol_browser.selected().is_some() || self.coinbase_product.is_some(),
-                    self.feed_diagnostics.is_some(),
                 )
                 .with_chart_controls(chart_has_market_data),
                 dom_visible: self.side_panel == Some(SidePanel::Dom),
-                health_visible: self.side_panel == Some(SidePanel::Health),
                 connection_state,
                 chart_state: self.chart_state,
-                delayed: self
-                    .feed_diagnostics
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.provider_timestamp_age)
-                    .is_some_and(|age| age.nanos > 60_000_000_000),
+                delayed: false,
             },
         );
 
@@ -2287,7 +2191,6 @@ impl Render for TerminalApp {
                 self.connection_message.as_deref(),
             )
             .to_string(),
-            diagnostics: self.feed_diagnostics.as_deref(),
             drawing_state,
             drawing_toolbar_collapsed: self.drawing_toolbar.is_collapsed(),
             theme: &theme,
@@ -2321,7 +2224,6 @@ struct MarketWorkspaceState<'a> {
     side_panel: Option<SidePanel>,
     chart_state: ChartState,
     chart_status_detail: String,
-    diagnostics: Option<&'a FeedDiagnosticsSnapshot>,
     drawing_state: DrawingToolbarState,
     drawing_toolbar_collapsed: bool,
     theme: &'a AxiusflowTheme,
@@ -2336,7 +2238,6 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         side_panel,
         chart_state,
         chart_status_detail,
-        diagnostics,
         drawing_state,
         drawing_toolbar_collapsed,
         theme,
@@ -2368,11 +2269,7 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
                     div()
                         .flex_1()
                         .overflow_hidden()
-                        .children((side_panel == Some(SidePanel::Dom)).then_some(dom))
-                        .children(
-                            (side_panel == Some(SidePanel::Health))
-                                .then(|| feed_health_panel(diagnostics, theme)),
-                        ),
+                        .children((side_panel == Some(SidePanel::Dom)).then_some(dom)),
                 ),
         );
     let chart_workspace = div()
@@ -3046,13 +2943,6 @@ fn header_controls(
         state.controls.enabled(HeaderControls::DOM),
         state.dom_visible,
     );
-    let health_toggle = side_panel_toggle(
-        app.clone(),
-        &state.theme,
-        SidePanel::Health,
-        state.controls.enabled(HeaderControls::HEALTH),
-        state.health_visible,
-    );
     let (connection_label, connection_color) = connection_presentation(
         state.provider,
         state.connection_state,
@@ -3126,7 +3016,6 @@ fn header_controls(
             &state.theme,
         ))
         .child(dom_toggle)
-        .child(health_toggle)
         .child(theme_toggle(app.clone(), &state.theme))
 }
 
@@ -3142,11 +3031,6 @@ fn side_panel_toggle(
             "dom_toggle",
             HugeIcon::SidebarRightIcon01,
             TerminalApp::toggle_dom as fn(&mut TerminalApp, &mut Context<TerminalApp>),
-        ),
-        SidePanel::Health => (
-            "health_toggle",
-            HugeIcon::ActivityIcon01,
-            TerminalApp::toggle_health as fn(&mut TerminalApp, &mut Context<TerminalApp>),
         ),
     };
     panel_toggle(
@@ -3198,7 +3082,6 @@ fn instrument_selector(
             match state.provider {
                 TerminalProvider::Coinbase => "Coinbase spot",
                 TerminalProvider::Rithmic => "Rithmic",
-                TerminalProvider::Fixture => "fixture",
             }
         ),
         button_activation(
@@ -3528,7 +3411,6 @@ fn instrument_dialog_footer(
         .child(match provider {
             TerminalProvider::Coinbase => "Coinbase public spot catalog",
             TerminalProvider::Rithmic => "Rithmic Test catalog",
-            TerminalProvider::Fixture => "Fixture catalog",
         })
 }
 
@@ -3733,7 +3615,6 @@ fn connection_presentation(
     let provider = match provider {
         TerminalProvider::Coinbase => "Coinbase",
         TerminalProvider::Rithmic => "Test",
-        TerminalProvider::Fixture => "Fixture",
     };
     if chart_state == ChartState::Stale {
         return (format!("{provider} · Stale"), |theme| theme.colors.warning);
@@ -3768,157 +3649,6 @@ fn connection_presentation(
             theme.colors.warning
         }),
         FeedConnectionState::Stopped => ("Stopped".to_string(), |theme| theme.colors.loss),
-    }
-}
-
-fn feed_health_panel(
-    snapshot: Option<&FeedDiagnosticsSnapshot>,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement + use<> {
-    let colors = theme.colors;
-    let rows = health_rows(snapshot);
-    div()
-        .id("feed_health_panel")
-        .size_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .border_l_1()
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface_primary))
-        .children(rows.into_iter().map(move |(label, value)| {
-            div()
-                .h(px(28.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .px_2()
-                .border_b_1()
-                .border_color(gpui_color(colors.border.with_alpha(0.55)))
-                .text_xs()
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(gpui_color(colors.muted_foreground))
-                        .child(label),
-                )
-                .child(value)
-        }))
-}
-
-fn health_rows(snapshot: Option<&FeedDiagnosticsSnapshot>) -> Vec<(String, String)> {
-    snapshot.map_or_else(
-        || vec![("State".to_string(), "Awaiting diagnostics".to_string())],
-        |snapshot| {
-            let queue_high_water = snapshot
-                .queues
-                .iter()
-                .map(|queue| queue.high_water_items)
-                .max()
-                .unwrap_or(0);
-            let local_p99 = snapshot
-                .detailed_latency
-                .iter()
-                .flatten()
-                .map(|latency| latency.p99_upper_bound_nanos)
-                .max();
-            vec![
-                (
-                    "Feed".to_string(),
-                    format!(
-                        "{} · {}",
-                        snapshot.identity.system(),
-                        snapshot.identity.environment()
-                    ),
-                ),
-                (
-                    "Session".to_string(),
-                    snapshot
-                        .session_generation
-                        .map_or_else(|| "—".to_string(), |generation| generation.to_string()),
-                ),
-                (
-                    "Messages".to_string(),
-                    format!(
-                        "{} trades · {} quotes · {} depth",
-                        snapshot.counters.trades,
-                        snapshot.counters.quotes,
-                        snapshot.counters.depth_snapshots
-                    ),
-                ),
-                (
-                    "Rates".to_string(),
-                    format!(
-                        "{} t/s · {} q/s · {} d/s",
-                        milli_rate(snapshot.rates.trades_per_second_milli),
-                        milli_rate(snapshot.rates.quotes_per_second_milli),
-                        milli_rate(snapshot.rates.depth_updates_per_second_milli)
-                    ),
-                ),
-                (
-                    "Last message".to_string(),
-                    snapshot
-                        .last_message_age_nanos
-                        .map_or_else(|| "—".to_string(), duration_label),
-                ),
-                (
-                    "Heartbeat".to_string(),
-                    snapshot
-                        .heartbeat_age_nanos
-                        .map_or_else(|| "—".to_string(), duration_label),
-                ),
-                (
-                    "Local processing p99".to_string(),
-                    local_p99.map_or_else(|| "Disabled".to_string(), duration_label),
-                ),
-                (
-                    "Provider clock age".to_string(),
-                    snapshot.provider_timestamp_age.map_or_else(
-                        || "—".to_string(),
-                        |age| format!("{} · clock-relative", signed_duration_label(age.nanos)),
-                    ),
-                ),
-                (
-                    "Reconnects".to_string(),
-                    snapshot.reconnect_count.to_string(),
-                ),
-                ("Queue high water".to_string(), queue_high_water.to_string()),
-                (
-                    "Memory".to_string(),
-                    format!(
-                        "{} / {} KiB",
-                        snapshot.memory.current_bytes / 1024,
-                        snapshot.memory.configured_bound_bytes / 1024
-                    ),
-                ),
-            ]
-        },
-    )
-}
-
-fn milli_rate(value: u64) -> String {
-    format!("{}.{:03}", value / 1_000, value % 1_000)
-}
-
-fn duration_label(nanos: u64) -> String {
-    if nanos < 1_000_000 {
-        format!("{} µs", nanos / 1_000)
-    } else if nanos < 1_000_000_000 {
-        format!("{} ms", nanos / 1_000_000)
-    } else {
-        format!(
-            "{}.{:01} s",
-            nanos / 1_000_000_000,
-            nanos / 100_000_000 % 10
-        )
-    }
-}
-
-fn signed_duration_label(nanos: i64) -> String {
-    if nanos < 0 {
-        format!("-{}", duration_label(nanos.unsigned_abs()))
-    } else {
-        duration_label(nanos.unsigned_abs())
     }
 }
 
@@ -4044,15 +3774,14 @@ fn symbol_input_for_startup(
     startup: &MarketWorkerStartup,
     window: &mut Window,
     cx: &mut App,
-) -> Option<Entity<InputState>> {
+) -> Entity<InputState> {
     match startup {
-        MarketWorkerStartup::Shell(_) => {
-            Some(cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols")))
+        MarketWorkerStartup::Rithmic(_) => {
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
         }
-        MarketWorkerStartup::Loading(_) => Some(
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search Coinbase spot markets")),
-        ),
-        MarketWorkerStartup::Ready(_) => None,
+        MarketWorkerStartup::Coinbase(_) => {
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search Coinbase spot markets"))
+        }
     }
 }
 
@@ -4139,7 +3868,7 @@ fn terminal_root(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
-    let symbol_input = symbol_input_for_startup(&bootstrap, window, cx);
+    let symbol_input = Some(symbol_input_for_startup(&bootstrap, window, cx));
     let search_input = symbol_input.clone();
     let indicator_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
@@ -4179,10 +3908,7 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
-            resident_market_worker::start_rithmic().unwrap_or_else(|error| {
-                eprintln!("Rithmic Test shell could not start: {error}");
-                std::process::exit(1);
-            })
+            resident_market_worker::start_rithmic()
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
@@ -4243,11 +3969,10 @@ mod tests {
         RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
         RithmicSessionRetirement, SidePanel, TerminalProvider, WindowCommand,
         bounded_status_detail, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
-        connection_presentation, default_rithmic_contract_index, duration_label,
-        fullscreen_escape_command, gpui_color, instrument_selector_label, milli_rate,
-        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
-        rithmic_production_subscription, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop,
+        connection_presentation, default_rithmic_contract_index, fullscreen_escape_command,
+        gpui_color, instrument_selector_label, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
+        series_selector_label, should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
     use axiusflow_observability::FeedConnectionState;
@@ -4502,7 +4227,7 @@ mod tests {
     }
 
     #[test]
-    fn header_lifecycle_and_health_values_are_truthfully_labeled() {
+    fn header_lifecycle_values_are_truthfully_labeled() {
         assert_eq!(
             connection_presentation(
                 TerminalProvider::Rithmic,
@@ -4563,15 +4288,10 @@ mod tests {
             .0,
             "Coinbase · Live"
         );
-        assert_eq!(milli_rate(12_345), "12.345");
-        assert_eq!(duration_label(850_000), "850 µs");
-        assert_eq!(duration_label(42_000_000), "42 ms");
-        assert_eq!(duration_label(1_500_000_000), "1.5 s");
-        let controls = HeaderControls::from_state(true, true, false).with_chart_controls(true);
+        let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
-        assert!(!controls.enabled(HeaderControls::HEALTH));
         assert!(controls.enabled(HeaderControls::FIT));
         assert!(controls.enabled(HeaderControls::LATEST));
     }
@@ -4579,12 +4299,12 @@ mod tests {
     #[test]
     fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
         let retained_chart_controls =
-            HeaderControls::from_state(true, false, false).with_chart_controls(true);
+            HeaderControls::from_state(true, false).with_chart_controls(true);
         assert!(retained_chart_controls.enabled(HeaderControls::FIT));
         assert!(retained_chart_controls.enabled(HeaderControls::LATEST));
 
         let empty_chart_controls =
-            HeaderControls::from_state(true, false, false).with_chart_controls(false);
+            HeaderControls::from_state(true, false).with_chart_controls(false);
         assert!(!empty_chart_controls.enabled(HeaderControls::FIT));
         assert!(!empty_chart_controls.enabled(HeaderControls::LATEST));
     }
@@ -4593,11 +4313,9 @@ mod tests {
     fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
         assert_eq!(SidePanel::Dom.toggle_label(), "DOM");
         assert_eq!(SidePanel::Dom.title(), "Order book");
-        assert_eq!(SidePanel::Health.toggle_label(), "Health");
-        assert_eq!(SidePanel::Health.title(), "Feed health");
-        assert_ne!(
+        assert_eq!(
             SidePanel::Dom.toggle_tooltip(),
-            SidePanel::Health.toggle_tooltip()
+            "Toggle read-only depth panel"
         );
     }
 

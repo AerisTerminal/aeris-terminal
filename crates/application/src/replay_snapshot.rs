@@ -347,7 +347,7 @@ impl ReplaySession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarReplayPort, Provenanced};
+    use crate::{EmbeddedReplaySource, LoadEmbeddedReplay, Provenanced};
 
     #[test]
     fn snapshot_orders_bars_by_exact_provenance_time_within_one_second() {

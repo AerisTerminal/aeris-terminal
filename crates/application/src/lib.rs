@@ -6,14 +6,11 @@ mod generation;
 mod provenance;
 mod replay_snapshot;
 mod stream_runtime;
-mod use_case;
 
 pub use axiusflow_protocols::{
     MarketEventProvenance, Provenanced, SequenceDecision, SnapshotEvidence, StreamDelta,
 };
-pub use embedded_source::{
-    EmbeddedReplaySource, LoadEmbeddedReplay, MAX_EMBEDDED_REPLAY_BARS, MarketBarReplayPort,
-};
+pub use embedded_source::{EmbeddedReplaySource, LoadEmbeddedReplay, MAX_EMBEDDED_REPLAY_BARS};
 pub use errors::ReplayValidationError;
 pub use generation::{
     MarketBarClientModel, MarketBarModelOutcome, MarketGeneration, ReplayRecoveryCommand,
@@ -23,9 +20,4 @@ pub use provenance::{
     ProvenancedMarketBar, ReplayProvenance, RequestContext, validate_provenanced_market_bar,
 };
 pub use replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate};
-pub use stream_runtime::{
-    MarketGenerationPort, MarketStreamCommand, MarketStreamCommandOffer, MarketStreamControlSignal,
-    MarketStreamEvent, MarketStreamPublication, MarketStreamPublicationError,
-    MarketStreamRuntimePort,
-};
-pub use use_case::UseCase;
+pub use stream_runtime::{MarketStreamPublication, MarketStreamPublicationError};

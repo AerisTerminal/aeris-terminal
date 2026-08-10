@@ -4,10 +4,7 @@
 //! bounded binary frame encoder. It never decodes; decoding lives in the stream decoder
 //! and wire codec modules.
 
-use crate::canonical_mapping::try_project_canonical_market_bar;
-use crate::errors::{
-    BinaryMarketStreamError, CanonicalMarketBarProjectionError, ProtobufAdapterError,
-};
+use crate::errors::{BinaryMarketStreamError, ProtobufAdapterError};
 use crate::wire_codec::{encode_decimal_i64, try_encode_instrument_revision};
 use crate::{DecimalConvention, MAX_MARKET_BAR_SNAPSHOT_CHUNKS};
 use axiusflow_application::{
@@ -22,7 +19,6 @@ use axiusflow_protocols::{
         market::v1::{self as market_wire, market_bar_stream_envelope},
     },
 };
-use axiusflow_realtime::{CanonicalMarketEvent, SemanticClass};
 use axiusflow_transport::encode_binary_frame;
 use prost::Message;
 use std::num::NonZeroUsize;
@@ -154,39 +150,6 @@ pub fn try_encode_replay_snapshot_chunk_envelopes(
             })
         })
         .collect()
-}
-
-/// Projects one canonical ordered delta directly into the provider-neutral stream envelope.
-///
-/// # Errors
-///
-/// Returns an error for a non-delta semantic class, invalid canonical projection,
-/// non-contiguous sequence evidence, or invalid wire context.
-pub fn try_encode_canonical_market_bar_delta_envelope(
-    subscription_id: impl Into<String>,
-    instrument: &InstrumentRevision,
-    bar_definition: &BarDefinition,
-    previous_sequence: u64,
-    event: &CanonicalMarketEvent,
-    decimal_convention: &DecimalConvention,
-) -> Result<market_wire::MarketBarStreamEnvelope, ProtobufAdapterError> {
-    if event.header().semantic_class != SemanticClass::OrderedDelta {
-        return Err(ProtobufAdapterError::CanonicalProjection(
-            CanonicalMarketBarProjectionError::UnsupportedSemanticClass(
-                event.header().semantic_class,
-            ),
-        ));
-    }
-    let item = try_project_canonical_market_bar(event, instrument, bar_definition)
-        .map_err(ProtobufAdapterError::CanonicalProjection)?;
-    let delta = StreamDelta::try_new(previous_sequence, event.header().source_sequence, item)?;
-    try_encode_replay_delta_envelope(
-        subscription_id,
-        instrument,
-        bar_definition,
-        &delta,
-        decimal_convention,
-    )
 }
 
 /// Encodes one validated replay delta into the provider-neutral stream envelope.

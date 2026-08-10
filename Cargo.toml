@@ -3,17 +3,10 @@ members = [
     "apps/engine",
     "apps/desktop",
     "crates/adapters/coinbase_market",
-    "crates/adapters/linux_socket_network",
-    "crates/adapters/macos_network",
     "crates/adapters/market_protocol",
-    "crates/adapters/portable_network",
-    "crates/adapters/rithmic_fixture",
     "crates/adapters/rithmic_protocol",
-    "crates/adapters/stream_websocket",
-    "crates/adapters/windows_network",
     "crates/application",
     "crates/coinbase_coordinator",
-    "crates/domain/authorization",
     "crates/domain/instruments",
     "crates/domain/market_data",
     "crates/desktop_storage",
@@ -21,26 +14,15 @@ members = [
     "crates/desktop_provider_runtime",
     "crates/local_engine_protocol",
     "crates/observability",
-    "crates/persistence",
     "crates/platform_runtime",
     "crates/provider_history",
     "crates/protocols",
-    "crates/realtime",
-    "crates/security",
-    "services/auth_service",
-    "crates/streaming",
-    "crates/testing",
     "crates/transport",
     "crates/ui/chart_integration",
     "crates/ui/design_system",
     "crates/ui/terminal_ui",
-    "services/authorization_service",
     "tools/diagnostics_overhead",
-    "tools/ingest_conformance",
     "tools/naming_check",
-]
-exclude = [
-    "services/market_data_plane",
 ]
 resolver = "3"
 
@@ -54,12 +36,9 @@ version = "0.1.0"
 [workspace.dependencies]
 base64 = { version = "=0.23.0", default-features = false, features = ["std"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
-core_affinity = "=0.8.3"
-ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
 display-info = "=0.5.9"
 getrandom = "=0.4.3"
 interprocess = { version = "=2.4.2", default-features = false }
-jsonwebtoken = { version = "=11.0.0", default-features = false }
 keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.43"
@@ -67,7 +46,6 @@ serde_json = "=1.0.151"
 webpki-roots = "=1.0.5"
 sha2 = "=0.10.9"
 sysinfo = { version = "=0.31.4", default-features = false, features = ["system"] }
-thread-priority = "=3.1.1"
 wayland-client = { version = "=0.31.15", default-features = false, features = ["dlopen"] }
 wayland-protocols = { version = "=0.32.13", default-features = false, features = [
     "client",
@@ -80,18 +58,10 @@ tungstenite = { version = "=0.30.0", default-features = false, features = [
 ] }
 zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = { version = "=1.9.0", default-features = false }
-postgres = "=0.19.14"
-redb = "=4.1.0"
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 prost = "=0.14.4"
-quinn = { version = "=0.11.11", default-features = false, features = [
-    "runtime-tokio",
-    "rustls-ring",
-] }
 rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
 rpassword = "=7.5.4"
-tokio = { version = "=1.53.1", default-features = false, features = ["rt", "net", "time"] }
-rdkafka = { version = "=0.39.0", default-features = false, features = ["cmake-build"] }
 hmac = "=0.12.1"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"

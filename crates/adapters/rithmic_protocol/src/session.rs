@@ -3,7 +3,7 @@ use crate::{
     InstrumentReferenceRequest, LoginRequest, MarketDataSubscription, OutboundRequest,
     ProtocolError, ReadOnlyPlant, ReplayKind, RithmicProtocolBackend, RithmicProtocolCodec,
     RithmicSessionError, RithmicSessionLimits, SymbolSearchRequest, TickBarReplayRequest,
-    TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
+    TimeBarReplayRequest,
     endpoint::RithmicEndpoint,
     network::{
         ConnectionAbort, RithmicWebSocket, begin_shutdown, connect_websocket, default_tls_config,
@@ -486,19 +486,6 @@ impl RithmicHistoryConnection {
         self.connection.send(OutboundRequest::Heartbeat)
     }
 
-    /// Updates one live time-bar subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn update_time_bars(
-        &mut self,
-        request: TimeBarSubscription<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.connection
-            .send(OutboundRequest::TimeBarUpdate(request))
-    }
-
     /// Starts one bounded time-bar replay.
     ///
     /// # Errors
@@ -509,19 +496,6 @@ impl RithmicHistoryConnection {
         request: TimeBarReplayRequest<'_>,
     ) -> Result<(), RithmicSessionError> {
         self.start_replay(ReplayKind::Time, OutboundRequest::TimeBarReplay(request))
-    }
-
-    /// Updates one live tick-bar subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted protocol or transport failure.
-    pub fn update_tick_bars(
-        &mut self,
-        request: TickBarSubscription<'_>,
-    ) -> Result<(), RithmicSessionError> {
-        self.connection
-            .send(OutboundRequest::TickBarUpdate(request))
     }
 
     /// Starts one bounded tick-bar replay.

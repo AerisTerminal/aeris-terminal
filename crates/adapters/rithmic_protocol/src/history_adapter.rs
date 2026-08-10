@@ -196,11 +196,6 @@ impl RithmicHistorySessionTransport {
             maximum_control_messages,
         })
     }
-
-    #[must_use]
-    pub fn into_connection(self) -> RithmicHistoryConnection {
-        self.connection
-    }
 }
 
 impl RithmicHistoryTransport for RithmicHistorySessionTransport {
@@ -870,11 +865,6 @@ impl RithmicBarContinuity {
                 Err(RithmicHistoryAdapterError::MalformedHistory)
             }
         }
-    }
-
-    /// Discards buffered live values and requires a newer covering snapshot.
-    pub fn require_covering_resnapshot(&mut self, observed_sequence: u64) {
-        self.handoff.require_snapshot(observed_sequence);
     }
 }
 

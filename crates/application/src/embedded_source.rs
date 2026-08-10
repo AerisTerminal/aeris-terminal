@@ -5,7 +5,6 @@ use crate::provenance::{
     ProvenancedMarketBar, ReplayProvenance, embedded_event_provenance, try_provenanced_market_bar,
 };
 use crate::replay_snapshot::ReplaySnapshot;
-use crate::use_case::UseCase;
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -24,36 +23,19 @@ pub struct LoadEmbeddedReplay {
     pub bar_count: usize,
 }
 
-/// Application port implemented by embedded and future transport adapters.
-pub trait MarketBarReplayPort {
-    type Error;
-
-    /// Loads the initial bounded snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns adapter or validation failures.
-    fn load_snapshot(&self, request: LoadEmbeddedReplay) -> Result<ReplaySnapshot, Self::Error>;
-
-    /// Loads one delta after the accepted predecessor, if data remains.
-    ///
-    /// # Errors
-    ///
-    /// Returns adapter, validation, or sequence failures.
-    fn load_delta(
-        &self,
-        previous_sequence: u64,
-    ) -> Result<Option<StreamDelta<ProvenancedMarketBar>>, Self::Error>;
-}
-
 /// Local Stage 1 source used until the real replay transport is implemented.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EmbeddedReplaySource;
 
-impl MarketBarReplayPort for EmbeddedReplaySource {
-    type Error = ReplayValidationError;
-
-    fn load_snapshot(&self, request: LoadEmbeddedReplay) -> Result<ReplaySnapshot, Self::Error> {
+impl EmbeddedReplaySource {
+    /// Loads a bounded deterministic snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the requested size or generated replay is invalid.
+    pub fn load_snapshot(
+        self,
+        request: LoadEmbeddedReplay,
+    ) -> Result<ReplaySnapshot, ReplayValidationError> {
         if !(1..=MAX_EMBEDDED_REPLAY_BARS).contains(&request.bar_count) {
             return Err(StreamProtocolError::ItemLimitExceeded {
                 requested: request.bar_count,
@@ -70,10 +52,14 @@ impl MarketBarReplayPort for EmbeddedReplaySource {
         )
     }
 
-    fn load_delta(
-        &self,
+    /// Loads the next deterministic delta, if one remains.
+    ///
+    /// # Errors
+    /// Returns an error when the sequence overflows or the generated delta is invalid.
+    pub fn load_delta(
+        self,
         previous_sequence: u64,
-    ) -> Result<Option<StreamDelta<ProvenancedMarketBar>>, Self::Error> {
+    ) -> Result<Option<StreamDelta<ProvenancedMarketBar>>, ReplayValidationError> {
         let sequence = previous_sequence
             .checked_add(1)
             .ok_or(StreamProtocolError::SequenceOverflow)?;
@@ -82,24 +68,15 @@ impl MarketBarReplayPort for EmbeddedReplaySource {
         if bar_count > MAX_EMBEDDED_REPLAY_BARS {
             return Ok(None);
         }
-        let bar = embedded_bars(bar_count)
-            .pop()
-            .expect("a non-zero sequence creates one embedded bar");
+        let Some(bar) = embedded_bars(bar_count).pop() else {
+            return Ok(None);
+        };
         let item = try_provenanced_market_bar(bar, embedded_event_provenance(&bar))?;
         Ok(Some(StreamDelta::try_new(
             previous_sequence,
             sequence,
             item,
         )?))
-    }
-}
-
-impl UseCase<LoadEmbeddedReplay> for EmbeddedReplaySource {
-    type Output = ReplaySnapshot;
-    type Error = ReplayValidationError;
-
-    fn execute(&self, command: LoadEmbeddedReplay) -> Result<Self::Output, Self::Error> {
-        self.load_snapshot(command)
     }
 }
 
