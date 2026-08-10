@@ -1,7 +1,6 @@
 use crate::{
-    CacheSource, ControlPlaneState, DesktopHistoryError, HistoryPublication, HydrationOutcome,
-    HydrationRequest, ProviderConnectionState, StartupCacheState, WorkerMetrics,
-    cache::SharedHistoryCache,
+    CacheSource, DesktopHistoryError, HistoryPublication, HydrationOutcome, HydrationRequest,
+    ProviderConnectionState, StartupCacheState, WorkerMetrics, cache::SharedHistoryCache,
 };
 use axiusflow_desktop_storage::{
     AuthorizedHistoryRead, AvailabilityReason, CatalogKey, DesktopStorageError,
@@ -364,12 +363,6 @@ impl<T: Clone> HistoryWorker<T> {
         decoder: &mut D,
     ) -> Result<HydrationOutcome<T>, DesktopHistoryError> {
         self.ensure_owner()?;
-        if request.control_plane_state == ControlPlaneState::Unavailable {
-            self.metrics.control_plane_unavailable_requests = self
-                .metrics
-                .control_plane_unavailable_requests
-                .saturating_add(1);
-        }
         if let Some((publication, access_policy)) = self.cache.get(request.identity) {
             if let Some(access_policy) = access_policy
                 && let Some((reason, recovery)) =

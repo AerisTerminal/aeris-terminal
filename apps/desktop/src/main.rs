@@ -46,7 +46,8 @@ use gpui_component::{
 use gpui_platform::application;
 use resident_market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
+    UiDiagnosticsFeedback,
 };
 use std::{
     borrow::Cow,
@@ -232,6 +233,7 @@ struct TerminalApp {
     subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
+    pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
@@ -687,7 +689,7 @@ fn terminal_startup_state(
     cx: &mut Context<TerminalApp>,
 ) -> TerminalStartupState {
     match startup {
-        MarketWorkerStartup::Rithmic(shell) => {
+        MarketWorkerStartup::Shell(shell) => {
             let profile = shell.profile_label();
             let connection = shell.connection();
             let message = shell.message().to_string();
@@ -695,7 +697,7 @@ fn terminal_startup_state(
                 chart: Some(cx.new(move |_| OriginChartView::empty())),
                 chart_state: ChartState::Loading,
                 chart_state_message: message.clone(),
-                replay_label: profile.to_string(),
+                replay_label: profile.clone(),
                 worker_label: "Rithmic market worker".to_string(),
                 subscription_id: "Loading chart".to_string(),
                 connection_state: Some(connection),
@@ -704,7 +706,7 @@ fn terminal_startup_state(
                 coinbase_product: None,
             }
         }
-        MarketWorkerStartup::Coinbase(startup) => TerminalStartupState {
+        MarketWorkerStartup::Loading(startup) => TerminalStartupState {
             chart: None,
             chart_state: ChartState::Loading,
             chart_state_message: "waiting for a covering market snapshot".to_string(),
@@ -716,6 +718,27 @@ fn terminal_startup_state(
             provider: TerminalProvider::Coinbase,
             coinbase_product: Some(startup.coinbase_product),
         },
+        MarketWorkerStartup::Ready(bootstrap) => {
+            let MarketWorkerBootstrap {
+                snapshot,
+                subscription_id,
+                generation,
+                worker_label,
+            } = *bootstrap;
+            let replay_label = generation_status(&worker_label, &subscription_id, &generation);
+            TerminalStartupState {
+                chart: Some(cx.new(move |_| OriginChartView::with_replay(&snapshot))),
+                chart_state: ChartState::Ready,
+                chart_state_message: "market snapshot is current".to_string(),
+                replay_label,
+                worker_label,
+                subscription_id,
+                connection_state: Some(FeedConnectionState::Streaming),
+                connection_message: Some("Local market fixture is ready".to_string()),
+                provider: TerminalProvider::Coinbase,
+                coinbase_product: None,
+            }
+        }
     }
 }
 
@@ -763,6 +786,7 @@ impl TerminalApp {
             subscription_id,
             bridge_label,
             market_worker,
+            pending_ui_diagnostics: None,
             connection_state,
             connection_message,
             symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
@@ -1042,8 +1066,15 @@ impl TerminalApp {
     }
 
     fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
+        let MarketWorkerPublication {
+            update,
+            generation,
+            subscription_id,
+            worker_label,
+            ui_diagnostics,
+        } = publication;
         if self.provider == TerminalProvider::Coinbase
-            && let ReplayStreamUpdate::Snapshot(snapshot) = &publication.update
+            && let ReplayStreamUpdate::Snapshot(snapshot) = &update
         {
             if let Some(product) = self
                 .coinbase_products
@@ -1061,14 +1092,11 @@ impl TerminalApp {
                 self.coinbase_interval = interval;
             }
         }
-        self.worker_label = publication.worker_label;
-        self.subscription_id = publication.subscription_id;
-        self.replay_label = generation_status(
-            &self.worker_label,
-            &self.subscription_id,
-            &publication.generation,
-        );
-        let next_state = match (&self.chart, publication.update) {
+        self.worker_label = worker_label;
+        self.subscription_id = subscription_id;
+        self.replay_label =
+            generation_status(&self.worker_label, &self.subscription_id, &generation);
+        let next_state = match (&self.chart, update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
                 let theme = self.theme;
                 let chart =
@@ -1094,6 +1122,12 @@ impl TerminalApp {
                 publication_chart_state(accepted, recovery_pending)
             }
             (None, axiusflow_application::ReplayStreamUpdate::Delta(_)) => {
+                if let Some(diagnostics) = ui_diagnostics {
+                    self.market_worker
+                        .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
+                            generation: diagnostics.generation(),
+                        });
+                }
                 self.set_chart_state(
                     ChartState::Error,
                     "market delta arrived before the initial covering snapshot".to_string(),
@@ -1102,6 +1136,14 @@ impl TerminalApp {
                 return;
             }
         };
+        if let Some(diagnostics) = ui_diagnostics
+            && let Some(replaced) = self.pending_ui_diagnostics.replace(diagnostics)
+        {
+            self.market_worker
+                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
+                    generation: replaced.generation(),
+                });
+        }
         if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = "market snapshot is current".to_string();
@@ -1239,6 +1281,12 @@ impl TerminalApp {
         match message {
             MarketWorkerMessage::Update(publication) => {
                 self.apply_publication(publication, cx);
+            }
+            MarketWorkerMessage::Diagnostics(snapshot) => {
+                #[cfg(feature = "diagnostics")]
+                eprintln!("desktop market diagnostics: {snapshot:?}");
+                #[cfg(not(feature = "diagnostics"))]
+                drop(snapshot);
             }
             MarketWorkerMessage::Recovery { request_id, result } => {
                 self.apply_recovery(request_id, result, cx);
@@ -1479,13 +1527,24 @@ impl TerminalApp {
             return;
         }
         let app = cx.entity();
-        window.on_next_frame(move |_, cx| {
-            app.update(cx, |app, cx| {
+        window.on_next_frame(move |window, cx| {
+            let diagnostics = app.update(cx, |app, cx| {
                 app.frame_poll_gate.complete();
                 if app.poll_market_worker(cx) > 0 {
                     cx.notify();
                 }
+                app.pending_ui_diagnostics.take()
             });
+            if let Some(mut diagnostics) = diagnostics {
+                diagnostics.mark_frame_submit();
+                let app = app.clone();
+                window.on_next_frame(move |_, cx| {
+                    app.update(cx, |app, _| {
+                        app.market_worker
+                            .send_ui_diagnostics(diagnostics.into_presented());
+                    });
+                });
+            }
         });
     }
 
@@ -3832,10 +3891,10 @@ fn symbol_input_for_startup(
     cx: &mut App,
 ) -> Entity<InputState> {
     match startup {
-        MarketWorkerStartup::Rithmic(_) => {
+        MarketWorkerStartup::Shell(_) => {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
         }
-        MarketWorkerStartup::Coinbase(_) => {
+        MarketWorkerStartup::Loading(_) | MarketWorkerStartup::Ready(_) => {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search Coinbase spot markets"))
         }
     }
@@ -3943,7 +4002,7 @@ fn terminal_root(
     root
 }
 
-fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)> {
+fn configured_market_worker() -> Result<Option<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
         #[cfg(feature = "diagnostics")]
@@ -3953,37 +4012,42 @@ fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)>
                 .expect("usage: axiusflow_desktop --windowed-benchmark <report-path>");
             windowed_benchmark::run(std::path::Path::new(&report_path))
                 .expect("the windowed benchmark completes");
-            return None;
+            return Ok(None);
         }
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-readiness" {
             run_desktop_readiness_command(arguments).expect("desktop readiness conformance passes");
-            return None;
+            return Ok(None);
         }
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-endurance" {
             run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
-            return None;
+            return Ok(None);
         }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
-            resident_market_worker::start_rithmic()
+            resident_market_worker::start_rithmic()?
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
         }
     } else {
-        resident_market_worker::start()
+        resident_market_worker::start()?
     };
-    Some(worker)
+    Ok(Some(worker))
 }
 
 fn main() {
-    let Some((bootstrap, market_worker)) = configured_market_worker() else {
-        return;
+    let (bootstrap, market_worker) = match configured_market_worker() {
+        Ok(Some(worker)) => worker,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("Axiusflow market worker could not start: {error}");
+            std::process::exit(1);
+        }
     };
     application()
         .with_assets(assets::DesktopAssets)

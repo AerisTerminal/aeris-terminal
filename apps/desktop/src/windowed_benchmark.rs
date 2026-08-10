@@ -7,8 +7,11 @@
 //! native GPUI window. These callbacks run after the prior render but do not prove
 //! physical scanout, and the report says so.
 
+use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate};
 use axiusflow_chart_integration::OriginChartView;
 use axiusflow_coinbase_coordinator::market_worker::FixtureMarketWorker;
+use axiusflow_coinbase_market_adapter::{CoinbaseInterval, aggregate_coinbase_bars};
+use axiusflow_market_data::BarDefinition;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
 use axiusflow_platform_runtime::{WindowsCompositionProbe, WindowsCompositionTiming};
@@ -89,6 +92,12 @@ struct WindowsCompositionEvidence {
 }
 
 #[derive(Serialize)]
+struct LatencyTargets {
+    warm_first_pixel_met: bool,
+    timeframe_switch_met: bool,
+}
+
+#[derive(Serialize)]
 struct WindowedBenchmarkReport {
     schema_version: u32,
     evidence_scope: &'static str,
@@ -97,6 +106,9 @@ struct WindowedBenchmarkReport {
     warmup_frames: usize,
     measured_frames: usize,
     updates_published: usize,
+    first_pixel_nanos: u64,
+    timeframe_switch_first_pixel_nanos: u64,
+    latency_targets: LatencyTargets,
     update_to_frame_callback: LatencyEvidence,
     frame_callback_interval: LatencyEvidence,
     renderer_submission_performed: bool,
@@ -117,12 +129,17 @@ struct FrameSample {
 struct BenchmarkDriver {
     chart: Entity<OriginChartView>,
     worker: FixtureMarketWorker,
+    timeframe_snapshot: Option<ReplaySnapshot>,
     previous_sequence: u64,
     iteration: usize,
     submitted_at: Instant,
     last_callback_at: Instant,
     samples: Vec<FrameSample>,
     report_path: PathBuf,
+    opened_at: Instant,
+    first_pixel_nanos: Option<u64>,
+    timeframe_switch_submitted_at: Option<Instant>,
+    timeframe_switch_first_pixel_nanos: Option<u64>,
     #[cfg(target_os = "windows")]
     composition_probe: Option<WindowsCompositionProbe>,
     #[cfg(target_os = "windows")]
@@ -141,6 +158,24 @@ enum Step {
 impl BenchmarkDriver {
     fn step(&mut self, window: &mut Window, cx: &mut App) -> Step {
         let callback_at = Instant::now();
+        self.first_pixel_nanos.get_or_insert_with(|| {
+            u64::try_from(
+                callback_at
+                    .saturating_duration_since(self.opened_at)
+                    .as_nanos(),
+            )
+            .unwrap_or(u64::MAX)
+        });
+        if let Some(submitted_at) = self.timeframe_switch_submitted_at.take() {
+            self.timeframe_switch_first_pixel_nanos = Some(
+                u64::try_from(
+                    callback_at
+                        .saturating_duration_since(submitted_at)
+                        .as_nanos(),
+                )
+                .unwrap_or(u64::MAX),
+            );
+        }
         #[cfg(target_os = "windows")]
         self.sample_composition();
         if self.iteration > 0 {
@@ -150,7 +185,7 @@ impl BenchmarkDriver {
             let frame_callback_interval = callback_at
                 .saturating_duration_since(self.last_callback_at)
                 .as_nanos();
-            if self.iteration > WARMUP_FRAMES {
+            if self.iteration > WARMUP_FRAMES && self.samples.len() < MEASURED_FRAMES {
                 self.samples.push(FrameSample {
                     update_to_frame_callback_nanos: u64::try_from(update_to_frame_callback)
                         .unwrap_or(u64::MAX),
@@ -161,7 +196,23 @@ impl BenchmarkDriver {
         }
         self.last_callback_at = callback_at;
         if self.samples.len() >= MEASURED_FRAMES {
-            return Step::Finish;
+            if self.timeframe_switch_first_pixel_nanos.is_some() {
+                return Step::Finish;
+            }
+            let Some(snapshot) = self.timeframe_snapshot.take() else {
+                return Step::Finish;
+            };
+            self.chart.update(cx, |chart, _| {
+                if chart
+                    .try_queue_replay_update(ReplayStreamUpdate::Snapshot(snapshot))
+                    .is_err()
+                {
+                    eprintln!("windowed benchmark timeframe snapshot queue overflowed");
+                }
+            });
+            window.refresh();
+            self.timeframe_switch_submitted_at = Some(Instant::now());
+            return Step::Continue;
         }
         let publication = match self.worker.publish_delta(self.previous_sequence) {
             Ok(Some(publication)) => publication,
@@ -461,8 +512,8 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "windows")]
     let windows_dwm_composition = windows_composition_evidence(driver);
     let report = WindowedBenchmarkReport {
-        schema_version: 3,
-        evidence_scope: "windowed_replay_to_frame_callback_and_native_compositor_timeline",
+        schema_version: 5,
+        evidence_scope: "windowed_first_pixel_timeframe_switch_replay_and_native_compositor_timeline",
         source_revision: env::var("GITHUB_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty()),
@@ -470,6 +521,18 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
         warmup_frames: WARMUP_FRAMES,
         measured_frames: driver.samples.len(),
         updates_published: driver.iteration,
+        first_pixel_nanos: driver.first_pixel_nanos.unwrap_or(u64::MAX),
+        timeframe_switch_first_pixel_nanos: driver
+            .timeframe_switch_first_pixel_nanos
+            .unwrap_or(u64::MAX),
+        latency_targets: LatencyTargets {
+            warm_first_pixel_met: driver
+                .first_pixel_nanos
+                .is_some_and(|value| value < 1_000_000_000),
+            timeframe_switch_met: driver
+                .timeframe_switch_first_pixel_nanos
+                .is_some_and(|value| value < 1_000_000_000),
+        },
         update_to_frame_callback: latency_evidence(&driver.samples, |sample| {
             sample.update_to_frame_callback_nanos
         }),
@@ -504,10 +567,11 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
     encoded.push(b'\n');
     fs::write(&driver.report_path, encoded)?;
     println!(
-        "windowed_replay_to_frame_callback=completed measured_frames={} update_to_frame_callback_p50_ns={} frame_callback_interval_p50_ns={} report={}",
+        "windowed_chart_latency=completed first_pixel_ns={} timeframe_switch_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} report={}",
+        report.first_pixel_nanos,
+        report.timeframe_switch_first_pixel_nanos,
         driver.samples.len(),
         report.update_to_frame_callback.p50,
-        report.frame_callback_interval.p50,
         driver.report_path.display()
     );
     Ok(())
@@ -527,6 +591,27 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     let bootstrap = worker
         .publish_snapshot(SNAPSHOT_BARS)
         .map_err(Box::<dyn Error>::from)?;
+    let source_bars = bootstrap
+        .snapshot
+        .stream()
+        .items()
+        .iter()
+        .map(|item| *item.value())
+        .collect::<Vec<_>>();
+    let (timeframe_bars, _) = aggregate_coinbase_bars(&source_bars, CoinbaseInterval::Minute5)
+        .map_err(Box::<dyn Error>::from)?;
+    let timeframe_snapshot = ReplaySnapshot::try_new(
+        bootstrap.snapshot.instrument().clone(),
+        ReplayProvenance::EmbeddedFixture,
+        BarDefinition {
+            definition_id: "coinbase_5m_ohlcv_v1".to_string(),
+            version: 1,
+            interval_seconds: 300,
+            trades_per_bar: None,
+        },
+        timeframe_bars,
+    )?
+    .try_with_generation(bootstrap.snapshot.evidence().generation.saturating_add(1))?;
     let previous_sequence = bootstrap.snapshot.stream().last_sequence();
     let snapshot = bootstrap.snapshot;
     let report_path = report_path.to_path_buf();
@@ -554,12 +639,17 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                 let driver = Rc::new(RefCell::new(BenchmarkDriver {
                     chart: chart.clone(),
                     worker,
+                    timeframe_snapshot: Some(timeframe_snapshot),
                     previous_sequence,
                     iteration: 0,
                     submitted_at: Instant::now(),
                     last_callback_at: Instant::now(),
                     samples: Vec::with_capacity(MEASURED_FRAMES),
                     report_path,
+                    opened_at: Instant::now(),
+                    first_pixel_nanos: None,
+                    timeframe_switch_submitted_at: None,
+                    timeframe_switch_first_pixel_nanos: None,
                     #[cfg(target_os = "windows")]
                     composition_probe,
                     #[cfg(target_os = "windows")]

@@ -15,8 +15,7 @@ use axiusflow_coinbase_market_adapter::{
     encode_history_segment, history_segment_item_count,
 };
 use axiusflow_desktop_history::{
-    ControlPlaneState, HistoryDecoder, HydrationOutcome, HydrationRequest, ProviderConnectionState,
-    StartupCacheState,
+    HistoryDecoder, HydrationOutcome, HydrationRequest, ProviderConnectionState, StartupCacheState,
 };
 use axiusflow_desktop_provider_runtime::SessionGeneration;
 use axiusflow_desktop_storage::{
@@ -34,7 +33,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub(super) struct PreparedHistory {
@@ -175,8 +177,14 @@ impl HistorySource for DirectHistorySource {
         let transport = CoinbaseHttpsHistoryTransport::with_stop(Arc::clone(&cancel));
         let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(transport)
             .map_err(|error| error.to_string())?;
-        adapter.set_stop(cancel);
-        fetch_history_range_with_adapter(profile, &mut adapter, now_unix_nanos, range)
+        adapter.set_stop(Arc::clone(&cancel));
+        fetch_history_range_with_adapter_cancelled(
+            profile,
+            &mut adapter,
+            now_unix_nanos,
+            range,
+            Some(&cancel),
+        )
     }
 }
 
@@ -366,28 +374,41 @@ pub(super) fn prepare_initial_history<V: axiusflow_platform_runtime::CredentialV
         account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
         entitlement_revision: ENTITLEMENT_CLASS.to_string(),
     };
-    let series = HistorySeriesIdentity {
-        scope: &scope,
-        instrument_id: &context.profile.instrument_id,
-        data_kind: DataKind::Bars,
-        resolution: context.profile.interval.label(),
-        source_revision: 1,
-        schema_revision: 1,
-        calendar_revision: 1,
-        adjustment_revision: 1,
-        correction_revision: 1,
-    };
     let requested = history_request_range(context.profile, now, FetchPhase::Full)?;
-    let identities = worker
-        .retained_history_identities_in_range(
-            series,
-            RetainedRange {
-                start_unix_nanos: requested.start_unix_nanos,
-                end_unix_nanos: requested.end_unix_nanos,
-            },
+    let requested_range = RetainedRange {
+        start_unix_nanos: requested.start_unix_nanos,
+        end_unix_nanos: requested.end_unix_nanos,
+    };
+    let mut identities =
+        if context.profile.interval == axiusflow_market_data::ChartInterval::Minute1 {
+            Vec::new()
+        } else {
+            worker
+                .retained_history_identities_in_range(
+                    history_series_for(&scope, context.profile, DataKind::Derived),
+                    requested_range,
+                    now_seconds,
+                )
+                .map_err(|error| error.to_string())?
+        };
+    if identities.is_empty() {
+        identities = worker
+            .retained_history_identities_in_range(
+                history_series(&scope, context.profile),
+                requested_range,
+                now_seconds,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if identities.is_empty() {
+        identities = materialize_derived_history(
+            worker,
+            context.profile,
+            context.segment_key,
+            requested,
             now_seconds,
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
+    }
     let provider_state =
         if context.initial_network == Some(axiusflow_platform_runtime::NetworkEvent::Unavailable) {
             ProviderConnectionState::Offline
@@ -450,7 +471,6 @@ fn hydrate_cached_history<V: axiusflow_platform_runtime::CredentialVault>(
                     now_unix_seconds: request.now_seconds,
                     startup_cache_state: StartupCacheState::Cold,
                     provider_state: request.provider_state,
-                    control_plane_state: ControlPlaneState::Unavailable,
                     missing_recovery: RecoveryAction::ProviderRefetch,
                 },
                 &mut CoinbaseSegmentDecoder,
@@ -674,7 +694,6 @@ fn load_merged_history_values<V: axiusflow_platform_runtime::CredentialVault>(
                     now_unix_seconds: now_seconds,
                     startup_cache_state: StartupCacheState::Warm,
                     provider_state: ProviderConnectionState::Online,
-                    control_plane_state: ControlPlaneState::Unavailable,
                     missing_recovery: RecoveryAction::ProviderRefetch,
                 },
                 &mut CoinbaseSegmentDecoder,
@@ -721,10 +740,18 @@ fn history_series<'a>(
     scope: &'a HistoryScope,
     profile: &'a ProductProfile,
 ) -> HistorySeriesIdentity<'a> {
+    history_series_for(scope, profile, DataKind::Bars)
+}
+
+fn history_series_for<'a>(
+    scope: &'a HistoryScope,
+    profile: &'a ProductProfile,
+    data_kind: DataKind,
+) -> HistorySeriesIdentity<'a> {
     HistorySeriesIdentity {
         scope,
         instrument_id: &profile.instrument_id,
-        data_kind: DataKind::Bars,
+        data_kind,
         resolution: profile.interval.label(),
         source_revision: 1,
         schema_revision: 1,
@@ -732,6 +759,96 @@ fn history_series<'a>(
         adjustment_revision: 1,
         correction_revision: 1,
     }
+}
+
+fn materialize_derived_history<V: axiusflow_platform_runtime::CredentialVault>(
+    worker: &mut CoinbaseDesktopWorker<V>,
+    profile: &ProductProfile,
+    segment_key: &SegmentEncryptionKey,
+    requested: HistoryRange,
+    now_seconds: i64,
+) -> Result<Vec<SegmentIdentity>, String> {
+    if profile.interval == axiusflow_market_data::ChartInterval::Minute1 {
+        return Ok(Vec::new());
+    }
+    let scope = HistoryScope {
+        provider_id: "coinbase".to_string(),
+        account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+        entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+    };
+    let source_profile = ProductProfile {
+        interval: axiusflow_market_data::ChartInterval::Minute1,
+        ..profile.clone()
+    };
+    let source_identities = worker
+        .retained_history_identities_in_range(
+            history_series(&scope, &source_profile),
+            RetainedRange {
+                start_unix_nanos: requested.start_unix_nanos,
+                end_unix_nanos: requested.end_unix_nanos,
+            },
+            now_seconds,
+        )
+        .map_err(|error| error.to_string())?;
+    if source_identities.is_empty() {
+        return Ok(Vec::new());
+    }
+    let source = load_merged_history_values(
+        worker,
+        source_identities,
+        requested,
+        segment_key,
+        now_seconds,
+    )?
+    .into_iter()
+    .map(|item| item.value)
+    .collect::<Vec<_>>();
+    let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
+    let (derived, _) = aggregate_coinbase_bars(&source, interval)?;
+    let interval_nanos = history_interval_nanos(profile)?;
+    let mut identities = Vec::new();
+    for chunk in derived.chunks(350) {
+        let Some((first, last)) = chunk.first().zip(chunk.last()) else {
+            continue;
+        };
+        let start = first
+            .exchange_timestamp_seconds
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| "Coinbase derived range overflow".to_string())?;
+        let end = last
+            .exchange_timestamp_seconds
+            .checked_mul(1_000_000_000)
+            .and_then(|value| value.checked_add(interval_nanos))
+            .ok_or_else(|| "Coinbase derived range overflow".to_string())?;
+        let mut identity = history_identity(profile, start, end);
+        identity.data_kind = DataKind::Derived;
+        let items = chunk
+            .iter()
+            .map(|bar| HistoryItem {
+                sequence: bar.source_sequence,
+                event_time_unix_nanos: bar.exchange_timestamp_seconds * 1_000_000_000,
+                payload: encode_history_bar(*bar),
+            })
+            .collect::<Vec<_>>();
+        let payload = encode_history_segment(&items)?;
+        worker
+            .persist_history_segment(PublicationRequest {
+                identity: &identity,
+                payload: &payload,
+                encryption_key: segment_key,
+                retention: RetentionPolicy::UntilRevoked,
+                recovery: RecoveryAction::ProviderRefetch,
+                now_unix_seconds: now_seconds,
+            })
+            .map_err(|error| error.to_string())?;
+        identities.push(identity);
+    }
+    worker
+        .enforce_derived_history_quota(
+            axiusflow_desktop_storage::DEFAULT_DERIVED_PAYLOAD_QUOTA_BYTES,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(identities)
 }
 
 #[cfg(test)]
@@ -767,11 +884,22 @@ pub(super) fn fetch_history_with_adapter<T: CoinbaseHistoryTransport>(
     fetch_history_range_with_adapter(profile, adapter, now, range)
 }
 
+#[cfg(test)]
 pub(super) fn fetch_history_range_with_adapter<T: CoinbaseHistoryTransport>(
     profile: &ProductProfile,
     adapter: &mut CoinbaseHistoryCapabilityAdapter<T>,
     now: i64,
     range: HistoryRange,
+) -> Result<PreparedHistory, String> {
+    fetch_history_range_with_adapter_cancelled(profile, adapter, now, range, None)
+}
+
+fn fetch_history_range_with_adapter_cancelled<T: CoinbaseHistoryTransport>(
+    profile: &ProductProfile,
+    adapter: &mut CoinbaseHistoryCapabilityAdapter<T>,
+    now: i64,
+    range: HistoryRange,
+    cancel: Option<&AtomicBool>,
 ) -> Result<PreparedHistory, String> {
     let interval = CoinbaseInterval::try_from(profile.interval).map_err(str::to_string)?;
     let source_seconds = coinbase_history_source_seconds(interval);
@@ -812,9 +940,15 @@ pub(super) fn fetch_history_range_with_adapter<T: CoinbaseHistoryTransport>(
         .map_err(|error| error.to_string())?
         .dispatch
         .ok_or_else(|| "Coinbase history request was not dispatchable".to_string())?;
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return Err("Coinbase history repair was cancelled".to_string());
+    }
     let batch = adapter
         .fetch_paginated(&dispatch.request)
         .map_err(|error| format!("Coinbase history provider fetch failed: {error}"))?;
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        return Err("Coinbase history repair was cancelled before aggregation".to_string());
+    }
     let page = aggregated_history_page(&dispatch.request, &batch, interval, source_seconds, start)?;
     let received_unix_nanos = now;
     let completion = scheduler
@@ -1031,8 +1165,8 @@ mod tests {
     use crate::{
         live_market_worker::{
             composition::{
-                bar_definition, client_model, instrument, nonzero, open_test_worker,
-                product_profile,
+                bar_definition, bar_definition_for_interval, client_model, instrument, nonzero,
+                open_test_worker, product_profile,
             },
             lifecycle::apply_initial_network,
         },
@@ -1193,6 +1327,79 @@ mod tests {
         for corrupt in [false, true] {
             assert_offline_cache_startup(corrupt);
         }
+    }
+
+    #[test]
+    fn warm_timeframe_switch_materializes_immutable_derived_history() {
+        let source_profile = product_profile("BTC-USD".to_string()).expect("profile validates");
+        let root = seed_cached_history(&source_profile, false);
+        let mut target_profile = source_profile;
+        target_profile.interval = axiusflow_market_data::ChartInterval::Minute5;
+        let ui_thread = thread::current().id();
+        let path = root.0.clone();
+        thread::spawn(move || {
+            let (driver, _events) = CoinbaseProviderDriver::new(
+                CoinbaseConfig::try_new(vec![target_profile.product_id.clone()])
+                    .expect("provider config validates"),
+                nonzero(8),
+            );
+            let mut worker = open_test_worker(
+                &target_profile,
+                path,
+                ui_thread,
+                MemoryVault,
+                driver,
+                catalog_key(),
+            )
+            .expect("shipping worker opens");
+            apply_initial_network(&mut worker, Some(NetworkEvent::Unavailable))
+                .expect("offline state applies");
+            let (sender, receiver) = market_worker_channel(nonzero(8));
+            let instrument = instrument(&target_profile).expect("instrument validates");
+            let definition = bar_definition_for_interval(target_profile.interval);
+            let retained = prepare_initial_history(
+                &mut worker,
+                &FixtureClock(1_700_000_190_000_000_000),
+                &InitialHistoryContext {
+                    profile: &target_profile,
+                    segment_key: &segment_key(),
+                    instrument: &instrument,
+                    bar_definition: &definition,
+                    worker_label: "Coinbase derived cache fixture",
+                    initial_network: Some(NetworkEvent::Unavailable),
+                },
+                &mut client_model(),
+                &sender,
+            )
+            .expect("derived cache hydrates");
+            assert_eq!(retained.len(), 1);
+            assert!(receiver.drain().0.iter().any(|message| matches!(
+                message,
+                MarketWorkerMessage::Update(publication)
+                    if matches!(publication.update, ReplayStreamUpdate::Snapshot(_))
+            )));
+            let scope = axiusflow_desktop_storage::HistoryScope {
+                provider_id: "coinbase".to_string(),
+                account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+                entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+            };
+            assert!(
+                worker
+                    .latest_history_identity(
+                        super::history_series_for(
+                            &scope,
+                            &target_profile,
+                            axiusflow_desktop_storage::DataKind::Derived,
+                        ),
+                        1_700_000_190,
+                    )
+                    .expect("derived lookup succeeds")
+                    .is_some()
+            );
+            worker.stop().expect("offline worker stops");
+        })
+        .join()
+        .expect("derived cache fixture completes");
     }
 
     fn assert_offline_cache_startup(corrupt: bool) {

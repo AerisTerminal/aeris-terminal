@@ -44,7 +44,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, ThreadId},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use composition::{
@@ -78,6 +78,7 @@ const SCHEMA_VERSION: u32 = 1;
 const INBOX_CAPACITY: usize = 64;
 const INBOX_BATCH: usize = 1_024;
 const UI_DIAGNOSTICS_CAPACITY: usize = 256;
+const HISTORY_REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const SUBSCRIPTION_ID: &str = "desktop_coinbase_one_minute_bars";
 const VAULT_SERVICE: &str = "axiusflow-desktop-market-history";
 const CATALOG_KEY_ID: &str = "history-catalog-key-v1";
@@ -107,6 +108,7 @@ enum HistoryCommand {
         requested: HistoryRange,
         repairs: Vec<HistoryRange>,
         cancel: Arc<AtomicBool>,
+        deadline: Instant,
     },
 }
 
@@ -511,6 +513,7 @@ fn history_command_loop<H: HistorySource>(
             requested,
             repairs,
             cancel,
+            deadline,
         } = command
         else {
             let HistoryCommand::Now(reply) = command else {
@@ -519,6 +522,9 @@ fn history_command_loop<H: HistorySource>(
             let _ = reply.send(source.now_unix_nanos());
             continue;
         };
+        if cancel.load(Ordering::Acquire) || Instant::now() >= deadline {
+            continue;
+        }
         let Ok(now) = source.now_unix_nanos() else {
             continue;
         };
@@ -544,16 +550,21 @@ fn history_command_loop<H: HistorySource>(
                 .flat_map(|range| subtract_history_range(range, recent))
                 .collect();
             if !visible_repairs.is_empty() {
-                let result =
-                    fetch_history_repairs(source, &profile, now, &visible_repairs, &cancel).map(
-                        |repairs| {
-                            Box::new(PreparedHistoryBatch {
-                                requested: recent,
-                                repairs,
-                                received_unix_nanos: now,
-                            })
-                        },
-                    );
+                let result = fetch_history_repairs(
+                    source,
+                    &profile,
+                    now,
+                    &visible_repairs,
+                    &cancel,
+                    deadline,
+                )
+                .map(|repairs| {
+                    Box::new(PreparedHistoryBatch {
+                        requested: recent,
+                        repairs,
+                        received_unix_nanos: now,
+                    })
+                });
                 let failed = result.is_err();
                 if inbox_tx
                     .send(WorkerInboxEvent::HistoryCompleted {
@@ -570,11 +581,11 @@ fn history_command_loop<H: HistorySource>(
                 }
             }
         }
-        if cancel.load(Ordering::Acquire) {
+        if cancel.load(Ordering::Acquire) || Instant::now() >= deadline {
             continue;
         }
-        let result =
-            fetch_history_repairs(source, &profile, now, &remaining, &cancel).map(|repairs| {
+        let result = fetch_history_repairs(source, &profile, now, &remaining, &cancel, deadline)
+            .map(|repairs| {
                 Box::new(PreparedHistoryBatch {
                     requested,
                     repairs,
@@ -630,13 +641,26 @@ fn fetch_history_repairs<H: HistorySource>(
     now: i64,
     repairs: &[HistoryRange],
     cancel: &Arc<AtomicBool>,
+    deadline: Instant,
 ) -> Result<Vec<history::PreparedHistory>, String> {
     let mut fetched = Vec::with_capacity(repairs.len());
     for &range in repairs {
         if cancel.load(Ordering::Acquire) {
             return Err("Coinbase history repair was cancelled".to_string());
         }
-        fetched.push(source.fetch(profile, now, Arc::clone(cancel), range)?);
+        if Instant::now() >= deadline {
+            cancel.store(true, Ordering::Release);
+            return Err("Coinbase history repair deadline exceeded".to_string());
+        }
+        let repair = source.fetch(profile, now, Arc::clone(cancel), range)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err("Coinbase history repair was cancelled before decode".to_string());
+        }
+        if Instant::now() >= deadline {
+            cancel.store(true, Ordering::Release);
+            return Err("Coinbase history repair deadline exceeded".to_string());
+        }
+        fetched.push(repair);
     }
     Ok(fetched)
 }
@@ -833,6 +857,7 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
             requested,
             repairs: coverage.repair_ranges().to_vec(),
             cancel,
+            deadline: Instant::now() + HISTORY_REQUEST_DEADLINE,
         })
         .map_err(|_| "Coinbase history worker stopped".to_string())
 }

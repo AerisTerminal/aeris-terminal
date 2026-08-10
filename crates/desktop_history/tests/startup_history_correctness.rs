@@ -1,7 +1,6 @@
 use axiusflow_desktop_history::{
-    ChartId, ControlPlaneState, DesktopHistoryError, HistoryDecoder, HistoryWorker,
-    HistoryWorkerConfig, HydrationOutcome, HydrationRequest, ProviderConnectionState,
-    StartupCacheState,
+    ChartId, DesktopHistoryError, HistoryDecoder, HistoryWorker, HistoryWorkerConfig,
+    HydrationOutcome, HydrationRequest, ProviderConnectionState, StartupCacheState,
 };
 use axiusflow_desktop_storage::{
     AvailabilityReason, CatalogKey, DataKind, HistoryScope, HistoryStore, PublicationOutcome,
@@ -137,7 +136,6 @@ fn startup_matrix_is_local_deterministic_and_recovers_explicitly() {
         assert_eq!(metrics.storage_bytes_read, 15);
         assert_eq!(metrics.memory_cache_hits, 1);
         assert_eq!(metrics.memory_cache_misses, metrics.storage_reads);
-        assert_eq!(metrics.control_plane_unavailable_requests, 4);
     })
     .join()
     .expect("worker thread completes");
@@ -160,7 +158,6 @@ fn assert_empty_and_populated_cases(
                 key,
                 cache_state,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             decoder,
         ));
@@ -171,7 +168,6 @@ fn assert_empty_and_populated_cases(
             key,
             StartupCacheState::Cold,
             ProviderConnectionState::Offline,
-            ControlPlaneState::Unavailable,
         ),
         decoder,
     ));
@@ -183,7 +179,6 @@ fn assert_empty_and_populated_cases(
             key,
             StartupCacheState::Warm,
             ProviderConnectionState::Online,
-            ControlPlaneState::Available,
         ),
         decoder,
     ));
@@ -196,7 +191,6 @@ fn assert_empty_and_populated_cases(
             key,
             StartupCacheState::Warm,
             ProviderConnectionState::Offline,
-            ControlPlaneState::Unavailable,
         ),
         decoder,
     ));
@@ -232,7 +226,6 @@ fn assert_cached_access_policy(
                 &wrong_key,
                 StartupCacheState::Warm,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             decoder,
         ),
@@ -245,7 +238,6 @@ fn assert_cached_access_policy(
         key,
         StartupCacheState::Warm,
         ProviderConnectionState::Online,
-        ControlPlaneState::Available,
     );
     expired_request.now_unix_seconds = 102;
     assert!(
@@ -278,7 +270,6 @@ fn assert_recovery_cases(
                 key,
                 StartupCacheState::Cold,
                 ProviderConnectionState::Offline,
-                ControlPlaneState::Unavailable,
             ),
             decoder,
         ),
@@ -293,7 +284,6 @@ fn assert_recovery_cases(
         key,
         StartupCacheState::Cold,
         ProviderConnectionState::Online,
-        ControlPlaneState::Available,
     );
     live_only_request.missing_recovery = RecoveryAction::LiveOnly;
     assert!(matches!(
@@ -309,7 +299,6 @@ fn assert_recovery_cases(
                 key,
                 StartupCacheState::Cold,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             decoder,
         ),
@@ -322,7 +311,6 @@ fn assert_recovery_cases(
                 key,
                 StartupCacheState::Cold,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             decoder,
         ),
@@ -331,17 +319,13 @@ fn assert_recovery_cases(
             maximum: 64,
         })
     ));
-    for (identity, control_state) in [
-        (identity("control-down", 1), ControlPlaneState::Unavailable),
-        (identity("btc-usd", 2), ControlPlaneState::Available),
-    ] {
+    for identity in [identity("not-cached", 1), identity("btc-usd", 2)] {
         assert_provider_fetch(worker.hydrate_visible(
             hydration_request(
                 &identity,
                 key,
                 StartupCacheState::Cold,
                 ProviderConnectionState::Online,
-                control_state,
             ),
             decoder,
         ));
@@ -354,7 +338,6 @@ fn assert_recovery_cases(
                     key,
                     StartupCacheState::Cold,
                     ProviderConnectionState::Offline,
-                    ControlPlaneState::Available,
                 ),
                 decoder,
             ),
@@ -490,7 +473,6 @@ fn local_cache_watermark_does_not_floor_provider_generation() {
                 &key,
                 StartupCacheState::Warm,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             &mut decoder,
         ));
@@ -535,7 +517,6 @@ fn expired_local_cache_does_not_floor_provider_handoff() {
                 &key,
                 StartupCacheState::Warm,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             &mut decoder,
         ));
@@ -588,7 +569,6 @@ fn local_hydration_rotates_unbound_cache_within_byte_bound() {
                 &key,
                 StartupCacheState::Warm,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             &mut decoder,
         ));
@@ -598,7 +578,6 @@ fn local_hydration_rotates_unbound_cache_within_byte_bound() {
                 &key,
                 StartupCacheState::Warm,
                 ProviderConnectionState::Online,
-                ControlPlaneState::Available,
             ),
             &mut decoder,
         ));
@@ -1052,7 +1031,6 @@ fn duplicate_maximum_decoded_sequence_is_rejected() {
                     &key,
                     StartupCacheState::Cold,
                     ProviderConnectionState::Offline,
-                    ControlPlaneState::Available,
                 ),
                 &mut decoder,
             ),
@@ -1079,7 +1057,6 @@ fn hydration_request<'a>(
     encryption_key: &'a SegmentEncryptionKey,
     startup_cache_state: StartupCacheState,
     provider_state: ProviderConnectionState,
-    control_plane_state: ControlPlaneState,
 ) -> HydrationRequest<'a> {
     HydrationRequest {
         identity,
@@ -1087,7 +1064,6 @@ fn hydration_request<'a>(
         now_unix_seconds: 101,
         startup_cache_state,
         provider_state,
-        control_plane_state,
         missing_recovery: RecoveryAction::ProviderRefetch,
     }
 }

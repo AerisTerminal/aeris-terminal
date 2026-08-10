@@ -16,6 +16,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -53,6 +54,7 @@ struct TimeframeEvidence {
     interval: &'static str,
     output_bars: usize,
     duration_micros: u64,
+    derived_cache_hit: bool,
     duplicate_bars: u64,
     gaps: u64,
 }
@@ -136,7 +138,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let timeframe_switches = benchmark_timeframes(&bars)?;
     update_process_peaks(&mut system, &mut peak_resident_bytes, &mut peak_cpu_percent)?;
     let evidence = Evidence {
-        schema_version: 1,
+        schema_version: 2,
         hardware,
         operating_system,
         bar_count,
@@ -277,27 +279,39 @@ fn read_warm_history(
 }
 
 fn benchmark_timeframes(bars: &[MarketBar]) -> Result<Vec<TimeframeEvidence>, Box<dyn Error>> {
-    [
+    let mut derived = Vec::new();
+    let mut evidence = Vec::new();
+    for interval in [
         CoinbaseInterval::Minute5,
         CoinbaseInterval::Minute15,
         CoinbaseInterval::Hour1,
         CoinbaseInterval::Hour4,
         CoinbaseInterval::Day1,
         CoinbaseInterval::Minute5,
-    ]
-    .into_iter()
-    .map(|interval| {
+    ] {
         let started = Instant::now();
-        let (output, diagnostics) = aggregate_coinbase_bars(bars, interval)?;
-        Ok(TimeframeEvidence {
+        let cached = derived
+            .iter()
+            .find(|(cached_interval, _, _)| *cached_interval == interval);
+        let (output, diagnostics, derived_cache_hit) =
+            if let Some((_, output, diagnostics)) = cached {
+                (Arc::clone(output), *diagnostics, true)
+            } else {
+                let (output, diagnostics) = aggregate_coinbase_bars(bars, interval)?;
+                let output = Arc::new(output);
+                derived.push((interval, Arc::clone(&output), diagnostics));
+                (output, diagnostics, false)
+            };
+        evidence.push(TimeframeEvidence {
             interval: interval.id(),
             output_bars: output.len(),
             duration_micros: micros(started.elapsed()),
+            derived_cache_hit,
             duplicate_bars: diagnostics.duplicate_bars,
             gaps: diagnostics.gaps,
-        })
-    })
-    .collect()
+        });
+    }
+    Ok(evidence)
 }
 
 fn arguments() -> Result<(PathBuf, usize), Box<dyn Error>> {
@@ -417,6 +431,13 @@ fn validate(evidence: &Evidence) -> Result<(), Box<dyn Error>> {
         .any(|item| item.duration_micros > 2_000_000 || item.gaps != 0)
     {
         return Err("timeframe aggregation exceeded its safety budget".into());
+    }
+    if !evidence
+        .timeframe_switches
+        .iter()
+        .any(|item| item.derived_cache_hit)
+    {
+        return Err("warm derived-timeframe lookup was not exercised".into());
     }
     Ok(())
 }

@@ -22,13 +22,6 @@ pub enum ProviderConnectionState {
     Offline,
 }
 
-/// Axiusflow control-plane availability, which cannot gate local hydration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ControlPlaneState {
-    Available,
-    Unavailable,
-}
-
 /// Inputs for one exact visible-range hydration attempt.
 #[derive(Clone, Copy, Debug)]
 pub struct HydrationRequest<'a> {
@@ -37,7 +30,6 @@ pub struct HydrationRequest<'a> {
     pub now_unix_seconds: i64,
     pub startup_cache_state: StartupCacheState,
     pub provider_state: ProviderConnectionState,
-    pub control_plane_state: ControlPlaneState,
     pub missing_recovery: RecoveryAction,
 }
 
@@ -97,5 +89,4 @@ pub struct WorkerMetrics {
     pub live_items: u64,
     pub live_publish_nanos: u64,
     pub duplicate_live_items: u64,
-    pub control_plane_unavailable_requests: u64,
 }

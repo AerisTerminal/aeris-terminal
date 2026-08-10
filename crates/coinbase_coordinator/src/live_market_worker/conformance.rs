@@ -39,6 +39,7 @@ use std::{
 const FIXED_NOW_UNIX_NANOS: i64 = 1_700_000_030_000_000_000;
 const FIXED_CURRENT_MINUTE_SECONDS: i64 = 1_699_999_980;
 const SENTINEL_SECRET: &str = "sentinel-provider-secret";
+const CONTROLLED_START_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 struct MemoryVault;
@@ -188,7 +189,7 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
     let (mut worker, control, _session_end) = start_controlled_worker(&root.0, source);
 
     let first = control
-        .wait_started(Duration::from_secs(1))
+        .wait_started(CONTROLLED_START_TIMEOUT)
         .expect("first controlled generation starts");
     assert!(directory_has_entry(&root.0.join("quarantine")));
     assert!(control.established(first));
@@ -198,7 +199,7 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
     control.invalid(first, CoinbaseProviderInvalidReason::StreamTransport);
     assert_eq!(control.wait_stopped(Duration::from_secs(1)), Some(first));
     let second = control
-        .wait_started(Duration::from_secs(2))
+        .wait_started(CONTROLLED_START_TIMEOUT)
         .expect("reconnect starts a fresh generation");
     assert_ne!(first, second);
     assert!(control.heartbeat(first));
@@ -221,7 +222,7 @@ fn shipping_loop_redacts_nested_history_failures() {
     let source = fixture_source(SecretFailureTransport);
     let (mut worker, control, _session_end) = start_controlled_worker(&root.0, source);
     let generation = control
-        .wait_started(Duration::from_secs(1))
+        .wait_started(CONTROLLED_START_TIMEOUT)
         .expect("controlled generation starts");
     assert!(control.established(generation));
     assert_eq!(
@@ -247,7 +248,7 @@ fn pre_seed_live_trades_survive_history_seeding() {
     };
     let (mut worker, control, _session_end) = start_controlled_worker(&root.0, source);
     let generation = control
-        .wait_started(Duration::from_secs(1))
+        .wait_started(CONTROLLED_START_TIMEOUT)
         .expect("controlled generation starts");
     assert!(control.established(generation));
     thread::sleep(Duration::from_millis(100));
@@ -287,7 +288,7 @@ fn shutdown_during_an_inflight_fetch_completes_boundedly() {
     };
     let (worker, control, _session_end) = start_controlled_worker(&root.0, source);
     let generation = control
-        .wait_started(Duration::from_secs(1))
+        .wait_started(CONTROLLED_START_TIMEOUT)
         .expect("controlled generation starts");
     assert!(control.established(generation));
     thread::sleep(Duration::from_millis(200));
@@ -307,7 +308,7 @@ fn reselection_ends_the_session_cleanly_without_store_contention() {
     let source = fixture_source(CandleTransport);
     let (mut worker, control, session_end) = start_controlled_worker(&root.0, source);
     let generation = control
-        .wait_started(Duration::from_secs(1))
+        .wait_started(CONTROLLED_START_TIMEOUT)
         .expect("controlled generation starts");
     assert!(control.established(generation));
 

@@ -26,7 +26,7 @@ use std::{
 
 const REST_HOST: &str = "api.coinbase.com";
 const RESPONSE_BYTE_LIMIT: usize = 1_048_576;
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NETWORK_RETRY_PAUSE: Duration = Duration::from_millis(1);
 const ONE_SECOND_NANOS: i64 = 1_000_000_000;

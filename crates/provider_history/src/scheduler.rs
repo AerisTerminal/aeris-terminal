@@ -21,6 +21,7 @@ pub struct HistoryScheduler {
     rate_gates: RateGates,
     next_order: u64,
     next_dispatch_id: u64,
+    last_dispatched_instrument: Option<String>,
 }
 
 impl HistoryScheduler {
@@ -47,6 +48,7 @@ impl HistoryScheduler {
             rate_gates: RateGates::default(),
             next_order: 1,
             next_dispatch_id: 1,
+            last_dispatched_instrument: None,
         })
     }
 
@@ -288,13 +290,13 @@ impl HistoryScheduler {
                 expired,
             });
         }
-        let mut selected = None;
-        for (_, _, request) in valid {
-            if self.dispatch_allowed(request.data_class, now_monotonic_nanos)? {
-                selected = Some(request);
-                break;
+        let mut eligible = Vec::new();
+        for candidate in valid {
+            if self.dispatch_allowed(candidate.2.data_class, now_monotonic_nanos)? {
+                eligible.push(candidate);
             }
         }
+        let selected = select_fair_request(&eligible, self.last_dispatched_instrument.as_deref());
         let Some(request) = selected else {
             return Ok(DispatchOutcome {
                 dispatch: None,
@@ -324,6 +326,7 @@ impl HistoryScheduler {
             now_monotonic_nanos,
         )?;
         self.next_dispatch_id = next_dispatch_id;
+        self.last_dispatched_instrument = Some(entry.request.instrument_id.clone());
         self.inflight.insert(
             dispatch_id,
             InflightEntry {
@@ -690,6 +693,40 @@ impl HistoryScheduler {
             }
         }
     }
+}
+
+fn select_fair_request(
+    eligible: &[(RequestPriority, u64, HistoryPageRequest)],
+    last_instrument: Option<&str>,
+) -> Option<HistoryPageRequest> {
+    let first = eligible.first()?;
+    let same_priority = eligible
+        .iter()
+        .take_while(|candidate| candidate.0 == first.0)
+        .collect::<Vec<_>>();
+    let selected_instrument = last_instrument
+        .and_then(|last| {
+            same_priority
+                .iter()
+                .map(|candidate| candidate.2.instrument_id.as_str())
+                .filter(|instrument| *instrument > last)
+                .min()
+        })
+        .or_else(|| {
+            last_instrument.and_then(|_| {
+                same_priority
+                    .iter()
+                    .map(|candidate| candidate.2.instrument_id.as_str())
+                    .min()
+            })
+        })
+        .unwrap_or(first.2.instrument_id.as_str());
+    Some(
+        same_priority
+            .into_iter()
+            .find(|candidate| candidate.2.instrument_id == selected_instrument)
+            .map_or_else(|| first.2.clone(), |candidate| candidate.2.clone()),
+    )
 }
 
 fn initial_continuations(request: &HistoryPageRequest) -> BTreeSet<Continuation> {

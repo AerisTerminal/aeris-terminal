@@ -15,11 +15,8 @@ axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
 axiusflow_coinbase_coordinator = { path = "../../crates/coinbase_coordinator" }
 axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
 axiusflow_design_system = { path = "../../crates/ui/design_system" }
-axiusflow_engine = { path = "../engine" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }
-axiusflow_local_engine_protocol = { path = "../../crates/local_engine_protocol" }
-axiusflow_market_protocol_adapter = { path = "../../crates/adapters/market_protocol" }
 axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
 axiusflow_provider_history = { path = "../../crates/provider_history" }

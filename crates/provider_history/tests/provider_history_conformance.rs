@@ -324,6 +324,48 @@ fn capability_matrix_rejects_unsupported_and_out_of_bound_requests() {
 }
 
 #[test]
+fn visible_requests_rotate_fairly_across_instrument_lanes() {
+    let mut scheduler = make_scheduler(PaginationStyle::None, 10, 8, 8, 0);
+    let ranges = [
+        HistoryRange {
+            start_unix_nanos: 9_100,
+            end_unix_nanos: 9_200,
+        },
+        HistoryRange {
+            start_unix_nanos: 9_200,
+            end_unix_nanos: 9_300,
+        },
+    ];
+    for (request, interest_id) in [
+        (request("btc-usd", ranges[0]), 1),
+        (request("btc-usd", ranges[1]), 2),
+        (request("eth-usd", ranges[0]), 3),
+        (request("sol-usd", ranges[0]), 4),
+    ] {
+        scheduler
+            .submit(
+                request,
+                interest(interest_id),
+                RequestPriority::Visible,
+                NOW,
+            )
+            .expect("visible lane request queues");
+    }
+    let dispatched = (0..4)
+        .map(|offset| {
+            scheduler
+                .dispatch_next(NOW, MONOTONIC_NOW + offset)
+                .expect("fair dispatch succeeds")
+                .dispatch
+                .expect("request dispatches")
+                .request
+                .instrument_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(dispatched, ["btc-usd", "eth-usd", "sol-usd", "btc-usd"]);
+}
+
+#[test]
 fn exact_requests_deduplicate_while_visible_work_dispatches_first() {
     let mut scheduler = make_scheduler(PaginationStyle::None, 8, 8, 8, 0);
     let background = request(

@@ -7,7 +7,7 @@ use axiusflow_coinbase_market_adapter::{
     ENTITLEMENT_CLASS, decode_history_bar,
 };
 use axiusflow_desktop_history::{
-    ControlPlaneState, HistoryDecoder, HistoryWorkerConfig, HydrationOutcome, HydrationRequest,
+    HistoryDecoder, HistoryWorkerConfig, HydrationOutcome, HydrationRequest,
     ProviderConnectionState, StartupCacheState,
 };
 use axiusflow_desktop_provider_runtime::{
@@ -694,7 +694,7 @@ fn publication_overflow_retires_history_before_retry() {
 }
 
 #[test]
-fn local_hydration_does_not_require_provider_or_control_plane() {
+fn local_hydration_does_not_require_provider() {
     let root = TestRoot::create("local-hydration");
     let key = segment_key();
     let identity = identity("local-hydration");
@@ -756,7 +756,6 @@ fn local_hydration_does_not_require_provider_or_control_plane() {
                 now_unix_seconds: 101,
                 startup_cache_state: StartupCacheState::Warm,
                 provider_state: ProviderConnectionState::Offline,
-                control_plane_state: ControlPlaneState::Unavailable,
                 missing_recovery: RecoveryAction::ProviderRefetch,
             },
             &mut decoder,
@@ -795,7 +794,6 @@ fn history_errors_do_not_expose_nested_diagnostics() {
                 now_unix_seconds: 101,
                 startup_cache_state: StartupCacheState::Warm,
                 provider_state: ProviderConnectionState::Offline,
-                control_plane_state: ControlPlaneState::Unavailable,
                 missing_recovery: RecoveryAction::ProviderRefetch,
             },
             &mut SecretFailingDecoder,

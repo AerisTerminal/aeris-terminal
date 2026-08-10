@@ -11,7 +11,7 @@ mod worker;
 
 pub use error::DesktopHistoryError;
 pub use model::{
-    CacheSource, ChartId, ControlPlaneState, HistoryPublication, HydrationOutcome,
-    HydrationRequest, ProviderConnectionState, StartupCacheState, WorkerMetrics,
+    CacheSource, ChartId, HistoryPublication, HydrationOutcome, HydrationRequest,
+    ProviderConnectionState, StartupCacheState, WorkerMetrics,
 };
 pub use worker::{HistoryDecoder, HistoryWorker, HistoryWorkerConfig};

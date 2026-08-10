@@ -10,7 +10,7 @@ This document describes the current architectural direction. Source code, tests,
 
 ## Principles
 
-1. Local first. Core viewing and workspace behavior must not depend on an Axiusflow cloud service. The resident engine owns provider sessions, cached data, and durable local state.
+1. Local only. Core viewing, history, provider connectivity, and workspace behavior run on the user's machine and have no remote Axiusflow service dependency.
 2. Correct before fast. Market data, sequence handling, history/live handoff, prices, quantities, and future orders must remain exact under disconnects, retries, and restarts.
 3. Measure performance. Optimize observed hot paths and tail latency. Do not add speculative caches, concurrency, unsafe code, or platform-specific acceleration.
 4. Keep ownership obvious. Each mutable resource has one clear owner. Communication across threads and processes uses bounded messages and explicit snapshots or deltas.
@@ -20,22 +20,24 @@ This document describes the current architectural direction. Source code, tests,
 
 ## Runtime topology
 
-Axiusflow has two application processes:
+Axiusflow ships two local application processes:
 
-- `axiusflow_desktop` owns the GPUI window, terminal interaction, presentation state, and chart integration.
-- `axiusflow_engine` is a per-user resident local process. It owns provider connectivity, workspace state, hot-series state, and publication to authenticated local clients.
+- `axiusflow_desktop` owns the GPUI window, terminal interaction, the active provider worker, local chart history, presentation state, and chart integration.
+- `axiusflow_engine` is a per-user resident local process retained for workspace persistence and warm background sessions. Its authenticated protocol is not on the desktop's first-pixel chart path.
 
-The desktop starts or connects to the sibling engine over a local socket. A random installation token stored in the operating system credential vault authenticates that connection. The engine retains covering state for newly attached clients and publishes bounded incremental updates to active subscribers. When no desktop client is attached, the engine can remain warm instead of tying market-data lifecycle to a window.
+The shipping desktop starts its active Coinbase or Rithmic coordinator directly on a bounded background worker. Local segments or provider snapshots are published into the desktop mailbox without a protobuf round trip, then applied to the chart bridge on GPUI. The engine remains a separately authenticated local executable for persisted workspace and warm-session duties; reconnect support may use its covering state, but chart opening never waits for it.
 
 ```text
 Provider sockets
     -> provider adapters
     -> provider runtime and coordinator
     -> canonical market/history models
-    -> resident engine publication
-    -> authenticated local protocol
-    -> desktop presentation model
+    -> bounded in-process desktop mailbox
+    -> desktop presentation model and next-frame timing feedback
     -> terminal UI and Origin chart renderer
+
+Resident engine
+    -> authenticated local workspace persistence and optional warm covering state
 ```
 
 ## Workspace boundaries
@@ -68,7 +70,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 - `crates/desktop_storage`: SQLite metadata, encrypted local segments, and storage lifecycle.
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
-- `crates/local_engine_protocol`: typed messages and framing for desktop-to-engine IPC.
+- `crates/local_engine_protocol`: typed messages and framing for local engine clients outside the chart first-pixel path.
 - `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
 - `crates/transport`: small transport framing primitives.
 
@@ -86,14 +88,13 @@ Coinbase or Rithmic socket
     -> provider-history scheduling and coverage repair
     -> encrypted immutable local segments plus SQLite metadata
     -> worker-owned decoded cache and history/live handoff
-    -> resident-engine replay snapshot or delta
     -> bounded desktop mailbox
     -> chart bridge and Origin Charts
 ```
 
 `ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
 
-The path is local first by construction. Provider credentials stay on the user's machine, provider traffic terminates in the resident process, durable history is stored under the user's local data root, and Axiusflow has no cloud market-data dependency. A future control plane may distribute application metadata or licensing state, but it must not become a prerequisite for local cache hydration or sit in the licensed market-data path.
+The path is local by construction. Provider credentials stay on the user's machine, provider traffic terminates in a local worker, and durable history is stored under the user's local data root. No remote Axiusflow service, licensing gateway, or network chart service exists in the product architecture.
 
 ## Historical data and restart behavior
 
@@ -103,26 +104,26 @@ The path is local first by construction. Provider credentials stay on the user's
 
 `desktop_history::HistoryWorker` is owned by a market-data worker thread, never GPUI. It reads and decrypts bounded segments, validates contiguous sequence, maintains a byte- and entry-bounded decoded cache, shares immutable publications across charts, and coordinates the history/live cutover. Live items are buffered during hydration; a verified covering snapshot admits only the contiguous suffix newer than its watermark.
 
-The current storage format supports progressive recent-first reads because retained history is segmented and range-indexed. Coinbase chart viewport changes are first-class resident-engine demand: the active selection generation is checked, the visible time range is aligned to the source interval, one visible window is prefetched behind the viewport, duplicate ranges are deduplicated, local coverage is installed directly, and only missing ranges are sent to the provider. The retained working set is bounded to the adapter-supported chart window rather than the old 300-bar slice.
+The current storage format supports progressive recent-first reads because retained history is segmented and range-indexed. Coinbase chart viewport changes are first-class desktop-worker demand: the active selection generation is checked, the visible time range is aligned to the source interval, one visible window is prefetched behind the viewport, duplicate ranges are deduplicated, local coverage is installed directly, and only missing ranges are sent to the provider. The retained working set is bounded to the adapter-supported chart window rather than the old 300-bar slice.
 
 ## Timeframes
 
 Provider-native history is requested at the closest supported source resolution. Coinbase bars are normalized and aggregated locally into the requested canonical interval; live one-minute trades incrementally update the active interval. Rithmic maps canonical chart intervals to its provider bar specifications behind its adapter.
 
-The durable identity includes resolution, so native or previously materialized resolutions cannot be confused. Recomputable derived intervals may be retained under the derived-data quota, but the current platform does not yet maintain a general cross-provider derived-timeframe cache. Until that exists, timeframe changes can repeat aggregation. The required design is one canonical lowest-practical source series per provider capability, page-local aggregation, immutable derived chunks keyed by source revision plus interval, and incremental tail updates. Calendar intervals must retain their explicit UTC/exchange-calendar rules instead of being approximated as fixed seconds.
+The durable identity includes resolution and source revision, so native and derived data cannot be confused. Coinbase warm switches first look for immutable derived chunks keyed by source revision and interval; when absent, retained canonical one-minute chunks are aggregated once, published immediately, and stored under the bounded derived-data quota before provider reconciliation. Rithmic retains its provider-native series mapping. Calendar intervals keep explicit UTC/exchange-calendar bucket rules instead of being approximated as fixed seconds.
 
 ## Concurrency model
 
 - Provider sessions own their sockets and callback generations.
-- The resident market worker owns provider orchestration, history scheduling, storage access, aggregation, and history/live handoff.
+- The in-process desktop market worker owns active provider orchestration, history scheduling, storage access, aggregation, and history/live handoff.
 - Blocking history and storage work stays off GPUI and communicates through bounded channels.
 - Selection generations make obsolete symbol and timeframe results stale; stale work cannot overwrite the new selection.
-- The resident engine coalesces selection changes to the newest workspace state and retains that state until the bounded provider-worker mailbox accepts it; queue pressure must never silently discard the active selection.
+- The desktop command boundary coalesces selection changes to the newest state until the bounded provider-worker mailbox accepts it; queue pressure must never silently discard the active selection.
 - Chart viewport changes are also retained as demand on the active series; the Coinbase worker may not drop them silently or apply them to an older symbol/timeframe generation.
 - Covering snapshots may replace older covering snapshots. Non-conflatable deltas, sequence gaps, and queue overflow require recovery rather than silent loss.
 - Work is bounded by queue item/byte capacities, scheduler in-flight limits, cache bytes, segment bytes, chart bindings, handoffs, retries, and deadlines. No request creates an unbounded thread pool or unbounded queue.
 
-Independent instruments should eventually be scheduled as independent bounded jobs so one slow provider request cannot head-of-line block another. The existing generation and cancellation contracts are the basis for that change; a second task system or cloud queue is not required.
+Visible history work rotates across per-instrument lanes under the existing global in-flight bound. Selection changes cancel obsolete work before aggregation, Coinbase requests have a 30-second task deadline and five-second network-operation bound, and shared scheduler interests remain alive until their final consumer cancels.
 
 ## Performance evidence and instrumentation
 
@@ -130,18 +131,18 @@ Always-on feed diagnostics count trades, quotes, depth updates, publications, ga
 
 `HistoryWorker::metrics` additionally records local storage operations and bytes, memory-cache hits and misses, decode work, provider snapshots, live items, duplicates, and cumulative storage-write, storage-read, decode, snapshot-install, and live-publication nanoseconds. These metrics contain no provider payloads, credentials, account text, or instrument text.
 
-`axiusflow_market_data_performance` is the deterministic offline regression runner. It uses the production Coinbase segment codec, encrypted `HistoryStore`, catalog coverage planner, and interval aggregator. Its JSON evidence records cold publication, warm catalog open and discovery, recent-first time to first usable segment, full warm read and decode, repeated timeframe-switch latency, payload/stored bytes, coverage gaps, resident memory, and sampled process CPU. CI runs the release binary on 100,000 bars, enforces broad anti-regression budgets, and retains the JSON artifact for build-to-build comparison. Provider-network benchmarks remain separate because provider latency, entitlements, and credentials are not deterministic CI inputs.
+`axiusflow_market_data_performance` is the deterministic storage regression runner. It uses the production Coinbase segment codec, encrypted `HistoryStore`, catalog coverage planner, interval aggregator, and a repeated immutable derived-timeframe lookup. The desktop's `--windowed-benchmark` path complements it by opening a real GPUI/Origin window and measuring startup-to-first-frame, steady replay-to-frame latency, a five-minute covering timeframe replacement, callback cadence, and native compositor timing. Provider-network benchmarks remain separate because provider latency, entitlements, and credentials are not deterministic CI inputs.
 
 The first recorded local release run on 250,000 one-minute bars produced 715 encrypted segments (15.5 MB payload): cold publication 1.37 seconds, warm catalog open 22 ms, coverage discovery 1 ms, full warm read 78 ms, decode 8 ms, and first recent segment in under 1 ms. Removing unconditional sort and duplicate-buffer copies reduced sorted-source timeframe aggregation from 7.2-8.4 ms to 1.3-3.1 ms across 5-minute through daily intervals on the same run. Machine-specific JSON is transient evidence under `.cache`, not a portable product guarantee.
+
+The first direct-path Windows release run after removing the engine subscription from first pixels measured 22.9 ms from window setup to the first GPUI frame and 5.9 ms from a five-minute covering snapshot submission to the following frame callback on a 165 Hz display. The same run measured 6.0 ms p50 update-to-frame latency with advancing DWM refresh evidence. A separate 100,000-bar storage run measured the first recent segment in 155 microseconds, a complete warm read in 30 ms, a cold five-minute derivation in 966 microseconds, and its repeated immutable-cache lookup below the microsecond timer resolution. These numbers are machine-specific regression evidence, not physical panel scanout guarantees.
 
 ## Ranked local-data roadmap
 
 1. Extend the visible-range runtime from Coinbase bars to provider trade and depth history so footprint/order-flow views receive the same demand-driven backfill behavior.
-2. Add immutable derived-timeframe chunks keyed by source revision and update only the active tail. This removes repeated aggregation during timeframe switching while keeping memory bounded.
-3. Split history scheduling into fair per-instrument lanes under one global bound, with generation cancellation before decode and aggregation. This prevents slow or obsolete work from delaying the active selection.
-4. Extend deterministic performance scenarios to symbol churn, interrupted publication recovery, concurrent live plus history, viewport panning, and multi-million tick streams. Use synthetic transports in CI and credentialed provider runs only as local evidence.
-5. Add chart-preparation and first-render timestamps to the existing latency chain so time to first pixels is measured across the process boundary rather than inferred from data readiness.
-6. Evaluate memory mapping only after paged reads and derived chunks are measured. Encryption and authenticated recovery currently require bounded read/decrypt buffers, so mapping ciphertext alone is not automatically a win.
+2. Extend immutable derived chunks and incremental active-tail updates from Coinbase bars to Rithmic and future provider capabilities without weakening calendar rules.
+3. Extend deterministic performance scenarios to symbol churn, interrupted publication recovery, concurrent live plus history, viewport panning, and multi-million tick streams. Use synthetic transports in CI and credentialed provider runs only as local evidence.
+4. Evaluate memory mapping only after paged reads and derived chunks are measured. Encryption and authenticated recovery currently require bounded read/decrypt buffers, so mapping ciphertext alone is not automatically a win.
 
 ### UI
 
@@ -175,7 +176,7 @@ Prices and quantities use fixed-point or provider-exact representations. Floatin
 
 ## Concurrency and backpressure
 
-Provider sessions, the resident engine, and GPUI have distinct owners. Do not let the UI thread perform blocking network, disk, process, or shutdown work. Do not let background workers mutate GPUI state directly.
+Provider sessions, the desktop market worker, the resident engine, and GPUI have distinct owners. Do not let the UI thread perform blocking network, disk, process, or shutdown work. Do not let background workers mutate GPUI state directly.
 
 Queues must be bounded and have semantics appropriate to their payload:
 
