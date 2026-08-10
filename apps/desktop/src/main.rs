@@ -2787,6 +2787,7 @@ impl WindowCommand {
     fn execute(self, window: &mut Window) {
         match self {
             Self::Minimize => window.minimize_window(),
+            Self::MaximizeOrRestore if window.is_fullscreen() => window.toggle_fullscreen(),
             Self::MaximizeOrRestore => window.zoom_window(),
             Self::ToggleFullscreen => window.toggle_fullscreen(),
             Self::Close => window.remove_window(),
@@ -2826,7 +2827,6 @@ fn terminal_header(
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface_primary))
-        .window_control_area(WindowControlArea::Drag)
         .child(
             div()
                 .h_full()
@@ -2845,7 +2845,13 @@ fn terminal_header(
                         .child("Axiusflow"),
                 )
                 .child(controls)
-                .child(div().h_full().min_w(px(12.0)).flex_1()),
+                .child(
+                    div()
+                        .h_full()
+                        .min_w(px(12.0))
+                        .flex_1()
+                        .window_control_area(WindowControlArea::Drag),
+                ),
         )
         .child(windows_window_controls(window, &theme));
 
@@ -2880,7 +2886,8 @@ fn terminal_header(
 
 #[cfg(target_os = "windows")]
 fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl IntoElement {
-    let maximize = if window.is_maximized() {
+    let fullscreen = window.is_fullscreen();
+    let maximize = if window.is_maximized() || fullscreen {
         ("restore", "\u{e923}")
     } else {
         ("maximize", "\u{e922}")
@@ -2897,6 +2904,7 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             "\u{e921}",
             WindowControlArea::Min,
             WindowCommand::Minimize,
+            fullscreen,
             false,
             theme,
         ))
@@ -2905,6 +2913,7 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             maximize.1,
             WindowControlArea::Max,
             WindowCommand::MaximizeOrRestore,
+            fullscreen,
             false,
             theme,
         ))
@@ -2913,6 +2922,7 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             "\u{e8bb}",
             WindowControlArea::Close,
             WindowCommand::Close,
+            fullscreen,
             true,
             theme,
         ))
@@ -2924,6 +2934,7 @@ fn windows_caption_button(
     glyph: &'static str,
     area: WindowControlArea,
     command: WindowCommand,
+    manual: bool,
     close: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
@@ -2963,10 +2974,12 @@ fn windows_caption_button(
         .hover(move |style| style.bg(hover).text_color(hover_foreground))
         .active(move |style| style.bg(active).text_color(active_foreground))
         .window_control_area(area)
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            window.prevent_default();
-            command.execute(window);
-            cx.stop_propagation();
+        .when(manual, |button| {
+            button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.prevent_default();
+                command.execute(window);
+                cx.stop_propagation();
+            })
         })
         .child(glyph)
 }
