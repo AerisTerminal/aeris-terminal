@@ -27,14 +27,10 @@ pub enum UiIcon {
     SidebarRightIcon01,
     SunIcon03,
     Text,
-    WindowClose,
-    WindowMaximize,
-    WindowMinimize,
-    WindowRestore,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 21] = [
         Self::ActivityIcon01,
         Self::AddIcon01,
         Self::AiEraser,
@@ -56,10 +52,6 @@ impl UiIcon {
         Self::SidebarRightIcon01,
         Self::SunIcon03,
         Self::Text,
-        Self::WindowClose,
-        Self::WindowMaximize,
-        Self::WindowMinimize,
-        Self::WindowRestore,
     ];
 
     #[must_use]
@@ -86,10 +78,6 @@ impl UiIcon {
             Self::SidebarRightIcon01 => "sidebar-right-01.svg",
             Self::SunIcon03 => "sun-03.svg",
             Self::Text => "text.svg",
-            Self::WindowClose => "window-close.svg",
-            Self::WindowMaximize => "window-maximize.svg",
-            Self::WindowMinimize => "window-minimize.svg",
-            Self::WindowRestore => "window-restore.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -223,10 +211,6 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "sidebar-right-01.svg" => include_bytes!("../assets/icons/ui/sidebar-right-01.svg"),
         "sun-03.svg" => include_bytes!("../assets/icons/ui/sun-03.svg"),
         "text.svg" => include_bytes!("../assets/icons/ui/text.svg"),
-        "window-close.svg" => include_bytes!("../assets/icons/ui/window-close.svg"),
-        "window-maximize.svg" => include_bytes!("../assets/icons/ui/window-maximize.svg"),
-        "window-minimize.svg" => include_bytes!("../assets/icons/ui/window-minimize.svg"),
-        "window-restore.svg" => include_bytes!("../assets/icons/ui/window-restore.svg"),
         _ => return None,
     })
 }
@@ -318,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_source_composes_drawing_and_window_control_assets() {
+    fn desktop_source_composes_application_and_component_assets() {
         let assets = DesktopAssets;
         assert!(
             assets
@@ -326,17 +310,6 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        for icon in [
-            UiIcon::WindowMinimize,
-            UiIcon::WindowMaximize,
-            UiIcon::WindowRestore,
-            UiIcon::WindowClose,
-        ] {
-            let path = icon.path();
-            assert!(
-                assets.load(path.as_ref()).unwrap().is_some(),
-                "missing {path}"
-            );
-        }
+        assert!(assets.load("icons/window-close.svg").unwrap().is_some());
     }
 }

@@ -28,12 +28,12 @@ use axiusflow_rithmic_protocol_adapter::{
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
-    KeyBinding, KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowControlArea,
-    WindowOptions, actions, div, prelude::*, px, rgb, size,
+    KeyBinding, KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowOptions, actions,
+    div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
-    button::{Button, ButtonCustomVariant, ButtonVariants},
+    button::{Button, ButtonVariants},
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
@@ -2807,18 +2807,14 @@ fn execute_in_active_window(cx: &mut App, command: WindowCommand) {
 }
 
 fn terminal_header(
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<TerminalApp>,
     app: &Entity<TerminalApp>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
     let controls = header_controls(cx, app, state);
-    let window_controls = terminal_window_controls(window.is_maximized(), cx, &theme);
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
+    TitleBar::new()
         .h(px(theme.dimensions.app_header_height.logical_pixels))
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
@@ -2826,109 +2822,21 @@ fn terminal_header(
         .child(
             div()
                 .h_full()
+                .flex_1()
                 .flex()
                 .items_center()
-                .pl_4()
-                .pr_2()
-                .window_control_area(WindowControlArea::Drag)
                 .child(
                     div()
                         .flex_none()
+                        .pl_4()
+                        .pr_2()
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .child("Axiusflow"),
-                ),
+                )
+                .child(controls)
+                .child(div().h_full().min_w(px(12.0)).flex_1()),
         )
-        .child(controls)
-        .child(
-            div()
-                .h_full()
-                .min_w(px(12.0))
-                .flex_1()
-                .window_control_area(WindowControlArea::Drag),
-        )
-        .child(window_controls)
-}
-
-fn terminal_window_controls(
-    is_maximized: bool,
-    cx: &App,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    div()
-        .id("window_controls")
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .child(window_control_button(
-            "window_minimize",
-            HugeIcon::WindowMinimize,
-            WindowCommand::Minimize,
-            false,
-            cx,
-            theme,
-        ))
-        .child(window_control_button(
-            "window_maximize_restore",
-            if is_maximized {
-                HugeIcon::WindowRestore
-            } else {
-                HugeIcon::WindowMaximize
-            },
-            WindowCommand::MaximizeOrRestore,
-            false,
-            cx,
-            theme,
-        ))
-        .child(window_control_button(
-            "window_close",
-            HugeIcon::WindowClose,
-            WindowCommand::Close,
-            true,
-            cx,
-            theme,
-        ))
-}
-
-fn window_control_button(
-    id: &'static str,
-    icon: HugeIcon,
-    command: WindowCommand,
-    destructive: bool,
-    cx: &App,
-    theme: &AxiusflowTheme,
-) -> Button {
-    let colors = theme.colors;
-    let (hover, active) = if destructive {
-        (colors.loss, colors.loss.with_alpha(0.82))
-    } else {
-        (
-            colors.interactive_neutral_hover_bg,
-            colors.interactive_neutral_active_bg,
-        )
-    };
-    let button = Button::new(id)
-        .icon(header_icon(icon))
-        .custom(
-            ButtonCustomVariant::new(cx)
-                .foreground(gpui_color(colors.icon_color))
-                .hover(gpui_color(hover))
-                .active(gpui_color(active)),
-        )
-        .h_full()
-        .w(px(46.0))
-        .rounded(px(0.0))
-        .cursor_pointer();
-    button
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(move |_, window, cx| {
-            command.execute(window);
-            if command != WindowCommand::Close {
-                window.refresh();
-            }
-            cx.stop_propagation();
-        })
 }
 
 fn header_controls(
