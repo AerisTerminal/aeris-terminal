@@ -11,7 +11,7 @@ do
         --quiet \
         --locked \
         --manifest-path "$repo_root/Cargo.toml" \
-        --package axiusflow_engine \
+        --package axiusflow_desktop \
         -- \
         --coinbase-live-smoke "$product" "$history_root/$product"
 done

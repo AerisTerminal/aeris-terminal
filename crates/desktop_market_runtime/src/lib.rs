@@ -1,5 +1,4 @@
-//! Persistent Coinbase market-data coordinator shared by the desktop shell and
-//! the resident data-engine process.
+//! Desktop-owned Coinbase and Rithmic market-data coordination.
 
 pub mod live_market_worker;
 pub mod market_worker;

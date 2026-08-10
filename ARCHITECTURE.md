@@ -94,6 +94,8 @@ Coinbase or Rithmic socket
 
 `ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
 
+`desktop_market_runtime` is the only owner of visible-range hydration, coverage repair, history/live handoff, provider-neutral aggregation policy, stale-work cancellation, mailbox backpressure, chart/DOM publication, and overflow/gap/reconnect recovery. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, and paging. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second hydration owner.
+
 The path is local by construction. Provider credentials stay on the user's machine, provider traffic terminates in a local worker, and durable history is stored under the user's local data root. No remote Axiusflow service, licensing gateway, or network chart service exists in the product architecture.
 
 ## Historical data and restart behavior

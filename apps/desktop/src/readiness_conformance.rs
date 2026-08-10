@@ -894,6 +894,46 @@ mod tests {
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    fn run_provider_neutral_handoff_scenario(provider: &str) {
+        let mut handoff = axiusflow_provider_history::HandoffCoordinator::new(
+            std::num::NonZeroUsize::new(8).unwrap_or(std::num::NonZeroUsize::MIN),
+        );
+        handoff
+            .install_snapshot(super::history_snapshot(1, 2).expect("covering snapshot builds"))
+            .unwrap_or_else(|error| panic!("{provider} hydration failed: {error}"));
+        assert!(
+            handoff.push_live(super::sequenced_history(4)).is_err(),
+            "{provider} must latch a sequence gap"
+        );
+        assert!(
+            handoff
+                .install_snapshot(
+                    super::history_snapshot(1, 4).expect("stale covering snapshot builds")
+                )
+                .is_err(),
+            "{provider} must reject a stale session"
+        );
+        handoff
+            .install_snapshot(
+                super::history_snapshot(2, 4).expect("replacement covering snapshot builds"),
+            )
+            .unwrap_or_else(|error| panic!("{provider} recovery failed: {error}"));
+        assert!(matches!(
+            handoff.state(),
+            axiusflow_provider_history::HandoffState::Live {
+                generation: 2,
+                last_sequence: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_neutral_hydration_fencing_and_recovery_match_both_boundaries() {
+        for provider in ["coinbase", "rithmic"] {
+            run_provider_neutral_handoff_scenario(provider);
+        }
+    }
+
     #[test]
     fn frame_gate_accepts_one_request_until_completion() {
         let mut gate = FramePollGate::default();
