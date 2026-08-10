@@ -808,26 +808,56 @@ pub struct EngineClient {
     ready: EngineReady,
 }
 
+struct EngineConnectionFailure {
+    detail: String,
+    endpoint_reached: bool,
+}
+
 impl EngineClient {
     /// Connects and authenticates against a named engine endpoint.
     ///
     /// # Errors
     /// Returns an error when connection, framing, authentication, or negotiation fails.
     pub fn connect(name: &str, installation_token: &[u8]) -> Result<Self, String> {
-        let name = name
-            .to_ns_name::<GenericNamespaced>()
-            .map_err(|error| error.to_string())?;
-        let stream = LocalSocketStream::connect(name).map_err(|error| error.to_string())?;
-        let mut connection = FramedConnection::new(stream)?;
-        connection.send(envelope::Payload::ClientHello(ClientHello {
-            protocol_version: PROTOCOL_VERSION,
-            installation_token: installation_token.to_vec(),
-            client_kind: ClientKind::Ui as i32,
-        }))?;
-        let ready = match connection.receive()? {
+        Self::connect_with_reachability(name, installation_token).map_err(|failure| failure.detail)
+    }
+
+    fn connect_with_reachability(
+        name: &str,
+        installation_token: &[u8],
+    ) -> Result<Self, EngineConnectionFailure> {
+        let name =
+            name.to_ns_name::<GenericNamespaced>()
+                .map_err(|error| EngineConnectionFailure {
+                    detail: error.to_string(),
+                    endpoint_reached: false,
+                })?;
+        let stream = LocalSocketStream::connect(name).map_err(|error| EngineConnectionFailure {
+            detail: error.to_string(),
+            endpoint_reached: false,
+        })?;
+        let mut connection = FramedConnection::new(stream).map_err(reached_failure)?;
+        connection
+            .send(envelope::Payload::ClientHello(ClientHello {
+                protocol_version: PROTOCOL_VERSION,
+                installation_token: installation_token.to_vec(),
+                client_kind: ClientKind::Ui as i32,
+            }))
+            .map_err(reached_failure)?;
+        let ready = match connection.receive().map_err(reached_failure)? {
             envelope::Payload::EngineReady(ready) => ready,
-            envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
-            _ => return Err("engine did not complete readiness negotiation".to_string()),
+            envelope::Payload::Fault(fault) => {
+                return Err(EngineConnectionFailure {
+                    detail: fault.redacted_detail,
+                    endpoint_reached: true,
+                });
+            }
+            _ => {
+                return Err(EngineConnectionFailure {
+                    detail: "engine did not complete readiness negotiation".to_string(),
+                    endpoint_reached: true,
+                });
+            }
         };
         Ok(Self { connection, ready })
     }
@@ -994,6 +1024,13 @@ impl EngineClient {
     }
 }
 
+fn reached_failure(detail: String) -> EngineConnectionFailure {
+    EngineConnectionFailure {
+        detail,
+        endpoint_reached: true,
+    }
+}
+
 /// Blocking authenticated stream for one bounded engine view.
 pub struct EngineViewStream {
     connection: FramedConnection,
@@ -1042,24 +1079,56 @@ pub fn default_engine_state_root() -> Result<PathBuf, String> {
 /// Returns an error when credentials, process launch, or readiness negotiation fail.
 pub fn connect_or_start_engine(engine_executable: &Path) -> Result<EngineClient, String> {
     let token = native_installation_token()?;
-    if let Ok(client) = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice()) {
-        return Ok(client);
+    connect_or_start_engine_named(
+        ENGINE_SOCKET_NAME,
+        engine_executable,
+        token.as_slice(),
+        ENGINE_START_TIMEOUT,
+    )
+}
+
+fn connect_or_start_engine_named(
+    socket_name: &str,
+    engine_executable: &Path,
+    installation_token: &[u8],
+    start_timeout: Duration,
+) -> Result<EngineClient, String> {
+    let mut engine_started = false;
+    let mut last_error =
+        match EngineClient::connect_with_reachability(socket_name, installation_token) {
+            Ok(client) => return Ok(client),
+            Err(failure) => {
+                if !failure.endpoint_reached {
+                    start_engine_process(engine_executable)?;
+                    engine_started = true;
+                }
+                failure.detail
+            }
+        };
+    let deadline = Instant::now() + start_timeout;
+    while Instant::now() < deadline {
+        match EngineClient::connect_with_reachability(socket_name, installation_token) {
+            Ok(client) => return Ok(client),
+            Err(failure) => {
+                if !failure.endpoint_reached && !engine_started {
+                    start_engine_process(engine_executable)?;
+                    engine_started = true;
+                }
+                last_error = failure.detail;
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
     }
+    Err(last_error)
+}
+
+fn start_engine_process(engine_executable: &Path) -> Result<(), String> {
     let mut command = Command::new(engine_executable);
     configure_background_process(&mut command);
     command.spawn().map_err(|_| {
         "resident engine could not be started from the installation directory".to_string()
     })?;
-    let deadline = Instant::now() + ENGINE_START_TIMEOUT;
-    let mut last_error = "resident engine did not publish readiness".to_string();
-    while Instant::now() < deadline {
-        match EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice()) {
-            Ok(client) => return Ok(client),
-            Err(error) => last_error = error,
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    Err(last_error)
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1386,4 +1455,64 @@ fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
             difference | (left ^ right)
         })
         == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
+
+    use super::{bind_listener, connect_or_start_engine_named};
+
+    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn reached_endpoint_is_retried_without_spawning_another_engine() {
+        let socket_name = format!(
+            "axiusflow-engine-reached-test-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        );
+        let listener = bind_listener(&socket_name).expect("bind occupied endpoint");
+        let accepting = Arc::new(AtomicBool::new(true));
+        let server_accepting = Arc::clone(&accepting);
+        let server = thread::spawn(move || {
+            while server_accepting.load(Ordering::Acquire) {
+                let stream = listener.accept().expect("accept probe connection");
+                drop(stream);
+            }
+        });
+
+        let timeout = Duration::from_millis(80);
+        let started = Instant::now();
+        let error = connect_or_start_engine_named(
+            &socket_name,
+            Path::new("engine-executable-that-does-not-exist"),
+            &[7_u8; 32],
+            timeout,
+        )
+        .err()
+        .expect("closed occupied endpoint cannot become ready");
+
+        assert!(started.elapsed() >= timeout);
+        assert_ne!(
+            error,
+            "resident engine could not be started from the installation directory"
+        );
+        accepting.store(false, Ordering::Release);
+        let name = socket_name
+            .to_ns_name::<GenericNamespaced>()
+            .expect("create socket name");
+        drop(LocalSocketStream::connect(name).expect("wake accepting server"));
+        server.join().expect("join accepting server");
+    }
 }
