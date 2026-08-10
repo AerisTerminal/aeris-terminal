@@ -1,6 +1,6 @@
 use std::{path::PathBuf, thread};
 
-pub(super) use axiusflow_coinbase_coordinator::market_worker::{
+pub(super) use axiusflow_desktop_market_runtime::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
     UiDiagnosticsFeedback,
@@ -17,7 +17,7 @@ pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String>
 }
 
 pub(super) fn start_rithmic() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    axiusflow_coinbase_coordinator::rithmic_market_worker::start(
+    axiusflow_desktop_market_runtime::rithmic_market_worker::start(
         history_root("rithmic"),
         thread::current().id(),
         cfg!(feature = "diagnostics"),

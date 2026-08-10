@@ -12,7 +12,7 @@ diagnostics = []
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
-axiusflow_coinbase_coordinator = { path = "../../crates/coinbase_coordinator" }
+axiusflow_desktop_market_runtime = { path = "../../crates/desktop_market_runtime" }
 axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
 axiusflow_design_system = { path = "../../crates/ui/design_system" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }

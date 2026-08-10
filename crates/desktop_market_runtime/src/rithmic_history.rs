@@ -1,11 +1,11 @@
-use crate as axiusflow_coinbase_coordinator;
+use crate as axiusflow_desktop_market_runtime;
 pub(crate) use crate::rithmic_series::{RithmicSeries, RithmicSeriesRequest};
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
     validate_provenanced_market_bar,
 };
-use axiusflow_coinbase_coordinator::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
+use axiusflow_desktop_market_runtime::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
 use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,

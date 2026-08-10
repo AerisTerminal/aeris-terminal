@@ -62,7 +62,7 @@ These crates must not depend on UI or a particular provider.
 - `crates/adapters/market_protocol`: conversion between canonical market models and protobuf/wire representations.
 - `crates/desktop_provider_runtime`: bounded provider-session lifecycle and recovery.
 - `crates/provider_history`: provider-neutral pagination, rate limiting, coverage, scheduling, and history/live handoff.
-- `crates/coinbase_coordinator`: current composition layer for Coinbase and Rithmic market workers. Despite its historical name, it coordinates the desktop/engine market-data vertical and should not absorb unrelated product logic.
+- `crates/desktop_market_runtime`: shared composition layer for Coinbase and Rithmic desktop market workers, including bounded mailbox publication, hydration, cancellation, and recovery policy. It should not absorb unrelated product logic.
 
 Provider-specific types stop at adapter boundaries. Downstream code consumes canonical identities and market models.
 

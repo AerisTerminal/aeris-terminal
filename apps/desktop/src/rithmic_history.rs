@@ -1,4 +1,4 @@
-pub(crate) use axiusflow_coinbase_coordinator::rithmic_series::{
+pub(crate) use axiusflow_desktop_market_runtime::rithmic_series::{
     RithmicSeries, RithmicSeriesRequest,
 };
 use std::num::NonZeroUsize;

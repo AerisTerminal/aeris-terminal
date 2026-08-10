@@ -6,7 +6,7 @@ members = [
     "crates/adapters/market_protocol",
     "crates/adapters/rithmic_protocol",
     "crates/application",
-    "crates/coinbase_coordinator",
+    "crates/desktop_market_runtime",
     "crates/domain/instruments",
     "crates/domain/market_data",
     "crates/desktop_storage",

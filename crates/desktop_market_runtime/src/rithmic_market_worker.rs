@@ -1,4 +1,4 @@
-use crate as axiusflow_coinbase_coordinator;
+use crate as axiusflow_desktop_market_runtime;
 use crate::{
     rithmic_history::{
         InstalledRithmicInstrument, RithmicHistoryResult, RithmicHistoryTask, RithmicSeriesRequest,
@@ -12,11 +12,11 @@ use crate::{
     },
 };
 use axiusflow_application::ProvenancedMarketBar;
-use axiusflow_coinbase_coordinator::market_worker::{
+use axiusflow_desktop_history::HistoryWorkerConfig;
+use axiusflow_desktop_market_runtime::market_worker::{
     MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
     market_worker_channel,
 };
-use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_provider_runtime::{
     AuthenticationState, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig,
     ProviderInvalidationReason, ProviderSessionEvent,
@@ -183,7 +183,7 @@ pub fn start(
 fn spawn_worker(
     shell: RithmicShellState,
     task: impl FnOnce(
-        axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+        axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
         Receiver<MarketWorkerCommand>,
     ) + Send
     + 'static,
@@ -206,7 +206,7 @@ fn spawn_worker(
 }
 
 fn run(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     commands: &Receiver<MarketWorkerCommand>,
     history_root: PathBuf,
     ui_thread: ThreadId,
@@ -283,7 +283,7 @@ fn run(
 }
 
 fn run_connected(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     commands: &Receiver<MarketWorkerCommand>,
     mut worker: RithmicWorker,
     events: &RithmicEvents,
@@ -398,7 +398,7 @@ fn apply_initial_network_state(
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     initial_network: Option<NetworkEvent>,
 ) {
     if initial_network != Some(NetworkEvent::Unavailable) {
@@ -539,7 +539,7 @@ fn drain_environment_events(
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
     transition_capture: &mut Option<NativeTransitionCapture>,
 ) {
@@ -620,7 +620,7 @@ fn reset_live_state(state: &mut RithmicRuntimeState) {
 }
 
 fn apply_history_result(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
     result: RithmicHistoryResult,
 ) -> bool {
@@ -656,7 +656,7 @@ fn apply_history_result(
     }
     if matching_request && state.history_trade_overflow && reschedule_history(state) {
         let _ = messages.send(MarketWorkerMessage::State {
-            state: axiusflow_coinbase_coordinator::market_worker::ChartState::Recovering,
+            state: axiusflow_desktop_market_runtime::market_worker::ChartState::Recovering,
             message: "Rithmic history is covering buffered trade overflow".to_string(),
         });
         return true;
@@ -694,7 +694,7 @@ fn process_command(
     commands: &Receiver<MarketWorkerCommand>,
     worker: &RithmicWorker,
     events: &RithmicEvents,
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
 ) -> bool {
     let (dispatch, rejection, failure_message) = match commands.try_recv() {
@@ -786,7 +786,7 @@ fn drain_events(
     worker: &mut RithmicWorker,
     events: &RithmicEvents,
     retries: &mut RithmicRetryScheduler,
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     state: &mut RithmicRuntimeState,
     transition_capture: &mut Option<NativeTransitionCapture>,
 ) {
@@ -921,7 +921,7 @@ fn apply_capture(
 }
 
 fn publish_dom(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
     dom: &mut ReadOnlyDom,
 ) {
@@ -942,7 +942,7 @@ fn publish_dom(
 }
 
 fn publish_live_chart(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
     state: &mut RithmicRuntimeState,
 ) {
@@ -982,7 +982,7 @@ fn buffer_history_trade(
 }
 
 fn publish_trade(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     chart: &mut RithmicLiveChart,
     trade: &axiusflow_market_data::MarketTrade,
 ) -> bool {
@@ -1002,7 +1002,7 @@ fn publish_trade(
         ) => true,
         Err(_) => {
             let _ = messages.send(MarketWorkerMessage::State {
-                state: axiusflow_coinbase_coordinator::market_worker::ChartState::Recovering,
+                state: axiusflow_desktop_market_runtime::market_worker::ChartState::Recovering,
                 message: "Rithmic live candles require a covering history snapshot".to_string(),
             });
             false
@@ -1076,7 +1076,7 @@ fn open_worker(
 }
 
 fn publish_event(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     event: &AppliedRithmicEvent,
     selection_installed: &mut bool,
 ) {
@@ -1261,7 +1261,7 @@ fn retry_presentation(reason: ProviderInvalidationReason) -> (FeedConnectionStat
 }
 
 fn send_connection(
-    messages: &axiusflow_coinbase_coordinator::market_worker::MarketWorkerSender,
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     state: FeedConnectionState,
     message: &str,
 ) {

@@ -9,8 +9,8 @@
 
 use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate};
 use axiusflow_chart_integration::OriginChartView;
-use axiusflow_coinbase_coordinator::market_worker::FixtureMarketWorker;
 use axiusflow_coinbase_market_adapter::{CoinbaseInterval, aggregate_coinbase_bars};
+use axiusflow_desktop_market_runtime::market_worker::FixtureMarketWorker;
 use axiusflow_market_data::BarDefinition;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]

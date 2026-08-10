@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_coinbase_coordinator"
+name = "axiusflow_desktop_market_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

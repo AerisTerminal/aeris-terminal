@@ -17,13 +17,13 @@ use std::{
 };
 
 use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate};
-use axiusflow_coinbase_coordinator::market_worker::{
-    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
-};
-use axiusflow_coinbase_coordinator::{rithmic_market_worker, rithmic_series::RithmicSeries};
 use axiusflow_coinbase_market_adapter::{
     CoinbaseHttpsHistoryTransport, CoinbaseProductCatalog, CoinbaseSpotProduct,
 };
+use axiusflow_desktop_market_runtime::market_worker::{
+    ChartState, MarketDataWorker, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+};
+use axiusflow_desktop_market_runtime::{rithmic_market_worker, rithmic_series::RithmicSeries};
 use axiusflow_engine::{
     ENGINE_SOCKET_NAME, EnginePublicationHub, EngineState, bind_listener,
     default_engine_state_root, load_coinbase_catalog, native_installation_token,
@@ -650,13 +650,13 @@ fn parse_rithmic_selection(
 
 fn parse_rithmic_history(
     request: &axiusflow_local_engine_protocol::RithmicHistory,
-) -> Result<axiusflow_coinbase_coordinator::rithmic_series::RithmicSeriesRequest, String> {
+) -> Result<axiusflow_desktop_market_runtime::rithmic_series::RithmicSeriesRequest, String> {
     let series = RithmicSeries::ALL
         .into_iter()
         .find(|series| series.label() == request.series)
         .ok_or_else(|| "Rithmic chart series is unsupported".to_string())?;
     Ok(
-        axiusflow_coinbase_coordinator::rithmic_series::RithmicSeriesRequest {
+        axiusflow_desktop_market_runtime::rithmic_series::RithmicSeriesRequest {
             selection_generation: nonzero_usize(request.selection_generation)?,
             series_generation: nonzero_usize(request.series_generation)?,
             series,
@@ -1308,10 +1308,10 @@ mod tests {
         ActiveSelection, ResourceTransition, apply_selections, resource_transition,
         run_coinbase_live_smoke_command,
     };
-    use axiusflow_coinbase_coordinator::market_worker::{
+    use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
+    use axiusflow_desktop_market_runtime::market_worker::{
         ChartViewportUpdate, MarketDataWorker, MarketWorkerCommand, market_worker_channel,
     };
-    use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
     use axiusflow_local_engine_protocol::{ResourceMode, WorkspaceState};
     use axiusflow_market_data::ChartInterval;
     use std::{

@@ -675,30 +675,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_coinbase_coordinator"
-version = "0.1.0"
-dependencies = [
- "axiusflow_application",
- "axiusflow_coinbase_market_adapter",
- "axiusflow_desktop_history",
- "axiusflow_desktop_provider_runtime",
- "axiusflow_desktop_storage",
- "axiusflow_instruments",
- "axiusflow_market_data",
- "axiusflow_market_protocol_adapter",
- "axiusflow_observability",
- "axiusflow_platform_runtime",
- "axiusflow_provider_history",
- "axiusflow_rithmic_protocol_adapter",
- "axiusflow_terminal_ui",
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
 name = "axiusflow_coinbase_market_adapter"
 version = "0.1.0"
 dependencies = [
@@ -727,9 +703,9 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_application",
  "axiusflow_chart_integration",
- "axiusflow_coinbase_coordinator",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_design_system",
+ "axiusflow_desktop_market_runtime",
  "axiusflow_instruments",
  "axiusflow_market_data",
  "axiusflow_observability",
@@ -753,6 +729,30 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_desktop_storage",
  "axiusflow_provider_history",
+]
+
+[[package]]
+name = "axiusflow_desktop_market_runtime"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_application",
+ "axiusflow_coinbase_market_adapter",
+ "axiusflow_desktop_history",
+ "axiusflow_desktop_provider_runtime",
+ "axiusflow_desktop_storage",
+ "axiusflow_instruments",
+ "axiusflow_market_data",
+ "axiusflow_market_protocol_adapter",
+ "axiusflow_observability",
+ "axiusflow_platform_runtime",
+ "axiusflow_provider_history",
+ "axiusflow_rithmic_protocol_adapter",
+ "axiusflow_terminal_ui",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -795,8 +795,8 @@ name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
  "axiusflow_application",
- "axiusflow_coinbase_coordinator",
  "axiusflow_coinbase_market_adapter",
+ "axiusflow_desktop_market_runtime",
  "axiusflow_desktop_provider_runtime",
  "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
