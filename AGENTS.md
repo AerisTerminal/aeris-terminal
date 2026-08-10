@@ -8,7 +8,7 @@ Axiusflow is a local-first professional trading platform comparable in product c
 
 The target is best-in-class performance while remaining lightweight. Architecture is part of the competitive advantage: clear ownership, bounded work, low latency, fast local startup, low resource use, deterministic recovery, and native cross-platform behavior.
 
-`Origin_charts/` is a separate repository. Do not edit, delete, format, document, commit, or otherwise modify it unless the user explicitly asks for work in that repository.
+Origin Charts is a separate repository consumed through the Git dependencies pinned in `Cargo.toml`. Never clone or copy its repository inside the Axiusflow workspace: the additional codebase overwhelms repository searches and agent context, and the platform build does not use a local clone. Let Cargo fetch the pinned revision into its external cache. If the user explicitly requests Origin development, work from a separate checkout outside this workspace and follow that repository's instructions.
 
 ## Working with the maintainer
 
@@ -82,7 +82,7 @@ Exactly two Markdown files may exist in the Axiusflow repository:
 - `ARCHITECTURE.md`
 - `AGENTS.md`
 
-`Origin_charts/` is its own repository and enforces its own two-file inventory. Do not count or modify its files as part of Axiusflow work.
+Origin Charts has its own repository and two-file inventory. Do not clone it into this workspace or count or modify its files as part of Axiusflow work.
 
 Do not create any other `.md` file, including temporary plans, reports, reviews, generated output, package READMEs, or nested agent files. If a tool creates one during work, remove it before committing.
 
