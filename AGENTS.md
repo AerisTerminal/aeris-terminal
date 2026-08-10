@@ -75,6 +75,19 @@ A test harness that bypasses the failing path is not proof. If runtime verificat
 - Edit existing files when that is clearer. Create a new module only when it improves a real ownership boundary.
 - Keep `ARCHITECTURE.md` authoritative. Do not create architecture diaries, duplicate plans, or speculative decision-document trees.
 
+## Markdown and architecture consistency
+
+Exactly two Markdown files may exist in the Axiusflow repository:
+
+- `ARCHITECTURE.md`
+- `AGENTS.md`
+
+`Origin_charts/` is its own repository and enforces its own two-file inventory. Do not count or modify its files as part of Axiusflow work.
+
+Do not create any other `.md` file, including temporary plans, reports, reviews, generated output, package READMEs, or nested agent files. If a tool creates one during work, remove it before committing.
+
+Keep `ARCHITECTURE.md` synchronized with the implementation. A change to process topology, crate responsibilities, dependency direction, data flow, mutable ownership, persistence, security, platform support, provider/UI boundaries, or verification gates must update it in the same commit. Before delivery, compare its claims with Cargo manifests, public exports, application entry points, and actual call paths.
+
 ## Verification and delivery
 
 Use focused checks while iterating. Before committing a code change, all of these must pass with zero warnings:
@@ -90,7 +103,7 @@ Add any relevant provider conformance, persistence, IPC, release-mode performanc
 
 When the requested batch is complete:
 
-1. Review the diff for accidental changes, secrets, and scope drift.
+1. Review the diff for accidental changes, secrets, scope drift, architecture drift, and extra Markdown files.
 2. Commit once with a clear, structured message describing the achieved outcome.
 3. Push `main` to `origin` without force.
 4. Report what changed, the verification performed, and anything the user must test.

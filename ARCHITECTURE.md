@@ -140,6 +140,14 @@ Never trade determinism, recoverability, security, or cross-platform correctness
 - Keep architectural claims in this file concise and current. Historical plans and decision-log sprawl are not architecture.
 - Update this document in the same change when runtime topology, ownership, persistence, security boundaries, or supported platforms change.
 
+## Repository documentation rule
+
+The only Markdown files allowed in the Axiusflow repository are root-level `ARCHITECTURE.md` and `AGENTS.md`. Do not create plans, reports, reviews, roadmaps, temporary Markdown, package READMEs, or duplicate architecture documents. Put durable architecture here, executable behavior in code and tests, and transient work notes outside the repository.
+
+`Origin_charts/` is a separate repository with its own root-level `ARCHITECTURE.md` and `AGENTS.md`. Its Markdown inventory is not part of Axiusflow, and its files must not be changed from this repository unless coordinated Origin work is explicitly requested.
+
+Architecture is never a historical snapshot. Any code change that alters process topology, crate ownership, dependencies, data flow, persistence, security boundaries, provider/UI boundaries, supported platforms, or verification gates must update this file in the same commit. Validate it against manifests, public exports, entry points, and real call paths before delivery.
+
 ## Verification
 
 The workspace gate is:
