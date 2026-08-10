@@ -37,16 +37,18 @@ use gpui::{
     WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
+    ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
+    spinner::Spinner,
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
 use std::{
+    borrow::Cow,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -2818,7 +2820,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
                 .flex()
                 .items_center()
                 .gap_2()
-                .children(loading.then(|| div().size(px(6.0)).rounded_full().bg(gpui_color(tone))))
+                .children(loading.then(|| Spinner::new().xsmall().color(gpui_color(tone))))
                 .child(notice.label),
         )
         .children((!loading).then_some(notice.detail).flatten().map(|detail| {
@@ -2964,7 +2966,7 @@ fn terminal_window_controls(
         .items_center()
         .child(window_control_button(
             "window_minimize",
-            IconName::WindowMinimize,
+            HugeIcon::WindowMinimize,
             WindowCommand::Minimize,
             false,
             cx,
@@ -2973,9 +2975,9 @@ fn terminal_window_controls(
         .child(window_control_button(
             "window_maximize_restore",
             if is_maximized {
-                IconName::WindowRestore
+                HugeIcon::WindowRestore
             } else {
-                IconName::WindowMaximize
+                HugeIcon::WindowMaximize
             },
             WindowCommand::MaximizeOrRestore,
             false,
@@ -2984,7 +2986,7 @@ fn terminal_window_controls(
         ))
         .child(window_control_button(
             "window_close",
-            IconName::WindowClose,
+            HugeIcon::WindowClose,
             WindowCommand::Close,
             true,
             cx,
@@ -2994,7 +2996,7 @@ fn terminal_window_controls(
 
 fn window_control_button(
     id: &'static str,
-    icon: IconName,
+    icon: HugeIcon,
     command: WindowCommand,
     destructive: bool,
     cx: &App,
@@ -3010,7 +3012,7 @@ fn window_control_button(
         )
     };
     let button = Button::new(id)
-        .icon(Icon::new(icon))
+        .icon(header_icon(icon))
         .custom(
             ButtonCustomVariant::new(cx)
                 .foreground(gpui_color(colors.icon_color))
@@ -3929,6 +3931,7 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
 
     let colors = theme.colors;
     let component = ComponentTheme::global_mut(cx);
+    component.font_family = "Inter".into();
     component.radius = px(f32::from(RadiusToken::Default.logical_pixels()));
     component.radius_lg = component.radius;
     component.tile_radius = component.radius;
@@ -4197,6 +4200,11 @@ fn main() {
     application()
         .with_assets(assets::DesktopAssets)
         .run(move |cx: &mut App| {
+            cx.text_system()
+                .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                    "../assets/fonts/Inter-Regular.ttf"
+                ))])
+                .expect("the bundled Inter Regular font is valid");
             gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("f11", ToggleFullscreen, None),

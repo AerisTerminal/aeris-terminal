@@ -199,6 +199,7 @@ fn apply_platform_theme(
     let separator_hover = colors.interactive_neutral_active_bg.css_value();
     let patch = serde_json::json!({
         "layout": {
+            "fontFamily": "Inter",
             "background": {
                 "type": "solid",
                 "color": surface,
@@ -1274,10 +1275,11 @@ mod tests {
 
         assert_eq!(
             chart.engine.options.get().layout.background.color,
-            "#171717"
+            "#141414"
         );
-        assert_eq!(chart.engine.options.get().layout.text_color, "#ebebeb");
-        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#1d1d1d");
+        assert_eq!(chart.engine.options.get().layout.text_color, "#e3e3e3");
+        assert_eq!(chart.engine.options.get().layout.font_family, "Inter");
+        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#1e1e1e");
         assert_eq!(
             chart.engine.options.get().crosshair.vert_line.color,
             "#2e2e2e"
@@ -1339,6 +1341,9 @@ mod tests {
             chart.engine.options.get().layout.background.color,
             "#ffffff"
         );
+        assert_eq!(chart.engine.options.get().layout.text_color, "#404040");
+        assert_eq!(chart.engine.options.get().layout.font_family, "Inter");
+        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#f5f5f5");
         assert_eq!(
             chart.engine.options.get().crosshair.vert_line.color,
             "#9598a1"
@@ -1348,7 +1353,7 @@ mod tests {
             .expect("platform theme patch is valid");
         assert_eq!(
             chart.engine.options.get().layout.background.color,
-            "#171717"
+            "#141414"
         );
         assert_eq!(
             chart.engine.options.get().crosshair.vert_line.color,

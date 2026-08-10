@@ -1,53 +1,40 @@
-/*
- * Axiusflow canonical CSS theme contract.
- * Neutral values match Twenty's light/dark theme, verified against
- * twentyhq/twenty@cd288d84470503ba897c0823a9d98701fa9986ab (2026-08-09),
- * packages/twenty-ui/src/theme/constants (GrayScale*, Background*, Border*,
- * Font* light and dark files).
- * Product, trading, and status colors remain Axiusflow-owned.
- * Keep this manifest in parity with AxiusflowTheme::color_tokens.
- */
-
-:root,
-.light {
-  --background: color(display-p3 1 1 1);
-  --foreground: color(display-p3 0.2 0.2 0.2);
+/* Axiusflow canonical semantic theme tokens. */
+:root {
+  --background: #ffffff;
+  --foreground: #404040;
   --surface_primary: var(--background);
-  --surface_secondary: color(display-p3 0.988 0.988 0.988);
-  --surface_tertiary: color(display-p3 0.945 0.945 0.945);
-  --surface_quaternary: color(display-p3 0.922 0.922 0.922);
+  --surface_secondary: #fcfcfc;
+  --surface_tertiary: var(--surface_secondary);
+  --surface_quaternary: var(--surface_secondary);
   --card: var(--surface_secondary);
   --card_foreground: var(--foreground);
   --popover: var(--surface_secondary);
   --popover_foreground: var(--foreground);
-
   --primary: #3e63dd;
-  --primary_foreground: oklch(0.97 0.014 254.604);
-  --secondary: var(--surface_tertiary);
+  --primary_foreground: #ffffff;
+  --secondary: var(--surface_secondary);
   --secondary_foreground: var(--foreground);
-  --muted: var(--surface_tertiary);
-  --muted_foreground: color(display-p3 0.6 0.6 0.6);
-  --accent: var(--surface_tertiary);
+  --muted: var(--surface_secondary);
+  --muted_foreground: #7a7a7a;
+  --text_secondary: #7a7a7a;
+  --text_muted: #dedede;
+  --text_placeholder: #dedede;
+  --text_unavailable: #dedede;
+  --icon_color: #808080;
+  --icon_active: #414141;
+  --accent: var(--surface_secondary);
   --accent_foreground: var(--foreground);
-
-  --text_secondary: color(display-p3 0.4 0.4 0.4);
-  --text_muted: color(display-p3 0.6 0.6 0.6);
-  --text_placeholder: color(display-p3 0.702 0.702 0.702);
-  --text_unavailable: color(display-p3 0.8 0.8 0.8);
-  --icon_color: color(display-p3 0.4 0.4 0.4);
-
   --destructive: oklch(0.577 0.245 27.325);
   --destructive_foreground: oklch(0.985 0 0);
-  --border: color(display-p3 0.945 0.945 0.945);
-  --input: color(display-p3 0.922 0.922 0.922);
-  --input_surface: color(display-p3 0.988 0.988 0.988);
-  --ring: oklch(0.708 0 0);
-
-  --interactive_neutral_hover_bg: color(display-p3 0 0 0 / 0.039);
-  --interactive_neutral_hover_fg: var(--foreground);
-  --interactive_neutral_active_bg: color(display-p3 0 0 0 / 0.078);
-  --interactive_neutral_active_fg: var(--foreground);
-
+  --border: #f5f5f5;
+  --border_secondary: #f3f3f3;
+  --input: var(--border_secondary);
+  --input_surface: var(--surface_secondary);
+  --ring: var(--primary);
+  --interactive_neutral_hover_bg: rgb(239 239 239 / 35%);
+  --interactive_neutral_hover_fg: var(--icon_active);
+  --interactive_neutral_active_bg: rgb(239 239 239 / 75%);
+  --interactive_neutral_active_fg: var(--icon_active);
   --chart_1: oklch(0.87 0 0);
   --chart_2: oklch(0.556 0 0);
   --chart_3: oklch(0.439 0 0);
@@ -62,35 +49,30 @@
   --chart_candle_down: var(--loss);
   --chart_volume_up: oklch(from var(--profit) l c h / 34%);
   --chart_volume_down: oklch(from var(--loss) l c h / 30%);
-  --chart_axis_text: #0a0a0a;
+  --chart_axis_text: var(--foreground);
   --chart_crosshair: #9598a1;
+  --radius_sm: 4px;
+  --radius_default: 6px;
+  --radius_full: 999px;
 }
 
 .dark {
-  --background: color(display-p3 0.09 0.09 0.09);
-  --foreground: color(display-p3 0.922 0.922 0.922);
-  --surface_secondary: color(display-p3 0.106 0.106 0.106);
-  --surface_tertiary: color(display-p3 0.114 0.114 0.114);
-  --surface_quaternary: color(display-p3 0.133 0.133 0.133);
-  --muted_foreground: color(display-p3 0.506 0.506 0.506);
-
-  --text_secondary: color(display-p3 0.702 0.702 0.702);
-  --text_muted: color(display-p3 0.506 0.506 0.506);
-  --text_placeholder: color(display-p3 0.4 0.4 0.4);
-  --text_unavailable: color(display-p3 0.298 0.298 0.298);
-  --icon_color: color(display-p3 0.702 0.702 0.702);
-
+  --background: #141414;
+  --foreground: #e3e3e3;
+  --surface_secondary: #1b1b1b;
+  --muted_foreground: #a2a2a2;
+  --text_secondary: #a2a2a2;
+  --text_muted: #4c4c4c;
+  --text_placeholder: #4c4c4c;
+  --text_unavailable: #4c4c4c;
+  --icon_color: #a3a3a3;
+  --icon_active: #e5e5e5;
   --destructive: oklch(0.704 0.191 22.216);
-  --border: color(display-p3 0.114 0.114 0.114);
-  --input: color(display-p3 0.133 0.133 0.133);
-  --input_surface: color(display-p3 0.106 0.106 0.106);
-  --ring: oklch(0.556 0 0);
-
-  --interactive_neutral_hover_bg: color(display-p3 1 1 1 / 0.059);
-  --interactive_neutral_active_bg: color(display-p3 1 1 1 / 0.102);
-
+  --border: #1e1e1e;
+  --border_secondary: #242424;
+  --interactive_neutral_hover_bg: rgb(97 97 97 / 20%);
+  --interactive_neutral_active_bg: rgb(97 97 97 / 30%);
   --chart_volume_up: oklch(from var(--profit) l c h / 32%);
   --chart_volume_down: oklch(from var(--loss) l c h / 28%);
-  --chart_axis_text: var(--foreground);
   --chart_crosshair: #2e2e2e;
 }
