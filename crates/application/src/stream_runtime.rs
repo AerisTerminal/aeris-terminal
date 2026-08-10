@@ -101,14 +101,11 @@ fn validate_stream_publication(
     let predecessor_generation = match update {
         ReplayStreamUpdate::Snapshot(snapshot) => {
             let evidence = snapshot.evidence();
-            if generation.partition_id() != evidence.partition_id {
-                return Err(mismatch("snapshot partition"));
+            if generation.session_generation() != evidence.session_generation {
+                return Err(mismatch("snapshot session generation"));
             }
-            if generation.ownership_epoch() != evidence.ownership_epoch {
-                return Err(mismatch("snapshot ownership epoch"));
-            }
-            if generation.generation() != evidence.generation {
-                return Err(mismatch("snapshot generation"));
+            if generation.publication_generation() != evidence.publication_generation {
+                return Err(mismatch("snapshot publication generation"));
             }
             if generation_last != evidence.last_sequence {
                 return Err(mismatch("snapshot last sequence"));
@@ -125,11 +122,8 @@ fn validate_stream_publication(
         }
         ReplayStreamUpdate::Delta(delta) => {
             let provenance = delta.item().provenance();
-            if generation.partition_id() != provenance.partition_id {
-                return Err(mismatch("delta partition"));
-            }
-            if generation.ownership_epoch() != provenance.ownership_epoch {
-                return Err(mismatch("delta ownership epoch"));
+            if generation.session_generation() != provenance.session_generation {
+                return Err(mismatch("delta session generation"));
             }
             if generation_last != delta.sequence() {
                 return Err(mismatch("delta last sequence"));
@@ -139,7 +133,7 @@ fn validate_stream_publication(
             }
             Some(
                 generation
-                    .generation()
+                    .publication_generation()
                     .checked_sub(1)
                     .filter(|predecessor| *predecessor != 0)
                     .ok_or_else(|| mismatch("delta predecessor generation"))?,

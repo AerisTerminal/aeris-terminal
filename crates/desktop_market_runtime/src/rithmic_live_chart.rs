@@ -104,9 +104,8 @@ pub struct RithmicLiveChart {
     forming: MarketBar,
     bars: Vec<ProvenancedMarketBar>,
     retained_bar_count: usize,
-    snapshot_generation: u64,
-    partition_id: u32,
-    ownership_epoch: u64,
+    snapshot_publication_generation: u64,
+    session_generation: u64,
     schema_version: u32,
     live_session_generation: Option<u64>,
     last_trade_sequence: Option<u64>,
@@ -172,9 +171,8 @@ impl RithmicLiveChart {
             forming: *seed.value(),
             bars: snapshot.bars().to_vec(),
             retained_bar_count,
-            snapshot_generation: snapshot.evidence().generation,
-            partition_id: first.provenance().partition_id,
-            ownership_epoch: first.provenance().ownership_epoch,
+            snapshot_publication_generation: snapshot.evidence().publication_generation,
+            session_generation: first.provenance().session_generation,
             schema_version: first.provenance().schema_version,
             live_session_generation: None,
             last_trade_sequence: None,
@@ -252,10 +250,10 @@ impl RithmicLiveChart {
                 )
             }
         };
-        let snapshot_generation = self
-            .snapshot_generation
-            .checked_add(1)
-            .ok_or(RithmicLiveChartError::SnapshotGenerationOverflow)?;
+        let snapshot_publication_generation =
+            self.snapshot_publication_generation
+                .checked_add(1)
+                .ok_or(RithmicLiveChartError::SnapshotGenerationOverflow)?;
         let mut bars = self.bars.clone();
         let forming = update.forming();
         let provenanced = Provenanced::new(
@@ -276,13 +274,13 @@ impl RithmicLiveChart {
             self.instrument.clone(),
             self.replay_provenance,
             self.bar_definition.clone(),
-            snapshot_generation,
+            snapshot_publication_generation,
             bars.clone(),
         )
         .map_err(|_| RithmicLiveChartError::SnapshotInvalid)?;
         self.forming = forming;
         self.bars = bars;
-        self.snapshot_generation = snapshot_generation;
+        self.snapshot_publication_generation = snapshot_publication_generation;
         self.cadence = next_cadence;
         self.live_session_generation = Some(trade.metadata.session_generation);
         self.last_trade_sequence = Some(trade.metadata.source_sequence);
@@ -399,8 +397,7 @@ impl RithmicLiveChart {
             ),
             causation_id: trade.trade_id.clone(),
             entitlement_revision: self.entitlement_id.clone(),
-            partition_id: self.partition_id,
-            ownership_epoch: self.ownership_epoch,
+            session_generation: self.session_generation,
             source_id: self.provider_id.clone(),
             source_sequence: forming.source_sequence,
             exchange_timestamp_unix_nanos: exchange,
@@ -515,8 +512,7 @@ mod tests {
                         correlation_id: "history".to_string(),
                         causation_id: String::new(),
                         entitlement_revision: "rithmic_test_cme".to_string(),
-                        partition_id: 0,
-                        ownership_epoch: 1,
+                        session_generation: 1,
                         source_id: "rithmic".to_string(),
                         source_sequence: bar.source_sequence,
                         exchange_timestamp_unix_nanos: timestamp,
@@ -656,8 +652,8 @@ mod tests {
         assert_eq!(second.update.forming().low, 19_980);
         assert_eq!(second.update.forming().close, 19_980);
         assert_eq!(second.update.forming().volume, 17);
-        assert_eq!(first.snapshot.evidence().generation, 2);
-        assert_eq!(second.snapshot.evidence().generation, 3);
+        assert_eq!(first.snapshot.evidence().publication_generation, 2);
+        assert_eq!(second.snapshot.evidence().publication_generation, 3);
         assert_eq!(second.snapshot.bars().len(), 2);
         assert_eq!(
             second
@@ -787,7 +783,7 @@ mod tests {
         let publication = chart
             .apply_trade(fence, &trade(100, 9, START + 20, 20_040, 3))
             .expect("failed updates do not consume the trade sequence");
-        assert_eq!(publication.snapshot.evidence().generation, 2);
+        assert_eq!(publication.snapshot.evidence().publication_generation, 2);
     }
 
     #[test]
@@ -809,7 +805,7 @@ mod tests {
                 .expect("ordered trade applies");
             assert!(update.update.bar_count() <= 2);
             assert_eq!(update.snapshot.bars().len(), 2);
-            assert_eq!(update.snapshot.evidence().generation, 2 + index);
+            assert_eq!(update.snapshot.evidence().publication_generation, 2 + index);
         }
     }
 }

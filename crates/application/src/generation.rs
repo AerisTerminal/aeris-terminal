@@ -11,9 +11,8 @@ use std::{num::NonZeroU64, sync::Arc};
 /// Immutable application generation published atomically by one model writer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketGeneration<T> {
-    partition_id: u32,
-    ownership_epoch: NonZeroU64,
-    generation: NonZeroU64,
+    session_generation: NonZeroU64,
+    publication_generation: NonZeroU64,
     first_sequence: NonZeroU64,
     last_sequence: NonZeroU64,
     items: Arc<[T]>,
@@ -26,16 +25,16 @@ impl<T> MarketGeneration<T> {
     ///
     /// Returns an error for zero values, an empty generation, or a sequence/count mismatch.
     pub fn try_new(
-        partition_id: u32,
-        ownership_epoch: u64,
-        generation: u64,
+        session_generation: u64,
+        publication_generation: u64,
         first_sequence: u64,
         last_sequence: u64,
         items: Vec<T>,
     ) -> Result<Self, StreamProtocolError> {
-        let ownership_epoch =
-            NonZeroU64::new(ownership_epoch).ok_or(StreamProtocolError::ZeroSequence)?;
-        let generation = NonZeroU64::new(generation).ok_or(StreamProtocolError::ZeroSequence)?;
+        let session_generation =
+            NonZeroU64::new(session_generation).ok_or(StreamProtocolError::ZeroSequence)?;
+        let publication_generation =
+            NonZeroU64::new(publication_generation).ok_or(StreamProtocolError::ZeroSequence)?;
         let first_sequence =
             NonZeroU64::new(first_sequence).ok_or(StreamProtocolError::ZeroSequence)?;
         let last_sequence =
@@ -58,9 +57,8 @@ impl<T> MarketGeneration<T> {
             });
         }
         Ok(Self {
-            partition_id,
-            ownership_epoch,
-            generation,
+            session_generation,
+            publication_generation,
             first_sequence,
             last_sequence,
             items: items.into(),
@@ -68,18 +66,13 @@ impl<T> MarketGeneration<T> {
     }
 
     #[must_use]
-    pub const fn partition_id(&self) -> u32 {
-        self.partition_id
+    pub const fn session_generation(&self) -> u64 {
+        self.session_generation.get()
     }
 
     #[must_use]
-    pub const fn ownership_epoch(&self) -> u64 {
-        self.ownership_epoch.get()
-    }
-
-    #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation.get()
+    pub const fn publication_generation(&self) -> u64 {
+        self.publication_generation.get()
     }
 
     #[must_use]
@@ -104,11 +97,11 @@ pub enum MarketBarModelOutcome {
     ResnapshotRequired(ResnapshotReason),
 }
 
-/// Bounded single-writer client projection for one market-bar partition.
+/// Bounded single-writer client projection for one local market-bar series.
 ///
 /// The owner feeds transport-neutral snapshots and deltas into this model from one
 /// background worker. Readers receive cloned immutable generations and never observe
-/// partially applied snapshots, deltas, ownership handoffs, or history eviction.
+/// partially applied snapshots, deltas, session changes, or history eviction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketBarClientModel {
     maximum_items: std::num::NonZeroUsize,
@@ -136,7 +129,7 @@ impl MarketBarClientModel {
     /// Applies one validated update atomically and publishes at most one generation.
     ///
     /// Accepted deltas are validated in order before bounded oldest-item eviction.
-    /// Gaps and ownership changes preserve the last immutable generation for readers
+    /// Gaps and session changes preserve the last immutable generation for readers
     /// but block all subsequent deltas until a replacement snapshot is installed.
     ///
     /// # Errors
@@ -161,11 +154,6 @@ impl MarketBarClientModel {
             return Ok(());
         };
         let evidence = snapshot.evidence();
-        if evidence.partition_id != current.partition_id() {
-            return Err(ReplayValidationError::SnapshotEvidenceMismatch(
-                "partition_id",
-            ));
-        }
         if self.current_instrument.as_ref() != Some(snapshot.instrument())
             || self.current_bar_definition.as_ref() != Some(snapshot.bar_definition())
         {
@@ -173,20 +161,20 @@ impl MarketBarClientModel {
                 "series_identity",
             ));
         }
-        if evidence.ownership_epoch < current.ownership_epoch() {
-            return Err(ReplayValidationError::SnapshotOwnershipRegression {
-                current_epoch: current.ownership_epoch(),
-                actual_epoch: evidence.ownership_epoch,
+        if evidence.session_generation < current.session_generation() {
+            return Err(ReplayValidationError::SnapshotSessionGenerationRegression {
+                current_generation: current.session_generation(),
+                actual_generation: evidence.session_generation,
             });
         }
-        if evidence.ownership_epoch == current.ownership_epoch()
-            && (evidence.generation <= current.generation()
+        if evidence.session_generation == current.session_generation()
+            && (evidence.publication_generation <= current.publication_generation()
                 || evidence.last_sequence < current.sequence_range().1)
         {
             return Err(ReplayValidationError::StaleSnapshot {
-                current_generation: current.generation(),
+                current_generation: current.publication_generation(),
                 current_last_sequence: current.sequence_range().1,
-                actual_generation: evidence.generation,
+                actual_generation: evidence.publication_generation,
                 actual_last_sequence: evidence.last_sequence,
             });
         }
@@ -211,9 +199,8 @@ impl MarketBarClientModel {
             .value()
             .source_sequence;
         let generation = MarketGeneration::try_new(
-            evidence.partition_id,
-            evidence.ownership_epoch,
-            evidence.generation,
+            evidence.session_generation,
+            evidence.publication_generation,
             first_sequence,
             evidence.last_sequence,
             retained_items,
@@ -237,13 +224,11 @@ impl MarketBarClientModel {
             ));
         };
         let provenance = delta.item().provenance();
-        if provenance.partition_id != current.partition_id()
-            || provenance.ownership_epoch != current.ownership_epoch()
-        {
+        if provenance.session_generation != current.session_generation() {
             self.session = None;
-            self.pending_resnapshot = Some(ResnapshotReason::OwnershipHandoff);
+            self.pending_resnapshot = Some(ResnapshotReason::SessionChanged);
             return Ok(MarketBarModelOutcome::ResnapshotRequired(
-                ResnapshotReason::OwnershipHandoff,
+                ResnapshotReason::SessionChanged,
             ));
         }
         let current_schema_version = current
@@ -277,7 +262,7 @@ impl MarketBarClientModel {
             }
             SequenceDecision::Accepted => {
                 let next_generation = current
-                    .generation()
+                    .publication_generation()
                     .checked_add(1)
                     .ok_or(StreamProtocolError::SequenceOverflow)?;
                 let mut items = current.items().to_vec();
@@ -295,8 +280,7 @@ impl MarketBarClientModel {
                     .value()
                     .source_sequence;
                 let generation = MarketGeneration::try_new(
-                    current.partition_id(),
-                    current.ownership_epoch(),
+                    current.session_generation(),
                     next_generation,
                     first_sequence,
                     last_sequence,
@@ -345,7 +329,7 @@ pub enum ResnapshotReason {
     SequenceGap,
     SchemaChanged,
     QueueOverflow,
-    OwnershipHandoff,
+    SessionChanged,
     TransportReset,
 }
 

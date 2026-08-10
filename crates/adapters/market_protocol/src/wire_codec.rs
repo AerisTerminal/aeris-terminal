@@ -250,8 +250,7 @@ pub fn try_decode_market_bar(
         correlation_id: metadata.correlation_id.clone(),
         causation_id: metadata.causation_id.clone(),
         entitlement_revision: header.entitlement_revision,
-        partition_id: header.partition_id,
-        ownership_epoch: header.ownership_epoch,
+        session_generation: header.session_generation,
         source_id: header.source_id,
         source_sequence: header.source_sequence,
         exchange_timestamp_unix_nanos: header.exchange_timestamp_unix_nanos,
@@ -281,13 +280,15 @@ pub fn try_decode_market_bar_snapshot(
     if wire.subscription_id.trim().is_empty() {
         return Err(ProtobufAdapterError::EmptySubscriptionId);
     }
-    if wire.ownership_epoch == 0 {
+    if wire.session_generation == 0 {
         return Err(ProtobufAdapterError::ZeroWireField(
-            "snapshot.ownership_epoch",
+            "snapshot.session_generation",
         ));
     }
-    if wire.generation == 0 {
-        return Err(ProtobufAdapterError::ZeroWireField("snapshot.generation"));
+    if wire.publication_generation == 0 {
+        return Err(ProtobufAdapterError::ZeroWireField(
+            "snapshot.publication_generation",
+        ));
     }
     if wire.schema_version == 0 {
         return Err(ProtobufAdapterError::ZeroWireField(
@@ -304,9 +305,8 @@ pub fn try_decode_market_bar_snapshot(
             ProtobufAdapterError::InvalidSnapshotChecksumLength(wire.checksum.len())
         })?;
     let evidence = SnapshotEvidence {
-        partition_id: wire.partition_id,
-        ownership_epoch: wire.ownership_epoch,
-        generation: wire.generation,
+        session_generation: wire.session_generation,
+        publication_generation: wire.publication_generation,
         first_sequence: wire.first_sequence,
         last_sequence: wire.last_sequence,
         schema_version: wire.schema_version,
@@ -325,10 +325,8 @@ pub fn try_decode_market_bar_snapshot(
         let (bar_definition, item) =
             try_decode_market_bar(wire_bar, &instrument, decimal_convention)?;
         let bar = *item.value();
-        if item.provenance().partition_id != wire.partition_id
-            || item.provenance().ownership_epoch != wire.ownership_epoch
-        {
-            return Err(ProtobufAdapterError::SnapshotOwnershipMismatch);
+        if item.provenance().session_generation != wire.session_generation {
+            return Err(ProtobufAdapterError::SnapshotSessionMismatch);
         }
         if let Some(expected_definition) = &definition {
             if expected_definition != &bar_definition {
@@ -465,22 +463,10 @@ fn validate_header(
             "bar.header.metadata.schema_version",
         ));
     }
-    if metadata.ownership_epoch == 0 || header.ownership_epoch == 0 {
+    if header.session_generation == 0 {
         return Err(ProtobufAdapterError::ZeroWireField(
-            "bar.header.ownership_epoch",
+            "bar.header.session_generation",
         ));
-    }
-    if metadata.partition_id != header.partition_id {
-        return Err(ProtobufAdapterError::PartitionMetadataMismatch {
-            metadata: metadata.partition_id,
-            header: header.partition_id,
-        });
-    }
-    if metadata.ownership_epoch != header.ownership_epoch {
-        return Err(ProtobufAdapterError::OwnershipEpochMetadataMismatch {
-            metadata: metadata.ownership_epoch,
-            header: header.ownership_epoch,
-        });
     }
     if metadata.publication_time_unix_nanos != header.publication_timestamp_unix_nanos {
         return Err(ProtobufAdapterError::PublicationTimestampMismatch {

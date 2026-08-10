@@ -149,14 +149,6 @@ pub enum ProtobufAdapterError {
         expected: String,
         actual: String,
     },
-    PartitionMetadataMismatch {
-        metadata: u32,
-        header: u32,
-    },
-    OwnershipEpochMetadataMismatch {
-        metadata: u64,
-        header: u64,
-    },
     PublicationTimestampMismatch {
         metadata: i64,
         header: i64,
@@ -168,10 +160,9 @@ pub enum ProtobufAdapterError {
     InvalidSemanticClass(i32),
     InvalidSnapshotChecksumLength(usize),
     SnapshotChecksumMismatch,
-    SnapshotOwnershipMismatch,
+    SnapshotSessionMismatch,
     SnapshotSeriesChanged,
-    SnapshotPartitionChanged,
-    SnapshotOwnershipRegression {
+    SnapshotSessionGenerationRegression {
         current: u64,
         actual: u64,
     },
@@ -181,7 +172,7 @@ pub enum ProtobufAdapterError {
         actual_generation: u64,
         actual_last_sequence: u64,
     },
-    StreamOwnershipChanged,
+    StreamSessionChanged,
     StreamSchemaChanged {
         expected: u32,
         actual: u32,
@@ -329,14 +320,6 @@ impl fmt::Display for ProtobufAdapterError {
                 formatter,
                 "bar venue id mismatch: expected {expected}, received {actual}"
             ),
-            Self::PartitionMetadataMismatch { metadata, header } => write!(
-                formatter,
-                "partition metadata mismatch: metadata {metadata}, header {header}"
-            ),
-            Self::OwnershipEpochMetadataMismatch { metadata, header } => write!(
-                formatter,
-                "ownership epoch metadata mismatch: metadata {metadata}, header {header}"
-            ),
             Self::PublicationTimestampMismatch { metadata, header } => write!(
                 formatter,
                 "publication timestamp mismatch: metadata {metadata}, header {header}"
@@ -360,18 +343,14 @@ impl fmt::Display for ProtobufAdapterError {
             Self::SnapshotChecksumMismatch => {
                 formatter.write_str("snapshot checksum does not match canonical content")
             }
-            Self::SnapshotOwnershipMismatch => formatter.write_str(
-                "snapshot bar partition or ownership epoch does not match snapshot framing",
-            ),
+            Self::SnapshotSessionMismatch => formatter
+                .write_str("snapshot bar session generation does not match snapshot framing"),
             Self::SnapshotSeriesChanged => {
                 formatter.write_str("snapshot changed instrument or bar-definition identity")
             }
-            Self::SnapshotPartitionChanged => {
-                formatter.write_str("snapshot changed partition identity")
-            }
-            Self::SnapshotOwnershipRegression { current, actual } => write!(
+            Self::SnapshotSessionGenerationRegression { current, actual } => write!(
                 formatter,
-                "snapshot ownership epoch {actual} regresses current epoch {current}"
+                "snapshot session generation {actual} regresses current generation {current}"
             ),
             Self::StaleSnapshotTransition {
                 current_generation,
@@ -382,9 +361,8 @@ impl fmt::Display for ProtobufAdapterError {
                 formatter,
                 "snapshot generation {actual_generation} sequence {actual_last_sequence} does not advance current generation {current_generation} sequence {current_last_sequence}"
             ),
-            Self::StreamOwnershipChanged => formatter.write_str(
-                "delta partition or ownership epoch changed without a replacement snapshot",
-            ),
+            Self::StreamSessionChanged => formatter
+                .write_str("delta session generation changed without a replacement snapshot"),
             Self::StreamSchemaChanged { expected, actual } => write!(
                 formatter,
                 "delta schema version {actual} does not match installed snapshot schema {expected}"

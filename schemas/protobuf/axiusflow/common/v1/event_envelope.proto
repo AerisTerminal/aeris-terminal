@@ -11,8 +11,7 @@ message EventMetadata {
   uint32 schema_version = 5;
   string correlation_id = 6;
   string causation_id = 7;
-  uint32 partition_id = 8;
-  uint64 ownership_epoch = 9;
+  reserved 8, 9;
 }
 
 // Fixed-point wire value. Mantissa uses signed, big-endian two's-complement.

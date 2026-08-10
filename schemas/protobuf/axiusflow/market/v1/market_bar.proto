@@ -38,8 +38,8 @@ message MarketEventHeader {
   int64 publication_timestamp_unix_nanos = 10;
   uint64 correction_flags = 11;
   uint64 quality_flags = 12;
-  uint32 partition_id = 13;
-  uint64 ownership_epoch = 14;
+  reserved 13;
+  uint64 session_generation = 14;
   optional int64 nic_receive_timestamp_unix_nanos = 15;
   int64 normalized_timestamp_unix_nanos = 16;
   TimestampSource nic_timestamp_source = 17;
@@ -68,9 +68,9 @@ message MarketBarSnapshot {
   repeated MarketBar bars = 3;
   uint64 first_sequence = 4;
   uint64 last_sequence = 5;
-  uint32 partition_id = 6;
-  uint64 ownership_epoch = 7;
-  uint64 generation = 8;
+  reserved 6;
+  uint64 session_generation = 7;
+  uint64 publication_generation = 8;
   bytes checksum = 9;
   uint32 schema_version = 10;
 

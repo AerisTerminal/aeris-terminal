@@ -611,7 +611,13 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
         },
         timeframe_bars,
     )?
-    .try_with_generation(bootstrap.snapshot.evidence().generation.saturating_add(1))?;
+    .try_with_publication_generation(
+        bootstrap
+            .snapshot
+            .evidence()
+            .publication_generation
+            .saturating_add(1),
+    )?;
     let previous_sequence = bootstrap.snapshot.stream().last_sequence();
     let snapshot = bootstrap.snapshot;
     let report_path = report_path.to_path_buf();

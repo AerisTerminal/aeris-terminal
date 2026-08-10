@@ -328,14 +328,14 @@ fn install_repaired_snapshot<V: axiusflow_platform_runtime::CredentialVault>(
         .into_iter()
         .map(|bar| history_provenance(bar, generation, received_unix_nanos))
         .collect::<Result<VecDeque<_>, _>>()?;
-    let snapshot_generation = model
-        .current_generation()
-        .map_or(1, |current| current.generation().saturating_add(1));
+    let snapshot_publication_generation = model.current_generation().map_or(1, |current| {
+        current.publication_generation().saturating_add(1)
+    });
     let snapshot = ReplaySnapshot::try_from_provenanced_values(
         context.instrument.clone(),
         ReplayProvenance::LiveProvider,
         context.bar_definition.clone(),
-        snapshot_generation,
+        snapshot_publication_generation,
         retained.iter().cloned().collect(),
     )
     .map_err(|error| error.to_string())?;
@@ -517,9 +517,9 @@ fn hydrate_cached_history<V: axiusflow_platform_runtime::CredentialVault>(
         request.instrument.clone(),
         ReplayProvenance::LocalCache,
         request.bar_definition.clone(),
-        model
-            .current_generation()
-            .map_or(1, |current| current.generation().saturating_add(1)),
+        model.current_generation().map_or(1, |current| {
+            current.publication_generation().saturating_add(1)
+        }),
         retained.iter().cloned().collect(),
     )
     .map_err(|error| error.to_string())?;
@@ -1538,7 +1538,7 @@ mod tests {
                 _ => None,
             });
             let cached_snapshot = cached_snapshot.expect("local cache snapshot publishes");
-            assert_eq!(cached_snapshot.evidence().ownership_epoch, 1);
+            assert_eq!(cached_snapshot.evidence().session_generation, 1);
             assert_eq!(cached_snapshot.evidence().first_sequence, 1);
             assert_eq!(cached_snapshot.evidence().last_sequence, 2);
         }

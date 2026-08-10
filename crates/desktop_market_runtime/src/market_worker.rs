@@ -1522,20 +1522,20 @@ impl FixtureMarketWorker {
             .load_snapshot(LoadEmbeddedReplay { bar_count })
             .map_err(|error| error.to_string())?;
         let generation = self.model.current_generation().map_or(
-            Ok(snapshot.evidence().generation),
+            Ok(snapshot.evidence().publication_generation),
             |current| {
                 current
-                    .generation()
+                    .publication_generation()
                     .checked_add(1)
                     .ok_or_else(|| "desktop fixture generation overflow".to_string())
             },
         )?;
         let snapshot = snapshot
-            .try_with_generation(generation)
+            .try_with_publication_generation(generation)
             .map_err(|error| error.to_string())?;
         let snapshot_id = format!(
             "desktop_fixture_generation_{}_sequence_{}",
-            snapshot.evidence().generation,
+            snapshot.evidence().publication_generation,
             snapshot.evidence().last_sequence
         );
         let envelopes = try_encode_replay_snapshot_chunk_envelopes(

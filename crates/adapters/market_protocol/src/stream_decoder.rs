@@ -54,9 +54,8 @@ struct MarketBarStreamContext {
     subscription_id: String,
     instrument: InstrumentRevision,
     bar_definition: BarDefinition,
-    partition_id: u32,
-    ownership_epoch: u64,
-    generation: u64,
+    session_generation: u64,
+    publication_generation: u64,
     schema_version: u32,
     last_sequence: u64,
     last_exchange_timestamp_seconds: i64,
@@ -69,9 +68,8 @@ struct PendingMarketBarSnapshot {
     instrument: Option<instrument_wire::InstrumentRevision>,
     first_sequence: u64,
     last_sequence: u64,
-    partition_id: u32,
-    ownership_epoch: u64,
-    generation: u64,
+    session_generation: u64,
+    publication_generation: u64,
     checksum: Vec<u8>,
     schema_version: u32,
     chunk_count: u32,
@@ -91,9 +89,8 @@ impl PendingMarketBarSnapshot {
             instrument: wire.instrument,
             first_sequence: wire.first_sequence,
             last_sequence: wire.last_sequence,
-            partition_id: wire.partition_id,
-            ownership_epoch: wire.ownership_epoch,
-            generation: wire.generation,
+            session_generation: wire.session_generation,
+            publication_generation: wire.publication_generation,
             checksum: wire.checksum,
             schema_version: wire.schema_version,
             chunk_count: wire.chunk_count,
@@ -109,9 +106,8 @@ impl PendingMarketBarSnapshot {
             && self.instrument == wire.instrument
             && self.first_sequence == wire.first_sequence
             && self.last_sequence == wire.last_sequence
-            && self.partition_id == wire.partition_id
-            && self.ownership_epoch == wire.ownership_epoch
-            && self.generation == wire.generation
+            && self.session_generation == wire.session_generation
+            && self.publication_generation == wire.publication_generation
             && self.checksum == wire.checksum
             && self.schema_version == wire.schema_version
             && self.chunk_count == wire.chunk_count
@@ -125,9 +121,8 @@ impl PendingMarketBarSnapshot {
             bars: self.bars,
             first_sequence: self.first_sequence,
             last_sequence: self.last_sequence,
-            partition_id: self.partition_id,
-            ownership_epoch: self.ownership_epoch,
-            generation: self.generation,
+            session_generation: self.session_generation,
+            publication_generation: self.publication_generation,
             checksum: self.checksum,
             schema_version: self.schema_version,
             snapshot_id: String::new(),
@@ -348,10 +343,10 @@ impl MarketBarStreamDecoder {
                         actual: decoded.subscription_id,
                     });
                 }
-                if decoded.delta.item().provenance().partition_id != context.partition_id
-                    || decoded.delta.item().provenance().ownership_epoch != context.ownership_epoch
+                if decoded.delta.item().provenance().session_generation
+                    != context.session_generation
                 {
-                    return Err(ProtobufAdapterError::StreamOwnershipChanged);
+                    return Err(ProtobufAdapterError::StreamSessionChanged);
                 }
                 let actual_schema = decoded.delta.item().provenance().schema_version;
                 if actual_schema != context.schema_version {
@@ -401,23 +396,20 @@ impl MarketBarStreamDecoder {
             {
                 return Err(ProtobufAdapterError::SnapshotSeriesChanged);
             }
-            if decoded.evidence.partition_id != context.partition_id {
-                return Err(ProtobufAdapterError::SnapshotPartitionChanged);
-            }
-            if decoded.evidence.ownership_epoch < context.ownership_epoch {
-                return Err(ProtobufAdapterError::SnapshotOwnershipRegression {
-                    current: context.ownership_epoch,
-                    actual: decoded.evidence.ownership_epoch,
+            if decoded.evidence.session_generation < context.session_generation {
+                return Err(ProtobufAdapterError::SnapshotSessionGenerationRegression {
+                    current: context.session_generation,
+                    actual: decoded.evidence.session_generation,
                 });
             }
-            if decoded.evidence.ownership_epoch == context.ownership_epoch
-                && (decoded.evidence.generation <= context.generation
+            if decoded.evidence.session_generation == context.session_generation
+                && (decoded.evidence.publication_generation <= context.publication_generation
                     || decoded.evidence.last_sequence < context.last_sequence)
             {
                 return Err(ProtobufAdapterError::StaleSnapshotTransition {
-                    current_generation: context.generation,
+                    current_generation: context.publication_generation,
                     current_last_sequence: context.last_sequence,
-                    actual_generation: decoded.evidence.generation,
+                    actual_generation: decoded.evidence.publication_generation,
                     actual_last_sequence: decoded.evidence.last_sequence,
                 });
             }
@@ -431,9 +423,8 @@ impl MarketBarStreamDecoder {
             subscription_id: decoded.subscription_id.clone(),
             instrument: decoded.instrument.clone(),
             bar_definition: decoded.bar_definition.clone(),
-            partition_id: last_item.provenance().partition_id,
-            ownership_epoch: last_item.provenance().ownership_epoch,
-            generation: decoded.evidence.generation,
+            session_generation: last_item.provenance().session_generation,
+            publication_generation: decoded.evidence.publication_generation,
             schema_version: decoded.evidence.schema_version,
             last_sequence: decoded.stream.last_sequence(),
             last_exchange_timestamp_seconds: last_item.value().exchange_timestamp_seconds,

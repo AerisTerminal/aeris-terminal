@@ -22,8 +22,6 @@ pub struct EventMetadata {
     pub schema_version: u32,
     pub correlation_id: String,
     pub causation_id: String,
-    pub partition_id: u32,
-    pub ownership_epoch: u64,
 }
 
 /// Canonical evidence retained with each displayed or replayed market value.
@@ -37,8 +35,7 @@ pub struct MarketEventProvenance {
     pub correlation_id: String,
     pub causation_id: String,
     pub entitlement_revision: String,
-    pub partition_id: u32,
-    pub ownership_epoch: u64,
+    pub session_generation: u64,
     pub source_id: String,
     pub source_sequence: u64,
     pub exchange_timestamp_unix_nanos: i64,
@@ -85,9 +82,8 @@ impl<Value> Provenanced<Value> {
 /// Snapshot identity and integrity evidence retained through recovery boundaries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotEvidence {
-    pub partition_id: u32,
-    pub ownership_epoch: u64,
-    pub generation: u64,
+    pub session_generation: u64,
+    pub publication_generation: u64,
     pub first_sequence: u64,
     pub last_sequence: u64,
     pub schema_version: u32,
@@ -126,9 +122,8 @@ pub fn compute_market_snapshot_checksum<'value>(
     values: impl IntoIterator<Item = MarketValueChecksumRef<'value>>,
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(evidence.partition_id.to_be_bytes());
-    digest.update(evidence.ownership_epoch.to_be_bytes());
-    digest.update(evidence.generation.to_be_bytes());
+    digest.update(evidence.session_generation.to_be_bytes());
+    digest.update(evidence.publication_generation.to_be_bytes());
     digest.update(evidence.first_sequence.to_be_bytes());
     digest.update(evidence.last_sequence.to_be_bytes());
     digest.update(evidence.schema_version.to_be_bytes());
@@ -160,8 +155,7 @@ fn update_provenance_digest(digest: &mut Sha256, provenance: &MarketEventProvena
     update_string_digest(digest, &provenance.correlation_id);
     update_string_digest(digest, &provenance.causation_id);
     update_string_digest(digest, &provenance.entitlement_revision);
-    digest.update(provenance.partition_id.to_be_bytes());
-    digest.update(provenance.ownership_epoch.to_be_bytes());
+    digest.update(provenance.session_generation.to_be_bytes());
     update_string_digest(digest, &provenance.source_id);
     digest.update(provenance.source_sequence.to_be_bytes());
     digest.update(provenance.exchange_timestamp_unix_nanos.to_be_bytes());
@@ -481,3 +475,73 @@ impl fmt::Display for StreamProtocolError {
 }
 
 impl Error for StreamProtocolError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provenance(session_generation: u64) -> MarketEventProvenance {
+        MarketEventProvenance {
+            event_id: "event".into(),
+            event_time_unix_nanos: 1,
+            publication_time_unix_nanos: 2,
+            producer: "fixture".into(),
+            schema_version: 2,
+            correlation_id: "correlation".into(),
+            causation_id: "causation".into(),
+            entitlement_revision: "entitlement".into(),
+            session_generation,
+            source_id: "source".into(),
+            source_sequence: 1,
+            exchange_timestamp_unix_nanos: 1_000_000_000,
+            provider_receive_timestamp_unix_nanos: 1_000_000_001,
+            nic_receive_timestamp_unix_nanos: None,
+            axiusflow_receive_timestamp_unix_nanos: 1_000_000_002,
+            normalized_timestamp_unix_nanos: 1_000_000_003,
+            fanout_enqueue_timestamp_unix_nanos: None,
+            correction_flags: 0,
+            quality_flags: 0,
+            nic_timestamp_source: 0,
+            semantic_class: 1,
+        }
+    }
+
+    fn checksum(session_generation: u64, publication_generation: u64) -> [u8; 32] {
+        let provenance = provenance(session_generation);
+        compute_market_snapshot_checksum(
+            &SnapshotEvidence {
+                session_generation,
+                publication_generation,
+                first_sequence: 1,
+                last_sequence: 1,
+                schema_version: 2,
+                checksum: [0; 32],
+            },
+            MarketSnapshotIdentityRef {
+                instrument_id: "BTC-USD",
+                instrument_revision: 1,
+                bar_definition_id: "one-minute",
+                bar_definition_version: 1,
+                bar_interval_seconds: 60,
+                bar_trades_per_bar: None,
+            },
+            [MarketValueChecksumRef {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 1,
+                open: 10,
+                high: 12,
+                low: 9,
+                close: 11,
+                volume: 5,
+                provenance: &provenance,
+            }],
+        )
+    }
+
+    #[test]
+    fn checksum_is_deterministic_and_fences_session_and_publication_generations() {
+        assert_eq!(checksum(1, 1), checksum(1, 1));
+        assert_ne!(checksum(1, 1), checksum(2, 1));
+        assert_ne!(checksum(1, 1), checksum(1, 2));
+    }
+}

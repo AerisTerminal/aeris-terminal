@@ -39,7 +39,7 @@ impl ReplayProvenance {
     }
 }
 
-/// One fixed-point bar inseparable from source, ownership, quality, and entitlement evidence.
+/// One fixed-point bar inseparable from source, session, quality, and entitlement evidence.
 pub type ProvenancedMarketBar = Provenanced<MarketBar>;
 
 /// Revalidates a market value and its canonical evidence at an application boundary.
@@ -83,7 +83,7 @@ pub fn validate_provenanced_market_bar(
             return Err(ReplayValidationError::MissingProvenance(field));
         }
     }
-    if provenance.ownership_epoch == 0 || provenance.schema_version == 0 {
+    if provenance.session_generation == 0 || provenance.schema_version == 0 {
         return Err(ReplayValidationError::InvalidProvenanceRevision);
     }
     Ok(())
@@ -142,8 +142,7 @@ pub(crate) fn embedded_event_provenance(bar: &MarketBar) -> MarketEventProvenanc
         correlation_id: "embedded_replay".to_string(),
         causation_id: String::new(),
         entitlement_revision: "embedded_fixture_entitlement_v1".to_string(),
-        partition_id: 0,
-        ownership_epoch: 1,
+        session_generation: 1,
         source_id: "embedded_fixture".to_string(),
         source_sequence: bar.source_sequence,
         exchange_timestamp_unix_nanos,

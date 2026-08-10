@@ -1,4 +1,4 @@
-use super::{PARTITION_ID, SCHEMA_VERSION, unix_nanos};
+use super::{SCHEMA_VERSION, unix_nanos};
 use axiusflow_application::{
     MarketEventProvenance, Provenanced, ProvenancedMarketBar, validate_provenanced_market_bar,
 };
@@ -8,7 +8,7 @@ use axiusflow_market_data::MarketBar;
 
 struct ProvenanceContext {
     generation: u64,
-    ownership_epoch: u64,
+    session_generation: u64,
     event_id: String,
     event_time_unix_nanos: i64,
     provider_receive_timestamp_unix_nanos: i64,
@@ -29,7 +29,7 @@ pub(super) fn history_provenance(
         bar,
         ProvenanceContext {
             generation: generation.get(),
-            ownership_epoch: generation.get().saturating_add(1),
+            session_generation: generation.get().saturating_add(1),
             event_id: format!("coinbase_history_bar_{}_{exchange}", bar.source_sequence),
             event_time_unix_nanos: exchange,
             provider_receive_timestamp_unix_nanos: received_unix_nanos,
@@ -52,7 +52,7 @@ pub(super) fn cached_history_provenance(
         bar,
         ProvenanceContext {
             generation: cache_generation,
-            ownership_epoch: 1,
+            session_generation: 1,
             event_id: format!(
                 "coinbase_cached_history_bar_{}_{exchange}",
                 bar.source_sequence
@@ -85,7 +85,7 @@ pub(super) fn live_provenance(
         completed.bar,
         ProvenanceContext {
             generation: generation.get(),
-            ownership_epoch: generation.get().saturating_add(1),
+            session_generation: generation.get().saturating_add(1),
             event_id: format!(
                 "coinbase_live_bar_{}_message_{}",
                 completed.bar.source_sequence, provider_sequence_num
@@ -114,8 +114,7 @@ fn provenanced(bar: MarketBar, context: ProvenanceContext) -> Result<Provenanced
             correlation_id: format!("coinbase_generation_{}", context.generation),
             causation_id: context.causation_id,
             entitlement_revision: ENTITLEMENT_CLASS.to_string(),
-            partition_id: PARTITION_ID,
-            ownership_epoch: context.ownership_epoch,
+            session_generation: context.session_generation,
             source_id: "coinbase".to_string(),
             source_sequence: bar.source_sequence,
             exchange_timestamp_unix_nanos,

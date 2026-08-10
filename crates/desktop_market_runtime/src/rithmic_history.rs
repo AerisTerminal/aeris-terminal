@@ -633,7 +633,7 @@ fn bootstrap_from_bars(
         trades_per_bar: (request.series == RithmicSeries::Tick)
             .then_some(u32::from(TICK_TRADES_PER_BAR)),
     };
-    let ownership_epoch = u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX);
+    let session_generation = u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX);
     let provenanced = bars
         .into_iter()
         .map(|bar| {
@@ -652,7 +652,7 @@ fn bootstrap_from_bars(
         instrument,
         ReplayProvenance::LiveProvider,
         definition,
-        ownership_epoch,
+        session_generation,
         provenanced,
     )
     .map_err(|error| error.to_string())?;
@@ -698,8 +698,7 @@ fn history_provenance(
         ),
         causation_id: "rithmic_history_replay".to_string(),
         entitlement_revision: request.instrument.entitlement_id.clone(),
-        partition_id: 0,
-        ownership_epoch: u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX),
+        session_generation: u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX),
         source_id: "rithmic".to_string(),
         source_sequence: bar.source_sequence,
         exchange_timestamp_unix_nanos: exchange,

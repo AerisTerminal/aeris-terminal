@@ -1207,7 +1207,7 @@ fn publish_chart_update(
                 publication.subscription_id,
                 format!(
                     "engine-{engine_epoch}-{}",
-                    publication.generation.generation()
+                    publication.generation.publication_generation()
                 ),
                 &snapshot,
                 convention,
@@ -1226,7 +1226,9 @@ fn publish_chart_update(
                                 interval_seconds: snapshot.bar_definition().interval_seconds,
                                 engine_epoch,
                                 selection_generation: 0,
-                                provider_generation: publication.generation.generation(),
+                                provider_generation: publication
+                                    .generation
+                                    .publication_generation(),
                                 payload,
                                 provenance: wire_provenance as i32,
                             })
@@ -1261,7 +1263,7 @@ fn publish_chart_update(
                     interval_seconds: snapshot.bar_definition().interval_seconds,
                     engine_epoch,
                     selection_generation: 0,
-                    provider_generation: publication.generation.generation(),
+                    provider_generation: publication.generation.publication_generation(),
                     payload,
                     provenance: wire_provenance as i32,
                 }),

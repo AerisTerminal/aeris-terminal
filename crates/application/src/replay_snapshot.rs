@@ -45,9 +45,8 @@ impl ReplaySnapshot {
         let first = bars.first().ok_or(StreamProtocolError::EmptySnapshot)?;
         let last = bars.last().ok_or(StreamProtocolError::EmptySnapshot)?;
         let mut evidence = SnapshotEvidence {
-            partition_id: first.provenance().partition_id,
-            ownership_epoch: first.provenance().ownership_epoch,
-            generation: 1,
+            session_generation: first.provenance().session_generation,
+            publication_generation: 1,
             first_sequence: first.value().source_sequence,
             last_sequence: last.value().source_sequence,
             schema_version: first.provenance().schema_version,
@@ -71,13 +70,15 @@ impl ReplaySnapshot {
     ) -> Result<Self, ReplayValidationError> {
         instrument.validate()?;
         bar_definition.validate()?;
-        if evidence.ownership_epoch == 0 {
+        if evidence.session_generation == 0 {
             return Err(ReplayValidationError::InvalidSnapshotEvidence(
-                "ownership_epoch",
+                "session_generation",
             ));
         }
-        if evidence.generation == 0 {
-            return Err(ReplayValidationError::InvalidSnapshotEvidence("generation"));
+        if evidence.publication_generation == 0 {
+            return Err(ReplayValidationError::InvalidSnapshotEvidence(
+                "publication_generation",
+            ));
         }
         if evidence.schema_version == 0 {
             return Err(ReplayValidationError::InvalidSnapshotEvidence(
@@ -95,14 +96,9 @@ impl ReplaySnapshot {
         for item in &bars {
             validate_provenanced_market_bar(item)?;
             let item_provenance = item.provenance();
-            if item_provenance.partition_id != evidence.partition_id {
+            if item_provenance.session_generation != evidence.session_generation {
                 return Err(ReplayValidationError::SnapshotEvidenceMismatch(
-                    "partition_id",
-                ));
-            }
-            if item_provenance.ownership_epoch != evidence.ownership_epoch {
-                return Err(ReplayValidationError::SnapshotEvidenceMismatch(
-                    "ownership_epoch",
+                    "session_generation",
                 ));
             }
             if item_provenance.schema_version != evidence.schema_version {
@@ -161,16 +157,15 @@ impl ReplaySnapshot {
         instrument: InstrumentRevision,
         provenance: ReplayProvenance,
         bar_definition: BarDefinition,
-        generation: u64,
+        publication_generation: u64,
         bars: Vec<ProvenancedMarketBar>,
     ) -> Result<Self, ReplayValidationError> {
         let first = bars.first().ok_or(StreamProtocolError::EmptySnapshot)?;
         let last = bars.last().ok_or(StreamProtocolError::EmptySnapshot)?;
         let first_provenance = first.provenance();
         let mut evidence = SnapshotEvidence {
-            partition_id: first_provenance.partition_id,
-            ownership_epoch: first_provenance.ownership_epoch,
-            generation,
+            session_generation: first_provenance.session_generation,
+            publication_generation,
             first_sequence: first.value().source_sequence,
             last_sequence: last.value().source_sequence,
             schema_version: first_provenance.schema_version,
@@ -210,14 +205,17 @@ impl ReplaySnapshot {
         &self.evidence
     }
 
-    /// Reissues the same validated values under a nonzero snapshot generation.
+    /// Reissues the same validated values under a nonzero publication generation.
     ///
     /// # Errors
     ///
-    /// Returns an error when the generation is zero or rebuilt evidence is invalid.
-    pub fn try_with_generation(&self, generation: u64) -> Result<Self, ReplayValidationError> {
+    /// Returns an error when the publication generation is zero or rebuilt evidence is invalid.
+    pub fn try_with_publication_generation(
+        &self,
+        publication_generation: u64,
+    ) -> Result<Self, ReplayValidationError> {
         let mut evidence = self.evidence.clone();
-        evidence.generation = generation;
+        evidence.publication_generation = publication_generation;
         evidence.checksum = snapshot_checksum(
             &evidence,
             &self.instrument,

@@ -32,9 +32,9 @@ pub enum ReplayValidationError {
     InvalidSnapshotEvidence(&'static str),
     SnapshotEvidenceMismatch(&'static str),
     SnapshotChecksumMismatch,
-    SnapshotOwnershipRegression {
-        current_epoch: u64,
-        actual_epoch: u64,
+    SnapshotSessionGenerationRegression {
+        current_generation: u64,
+        actual_generation: u64,
     },
     StaleSnapshot {
         current_generation: u64,
@@ -97,8 +97,9 @@ impl fmt::Display for ReplayValidationError {
                     "market provenance field {field} must not be empty"
                 )
             }
-            Self::InvalidProvenanceRevision => formatter
-                .write_str("market provenance ownership epoch and schema version must be non-zero"),
+            Self::InvalidProvenanceRevision => formatter.write_str(
+                "market provenance session generation and schema version must be non-zero",
+            ),
             Self::InvalidSnapshotEvidence(field) => {
                 write!(
                     formatter,
@@ -112,12 +113,12 @@ impl fmt::Display for ReplayValidationError {
             Self::SnapshotChecksumMismatch => {
                 formatter.write_str("snapshot checksum does not match its canonical market values")
             }
-            Self::SnapshotOwnershipRegression {
-                current_epoch,
-                actual_epoch,
+            Self::SnapshotSessionGenerationRegression {
+                current_generation,
+                actual_generation,
             } => write!(
                 formatter,
-                "snapshot ownership epoch {actual_epoch} regresses current epoch {current_epoch}"
+                "snapshot session generation {actual_generation} regresses current generation {current_generation}"
             ),
             Self::StaleSnapshot {
                 current_generation,
@@ -151,7 +152,7 @@ impl Error for ReplayValidationError {
             | Self::InvalidSnapshotEvidence(_)
             | Self::SnapshotEvidenceMismatch(_)
             | Self::SnapshotChecksumMismatch
-            | Self::SnapshotOwnershipRegression { .. }
+            | Self::SnapshotSessionGenerationRegression { .. }
             | Self::StaleSnapshot { .. }
             | Self::UncorrelatedRecoverySnapshot { .. } => None,
         }

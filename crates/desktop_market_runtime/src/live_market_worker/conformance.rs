@@ -667,7 +667,7 @@ fn corrupt_file(path: &Path) {
     fs::write(path, b"corrupt").expect("fixture cache corruption writes");
 }
 
-fn wait_for_live_snapshot(worker: &mut MarketDataWorker, ownership_epoch: u64) -> (u64, u64) {
+fn wait_for_live_snapshot(worker: &mut MarketDataWorker, session_generation: u64) -> (u64, u64) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let (messages, disconnected) = worker.drain_messages();
@@ -686,7 +686,7 @@ fn wait_for_live_snapshot(worker: &mut MarketDataWorker, ownership_epoch: u64) -
             if let MarketWorkerMessage::Update(publication) = message
                 && let ReplayStreamUpdate::Snapshot(snapshot) = publication.update
                 && snapshot.provenance() == ReplayProvenance::LiveProvider
-                && snapshot.evidence().ownership_epoch == ownership_epoch
+                && snapshot.evidence().session_generation == session_generation
             {
                 return (
                     snapshot.evidence().first_sequence,

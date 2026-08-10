@@ -157,7 +157,7 @@ fn generation_status(
     let (first_sequence, last_sequence) = generation.sequence_range();
     format!(
         "{worker_label} · {subscription_id} · model g{} · {} retained · seq {first_sequence}–{last_sequence}",
-        generation.generation(),
+        generation.publication_generation(),
         generation.items().len(),
     )
 }

@@ -73,8 +73,7 @@ const PROVIDER_EVENT_CAPACITY: usize = 16_384;
 const PROVIDER_EVENT_BATCH: usize = 1_024;
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 1;
-const PARTITION_ID: u32 = 7;
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const INBOX_CAPACITY: usize = 64;
 const INBOX_BATCH: usize = 1_024;
 const UI_DIAGNOSTICS_CAPACITY: usize = 256;
@@ -1255,9 +1254,9 @@ fn publish_aggregated_coinbase_interval<V: axiusflow_platform_runtime::Credentia
         instrument.clone(),
         axiusflow_application::ReplayProvenance::LiveProvider,
         bar_definition.clone(),
-        model
-            .current_generation()
-            .map_or(1, |current| current.generation().saturating_add(1)),
+        model.current_generation().map_or(1, |current| {
+            current.publication_generation().saturating_add(1)
+        }),
         retained.iter().cloned().collect(),
     )
     .map_err(|error| error.to_string())?;

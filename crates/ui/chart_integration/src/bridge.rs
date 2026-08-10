@@ -102,9 +102,8 @@ pub struct ChartDataBridge {
     queue: BoundedUiQueue<ReplayStreamUpdate>,
     session: Option<ReplaySession>,
     accepted_series: ChartSeriesIdentity,
-    accepted_partition_id: u32,
-    accepted_ownership_epoch: u64,
-    accepted_generation: u64,
+    accepted_session_generation: u64,
+    accepted_publication_generation: u64,
     accepted_last_sequence: u64,
     queue_overflows: u64,
     resnapshot_requests: u64,
@@ -135,9 +134,8 @@ impl ChartDataBridge {
             queue: BoundedUiQueue::new(capacity),
             session: Some(ReplaySession::try_new(snapshot)?),
             accepted_series: ChartSeriesIdentity::from_snapshot(snapshot),
-            accepted_partition_id: snapshot.evidence().partition_id,
-            accepted_ownership_epoch: snapshot.evidence().ownership_epoch,
-            accepted_generation: snapshot.evidence().generation,
+            accepted_session_generation: snapshot.evidence().session_generation,
+            accepted_publication_generation: snapshot.evidence().publication_generation,
             accepted_last_sequence: snapshot.evidence().last_sequence,
             queue_overflows: 0,
             resnapshot_requests: 0,
@@ -211,9 +209,8 @@ impl ChartDataBridge {
         }
         let mut candidate_session = self.session;
         let mut candidate_series = self.accepted_series.clone();
-        let mut candidate_partition_id = self.accepted_partition_id;
-        let mut candidate_ownership_epoch = self.accepted_ownership_epoch;
-        let mut candidate_generation = self.accepted_generation;
+        let mut candidate_session_generation = self.accepted_session_generation;
+        let mut candidate_publication_generation = self.accepted_publication_generation;
         let mut candidate_last_sequence = self.accepted_last_sequence;
         let mut merged = MergedChartData {
             snapshot: None,
@@ -231,9 +228,8 @@ impl ChartDataBridge {
                     }
                     if !snapshot_may_replace(
                         &snapshot,
-                        candidate_partition_id,
-                        candidate_ownership_epoch,
-                        candidate_generation,
+                        candidate_session_generation,
+                        candidate_publication_generation,
                         candidate_last_sequence,
                         candidate_series.matches(&snapshot),
                         None,
@@ -244,9 +240,8 @@ impl ChartDataBridge {
                     }
                     candidate_session = Some(ReplaySession::try_new(&snapshot)?);
                     candidate_series = ChartSeriesIdentity::from_snapshot(&snapshot);
-                    candidate_partition_id = snapshot.evidence().partition_id;
-                    candidate_ownership_epoch = snapshot.evidence().ownership_epoch;
-                    candidate_generation = snapshot.evidence().generation;
+                    candidate_session_generation = snapshot.evidence().session_generation;
+                    candidate_publication_generation = snapshot.evidence().publication_generation;
                     candidate_last_sequence = snapshot.evidence().last_sequence;
                     merged.snapshot = Some(snapshot);
                     merged.accepted_deltas.clear();
@@ -278,9 +273,8 @@ impl ChartDataBridge {
         }
         self.session = candidate_session;
         self.accepted_series = candidate_series;
-        self.accepted_partition_id = candidate_partition_id;
-        self.accepted_ownership_epoch = candidate_ownership_epoch;
-        self.accepted_generation = candidate_generation;
+        self.accepted_session_generation = candidate_session_generation;
+        self.accepted_publication_generation = candidate_publication_generation;
         self.accepted_last_sequence = candidate_last_sequence;
         Ok(Some(merged))
     }
@@ -424,9 +418,8 @@ impl ChartDataBridge {
         self.queue.drain().for_each(drop);
         self.session = Some(session);
         self.accepted_series = ChartSeriesIdentity::from_snapshot(snapshot);
-        self.accepted_partition_id = snapshot.evidence().partition_id;
-        self.accepted_ownership_epoch = snapshot.evidence().ownership_epoch;
-        self.accepted_generation = snapshot.evidence().generation;
+        self.accepted_session_generation = snapshot.evidence().session_generation;
+        self.accepted_publication_generation = snapshot.evidence().publication_generation;
         self.accepted_last_sequence = snapshot.evidence().last_sequence;
         Ok(())
     }
@@ -440,9 +433,9 @@ impl ChartDataBridge {
         }
         self.rejected_stale_snapshots = self.rejected_stale_snapshots.saturating_add(1);
         Err(ReplayValidationError::StaleSnapshot {
-            current_generation: self.accepted_generation,
+            current_generation: self.accepted_publication_generation,
             current_last_sequence: self.accepted_last_sequence,
-            actual_generation: snapshot.evidence().generation,
+            actual_generation: snapshot.evidence().publication_generation,
             actual_last_sequence: snapshot.evidence().last_sequence,
         })
     }
@@ -462,9 +455,8 @@ impl ChartDataBridge {
     ) -> bool {
         snapshot_may_replace(
             snapshot,
-            self.accepted_partition_id,
-            self.accepted_ownership_epoch,
-            self.accepted_generation,
+            self.accepted_session_generation,
+            self.accepted_publication_generation,
             self.accepted_last_sequence,
             self.accepted_series.matches(snapshot),
             transition_reason,
@@ -506,54 +498,46 @@ impl ChartDataBridge {
 
 pub(crate) fn snapshot_advances(
     snapshot: &ReplaySnapshot,
-    current_ownership_epoch: u64,
-    current_generation: u64,
+    current_session_generation: u64,
+    current_publication_generation: u64,
     current_last_sequence: u64,
 ) -> bool {
-    snapshot.evidence().ownership_epoch > current_ownership_epoch
-        || (snapshot.evidence().ownership_epoch == current_ownership_epoch
-            && snapshot.evidence().generation >= current_generation
+    snapshot.evidence().session_generation > current_session_generation
+        || (snapshot.evidence().session_generation == current_session_generation
+            && snapshot.evidence().publication_generation >= current_publication_generation
             && snapshot.evidence().last_sequence > current_last_sequence)
 }
 
 fn snapshot_may_replace(
     snapshot: &ReplaySnapshot,
-    current_partition_id: u32,
-    current_ownership_epoch: u64,
-    current_generation: u64,
+    current_session_generation: u64,
+    current_publication_generation: u64,
     current_last_sequence: u64,
     same_series: bool,
     transition_reason: Option<ResnapshotReason>,
 ) -> bool {
-    if snapshot.evidence().partition_id != current_partition_id {
-        return same_series
-            && matches!(
-                transition_reason,
-                Some(ResnapshotReason::OwnershipHandoff | ResnapshotReason::TransportReset)
-            );
-    }
-    if snapshot.evidence().ownership_epoch < current_ownership_epoch {
+    if snapshot.evidence().session_generation < current_session_generation {
         return false;
     }
     if !same_series && transition_reason != Some(ResnapshotReason::SchemaChanged) {
         return false;
     }
-    if snapshot.evidence().ownership_epoch > current_ownership_epoch {
+    if snapshot.evidence().session_generation > current_session_generation {
         return true;
     }
     if !same_series {
         return true;
     }
     if transition_reason == Some(ResnapshotReason::TransportReset)
-        && snapshot.evidence().generation == current_generation
+        && snapshot.evidence().publication_generation == current_publication_generation
         && snapshot.evidence().last_sequence == current_last_sequence
     {
         return true;
     }
     snapshot_advances(
         snapshot,
-        current_ownership_epoch,
-        current_generation,
+        current_session_generation,
+        current_publication_generation,
         current_last_sequence,
     )
 }
@@ -564,7 +548,6 @@ fn delta_matches_snapshot(
 ) -> bool {
     let provenance = delta.item().provenance();
     let evidence = snapshot.evidence();
-    provenance.partition_id == evidence.partition_id
-        && provenance.ownership_epoch == evidence.ownership_epoch
+    provenance.session_generation == evidence.session_generation
         && provenance.schema_version == evidence.schema_version
 }

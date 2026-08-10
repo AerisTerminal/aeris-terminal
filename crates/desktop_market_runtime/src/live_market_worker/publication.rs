@@ -114,9 +114,9 @@ fn recovery_snapshot(
     model: &mut MarketBarClientModel,
     worker_label: &str,
 ) -> Result<MarketWorkerBootstrap, String> {
-    let generation = model
-        .current_generation()
-        .map_or(1, |current| current.generation().saturating_add(1));
+    let generation = model.current_generation().map_or(1, |current| {
+        current.publication_generation().saturating_add(1)
+    });
     let snapshot = ReplaySnapshot::try_from_provenanced_values(
         instrument.clone(),
         ReplayProvenance::LiveProvider,

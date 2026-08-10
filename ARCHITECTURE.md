@@ -162,7 +162,9 @@ The first direct-path Windows release run after removing the engine subscription
 
 ## Data correctness
 
-Every streamed view has an identity and generation. A selection change invalidates older work. Covering snapshots establish a known state; deltas are accepted only when their sequence and generation continue that state. A detected gap, stale response, or provider reconnect requires recovery from a covering snapshot.
+Every streamed view has a local series identity, session generation, publication generation, and source sequence. A selection change invalidates older work. Covering snapshots establish a known state; deltas are accepted only when their sequence and session continue that state. A new session requires a covering snapshot, and older sessions or publication generations are rejected. A detected gap, stale response, or provider reconnect requires recovery from a covering snapshot.
+
+The transient market-stream schema is version 2. Removed distributed partition fields are reserved in Protobuf and cannot be reused; session generation lives once on the market-event header, while publication generation identifies covering snapshot revisions. Persisted workspace and encrypted history use separate versioned schemas and are unaffected by this transient contract.
 
 History and live data meet at one explicit handoff boundary:
 
