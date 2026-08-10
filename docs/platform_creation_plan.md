@@ -74,7 +74,7 @@ Inspect the working tree before changing it; do not overwrite concurrent edits.
 | E — Main Rithmic UI | `blocked_external` | implementation [x]; named externally instrumented 60/120/144 Hz pacing [ ] |
 | F — Readiness | `blocked_external` | deterministic failure, burst, and memory evidence [x]; provider/physical transitions [ ] |
 | G — Terminal polish + Coinbase public markets | `active` | interaction/chrome repair [x]; full spot catalog [x]; complete interval menu [x]; paginated history [x]; live Level 2 DOM [x]; bounded 256 MiB cache [x]; physical UI acceptance [ ] |
-| H — Resident local engine + cached-first startup | `active` | coordinator extraction [x]; versioned protocol [x]; resident process [ ]; authenticated local IPC [ ]; desktop migration [ ]; workspace/hot-set restore [ ]; coverage scheduler [ ]; legacy path removal [ ]; end-to-end evidence [ ] |
+| H — Resident local engine + cached-first startup | `active` | coordinator extraction [x]; versioned protocol [x]; resident process [x]; authenticated local IPC [x]; desktop migration [x]; workspace/hot-set restore [x]; coverage scheduler [x]; Rithmic lifecycle migration [x]; derived checkpointing [ ]; legacy dependency removal [ ]; end-to-end evidence [ ] |
 
 ### Remaining focus (ordered)
 
@@ -883,22 +883,22 @@ path; an engine-shaped library beside the old desktop path is not completion.
 - [x] **H0 — Extract the boundary:** move the Coinbase coordinator out of the
   desktop crate without behavioral changes and define a bounded, append-only,
   versioned local-engine protocol with generation fences and chunked snapshots.
-- [ ] **H1 — Establish one owner:** ship a per-user `axiusflow_engine` process,
+- [x] **H1 — Establish one owner:** ship a per-user `axiusflow_engine` process,
   authenticated local IPC, protocol negotiation, single-instance ownership,
   health/readiness reporting, graceful shutdown, and deterministic reconnect.
-- [ ] **H2 — Migrate the desktop:** attach or start the engine without blocking
+- [x] **H2 — Migrate the desktop:** attach or start the engine without blocking
   first paint; route catalog, selection, chart, DOM, provider state, and faults
   through IPC; remove direct Coinbase/provider/store ownership from GPUI.
-- [ ] **H3 — Restore before network:** persist workspace and hot-set state;
+- [x] **H3 — Restore before network:** persist workspace and hot-set state;
   publish the last valid cached chart immediately; work offline; reconcile live
   data after presentation without replacing viewport, drawings, or indicators.
-- [ ] **H4 — Know coverage:** maintain complete, partial, confirmed-empty,
+- [x] **H4 — Know coverage:** maintain complete, partial, confirmed-empty,
   missing, invalidated, and quarantined interval coverage; coalesce requests;
   repair visible gaps first; prefetch adjacent selections within strict budgets.
 - [ ] **H5 — Retain eligible work:** keep legally retainable encrypted segments
   until quota policy evicts them, checkpoint expensive derived series, and use
   adaptive bounded decoded caches instead of treating the network as storage.
-- [ ] **H6 — Complete provider lifecycle:** move Rithmic ownership behind the
+- [x] **H6 — Complete provider lifecycle:** move Rithmic ownership behind the
   same boundary, enforce provider retention rights, and implement interactive,
   warm, constrained, and offline-suspended resource modes.
 - [ ] **H7 — Remove the bridge:** delete every in-process desktop data path and
