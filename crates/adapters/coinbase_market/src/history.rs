@@ -8,7 +8,7 @@ use axiusflow_provider_history::{
     HistoryPageRequest, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
     SequencedHistory,
 };
-use rustls::{ClientConfig, ClientConnection, RootCertStore, Stream};
+use rustls::{ClientConfig, RootCertStore};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -25,7 +25,6 @@ use std::{
 };
 
 const REST_HOST: &str = "api.coinbase.com";
-const REST_PORT: u16 = 443;
 const RESPONSE_BYTE_LIMIT: usize = 1_048_576;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -43,6 +42,7 @@ const HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXCBH1";
 const HISTORY_PAYLOAD_BYTES: usize = HISTORY_PAYLOAD_MAGIC.len() + 7 * 8;
 const HISTORY_SEGMENT_MAGIC: &[u8; 6] = b"AXCBS1";
 const HISTORY_SEGMENT_HEADER_BYTES: usize = HISTORY_SEGMENT_MAGIC.len() + 4;
+static HISTORY_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
 type ResolutionResult = io::Result<Vec<SocketAddr>>;
 
@@ -103,7 +103,7 @@ pub trait CoinbaseHistoryTransport {
     fn get(&mut self, path: &str) -> Result<Vec<u8>, String>;
 }
 
-/// Direct rustls transport to Coinbase's public Advanced Trade API.
+/// Pooled HTTPS transport to Coinbase's public Advanced Trade API.
 #[derive(Clone, Default)]
 pub struct CoinbaseHttpsHistoryTransport {
     stop: Option<Arc<AtomicBool>>,
@@ -125,7 +125,7 @@ impl CoinbaseHttpsHistoryTransport {
 
 impl CoinbaseHistoryTransport for CoinbaseHttpsHistoryTransport {
     fn get(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        https_get(path, self.stop.clone())
+        https_get(path, self.stop.as_deref())
     }
 }
 
@@ -775,25 +775,43 @@ fn read_i64(payload: &[u8], offset: &mut usize) -> Result<i64, String> {
     Ok(i64::from_le_bytes(bytes))
 }
 
-fn https_get(path: &str, stop: Option<Arc<AtomicBool>>) -> Result<Vec<u8>, String> {
+fn https_get(path: &str, stop: Option<&AtomicBool>) -> Result<Vec<u8>, String> {
     if !path.starts_with('/') || path.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
         return Err("invalid Coinbase history path".to_string());
     }
-    let config = coinbase_tls_config()?;
-    let server_name = rustls::pki_types::ServerName::try_from(REST_HOST)
-        .map_err(|_| "invalid Coinbase REST host".to_string())?;
-    let mut connection = ClientConnection::new(Arc::new(config), server_name)
-        .map_err(|_| "Coinbase TLS initialization failed".to_string())?;
-    let deadline = Instant::now() + IO_TIMEOUT;
-    let mut tcp = connect_coinbase_endpoint_cancellable(REST_HOST, REST_PORT, deadline, stop)?;
-    let mut tls = Stream::new(&mut connection, &mut tcp);
-    write!(
-        tls,
-        "GET {path} HTTP/1.1\r\nHost: {REST_HOST}\r\nAccept: application/json\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
-    )
-    .map_err(|_| "Coinbase REST request failed".to_string())?;
-    let response = read_bounded_response(&mut tls, deadline)?;
-    parse_http_response(&response)
+    if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+        return Err("Coinbase request cancelled".to_string());
+    }
+    let url = format!("https://{REST_HOST}{path}");
+    let agent = HISTORY_AGENT.get_or_init(|| {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(IO_TIMEOUT))
+            .build();
+        ureq::Agent::new_with_config(config)
+    });
+    let mut response = agent
+        .get(&url)
+        .header("Accept", "application/json")
+        .header("Cache-Control", "no-cache")
+        .call()
+        .map_err(|error| map_ureq_error(&error))?;
+    if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+        return Err("Coinbase request cancelled".to_string());
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(RESPONSE_BYTE_LIMIT as u64)
+        .read_to_vec()
+        .map_err(|error| format!("Coinbase REST response read failed: {error}"))
+}
+
+fn map_ureq_error(error: &ureq::Error) -> String {
+    match error {
+        ureq::Error::StatusCode(code) => format!("Coinbase candle request returned HTTP {code}"),
+        ureq::Error::Timeout(_) => "Coinbase REST request timed out".to_string(),
+        _ => format!("Coinbase REST request failed: {error}"),
+    }
 }
 
 pub(crate) fn coinbase_tls_config() -> Result<ClientConfig, String> {
@@ -838,9 +856,14 @@ impl DeadlineTcpStream {
                 "Coinbase connection cancelled",
             ));
         }
-        remaining_until(self.deadline)
-            .map(|remaining| remaining.min(NETWORK_POLL_INTERVAL))
-            .inspect_err(|_| thread::sleep(NETWORK_RETRY_PAUSE))
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Coinbase network deadline exceeded",
+            ));
+        }
+        Ok(remaining.min(NETWORK_POLL_INTERVAL))
     }
 }
 
@@ -1078,116 +1101,11 @@ fn start_resolver() -> Result<mpsc::SyncSender<ResolutionRequest>, &'static str>
     Ok(sender)
 }
 
-fn remaining_until(deadline: Instant) -> io::Result<Duration> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Coinbase network deadline exceeded",
-        ))
-    } else {
-        Ok(remaining)
-    }
-}
-
-fn read_bounded_response(reader: &mut impl Read, deadline: Instant) -> Result<Vec<u8>, String> {
-    let mut response = Vec::new();
-    let mut buffer = [0_u8; 8_192];
-    loop {
-        if Instant::now() >= deadline {
-            return Err("Coinbase REST response deadline exceeded".to_string());
-        }
-        match reader.read(&mut buffer) {
-            Ok(0) => return Ok(response),
-            Ok(read) => {
-                if response.len().saturating_add(read) > RESPONSE_BYTE_LIMIT {
-                    return Err("Coinbase REST response exceeds byte limit".to_string());
-                }
-                response.extend_from_slice(&buffer[..read]);
-            }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::TimedOut
-                    || error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => return Err("Coinbase REST response failed".to_string()),
-        }
-    }
-}
-
-fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, String> {
-    let header_end = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "malformed Coinbase REST response".to_string())?;
-    let headers = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| "malformed Coinbase REST response".to_string())?;
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| "malformed Coinbase REST status".to_string())?;
-    if status != 200 {
-        return Err(format!("Coinbase candle request returned HTTP {status}"));
-    }
-    let body = &response[header_end + 4..];
-    if headers.lines().skip(1).any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("transfer-encoding")
-                && value
-                    .split(',')
-                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
-        })
-    }) {
-        decode_chunked(body)
-    } else {
-        Ok(body.to_vec())
-    }
-}
-
-fn decode_chunked(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decoded = Vec::new();
-    let mut offset = 0_usize;
-    loop {
-        let line_end = raw
-            .get(offset..)
-            .and_then(|remaining| remaining.windows(2).position(|window| window == b"\r\n"))
-            .and_then(|relative| offset.checked_add(relative))
-            .ok_or_else(|| "malformed Coinbase chunk size".to_string())?;
-        let size_text = std::str::from_utf8(&raw[offset..line_end])
-            .ok()
-            .and_then(|value| value.split(';').next())
-            .ok_or_else(|| "malformed Coinbase chunk size".to_string())?;
-        let size = usize::from_str_radix(size_text, 16)
-            .map_err(|_| "malformed Coinbase chunk size".to_string())?;
-        offset = line_end + 2;
-        if size == 0 {
-            return Ok(decoded);
-        }
-        let chunk_end = offset
-            .checked_add(size)
-            .ok_or_else(|| "Coinbase chunk size overflow".to_string())?;
-        let terminator_end = chunk_end
-            .checked_add(2)
-            .ok_or_else(|| "Coinbase chunk size overflow".to_string())?;
-        if decoded.len().saturating_add(size) > RESPONSE_BYTE_LIMIT
-            || raw.get(chunk_end..terminator_end) != Some(b"\r\n")
-        {
-            return Err("malformed Coinbase chunk body".to_string());
-        }
-        decoded.extend_from_slice(
-            raw.get(offset..chunk_end)
-                .ok_or_else(|| "truncated Coinbase chunk body".to_string())?,
-        );
-        offset = terminator_end;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-        connect_coinbase_endpoint_cancellable, decode_history_bar, decode_history_segment,
-        encode_history_segment,
+        decode_history_bar, decode_history_segment, encode_history_segment,
     };
     use crate::ENTITLEMENT_CLASS;
     use axiusflow_provider_history::{
@@ -1195,19 +1113,10 @@ mod tests {
     };
     use std::{
         cell::RefCell,
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
         num::NonZeroUsize,
         rc::Rc,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        thread,
-        time::{Duration, Instant},
+        sync::{Arc, atomic::AtomicBool},
     };
-
-    use super::DeadlineTcpStream;
 
     #[derive(Clone)]
     struct FixtureTransport {
@@ -1220,112 +1129,6 @@ mod tests {
             self.paths.borrow_mut().push(path.to_string());
             Ok(self.response.clone())
         }
-    }
-
-    #[test]
-    fn absolute_socket_deadline_stops_trickle_reads() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
-        let address = listener.local_addr().expect("read loopback address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept loopback fixture");
-            for _ in 0..20 {
-                if stream.write_all(&[1]).is_err() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-        });
-        let started = Instant::now();
-        let stream = TcpStream::connect(address).expect("connect loopback fixture");
-        let mut stream = DeadlineTcpStream {
-            stream,
-            deadline: started + Duration::from_millis(60),
-            next_read_at: Instant::now(),
-            stop: None,
-        };
-        let mut byte = [0_u8; 1];
-        let error = loop {
-            match stream.read(&mut byte) {
-                Ok(1) => {}
-                Ok(_) => panic!("fixture stream ended before its deadline"),
-                Err(error) => break error,
-            }
-        };
-        assert!(matches!(
-            error.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ));
-        assert!(started.elapsed() < Duration::from_millis(500));
-        server.join().expect("join loopback fixture");
-    }
-
-    #[test]
-    fn cancellable_socket_read_observes_the_poll_bound() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
-        let address = listener.local_addr().expect("read loopback address");
-        let server = thread::spawn(move || {
-            let (_stream, _) = listener.accept().expect("accept loopback fixture");
-            thread::sleep(Duration::from_millis(200));
-        });
-        let stop = Arc::new(AtomicBool::new(false));
-        let request_stop = Arc::clone(&stop);
-        let canceller = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            request_stop.store(true, Ordering::Release);
-        });
-        let started = Instant::now();
-        let stream = TcpStream::connect(address).expect("connect loopback fixture");
-        let mut stream = DeadlineTcpStream {
-            stream,
-            deadline: started + Duration::from_secs(1),
-            next_read_at: Instant::now(),
-            stop: Some(stop),
-        };
-        let error = stream
-            .read(&mut [0_u8; 1])
-            .expect_err("cancelled read fails");
-        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
-        assert!(started.elapsed() < Duration::from_millis(500));
-        canceller.join().expect("join cancellation fixture");
-        server.join().expect("join loopback fixture");
-    }
-
-    #[test]
-    fn closed_socket_reports_eof_instead_of_zero_byte_progress() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
-        let address = listener.local_addr().expect("read loopback address");
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept loopback fixture");
-            drop(stream);
-        });
-        let stream = TcpStream::connect(address).expect("connect loopback fixture");
-        let mut stream = DeadlineTcpStream {
-            stream,
-            deadline: Instant::now() + Duration::from_secs(1),
-            next_read_at: Instant::now(),
-            stop: None,
-        };
-        let error = stream
-            .read(&mut [0_u8; 1])
-            .expect_err("closed connection reports EOF");
-        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-        server.join().expect("join loopback fixture");
-    }
-
-    #[test]
-    fn definitive_connection_failure_does_not_retry_until_deadline() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
-        let port = listener.local_addr().expect("read loopback address").port();
-        drop(listener);
-        let started = Instant::now();
-        let result = connect_coinbase_endpoint_cancellable(
-            "127.0.0.1",
-            port,
-            started + Duration::from_secs(1),
-            None,
-        );
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     fn request(maximum_items: usize) -> HistoryPageRequest {

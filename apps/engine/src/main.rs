@@ -405,6 +405,7 @@ fn run_coinbase_market_runtime(
         .into_iter()
         .map(|product| (product.product_id.clone(), product))
         .collect::<BTreeMap<_, _>>();
+    let mut pending = None;
     loop {
         if let Err(error) = apply_resource_mode(
             resource_modes,
@@ -420,19 +421,19 @@ fn run_coinbase_market_runtime(
             );
             return;
         }
-        let Some(active_worker) = worker.as_mut() else {
+        let Some(worker) = worker.as_mut() else {
             thread::park();
             continue;
         };
         let disconnected = drain_market_messages(
-            active_worker,
+            worker,
             publications,
             engine_epoch,
             &convention,
             &mut chart_context,
             &mut products,
         );
-        if apply_selections(selections, active_worker, &products, &mut active) {
+        if apply_selections(selections, worker, &products, &mut active, &mut pending) {
             return;
         }
         reject_non_coinbase_commands(provider_commands, publications);
@@ -691,31 +692,36 @@ fn apply_selections(
     worker: &MarketDataWorker,
     products: &BTreeMap<String, CoinbaseSpotProduct>,
     active: &mut ActiveSelection,
+    pending: &mut Option<axiusflow_local_engine_protocol::WorkspaceState>,
 ) -> bool {
     for selection in selections.try_iter() {
         if selection.provider != "coinbase" {
             return true;
         }
-        if selection.market == active.market
-            && selection.interval_seconds == active.interval_seconds
-        {
-            continue;
-        }
-        let Some(product) = products.get(&selection.market).cloned() else {
-            continue;
-        };
-        let Some(interval) = interval_from_seconds(selection.interval_seconds) else {
-            continue;
-        };
-        if worker
-            .try_select_coinbase(product.clone(), interval)
-            .is_ok()
-        {
-            active.product = product;
-            active.interval = interval;
-            active.market = selection.market;
-            active.interval_seconds = selection.interval_seconds;
-        }
+        *pending = Some(selection);
+    }
+    let Some(selection) = pending.as_ref() else {
+        return false;
+    };
+    if selection.market == active.market && selection.interval_seconds == active.interval_seconds {
+        *pending = None;
+        return false;
+    }
+    let Some(product) = products.get(&selection.market).cloned() else {
+        return false;
+    };
+    let Some(interval) = interval_from_seconds(selection.interval_seconds) else {
+        return false;
+    };
+    if worker
+        .try_select_coinbase(product.clone(), interval)
+        .is_ok()
+    {
+        active.product = product;
+        active.interval = interval;
+        active.market.clone_from(&selection.market);
+        active.interval_seconds = selection.interval_seconds;
+        *pending = None;
     }
     false
 }
@@ -1298,8 +1304,22 @@ fn default_rithmic_history_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResourceTransition, resource_transition, run_coinbase_live_smoke_command};
-    use axiusflow_local_engine_protocol::ResourceMode;
+    use super::{
+        ActiveSelection, ResourceTransition, apply_selections, resource_transition,
+        run_coinbase_live_smoke_command,
+    };
+    use axiusflow_coinbase_coordinator::market_worker::{
+        ChartViewportUpdate, MarketDataWorker, MarketWorkerCommand, market_worker_channel,
+    };
+    use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
+    use axiusflow_local_engine_protocol::{ResourceMode, WorkspaceState};
+    use axiusflow_market_data::ChartInterval;
+    use std::{
+        collections::BTreeMap,
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicU64, mpsc},
+        thread,
+    };
 
     #[test]
     fn warm_and_interactive_transitions_keep_the_provider_connection_alive() {
@@ -1344,5 +1364,114 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn full_worker_mailbox_retains_the_latest_selection_for_retry() {
+        let btc = spot_product("BTC-USD");
+        let eth = spot_product("ETH-USD");
+        let mut products = BTreeMap::new();
+        products.insert(btc.product_id.clone(), btc.clone());
+        products.insert(eth.product_id.clone(), eth.clone());
+        let mut active = ActiveSelection {
+            product: btc,
+            interval: ChartInterval::Minute1,
+            market: "BTC-USD".to_string(),
+            interval_seconds: 60,
+        };
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        command_tx
+            .send(MarketWorkerCommand::ChartViewport(ChartViewportUpdate {
+                start_unix_nanos: 1,
+                end_unix_nanos: 2,
+                selection_generation: 1,
+            }))
+            .expect("fills worker mailbox");
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let worker = MarketDataWorker::from_channels(
+            command_tx,
+            message_rx,
+            shutdown_rx,
+            None,
+            Some(Arc::new(AtomicU64::new(0))),
+        );
+        let (selection_tx, selection_rx) = mpsc::channel();
+        selection_tx
+            .send(workspace("ETH-USD"))
+            .expect("selection enters engine queue");
+        let mut pending = None;
+
+        assert!(!apply_selections(
+            &selection_rx,
+            &worker,
+            &products,
+            &mut active,
+            &mut pending,
+        ));
+        assert_eq!(
+            pending.as_ref().map(|state| state.market.as_str()),
+            Some("ETH-USD")
+        );
+        assert!(matches!(
+            command_rx.recv().expect("prefilled command remains"),
+            MarketWorkerCommand::ChartViewport(_)
+        ));
+
+        assert!(!apply_selections(
+            &selection_rx,
+            &worker,
+            &products,
+            &mut active,
+            &mut pending,
+        ));
+        assert!(pending.is_none());
+        assert_eq!(active.market, "ETH-USD");
+        let MarketWorkerCommand::CoinbaseSelect(request) =
+            command_rx.recv().expect("selection retries")
+        else {
+            panic!("retry must preserve the selection command");
+        };
+        assert_eq!(request.product.product_id, "ETH-USD");
+
+        let shutdown = thread::spawn(move || {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::Shutdown)
+            ));
+            shutdown_tx.send(()).expect("acknowledges shutdown");
+        });
+        drop(worker);
+        shutdown.join().expect("shutdown thread completes");
+    }
+
+    fn spot_product(product_id: &str) -> CoinbaseSpotProduct {
+        CoinbaseSpotProduct {
+            product_id: product_id.to_string(),
+            instrument_id: format!("instrument:coinbase:{}", product_id.to_ascii_lowercase()),
+            display_symbol: product_id.replace('-', "/"),
+            base_currency: product_id
+                .split_once('-')
+                .map_or(product_id, |(base, _)| base)
+                .to_string(),
+            quote_currency: "USD".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+        }
+    }
+
+    fn workspace(market: &str) -> WorkspaceState {
+        WorkspaceState {
+            provider: "coinbase".to_string(),
+            market: market.to_string(),
+            interval_seconds: 60,
+            watchlist: Vec::new(),
+            workspace_revision: 1,
+            warm_mode_enabled: true,
+            resource_mode: ResourceMode::Interactive as i32,
+            schema_revision: 1,
+            cache_manifest_revision: 1,
+            hot_series: Vec::new(),
+        }
     }
 }

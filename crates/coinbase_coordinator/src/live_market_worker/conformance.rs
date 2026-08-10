@@ -193,7 +193,7 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
     assert!(directory_has_entry(&root.0.join("quarantine")));
     assert!(control.established(first));
     let first_snapshot = wait_for_live_snapshot(&mut worker, 2);
-    assert_eq!(first_snapshot, (1, 300));
+    assert_eq!(first_snapshot, (1, 350));
 
     control.invalid(first, CoinbaseProviderInvalidReason::StreamTransport);
     assert_eq!(control.wait_stopped(Duration::from_secs(1)), Some(first));
@@ -204,10 +204,10 @@ fn shipping_loop_refetches_corrupt_cache_reconnects_and_stops_boundedly() {
     assert!(control.heartbeat(first));
     assert!(control.established(second));
     let second_snapshot = wait_for_live_snapshot(&mut worker, 3);
-    assert_eq!(second_snapshot, (1, 300));
+    assert_eq!(second_snapshot, (1, 350));
     assert!(control.trade(second, fixture_trade(1, FIXED_CURRENT_MINUTE_SECONDS)));
     assert!(control.trade(second, fixture_trade(2, FIXED_CURRENT_MINUTE_SECONDS + 60)));
-    assert_eq!(wait_for_live_delta(&mut worker), (300, 301));
+    assert_eq!(wait_for_live_delta(&mut worker), (350, 351));
 
     let shutdown_started = Instant::now();
     drop(worker);
@@ -260,7 +260,7 @@ fn pre_seed_live_trades_survive_history_seeding() {
     thread::sleep(Duration::from_millis(200));
     release.store(true, Ordering::Release);
 
-    assert_eq!(wait_for_live_snapshot(&mut worker, 2), (1, 300));
+    assert_eq!(wait_for_live_snapshot(&mut worker, 2), (1, 350));
     assert!(control.trade(
         generation,
         fixture_trade(3, FIXED_CURRENT_MINUTE_SECONDS + 120)
@@ -269,7 +269,7 @@ fn pre_seed_live_trades_survive_history_seeding() {
         generation,
         fixture_trade(4, FIXED_CURRENT_MINUTE_SECONDS + 180)
     ));
-    assert_eq!(wait_for_live_delta(&mut worker), (300, 301));
+    assert_eq!(wait_for_live_delta(&mut worker), (350, 351));
     drop(worker);
     assert_eq!(
         control.wait_stopped(Duration::from_secs(1)),
@@ -376,6 +376,7 @@ fn stale_selection_drain(ui_thread: thread::ThreadId) {
         false,
         &history_source,
         &message_tx,
+        0,
     )
     .expect("controlled worker prepares");
     let latest = AtomicU64::new(2);
@@ -404,6 +405,7 @@ fn stale_selection_drain(ui_thread: thread::ThreadId) {
             message_tx: &message_tx,
             provider_wake_pending: &provider_wake_pending,
             selection_sequence: &latest,
+            active_selection_generation: 0,
             series: super::history::StreamingSeriesContext {
                 profile: &running.profile,
                 segment_key: &running.segment_key,
@@ -444,6 +446,22 @@ fn recent_phase_publishes_the_newest_page_before_the_full_range() {
         full_items.last().map(|item| item.event_time_unix_nanos),
         "the recent phase ends at the same live boundary as the full range"
     );
+}
+
+#[test]
+fn viewport_history_range_prefetches_and_aligns_to_interval() {
+    let profile = product_profile("BTC-USD".to_string()).expect("fixture profile validates");
+    let range = super::viewport_history_range(
+        &profile,
+        crate::market_worker::ChartViewportUpdate {
+            start_unix_nanos: 1_700_000_061_000_000_000,
+            end_unix_nanos: 1_700_000_181_000_000_000,
+            selection_generation: 0,
+        },
+    )
+    .expect("viewport range validates");
+    assert_eq!(range.start_unix_nanos, 1_699_999_920_000_000_000);
+    assert_eq!(range.end_unix_nanos, 1_700_000_220_000_000_000);
 }
 
 fn spot_product(product_id: &str) -> axiusflow_coinbase_market_adapter::CoinbaseSpotProduct {
@@ -570,6 +588,7 @@ fn run_controlled_worker<H: super::HistorySource + 'static>(
         false,
         &input.history_source,
         input.message_tx,
+        0,
     )?;
     let (history_command_tx, history_command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let history_inbox_tx = input.inbox_tx.clone();

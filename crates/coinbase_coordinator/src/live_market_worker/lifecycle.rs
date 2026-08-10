@@ -6,7 +6,9 @@ use super::{
         install_recent_history,
     },
 };
-use crate::market_worker::{CoinbaseSelectionRequest, MarketWorkerCommand, MarketWorkerSender};
+use crate::market_worker::{
+    ChartViewportUpdate, CoinbaseSelectionRequest, MarketWorkerCommand, MarketWorkerSender,
+};
 use axiusflow_application::MarketBarClientModel;
 use axiusflow_coinbase_market_adapter::CoinbaseProviderEvents;
 use axiusflow_desktop_provider_runtime::{DesktopProviderState, SessionGeneration};
@@ -56,6 +58,7 @@ pub(super) struct InboxDrainContext<'a, V: axiusflow_platform_runtime::Credentia
     pub(super) message_tx: &'a MarketWorkerSender,
     pub(super) provider_wake_pending: &'a AtomicBool,
     pub(super) selection_sequence: &'a AtomicU64,
+    pub(super) active_selection_generation: u64,
     pub(super) series: StreamingSeriesContext<'a>,
     pub(super) model: &'a mut MarketBarClientModel,
 }
@@ -134,9 +137,18 @@ pub(super) fn forward_commands(
             Ok(
                 MarketWorkerCommand::RithmicSearch(_)
                 | MarketWorkerCommand::RithmicSelect(_)
-                | MarketWorkerCommand::RithmicHistory(_)
-                | MarketWorkerCommand::ChartViewport(_),
+                | MarketWorkerCommand::RithmicHistory(_),
             ) => {}
+            Ok(MarketWorkerCommand::ChartViewport(update)) => {
+                if inbox_tx
+                    .send(WorkerInboxEvent::Command(
+                        MarketWorkerCommand::ChartViewport(update),
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(MarketWorkerCommand::Shutdown) | Err(_) => {
                 let _ = inbox_tx.send(WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown));
                 return;
@@ -165,8 +177,7 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
             | WorkerInboxEvent::Command(
                 MarketWorkerCommand::RithmicSearch(_)
                 | MarketWorkerCommand::RithmicSelect(_)
-                | MarketWorkerCommand::RithmicHistory(_)
-                | MarketWorkerCommand::ChartViewport(_),
+                | MarketWorkerCommand::RithmicHistory(_),
             ) => {}
             WorkerInboxEvent::Environment(event) => {
                 let lifecycle_changed = apply_environment_event(
@@ -181,6 +192,8 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                 context.state.recovery_announced |= lifecycle_changed;
                 if lifecycle_changed {
                     context.state.active_tail.seal();
+                    context.state.pending_viewport = None;
+                    context.state.last_requested_range = None;
                 }
             }
             WorkerInboxEvent::HistoryCompleted {
@@ -201,12 +214,28 @@ pub(super) fn drain_worker_inbox<V: axiusflow_platform_runtime::CredentialVault>
                 }
                 context.state.pending_recovery.push_back(command);
             }
+            WorkerInboxEvent::Command(MarketWorkerCommand::ChartViewport(update)) => {
+                record_viewport_demand(context, update);
+            }
             WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown) => {
                 return Ok(DrainSignal::Shutdown);
             }
         }
     }
     Ok(DrainSignal::None)
+}
+
+fn record_viewport_demand<V: axiusflow_platform_runtime::CredentialVault>(
+    context: &mut InboxDrainContext<'_, V>,
+    update: ChartViewportUpdate,
+) {
+    if update.selection_generation != context.active_selection_generation {
+        return;
+    }
+    if update.start_unix_nanos >= update.end_unix_nanos {
+        return;
+    }
+    context.state.pending_viewport = Some(update);
 }
 
 fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
@@ -249,13 +278,16 @@ fn handle_history_completed<V: axiusflow_platform_runtime::CredentialVault>(
             context.model,
             context.message_tx,
         ),
-        (_, Err(_)) => super::fence_failed_history(
-            context.worker,
-            generation,
-            &mut context.state.retained,
-            &mut context.state.recovery_announced,
-            context.message_tx,
-        ),
+        (_, Err(_)) => {
+            context.state.last_requested_range = None;
+            super::fence_failed_history(
+                context.worker,
+                generation,
+                &mut context.state.retained,
+                &mut context.state.recovery_announced,
+                context.message_tx,
+            )
+        }
     }
 }
 
@@ -351,7 +383,7 @@ mod tests {
         MINIMUM_RECONNECT_DELAY, ReconnectBackoff, WorkerInboxEvent, forward_commands,
         wait_for_inbox,
     };
-    use crate::market_worker::MarketWorkerCommand;
+    use crate::market_worker::{ChartViewportUpdate, MarketWorkerCommand};
     use std::{
         sync::mpsc,
         thread,
@@ -390,6 +422,29 @@ mod tests {
             inbox_rx.recv().expect("shutdown reaches worker inbox"),
             WorkerInboxEvent::Command(MarketWorkerCommand::Shutdown)
         ));
+        forwarder.join().expect("command forwarder stops cleanly");
+    }
+
+    #[test]
+    fn command_forwarder_preserves_chart_viewport_demands() {
+        let (command_tx, command_rx) = mpsc::sync_channel::<MarketWorkerCommand>(1);
+        let (inbox_tx, inbox_rx) = mpsc::sync_channel(1);
+        let forwarder = thread::spawn(move || forward_commands(&command_rx, &inbox_tx));
+        let update = ChartViewportUpdate {
+            start_unix_nanos: 1_700_000_000_000_000_000,
+            end_unix_nanos: 1_700_000_060_000_000_000,
+            selection_generation: 7,
+        };
+        command_tx
+            .send(MarketWorkerCommand::ChartViewport(update))
+            .expect("viewport enters command channel");
+        let received = inbox_rx.recv().expect("viewport reaches worker inbox");
+        let WorkerInboxEvent::Command(MarketWorkerCommand::ChartViewport(received)) = received
+        else {
+            panic!("viewport command was not forwarded");
+        };
+        assert_eq!(received, update);
+        drop(command_tx);
         forwarder.join().expect("command forwarder stops cleanly");
     }
 

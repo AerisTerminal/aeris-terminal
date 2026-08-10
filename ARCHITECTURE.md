@@ -103,7 +103,7 @@ The path is local first by construction. Provider credentials stay on the user's
 
 `desktop_history::HistoryWorker` is owned by a market-data worker thread, never GPUI. It reads and decrypts bounded segments, validates contiguous sequence, maintains a byte- and entry-bounded decoded cache, shares immutable publications across charts, and coordinates the history/live cutover. Live items are buffered during hydration; a verified covering snapshot admits only the contiguous suffix newer than its watermark.
 
-The current storage format already supports progressive recent-first reads because retained history is segmented and range-indexed. The current Coinbase composition does not yet expose arbitrary multi-year chart paging: it installs a fixed 300-bar working set and recomputes derived intervals when selected. That limit is an application-composition constraint, not a storage or provider-history constraint, and must be removed through a paged visible-range API rather than by loading years into one `Vec`.
+The current storage format supports progressive recent-first reads because retained history is segmented and range-indexed. Coinbase chart viewport changes are first-class resident-engine demand: the active selection generation is checked, the visible time range is aligned to the source interval, one visible window is prefetched behind the viewport, duplicate ranges are deduplicated, local coverage is installed directly, and only missing ranges are sent to the provider. The retained working set is bounded to the adapter-supported chart window rather than the old 300-bar slice.
 
 ## Timeframes
 
@@ -117,6 +117,8 @@ The durable identity includes resolution, so native or previously materialized r
 - The resident market worker owns provider orchestration, history scheduling, storage access, aggregation, and history/live handoff.
 - Blocking history and storage work stays off GPUI and communicates through bounded channels.
 - Selection generations make obsolete symbol and timeframe results stale; stale work cannot overwrite the new selection.
+- The resident engine coalesces selection changes to the newest workspace state and retains that state until the bounded provider-worker mailbox accepts it; queue pressure must never silently discard the active selection.
+- Chart viewport changes are also retained as demand on the active series; the Coinbase worker may not drop them silently or apply them to an older symbol/timeframe generation.
 - Covering snapshots may replace older covering snapshots. Non-conflatable deltas, sequence gaps, and queue overflow require recovery rather than silent loss.
 - Work is bounded by queue item/byte capacities, scheduler in-flight limits, cache bytes, segment bytes, chart bindings, handoffs, retries, and deadlines. No request creates an unbounded thread pool or unbounded queue.
 
@@ -134,10 +136,10 @@ The first recorded local release run on 250,000 one-minute bars produced 715 enc
 
 ## Ranked local-data roadmap
 
-1. Replace the Coinbase 300-bar composition limit with a paged visible-range contract and recent-first publication. This has the largest user impact and moderate implementation risk because storage, coverage, and handoff already support the required pieces.
+1. Extend the visible-range runtime from Coinbase bars to provider trade and depth history so footprint/order-flow views receive the same demand-driven backfill behavior.
 2. Add immutable derived-timeframe chunks keyed by source revision and update only the active tail. This removes repeated aggregation during timeframe switching while keeping memory bounded.
 3. Split history scheduling into fair per-instrument lanes under one global bound, with generation cancellation before decode and aggregation. This prevents slow or obsolete work from delaying the active selection.
-4. Extend deterministic performance scenarios to symbol churn, interrupted publication recovery, concurrent live plus history, and multi-million tick streams. Use synthetic transports in CI and credentialed provider runs only as local evidence.
+4. Extend deterministic performance scenarios to symbol churn, interrupted publication recovery, concurrent live plus history, viewport panning, and multi-million tick streams. Use synthetic transports in CI and credentialed provider runs only as local evidence.
 5. Add chart-preparation and first-render timestamps to the existing latency chain so time to first pixels is measured across the process boundary rather than inferred from data readiness.
 6. Evaluate memory mapping only after paged reads and derived chunks are measured. Encryption and authenticated recovery currently require bounded read/decrypt buffers, so mapping ciphertext alone is not automatically a win.
 

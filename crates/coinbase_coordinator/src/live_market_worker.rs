@@ -10,9 +10,9 @@ mod provenance;
 mod publication;
 
 use crate::market_worker::{
-    ChartState, CoinbaseSelectionRequest, MarketDataWorker, MarketWorkerMessage,
-    MarketWorkerSender, MarketWorkerStartup, UiDiagnosticsReceiver, market_worker_channel,
-    ui_diagnostics_channel,
+    ChartState, ChartViewportUpdate, CoinbaseSelectionRequest, MarketDataWorker,
+    MarketWorkerMessage, MarketWorkerSender, MarketWorkerStartup, UiDiagnosticsReceiver,
+    market_worker_channel, ui_diagnostics_channel,
 };
 use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
@@ -66,8 +66,9 @@ use lifecycle::{
 use provenance::{cached_history_provenance, history_provenance, live_provenance};
 use publication::{publish_cached_update, publish_ready_recovery, publish_update};
 
-const HISTORY_BARS: usize = 300;
-const MODEL_ITEM_CAPACITY: usize = 350;
+const HISTORY_BARS: usize = 350;
+const VIEWPORT_PREFETCH_WINDOWS: i64 = 1;
+const MODEL_ITEM_CAPACITY: usize = HISTORY_BARS;
 const PROVIDER_EVENT_CAPACITY: usize = 16_384;
 const PROVIDER_EVENT_BATCH: usize = 1_024;
 const MESSAGE_CAPACITY: usize = 32;
@@ -85,6 +86,8 @@ const SEGMENT_KEY_ID: &str = "coinbase-public-bars-key-v1";
 struct LiveLoopState {
     history: Option<InflightHistory>,
     streaming_generation: Option<SessionGeneration>,
+    pending_viewport: Option<ChartViewportUpdate>,
+    last_requested_range: Option<HistoryRange>,
     retained: VecDeque<ProvenancedMarketBar>,
     reconnect_backoff: ReconnectBackoff,
     recovery_announced: bool,
@@ -128,6 +131,7 @@ struct RunningWorker<V: axiusflow_platform_runtime::CredentialVault> {
     segment_key: SegmentEncryptionKey,
     instrument: InstrumentRevision,
     bar_definition: BarDefinition,
+    active_selection_generation: u64,
     worker_label: String,
     model: MarketBarClientModel,
     state: LiveLoopState,
@@ -347,6 +351,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let (initial_network, monitors_active) = environment_events(inbox_tx.clone());
     let mut profile = profile;
+    let mut active_selection_generation = 0;
     let result = loop {
         let OpenedWorker {
             worker,
@@ -376,6 +381,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
             monitors_active,
             &history_source,
             &message_tx,
+            active_selection_generation,
         ) {
             Ok(running) => running,
             Err(error) => break Err(error),
@@ -392,6 +398,7 @@ fn run_worker(input: WorkerThreadInput) -> Result<(), String> {
             Ok(SessionEnd::Reselect(request)) => {
                 let sequence = request.sequence;
                 profile = product_profile_from_spot(request.product, request.interval);
+                active_selection_generation = sequence;
                 let _ = message_tx.send(MarketWorkerMessage::CoinbaseSwitchMarker { sequence });
                 let _ = message_tx.send(MarketWorkerMessage::State {
                     state: ChartState::Loading,
@@ -413,6 +420,7 @@ fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: His
     monitors_active: bool,
     history_source: &H,
     message_tx: &MarketWorkerSender,
+    active_selection_generation: u64,
 ) -> Result<RunningWorker<V>, String> {
     let OpenedWorker {
         mut worker,
@@ -441,11 +449,14 @@ fn prepare_running_worker<V: axiusflow_platform_runtime::CredentialVault, H: His
     Ok(RunningWorker {
         instrument,
         bar_definition,
+        active_selection_generation,
         worker_label,
         model,
         state: LiveLoopState {
             history: None,
             streaming_generation: None,
+            pending_viewport: None,
+            last_requested_range: None,
             retained,
             reconnect_backoff: ReconnectBackoff::new(),
             recovery_announced: false,
@@ -686,6 +697,7 @@ fn market_loop_iteration<V: axiusflow_platform_runtime::CredentialVault>(
             message_tx,
             provider_wake_pending: wiring.provider_wake_pending,
             selection_sequence: wiring.selection_sequence,
+            active_selection_generation: running.active_selection_generation,
             series: StreamingSeriesContext {
                 profile: &running.profile,
                 segment_key: &running.segment_key,
@@ -767,7 +779,7 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
     history_command_tx: &SyncSender<HistoryCommand>,
     message_tx: &MarketWorkerSender,
 ) -> Result<(), String> {
-    if running.state.streaming_generation.is_some() || running.state.history.is_some() {
+    if running.state.history.is_some() {
         return Ok(());
     }
     let DesktopProviderState::Streaming { generation } = running
@@ -777,6 +789,10 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
     else {
         return Ok(());
     };
+    let viewport = running.state.pending_viewport.take();
+    if viewport.is_none() && running.state.streaming_generation.is_some() {
+        return Ok(());
+    }
     let (clock_tx, clock_rx) = mpsc::sync_channel(1);
     history_command_tx
         .send(HistoryCommand::Now(clock_tx))
@@ -784,21 +800,32 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
     let now = clock_rx
         .recv_timeout(std::time::Duration::from_secs(1))
         .map_err(|_| "Coinbase history clock did not respond".to_string())??;
-    let requested = history_request_range(&running.profile, now, FetchPhase::Full)?;
+    let requested = if let Some(viewport) = viewport {
+        viewport_history_range(&running.profile, viewport)?
+    } else {
+        history_request_range(&running.profile, now, FetchPhase::Full)?
+    };
+    if running.state.last_requested_range == Some(requested) {
+        return Ok(());
+    }
     let coverage = history_coverage_plan(running, requested, now)?;
-    if activate_complete_cached_history(
-        running,
-        generation,
-        message_tx,
-        coverage.classification(),
-        now,
-    )? {
+    if running.state.streaming_generation.is_none()
+        && activate_complete_cached_history(
+            running,
+            generation,
+            message_tx,
+            coverage.classification(),
+            now,
+        )?
+    {
+        running.state.last_requested_range = Some(requested);
         return Ok(());
     }
     let cancel = Arc::new(AtomicBool::new(false));
     running.state.history = Some(InflightHistory {
         cancel: Arc::clone(&cancel),
     });
+    running.state.last_requested_range = Some(requested);
     history_command_tx
         .send(HistoryCommand::Fetch {
             generation,
@@ -808,6 +835,49 @@ fn maybe_start_history<V: axiusflow_platform_runtime::CredentialVault>(
             cancel,
         })
         .map_err(|_| "Coinbase history worker stopped".to_string())
+}
+
+fn viewport_history_range(
+    profile: &ProductProfile,
+    viewport: ChartViewportUpdate,
+) -> Result<HistoryRange, String> {
+    let interval_nanos = chart_interval_nanos(profile.interval)?;
+    let visible_span = viewport
+        .end_unix_nanos
+        .checked_sub(viewport.start_unix_nanos)
+        .ok_or_else(|| "Coinbase viewport range underflow".to_string())?;
+    let prefetch = visible_span
+        .checked_mul(VIEWPORT_PREFETCH_WINDOWS)
+        .ok_or_else(|| "Coinbase viewport prefetch overflow".to_string())?;
+    let start = viewport
+        .start_unix_nanos
+        .saturating_sub(prefetch)
+        .div_euclid(interval_nanos)
+        * interval_nanos;
+    let end = viewport
+        .end_unix_nanos
+        .saturating_add(interval_nanos - 1)
+        .div_euclid(interval_nanos)
+        * interval_nanos;
+    Ok(HistoryRange {
+        start_unix_nanos: start,
+        end_unix_nanos: end,
+    })
+}
+
+fn chart_interval_nanos(interval: ChartInterval) -> Result<i64, String> {
+    let seconds = match interval.aggregation() {
+        axiusflow_market_data::ChartAggregation::FixedSeconds(seconds) => i64::from(seconds.get()),
+        axiusflow_market_data::ChartAggregation::CalendarMonth => 30 * 24 * 60 * 60,
+        axiusflow_market_data::ChartAggregation::Trades(_) => {
+            return Err(
+                "Coinbase viewport history does not support trade-count intervals".to_string(),
+            );
+        }
+    };
+    seconds
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase viewport interval overflow".to_string())
 }
 
 fn activate_complete_cached_history<V: axiusflow_platform_runtime::CredentialVault>(
@@ -1269,6 +1339,8 @@ fn request_recovery_if_required<V: axiusflow_platform_runtime::CredentialVault>(
     if let DesktopProviderState::RecoveryRequired { reason, .. } = provider_state {
         worker.reset_aggregation();
         state.streaming_generation = None;
+        state.pending_viewport = None;
+        state.last_requested_range = None;
         cancel_inflight_history(&mut state.history);
         state.retained.clear();
         if !state.recovery_announced {

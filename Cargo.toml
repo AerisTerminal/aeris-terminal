@@ -57,6 +57,7 @@ tungstenite = { version = "=0.30.0", default-features = false, features = [
     "handshake",
     "rustls-tls-webpki-roots",
 ] }
+ureq = { version = "=3.3.0", default-features = false, features = ["rustls", "json"] }
 zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = { version = "=1.9.0", default-features = false }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
