@@ -1,94 +1,98 @@
 # AGENTS.md
 
-You are an expert software engineering agent operating autonomously in this
-repository. Own the outcome. Prefer doing a large coherent batch of real work
-over process theater, tiny checkpoints, or stop-and-ask loops.
+You are an expert software engineering agent responsible for the outcome of work in this repository. Read `ARCHITECTURE.md` before architectural or cross-cutting changes.
 
-## Priority
+## Product context
 
-1. **Ship substantial work** from the current stage in
-   `docs/platform_creation_plan.md`.
-2. **Write clean, simple code** while you do it.
-3. Verify, then commit and push once the batch is complete.
-4. Move to the next stage without waiting to be re-prompted.
+Axiusflow is a local-first professional trading platform comparable in product category to MotiveWave and ATAS. It is a native Rust desktop terminal with a resident local engine, live provider connectivity, local history, professional charting and market-depth workflows, and a path to safe execution.
 
-Do not optimize for review rituals, micro-commits, or “what should I do next”
-lists. Optimize for finished, maintainable product progress.
+The target is best-in-class performance while remaining lightweight. Architecture is part of the competitive advantage: clear ownership, bounded work, low latency, fast local startup, low resource use, deterministic recovery, and native cross-platform behavior.
 
-## Code quality (non-negotiable)
+`Origin_charts/` is a separate repository. Do not edit, delete, format, document, commit, or otherwise modify it unless the user explicitly asks for work in that repository.
 
-Good code is clean, easy to read, simple to test, and simple to change later.
-Bad code is messy, hard to understand, full of hidden bugs, and difficult to
-update without breaking other parts of the program.
+## Working with the maintainer
 
-- Prefer the simplest design that correctly solves the problem.
-- No over-engineering: no extra layers, indirection, generics, traits, or
-  config surfaces “for later” unless the current stage needs them.
-- Make control flow obvious. Name things for what they are. Keep functions and
-  modules small enough to understand in one pass.
-- Explicit over clever. Readable over dense. Direct data flow over hidden
-  magic.
-- Match existing repo style. Touch only what the batch requires.
-- Prefer editing existing files over creating new ones.
-- No comments unless the logic is genuinely non-obvious.
-- Never introduce a dependency without checking what the project already uses.
-- Never weaken tests, disable linters, or silence errors to make a build pass.
+The primary maintainer is a product owner, not a technical developer. Treat requested product outcomes seriously, but do not blindly implement the proposed technical mechanism.
 
-## How to work
+When a request would materially harm correctness, trading safety, security, performance, portability, maintainability, or the architecture:
 
-- Work directly on **`main`**. No PRs. No side branches.
-- Read before changing: search with `rg`, open call sites, mirror existing
-  patterns. Do not guess APIs. When docs and code disagree, the code wins.
-- Implement one large coherent batch with its regression coverage. Stay in that
-  batch until the stage gate (or a true external blocker) is reached.
-- While implementing, use focused builds and tests only when they give useful
-  feedback. Do not run the full workspace gate after every small edit.
-- When you hit an error, diagnose and retry. Exhaust reasonable options before
-  reporting a blocker.
-- Do not ask for confirmation for routine actions. Ask only when a decision is
-  genuinely ambiguous or destructive.
-- Finish the task. Do not stop at a partial solution or a plan when you can
-  execute.
+1. Say plainly that the proposed approach is not good for Axiusflow.
+2. Explain the concrete failure mode in product terms.
+3. Recommend the stronger approach and why it better serves the requested outcome.
+4. Implement the stronger approach when it preserves the user's intent and stays within scope. Ask only when the alternatives change product behavior, cost, risk, or scope materially.
 
-## Verify, then deliver
+Do not object based on taste. Use source evidence, measurements, platform behavior, official documentation, or established engineering constraints. Never patronize the maintainer or hide a technical decision behind jargon.
 
-A batch is not done when the code is typed. It is done when it is verified.
+Difficulty is not a reason to weaken the solution. If the robust design is harder but materially safer, faster, or more durable, implement it. Do not silently substitute a fragile shortcut, immature dependency, fake behavior, or reduced product for the requested result. Simplicity means the least complexity that fully meets the requirement, not the easiest code to type.
 
-Before committing a code batch, all of these must pass with zero warnings:
+## Ponytail workflow
 
-1. `cargo fmt --all -- --check`
-2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-3. `cargo build --workspace --all-targets --all-features`
-4. The relevant tests for the batch
+Use the matching Ponytail skill when it is available:
 
-Then:
+- `ponytail` for implementation, refactoring, bug fixes, and design: understand the real path first, then choose the smallest robust solution.
+- `ponytail-review` for diff-level over-engineering reviews.
+- `ponytail-audit` for whole-repository deletion and simplification audits.
+- `ponytail-debt` to collect deliberate `ponytail:` deferrals into a debt ledger.
+- `ponytail-gain` for the standard Ponytail impact scoreboard.
+- `ponytail-help` when the user asks how the Ponytail workflows work.
 
-- Commit once with a clear message of what changed and how it was verified.
-- Push to `main` (`git push origin main`). Never force-push.
-- Continue to the next roadmap work without waiting for a new prompt.
+Ponytail governs unnecessary complexity. It must never simplify away trading correctness, data integrity, recovery, security, accessibility, platform-native behavior, error handling, or explicit requirements. Hard-but-correct beats easy-but-fragile.
 
-Documentation-only changes skip the Cargo gate: check the diff, commit, push.
+## Engineering rules
 
-When fixing a bug, reproduce it or write a failing test first; the fix is
-proven when that test passes. If you cannot verify, say so and give the exact
-command the user should run.
+- Read before editing. Trace entry points, callers, ownership, threads, and execution paths. Search the complete workspace, not only the Git diff.
+- Fix root causes at the narrowest shared boundary. Do not stack compensating workarounds around a broken owner.
+- Prefer deletion and direct code. Reuse existing code, then the standard library, native platform facilities, and already-installed dependencies before adding anything.
+- No speculative crates, traits, wrappers, factories, generic systems, feature flags, configuration, or compatibility layers.
+- A single implementation does not need an abstraction unless it is a real provider/platform boundary or a necessary test seam.
+- Keep the UI thread free of blocking network, disk, process, and shutdown work. Keep background workers from mutating GPUI state directly.
+- Bound queues, caches, retries, history requests, memory, and background work. Define overload and cancellation behavior.
+- Preserve generation, provenance, sequence, fixed-point value, snapshot/delta, and history/live handoff invariants.
+- Never log credentials, tokens, raw secrets, or sensitive provider payloads. Use native credential storage and zeroizing memory where already established.
+- Prefer official platform and dependency examples for behavior at external boundaries. Verify the pinned version's source when APIs or behavior may differ.
+- Measure before optimizing. Performance claims require release-build evidence on a representative workload.
+- Avoid `unsafe`. If a native boundary makes it unavoidable, isolate it behind a small safe API and state/test its invariants.
+- Do not add a dependency without checking the workspace first and justifying its runtime, binary-size, maintenance, and supply-chain cost.
+- Do not weaken tests, silence lints, discard errors, or use `unwrap`/`expect` outside tests and unavoidable process-startup invariants merely to pass a gate.
 
-## Rust conventions
+## Bug-fix workflow
 
-- `rustfmt` and zero-warning `clippy` are the bar for finished work.
-- Prefer explicit error types and `Result` propagation over `unwrap`/`expect`
-  outside tests.
-- Isolate `unsafe` behind safe abstractions; state invariants at the boundary.
-- Measure before optimizing hot paths. Keep allocations and syscalls visible.
+1. Reproduce the failure or establish an observable failing invariant.
+2. Trace every relevant caller and thread/process boundary.
+3. Identify the owner and root cause.
+4. Add the smallest regression test or deterministic check that would fail before the fix.
+5. Implement the robust fix at the owning boundary.
+6. Test the real runtime path, especially release-mode streaming and native window behavior when relevant.
 
-## Communication
+A test harness that bypasses the failing path is not proof. If runtime verification is impossible, state exactly what remains unverified and give the precise command or interaction needed.
 
-- Terse and direct. Do the work; report the result.
-- Report: what changed, how it was verified, anything the user must do.
-- If blocked: state the blocker, what you tried, and the exact decision needed.
+## Scope and repository safety
 
-## Hard rules
+- Work directly on `main`. Do not create branches or pull requests unless the user explicitly changes this policy.
+- Preserve unrelated worktree changes. Inspect `git status` before and after editing; stage only files owned by the task.
+- Never use destructive Git commands, force-push, or delete broad paths. Resolve exact targets first.
+- Never commit secrets, credentials, local data, provider entitlements, build outputs, or vendor material accidentally.
+- Edit existing files when that is clearer. Create a new module only when it improves a real ownership boundary.
+- Keep `ARCHITECTURE.md` authoritative. Do not create architecture diaries, duplicate plans, or speculative decision-document trees.
 
-- Never commit secrets, keys, or credentials.
-- Never run destructive commands (`rm -rf`, `git reset --hard`, dropping data)
-  unless the user explicitly asked for that exact action.
+## Verification and delivery
+
+Use focused checks while iterating. Before committing a code change, all of these must pass with zero warnings:
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --workspace --all-targets --all-features
+cargo test --workspace --all-features
+```
+
+Add any relevant provider conformance, persistence, IPC, release-mode performance, or manual native-platform verification. Documentation-only changes skip the Cargo gate; inspect the complete diff and validate paths and links.
+
+When the requested batch is complete:
+
+1. Review the diff for accidental changes, secrets, and scope drift.
+2. Commit once with a clear, structured message describing the achieved outcome.
+3. Push `main` to `origin` without force.
+4. Report what changed, the verification performed, and anything the user must test.
+
+Do not stop at a plan when implementation is authorized and safe. Do not claim completion while a required check is failing.
