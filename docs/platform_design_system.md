@@ -67,37 +67,42 @@ components consume only the typed resolved value.
 
 ### 4.1 Core colors
 
-The neutral hierarchy follows Twenty's Display P3 gray scale. Axiusflow keeps
-its own semantic names and its existing product and financial colors.
+The neutral hierarchy follows Twenty's Display P3 gray scale, verified against
+`twentyhq/twenty` commit `cd288d84470503ba897c0823a9d98701fa9986ab`
+(2026-08-09), `packages/twenty-ui/src/theme/constants/GrayScaleLight.ts`,
+`GrayScaleDark.ts`, `BackgroundLight.ts`, `BackgroundDark.ts`,
+`BorderLight.ts`, `BorderDark.ts`, `FontLight.ts`, `FontDark.ts`,
+`GrayScaleLightAlpha.ts`, and `GrayScaleDarkAlpha.ts`. Axiusflow keeps its own
+semantic names and its existing product and financial colors.
 
-| Identifier             | Light                                      | Dark                                         |
-| ---------------------- | ------------------------------------------ | -------------------------------------------- |
-| `background`           | `color(display-p3 1 1 1)`                  | `color(display-p3 0.09 0.09 0.09)`           |
-| `foreground`           | `color(display-p3 0.2 0.2 0.2)`            | `color(display-p3 0.922 0.922 0.922)`        |
-| `surface_primary`      | `background`                               | `background`                                 |
-| `surface_secondary`    | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        |
-| `surface_tertiary`     | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        |
-| `surface_quaternary`   | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        |
-| `card`, `popover`      | `surface_secondary`                        | `surface_secondary`                          |
-| `secondary`, `muted`   | `surface_tertiary`                         | `surface_tertiary`                           |
-| `accent`               | `surface_tertiary`                         | `surface_tertiary`                           |
-| `border`               | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        |
-| `input`                | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        |
-| `input_surface`        | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        |
-| `primary`              | `#3e63dd`                                  | `#3e63dd`                                    |
-| `primary_foreground`   | `oklch(0.97 0.014 254.604)`                | same                                         |
-| `ring`                 | `oklch(0.708 0 0)`                         | `oklch(0.556 0 0)`                           |
+| Identifier             | Light                                      | Dark                                         | Twenty source                       |
+| ---------------------- | ------------------------------------------ | -------------------------------------------- | ----------------------------------- |
+| `background`           | `color(display-p3 1 1 1)`                  | `color(display-p3 0.09 0.09 0.09)`           | `background.primary` = `gray1`      |
+| `foreground`           | `color(display-p3 0.2 0.2 0.2)`            | `color(display-p3 0.922 0.922 0.922)`        | `font.color.primary` = `gray12`     |
+| `surface_primary`      | `background`                               | `background`                                 | `background.primary`                |
+| `surface_secondary`    | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        | `background.secondary` = `gray2`    |
+| `surface_tertiary`     | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        | `background.tertiary` = `gray4`     |
+| `surface_quaternary`   | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        | `background.quaternary` = `gray5`   |
+| `card`, `popover`      | `surface_secondary`                        | `surface_secondary`                          |                                     |
+| `secondary`, `muted`   | `surface_tertiary`                         | `surface_tertiary`                           |                                     |
+| `accent`               | `surface_tertiary`                         | `surface_tertiary`                           |                                     |
+| `border`               | `color(display-p3 0.945 0.945 0.945)`      | `color(display-p3 0.114 0.114 0.114)`        | `border.color.light` = `gray4`      |
+| `input`                | `color(display-p3 0.922 0.922 0.922)`      | `color(display-p3 0.133 0.133 0.133)`        | `border.color.medium` = `gray5`     |
+| `input_surface`        | `color(display-p3 0.988 0.988 0.988)`      | `color(display-p3 0.106 0.106 0.106)`        | `background.secondary` = `gray2`    |
+| `primary`              | `#3e63dd`                                  | `#3e63dd`                                    | Axiusflow-owned                     |
+| `primary_foreground`   | `oklch(0.97 0.014 254.604)`                | same                                         | Axiusflow-owned                     |
+| `ring`                 | `oklch(0.708 0 0)`                         | `oklch(0.556 0 0)`                           | Axiusflow-owned                     |
 
 ### 4.2 Text, icon, and interaction colors
 
-| Identifier                      | Light                                 | Dark                                  |
-| ------------------------------- | ------------------------------------- | ------------------------------------- |
-| `text_secondary`, `icon_color`  | `color(display-p3 0.4 0.4 0.4)`       | `color(display-p3 0.702 0.702 0.702)` |
-| `text_muted`, `muted_foreground` | `color(display-p3 0.6 0.6 0.6)`       | `color(display-p3 0.506 0.506 0.506)` |
-| `text_placeholder`              | `color(display-p3 0.702 0.702 0.702)` | `color(display-p3 0.4 0.4 0.4)`       |
-| `text_unavailable`              | `color(display-p3 0.8 0.8 0.8)`       | `color(display-p3 0.298 0.298 0.298)` |
-| `interactive_neutral_hover_bg`  | black at 3.9%                         | white at 5.9%                         |
-| `interactive_neutral_active_bg` | black at 7.8%                         | white at 10.2%                        |
+| Identifier                      | Light                                 | Dark                                  | Twenty source                              |
+| ------------------------------- | ------------------------------------- | ------------------------------------- | ------------------------------------------ |
+| `text_secondary`, `icon_color`  | `color(display-p3 0.4 0.4 0.4)`       | `color(display-p3 0.702 0.702 0.702)` | `font.color.secondary` = `gray11`          |
+| `text_muted`, `muted_foreground` | `color(display-p3 0.6 0.6 0.6)`       | `color(display-p3 0.506 0.506 0.506)` | `font.color.tertiary` = `gray9`            |
+| `text_placeholder`              | `color(display-p3 0.702 0.702 0.702)` | `color(display-p3 0.4 0.4 0.4)`       | `font.color.light` = `gray8`               |
+| `text_unavailable`              | `color(display-p3 0.8 0.8 0.8)`       | `color(display-p3 0.298 0.298 0.298)` | `font.color.extraLight` = `gray7`          |
+| `interactive_neutral_hover_bg`  | black at 3.9%                         | white at 5.9%                         | `background.transparent.light` = `gray2` alpha  |
+| `interactive_neutral_active_bg` | black at 7.8%                         | white at 10.2%                        | `background.transparent.medium` = `gray5` alpha |
 
 Neutral hover and active backgrounds are alpha overlays. This makes the same
 state readable on the root, card, popover, and input surfaces without a white

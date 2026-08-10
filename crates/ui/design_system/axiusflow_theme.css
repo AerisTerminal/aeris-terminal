@@ -1,6 +1,9 @@
 /*
  * Axiusflow canonical CSS theme contract.
- * Neutral values are derived from Twenty's light/dark theme at c520eb39.
+ * Neutral values match Twenty's light/dark theme, verified against
+ * twentyhq/twenty@cd288d84470503ba897c0823a9d98701fa9986ab (2026-08-09),
+ * packages/twenty-ui/src/theme/constants (GrayScale*, Background*, Border*,
+ * Font* light and dark files).
  * Product, trading, and status colors remain Axiusflow-owned.
  * Keep this manifest in parity with AxiusflowTheme::color_tokens.
  */
