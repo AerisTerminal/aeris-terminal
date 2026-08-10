@@ -2138,6 +2138,7 @@ impl Render for TerminalApp {
             .is_some_and(|chart| chart.read(cx).has_market_data());
         let drawing_state = self.drawing_toolbar_state(cx);
         let overlay = chrome_overlay_layer(self, &app, &theme, cx);
+        let fullscreen_focus = self.chrome_focus.clone();
         let header = terminal_header(
             window,
             cx,
@@ -2204,6 +2205,15 @@ impl Render for TerminalApp {
             .size_full()
             .track_focus(&self.chrome_focus)
             .on_key_down(cx.listener(Self::on_terminal_key_down))
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| {
+                WindowCommand::MaximizeOrRestore.execute(window);
+            })
+            .on_action(move |_: &ToggleFullscreen, window, cx| {
+                window.toggle_fullscreen();
+                fullscreen_focus.focus(window, cx);
+            })
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .bg(gpui_color(theme.colors.background))
             .text_color(gpui_color(theme.colors.foreground))
             .child(header)
@@ -2800,13 +2810,6 @@ fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCom
         return Some(WindowCommand::ToggleFullscreen);
     }
     None
-}
-
-fn execute_in_active_window(cx: &mut App, command: WindowCommand) {
-    let Some(window) = cx.active_window() else {
-        return;
-    };
-    let _ = window.update(cx, move |_, window, _| command.execute(window));
 }
 
 fn terminal_header(
@@ -3931,7 +3934,13 @@ fn terminal_root(
     });
     subscribe_symbol_input(search_input, &terminal, window, cx);
     subscribe_indicator_input(&indicator_search_input, &terminal, window, cx);
-    cx.new(|cx| Root::new(terminal, window, cx))
+    let root = cx.new(|cx| Root::new(terminal.clone(), window, cx));
+    window.on_next_frame(move |window, cx| {
+        terminal.update(cx, |terminal, cx| {
+            terminal.chrome_focus.focus(window, cx);
+        });
+    });
+    root
 }
 
 fn configured_market_worker() -> Option<(MarketWorkerStartup, MarketDataWorker)> {
@@ -3992,18 +4001,6 @@ fn main() {
                 KeyBinding::new("alt-f10", ZoomWindow, None),
                 KeyBinding::new("alt-f4", CloseWindow, None),
             ]);
-            cx.on_action(|_: &MinimizeWindow, cx| {
-                execute_in_active_window(cx, WindowCommand::Minimize);
-            });
-            cx.on_action(|_: &ZoomWindow, cx| {
-                execute_in_active_window(cx, WindowCommand::MaximizeOrRestore);
-            });
-            cx.on_action(|_: &ToggleFullscreen, cx| {
-                execute_in_active_window(cx, WindowCommand::ToggleFullscreen);
-            });
-            cx.on_action(|_: &CloseWindow, cx| {
-                execute_in_active_window(cx, WindowCommand::Close);
-            });
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
             let options = desktop_window_options(cx);
 
