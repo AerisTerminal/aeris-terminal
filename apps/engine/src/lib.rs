@@ -1,7 +1,7 @@
 //! Resident engine process boundary and authenticated local sessions.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -9,18 +9,15 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_local_engine_protocol::{
-    CatalogEntry, CatalogReassembler, ClientHello, ClientKind, EngineFaultCode, EngineHeartbeat,
-    EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION,
-    ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist, SubscribeView,
-    ViewKind, WorkspaceState, encode_envelope, envelope, split_catalog,
+    ClientHello, ClientKind, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault,
+    Goodbye, HotSeries, PROTOCOL_VERSION, ResourceMode, RestoreWorkspace, SetSelection,
+    SetViewport, SetWatchlist, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
@@ -36,110 +33,9 @@ pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
-const PUBLICATION_SUBSCRIBER_CAPACITY: usize = 128;
-const SUBSCRIBER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const WORKSPACE_SCHEMA_REVISION: u32 = 1;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
-type SelectionCallback = Arc<dyn Fn(WorkspaceState) + Send + Sync>;
-type ProviderCommandCallback = Arc<dyn Fn(envelope::Payload) + Send + Sync>;
-
-/// Bounded latest-state fan-out shared by the engine runtime and authenticated clients.
-#[derive(Clone, Default)]
-pub struct EnginePublicationHub {
-    inner: Arc<Mutex<PublicationHubState>>,
-}
-
-#[derive(Default)]
-struct PublicationHubState {
-    retained: BTreeMap<i32, Vec<envelope::Payload>>,
-    subscribers: Vec<(ViewKind, SyncSender<envelope::Payload>)>,
-}
-
-impl EnginePublicationHub {
-    /// Publishes a view update and retains the latest covering state for instant attachment.
-    pub fn publish(&self, view: ViewKind, payload: &envelope::Payload) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.retained.insert(view as i32, vec![payload.clone()]);
-        state.subscribers.retain(|(subscribed_view, sender)| {
-            if *subscribed_view != view && *subscribed_view != ViewKind::Session {
-                return true;
-            }
-            match sender.try_send(payload.clone()) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
-            }
-        });
-    }
-
-    /// Fans out an incremental update without replacing the retained covering state.
-    pub fn publish_transient(&self, view: ViewKind, payload: &envelope::Payload) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.subscribers.retain(|(subscribed_view, sender)| {
-            if *subscribed_view != view && *subscribed_view != ViewKind::Session {
-                return true;
-            }
-            match sender.try_send(payload.clone()) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
-            }
-        });
-    }
-
-    /// Atomically replaces and publishes a multi-frame covering state such as a catalog.
-    pub fn publish_covering(&self, view: ViewKind, payloads: &[envelope::Payload]) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.retained.insert(view as i32, payloads.to_owned());
-        state.subscribers.retain(|(subscribed_view, sender)| {
-            if *subscribed_view != view && *subscribed_view != ViewKind::Session {
-                return true;
-            }
-            payloads
-                .iter()
-                .all(|payload| match sender.try_send(payload.clone()) {
-                    Ok(()) => true,
-                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
-                })
-        });
-    }
-
-    fn subscribe(&self, view: ViewKind) -> Receiver<envelope::Payload> {
-        let (sender, receiver) = mpsc::sync_channel(PUBLICATION_SUBSCRIBER_CAPACITY);
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view == ViewKind::Session {
-            for retained_view in [
-                ViewKind::Catalog,
-                ViewKind::Diagnostics,
-                ViewKind::Chart,
-                ViewKind::Dom,
-            ] {
-                if let Some(retained) = state.retained.get(&(retained_view as i32)) {
-                    for payload in retained {
-                        let _ = sender.try_send(payload.clone());
-                    }
-                }
-            }
-        } else if let Some(retained) = state.retained.get(&(view as i32)) {
-            for payload in retained {
-                let _ = sender.try_send(payload.clone());
-            }
-        }
-        state.subscribers.push((view, sender));
-        receiver
-    }
-}
 
 /// Loads the installation credential from the native vault, creating it once.
 ///
@@ -181,8 +77,6 @@ fn redacted_vault_error<E>(_error: E) -> String {
 pub struct EngineState {
     workspace: Arc<Mutex<WorkspaceState>>,
     workspace_root: Option<Arc<PathBuf>>,
-    selection_callback: Arc<Mutex<Option<SelectionCallback>>>,
-    provider_command_callback: Arc<Mutex<Option<ProviderCommandCallback>>>,
     selection_generation: Arc<AtomicU64>,
 }
 
@@ -191,8 +85,6 @@ impl Default for EngineState {
         Self {
             workspace: Arc::new(Mutex::new(default_workspace())),
             workspace_root: None,
-            selection_callback: Arc::new(Mutex::new(None)),
-            provider_command_callback: Arc::new(Mutex::new(None)),
             selection_generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -221,8 +113,6 @@ impl EngineState {
         let state = Self {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
-            selection_callback: Arc::new(Mutex::new(None)),
-            provider_command_callback: Arc::new(Mutex::new(None)),
             selection_generation: Arc::new(AtomicU64::new(0)),
         };
         if state.workspace().workspace_revision == 0 || migrated {
@@ -250,33 +140,6 @@ impl EngineState {
         workspace.clone()
     }
 
-    /// Installs the resident market runtime's nonblocking selection callback.
-    pub fn set_selection_callback(&self, callback: SelectionCallback) {
-        *self
-            .selection_callback
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(callback);
-    }
-
-    /// Installs the resident provider runtime's nonblocking command callback.
-    pub fn set_provider_command_callback(&self, callback: ProviderCommandCallback) {
-        *self
-            .provider_command_callback
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(callback);
-    }
-
-    fn dispatch_provider_command(&self, command: envelope::Payload) {
-        if let Some(callback) = self
-            .provider_command_callback
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            callback(command);
-        }
-    }
-
     fn apply_selection(&self, selection: SetSelection) -> Result<WorkspaceState, String> {
         let mut workspace = self
             .workspace
@@ -298,15 +161,6 @@ impl EngineState {
         *workspace = candidate.clone();
         self.selection_generation
             .store(selection.selection_generation, Ordering::Release);
-        drop(workspace);
-        if let Some(callback) = self
-            .selection_callback
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            callback(candidate.clone());
-        }
         Ok(candidate)
     }
 
@@ -663,145 +517,6 @@ fn redacted_workspace_error<E>(_error: E) -> String {
     "engine workspace storage is unavailable".to_string()
 }
 
-/// Loads the newest valid resident Coinbase catalog, quarantining corrupt revisions.
-///
-/// # Errors
-/// Returns an error when the engine state directory cannot be inspected or quarantine fails.
-pub fn load_coinbase_catalog(root: &Path) -> Result<Option<Vec<CoinbaseSpotProduct>>, String> {
-    for (_, path) in catalog_files(root)? {
-        match decode_catalog_file(&path) {
-            Ok(products) => return Ok(Some(products)),
-            Err(()) => quarantine_workspace_file(&path)?,
-        }
-    }
-    Ok(None)
-}
-
-/// Persists a validated immutable Coinbase catalog revision and bounds old revisions.
-///
-/// # Errors
-/// Returns an error when validation, encoding, or durable storage fails.
-pub fn persist_coinbase_catalog(
-    root: &Path,
-    products: &[CoinbaseSpotProduct],
-) -> Result<(), String> {
-    let entries = products
-        .iter()
-        .map(catalog_entry)
-        .collect::<Result<Vec<_>, _>>()?;
-    if entries.is_empty() || entries.len() > 4_096 {
-        return Err("Coinbase catalog is outside its item bound".to_string());
-    }
-    fs::create_dir_all(root).map_err(redacted_workspace_error)?;
-    if load_coinbase_catalog(root)?.as_deref() == Some(products) {
-        return Ok(());
-    }
-    let files = catalog_files(root)?;
-    let revision = files
-        .first()
-        .map_or(1, |(revision, _)| revision.saturating_add(1));
-    let path = root.join(format!("coinbase-catalog-{revision:020}.frame"));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(redacted_workspace_error)?;
-    for snapshot in split_catalog(entries, revision) {
-        let frame = encode_envelope(&Envelope {
-            protocol_version: PROTOCOL_VERSION,
-            payload: Some(envelope::Payload::CatalogSnapshot(snapshot)),
-        })
-        .map_err(|_| "Coinbase catalog could not be encoded".to_string())?;
-        file.write_all(&frame).map_err(redacted_workspace_error)?;
-    }
-    file.sync_all().map_err(redacted_workspace_error)?;
-    for (_, stale) in catalog_files(root)?.into_iter().skip(2) {
-        fs::remove_file(stale).map_err(redacted_workspace_error)?;
-    }
-    Ok(())
-}
-
-fn catalog_entry(product: &CoinbaseSpotProduct) -> Result<CatalogEntry, String> {
-    validate_catalog_product(product)?;
-    Ok(CatalogEntry {
-        product_id: product.product_id.clone(),
-        base_currency: product.base_currency.clone(),
-        quote_currency: product.quote_currency.clone(),
-        price_scale: u32::from(product.price_scale),
-        quantity_scale: u32::from(product.quantity_scale),
-    })
-}
-
-fn catalog_files(root: &Path) -> Result<Vec<(u64, PathBuf)>, String> {
-    let mut files = fs::read_dir(root)
-        .map_err(redacted_workspace_error)?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let revision = name
-                .strip_prefix("coinbase-catalog-")?
-                .strip_suffix(".frame")?
-                .parse::<u64>()
-                .ok()?;
-            Some((revision, entry.path()))
-        })
-        .collect::<Vec<_>>();
-    files.sort_unstable_by_key(|(revision, _)| std::cmp::Reverse(*revision));
-    Ok(files)
-}
-
-fn decode_catalog_file(path: &Path) -> Result<Vec<CoinbaseSpotProduct>, ()> {
-    let bytes = fs::read(path).map_err(|_| ())?;
-    let mut decoder = EnvelopeDecoder::try_new().map_err(|_| ())?;
-    let envelopes = decoder.push(&bytes).map_err(|_| ())?;
-    let mut reassembler = CatalogReassembler::new();
-    let mut completed = None;
-    for envelope in envelopes {
-        let Some(envelope::Payload::CatalogSnapshot(snapshot)) = envelope.payload else {
-            return Err(());
-        };
-        if let Some(entries) = reassembler.push(snapshot).map_err(|_| ())? {
-            if completed.is_some() {
-                return Err(());
-            }
-            completed = Some(entries);
-        }
-    }
-    completed
-        .ok_or(())?
-        .into_iter()
-        .map(catalog_product)
-        .collect()
-}
-
-fn catalog_product(entry: CatalogEntry) -> Result<CoinbaseSpotProduct, ()> {
-    let product = CoinbaseSpotProduct {
-        instrument_id: coinbase_instrument_id(&entry.product_id).map_err(|_| ())?,
-        display_symbol: format!("{}/{}", entry.base_currency, entry.quote_currency),
-        product_id: entry.product_id,
-        base_currency: entry.base_currency,
-        quote_currency: entry.quote_currency,
-        price_scale: u8::try_from(entry.price_scale).map_err(|_| ())?,
-        quantity_scale: u8::try_from(entry.quantity_scale).map_err(|_| ())?,
-    };
-    validate_catalog_product(&product).map_err(|_| ())?;
-    Ok(product)
-}
-
-fn validate_catalog_product(product: &CoinbaseSpotProduct) -> Result<(), String> {
-    let expected = format!("{}-{}", product.base_currency, product.quote_currency);
-    if product.product_id != expected
-        || product.instrument_id
-            != coinbase_instrument_id(&product.product_id)
-                .map_err(|_| "Coinbase catalog contains an invalid product identity".to_string())?
-        || product.price_scale > 18
-        || product.quantity_scale > 18
-    {
-        return Err("Coinbase catalog contains an invalid product".to_string());
-    }
-    Ok(())
-}
-
 /// Authenticated local-engine client connection.
 pub struct EngineClient {
     connection: FramedConnection,
@@ -945,59 +660,6 @@ impl EngineClient {
         self.receive_workspace()
     }
 
-    /// Sends one validated Rithmic search intent to the resident provider owner.
-    ///
-    /// # Errors
-    /// Returns an error when the authenticated command connection fails.
-    pub fn search_rithmic(
-        &mut self,
-        search: axiusflow_local_engine_protocol::RithmicSearch,
-    ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::RithmicSearch(search))
-    }
-
-    /// Sends one Rithmic read-only selection to the resident provider owner.
-    ///
-    /// # Errors
-    /// Returns an error when the authenticated command connection fails.
-    pub fn select_rithmic(
-        &mut self,
-        selection: axiusflow_local_engine_protocol::RithmicSelect,
-    ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::RithmicSelect(selection))
-    }
-
-    /// Requests one Rithmic chart series from the resident provider owner.
-    ///
-    /// # Errors
-    /// Returns an error when the authenticated command connection fails.
-    pub fn request_rithmic_history(
-        &mut self,
-        request: axiusflow_local_engine_protocol::RithmicHistory,
-    ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::RithmicHistory(request))
-    }
-
-    /// Converts this authenticated connection into a blocking view stream.
-    ///
-    /// Use a separate client connection for commands so live publications can never
-    /// head-of-line block workspace mutations.
-    ///
-    /// # Errors
-    /// Returns an error when the subscription request cannot be sent.
-    pub fn subscribe_view(mut self, view: ViewKind) -> Result<EngineViewStream, String> {
-        self.connection
-            .send(envelope::Payload::SubscribeView(SubscribeView {
-                view: view as i32,
-            }))?;
-        Ok(EngineViewStream {
-            connection: self.connection,
-        })
-    }
-
     fn receive_workspace(&mut self) -> Result<WorkspaceState, String> {
         match self.connection.receive()? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
@@ -1011,21 +673,6 @@ fn reached_failure(detail: String) -> EngineConnectionFailure {
     EngineConnectionFailure {
         detail,
         endpoint_reached: true,
-    }
-}
-
-/// Blocking authenticated stream for one bounded engine view.
-pub struct EngineViewStream {
-    connection: FramedConnection,
-}
-
-impl EngineViewStream {
-    /// Receives the next publication for the subscribed view.
-    ///
-    /// # Errors
-    /// Returns an error when the engine disconnects or sends an invalid frame.
-    pub fn receive(&mut self) -> Result<envelope::Payload, String> {
-        self.connection.receive()
     }
 }
 
@@ -1235,107 +882,6 @@ pub fn serve_client_with_state(
         workspace_revision: state.workspace().workspace_revision,
     }))?;
     serve_authenticated_session(&mut connection, state)
-}
-
-/// Serves one client with workspace commands and bounded view subscriptions.
-///
-/// # Errors
-/// Returns an error for authentication, transport, framing, or malformed requests.
-pub fn serve_client_with_publications(
-    stream: LocalSocketStream,
-    installation_token: &[u8],
-    engine_epoch: u64,
-    state: &EngineState,
-    publications: &EnginePublicationHub,
-) -> Result<(), String> {
-    if installation_token.len() != INSTALLATION_TOKEN_BYTES {
-        return Err("installation credential has an invalid length".to_string());
-    }
-    let mut connection = FramedConnection::new(stream)?;
-    let envelope::Payload::ClientHello(hello) = connection.receive()? else {
-        return Err("client hello must be the first engine message".to_string());
-    };
-    if ClientKind::try_from(hello.client_kind).is_err() {
-        return Err("client kind is invalid".to_string());
-    }
-    if !constant_time_equals(&hello.installation_token, installation_token) {
-        connection.send(envelope::Payload::Fault(Fault {
-            code: EngineFaultCode::Unauthenticated as i32,
-            redacted_detail: "local engine authentication failed".to_string(),
-        }))?;
-        return Ok(());
-    }
-    connection.send(envelope::Payload::EngineReady(EngineReady {
-        protocol_version: PROTOCOL_VERSION,
-        engine_epoch,
-        workspace_revision: state.workspace().workspace_revision,
-    }))?;
-    serve_authenticated_session_with_publications(
-        &mut connection,
-        engine_epoch,
-        state,
-        publications,
-    )
-}
-
-fn serve_authenticated_session_with_publications(
-    connection: &mut FramedConnection,
-    engine_epoch: u64,
-    state: &EngineState,
-    publications: &EnginePublicationHub,
-) -> Result<(), String> {
-    loop {
-        let payload = match connection.receive() {
-            Ok(payload) => payload,
-            Err(error) if error == "local engine connection closed" => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        match payload {
-            envelope::Payload::RestoreWorkspace(_) => {
-                connection.send(envelope::Payload::WorkspaceState(state.workspace()))?;
-            }
-            envelope::Payload::SetSelection(selection) => {
-                apply_selection(state, selection, connection)?;
-            }
-            envelope::Payload::SetWatchlist(watchlist) => {
-                apply_watchlist(state, watchlist, connection)?;
-            }
-            envelope::Payload::SetViewport(viewport) => {
-                apply_viewport(state, viewport, connection)?;
-            }
-            command @ (envelope::Payload::RithmicSearch(_)
-            | envelope::Payload::RithmicSelect(_)
-            | envelope::Payload::RithmicHistory(_)) => {
-                state.dispatch_provider_command(command);
-            }
-            envelope::Payload::SubscribeView(subscription) => {
-                let view = ViewKind::try_from(subscription.view)
-                    .map_err(|_| "engine view subscription is invalid".to_string())?;
-                let receiver = publications.subscribe(view);
-                loop {
-                    match receiver.recv_timeout(SUBSCRIBER_HEARTBEAT_INTERVAL) {
-                        Ok(publication) => connection.send(publication)?,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            connection.send(envelope::Payload::EngineHeartbeat(
-                                EngineHeartbeat { engine_epoch },
-                            ))?;
-                        }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                    }
-                }
-            }
-            envelope::Payload::Goodbye(_) => {
-                connection.send(envelope::Payload::Goodbye(Goodbye {
-                    reason: "client session closed".to_string(),
-                }))?;
-                return Ok(());
-            }
-            _ => connection.send(envelope::Payload::Fault(Fault {
-                code: EngineFaultCode::MalformedMessage as i32,
-                redacted_detail: "message is invalid in the current engine state".to_string(),
-            }))?,
-        }
-    }
 }
 
 fn serve_authenticated_session(

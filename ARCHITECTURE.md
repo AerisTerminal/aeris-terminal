@@ -23,9 +23,9 @@ This document describes the current architectural direction. Source code, tests,
 Axiusflow ships two local application processes:
 
 - `axiusflow_desktop` owns the GPUI window, terminal interaction, the active provider worker, local chart history, presentation state, and chart integration.
-- `axiusflow_engine` is a per-user resident local process retained for workspace persistence and warm background sessions. Its authenticated protocol is not on the desktop's first-pixel chart path.
+- `axiusflow_engine` is a per-user resident local process retained only for authenticated workspace, watchlist, viewport, hot-set, resource-mode, and activation persistence. It owns no provider session or market publication path.
 
-The shipping desktop starts its active Coinbase or Rithmic coordinator directly on a bounded background worker. Local segments or provider snapshots are published into the desktop mailbox without a protobuf round trip, then applied to the chart bridge on GPUI. The engine remains a separately authenticated local executable for persisted workspace and warm-session duties; reconnect support may use its covering state, but chart opening never waits for it.
+The shipping desktop starts its active Coinbase or Rithmic runtime directly on a bounded background worker. Local segments or provider snapshots are published into the desktop mailbox without a protobuf round trip, then applied to the chart bridge on GPUI. The separately authenticated engine persists workspace intent only; selection and viewport messages update durable state and never start provider work.
 
 ```text
 Provider sockets
@@ -37,7 +37,7 @@ Provider sockets
     -> terminal UI and Origin chart renderer
 
 Resident engine
-    -> authenticated local workspace persistence and optional warm covering state
+    -> authenticated local workspace/watchlist/hot-set persistence
 ```
 
 ## Workspace boundaries
@@ -45,7 +45,7 @@ Resident engine
 ### Applications
 
 - `apps/desktop`: native GPUI application, window chrome, terminal composition, UI event routing, and desktop diagnostics.
-- `apps/engine`: resident engine executable plus its local IPC, authentication, workspace persistence, and client-session library.
+- `apps/engine`: resident engine executable plus authenticated local IPC, activation, workspace persistence, recovery, migration, and corrupt-file quarantine.
 
 ### Domain and application
 
@@ -70,7 +70,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 - `crates/desktop_storage`: SQLite metadata, encrypted local segments, and storage lifecycle.
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
-- `crates/local_engine_protocol`: typed messages and framing for local engine clients outside the chart first-pixel path.
+- `crates/local_engine_protocol`: authentication, activation, restore, workspace mutation, acknowledgment, and lifecycle framing only; it contains no chart, DOM, provider, catalog, or market-stream messages.
 - `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
 - `crates/transport`: small transport framing primitives.
 

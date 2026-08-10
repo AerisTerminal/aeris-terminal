@@ -3,24 +3,17 @@ use std::{
     fs,
     io::{Read, Write},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     thread,
 };
 
-use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, coinbase_instrument_id};
 use axiusflow_engine::{
-    EngineClient, EnginePublicationHub, EngineState, bind_listener, load_coinbase_catalog,
-    load_or_create_installation_token, persist_coinbase_catalog, serve_client,
-    serve_client_with_publications, serve_client_with_state,
+    EngineClient, EngineState, bind_listener, load_or_create_installation_token, serve_client,
+    serve_client_with_state,
 };
 use axiusflow_local_engine_protocol::{
-    ChartProvenance, ChartSnapshot, ClientHello, ClientKind, EngineFaultCode, Envelope,
-    EnvelopeDecoder, PROTOCOL_VERSION, ResourceMode, RithmicHistory, RithmicSearch, RithmicSelect,
-    ViewKind, WorkspaceState, encode_envelope, envelope,
+    ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
+    ResourceMode, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::CredentialVault;
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
@@ -179,70 +172,6 @@ fn authenticated_client_restores_engine_owned_workspace() {
 }
 
 #[test]
-fn authenticated_rithmic_commands_reach_only_the_resident_owner() {
-    let name = unique_name();
-    let listener = bind_listener(&name).expect("bind engine listener");
-    let token = [10_u8; 32];
-    let state = EngineState::default();
-    let publications = EnginePublicationHub::default();
-    let (commands_tx, commands_rx) = mpsc::sync_channel(3);
-    state.set_provider_command_callback(Arc::new(move |command| {
-        commands_tx.send(command).expect("capture provider command");
-    }));
-    let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client_with_publications(stream, &token, 74, &state, &publications)
-            .expect("serve client");
-    });
-    let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
-    let search = RithmicSearch {
-        generation: 1,
-        query: "MNQ".to_string(),
-        exchange: Some("CME".to_string()),
-        product_code: None,
-        instrument_type: Some("FUTURE".to_string()),
-        contains: true,
-        maximum_results: 24,
-    };
-    let selection = RithmicSelect {
-        selection_generation: 2,
-        search_generation: 1,
-        symbol: "MNQU6".to_string(),
-        exchange: "CME".to_string(),
-        entitlement_id: "test".to_string(),
-        trades: true,
-        quotes: true,
-        order_book: true,
-    };
-    let history = RithmicHistory {
-        selection_generation: 2,
-        series_generation: 3,
-        series: "1m".to_string(),
-    };
-    client.search_rithmic(search.clone()).expect("send search");
-    client
-        .select_rithmic(selection.clone())
-        .expect("send selection");
-    client
-        .request_rithmic_history(history.clone())
-        .expect("send history");
-    drop(client);
-    assert_eq!(
-        commands_rx.recv().expect("receive search"),
-        envelope::Payload::RithmicSearch(search)
-    );
-    assert_eq!(
-        commands_rx.recv().expect("receive selection"),
-        envelope::Payload::RithmicSelect(selection)
-    );
-    assert_eq!(
-        commands_rx.recv().expect("receive history"),
-        envelope::Payload::RithmicHistory(history)
-    );
-    server.join().expect("join server");
-}
-
-#[test]
 fn operational_resource_mode_updates_without_revising_user_workspace() {
     let state = EngineState::default();
     let before = state.workspace();
@@ -252,37 +181,6 @@ fn operational_resource_mode_updates_without_revising_user_workspace() {
     let warm = state.set_resource_mode(ResourceMode::Warm);
     assert_eq!(warm.resource_mode, ResourceMode::Warm as i32);
     assert_eq!(warm.workspace_revision, before.workspace_revision);
-}
-
-#[test]
-fn session_subscription_receives_retained_covering_chart_state() {
-    let name = unique_name();
-    let listener = bind_listener(&name).expect("bind engine listener");
-    let token = [13_u8; 32];
-    let state = EngineState::default();
-    let publications = EnginePublicationHub::default();
-    let covering = envelope::Payload::ChartSnapshot(ChartSnapshot {
-        market: "BTC-USD".to_string(),
-        interval_seconds: 60,
-        engine_epoch: 101,
-        selection_generation: 1,
-        provider_generation: 2,
-        payload: vec![1, 2, 3],
-        provenance: ChartProvenance::LocalCache as i32,
-    });
-    publications.publish_covering(ViewKind::Chart, std::slice::from_ref(&covering));
-    let server_publications = publications.clone();
-    let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        let _ = serve_client_with_publications(stream, &token, 101, &state, &server_publications);
-    });
-    let client = EngineClient::connect(&name, &token).expect("connect engine client");
-    let mut stream = client
-        .subscribe_view(ViewKind::Session)
-        .expect("subscribe session");
-    assert_eq!(stream.receive().expect("receive retained chart"), covering);
-    drop(stream);
-    server.join().expect("join server");
 }
 
 #[test]
@@ -444,59 +342,4 @@ fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
             .join("workspace-00000000000000000008.frame")
             .exists()
     );
-}
-
-#[test]
-fn resident_catalog_roundtrips_exact_product_precision() {
-    let directory = TestDirectory::new();
-    let products = vec![coinbase_product("BTC", "USD", 2, 8)];
-    persist_coinbase_catalog(&directory.0, &products).expect("persist catalog");
-    assert_eq!(
-        load_coinbase_catalog(&directory.0).expect("load catalog"),
-        Some(products)
-    );
-}
-
-#[test]
-fn corrupt_latest_catalog_is_quarantined_and_falls_back() {
-    let directory = TestDirectory::new();
-    let first = vec![coinbase_product("BTC", "USD", 2, 8)];
-    persist_coinbase_catalog(&directory.0, &first).expect("persist first catalog");
-    persist_coinbase_catalog(&directory.0, &[coinbase_product("ETH", "USD", 2, 8)])
-        .expect("persist second catalog");
-    fs::write(
-        directory
-            .0
-            .join("coinbase-catalog-00000000000000000002.frame"),
-        b"corrupt",
-    )
-    .expect("corrupt latest catalog");
-    assert_eq!(
-        load_coinbase_catalog(&directory.0).expect("load fallback catalog"),
-        Some(first)
-    );
-    assert!(
-        directory
-            .0
-            .join("coinbase-catalog-00000000000000000002.corrupt-0")
-            .exists()
-    );
-}
-
-fn coinbase_product(
-    base: &str,
-    quote: &str,
-    price_scale: u8,
-    quantity_scale: u8,
-) -> CoinbaseSpotProduct {
-    let product_id = format!("{base}-{quote}");
-    CoinbaseSpotProduct {
-        instrument_id: coinbase_instrument_id(&product_id).expect("valid product identity"),
-        display_symbol: format!("{base}/{quote}"),
-        product_id,
-        base_currency: base.to_string(),
-        quote_currency: quote.to_string(),
-        price_scale,
-        quantity_scale,
-    }
 }

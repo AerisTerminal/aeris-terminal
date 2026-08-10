@@ -4,27 +4,20 @@
 //! framing from `axiusflow_transport`. Pure synchronous Rust: no async, no
 //! GPUI, no network, no filesystem.
 
-mod catalog;
 mod codec;
 mod error;
-mod fence;
 mod messages;
 
-pub use catalog::{CATALOG_CHUNK_BUDGET_BYTES, CatalogReassembler, split_catalog};
 pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
-pub use fence::Fence;
 pub use messages::{
-    ActivateExistingUi, CatalogEntry, CatalogSnapshot, ChartDelta, ChartProvenance, ChartSnapshot,
-    ClientHello, ClientKind, DomBookState, DomLevel, DomRecoveryReason, DomRow, DomSnapshot,
-    EngineFaultCode, EngineHeartbeat, EngineReady, Envelope, Fault, Goodbye, HotSeries,
-    ProviderConnectionState, ProviderState, ResourceMode, RestoreWorkspace, RithmicCatalog,
-    RithmicChart, RithmicHistory, RithmicSearch, RithmicSelect, RithmicSymbol, SetSelection,
-    SetViewport, SetWatchlist, SubscribeView, UnsubscribeView, ViewKind, WorkspaceState, envelope,
+    ActivateExistingUi, ClientHello, ClientKind, EngineFaultCode, EngineReady, Envelope, Fault,
+    Goodbye, HotSeries, ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist,
+    WorkspaceState, envelope,
 };
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum prost payload accepted in one frame (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
