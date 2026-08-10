@@ -2250,7 +2250,7 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         .v_flex()
         .flex_1()
         .overflow_hidden()
-        .bg(gpui_color(colors.card))
+        .bg(gpui_color(colors.background))
         .child(div().flex_1().overflow_hidden().children(chart.cloned()))
         .children(notice.map(|notice| chart_notice(notice, theme)));
     let side_panel_content = resizable_panel()

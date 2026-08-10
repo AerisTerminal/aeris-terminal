@@ -438,7 +438,7 @@ impl AxiusflowTheme {
                 "var(--surface_secondary)",
                 colors.input_surface,
             ),
-            ColorToken::new("ring", "var(--primary)", colors.ring),
+            ColorToken::new("ring", mode_source(dark, "#000000", "#ffffff"), colors.ring),
             ColorToken::new(
                 "interactive_neutral_hover_bg",
                 mode_source(dark, "rgb(239 239 239 / 35%)", "rgb(97 97 97 / 20%)"),
@@ -614,7 +614,10 @@ fn foundational_colors(
         border_secondary,
         input: border_secondary,
         input_surface: surface_secondary,
-        ring: primary,
+        ring: match mode {
+            ThemeMode::Light => ThemeColor::from_rgb8(0, 0, 0),
+            ThemeMode::Dark => ThemeColor::from_rgb8(255, 255, 255),
+        },
         interactive_neutral_hover_bg,
         interactive_neutral_hover_fg: icon_active,
         interactive_neutral_active_bg,
@@ -727,6 +730,8 @@ mod tests {
         assert_eq!(dark.chart_crosshair, ThemeColor::from_rgb8(46, 46, 46));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
+        assert_eq!(light.ring, ThemeColor::from_rgb8(0, 0, 0));
+        assert_eq!(dark.ring, ThemeColor::from_rgb8(255, 255, 255));
         assert_eq!(dark.profit, ThemeColor::from_oklch(0.683, 0.151, 160.997));
         assert_eq!(dark.loss, ThemeColor::from_oklch(0.674, 0.215, 18.124));
         assert_eq!(light.popover, light.card);
@@ -755,6 +760,8 @@ mod tests {
             "var(--surface_secondary)"
         );
         assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
+        assert_eq!(token_source(&light_tokens, "ring"), "#000000");
+        assert_eq!(token_source(&dark_tokens, "ring"), "#ffffff");
         assert_eq!(
             token_source(&dark_tokens, "input_surface"),
             "var(--surface_secondary)"

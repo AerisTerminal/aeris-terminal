@@ -30,7 +30,7 @@
   --border_secondary: #f3f3f3;
   --input: var(--border_secondary);
   --input_surface: var(--surface_secondary);
-  --ring: var(--primary);
+  --ring: #000000;
   --interactive_neutral_hover_bg: rgb(239 239 239 / 35%);
   --interactive_neutral_hover_fg: var(--icon_active);
   --interactive_neutral_active_bg: rgb(239 239 239 / 75%);
@@ -56,6 +56,11 @@
   --radius_full: 999px;
 }
 
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 12%, transparent);
+}
+
 .dark {
   --background: #141414;
   --foreground: #e3e3e3;
@@ -70,9 +75,14 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: #1e1e1e;
   --border_secondary: #242424;
+  --ring: #ffffff;
   --interactive_neutral_hover_bg: rgb(97 97 97 / 20%);
   --interactive_neutral_active_bg: rgb(97 97 97 / 30%);
   --chart_volume_up: oklch(from var(--profit) l c h / 32%);
   --chart_volume_down: oklch(from var(--loss) l c h / 28%);
   --chart_crosshair: #2e2e2e;
+}
+
+.dark :focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 14%, transparent);
 }
