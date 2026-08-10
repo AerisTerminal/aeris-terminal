@@ -135,6 +135,8 @@ fn startup_matrix_is_local_deterministic_and_recovers_explicitly() {
         let metrics = worker.metrics();
         assert_eq!(metrics.decode_operations, 3);
         assert_eq!(metrics.storage_bytes_read, 15);
+        assert_eq!(metrics.memory_cache_hits, 1);
+        assert_eq!(metrics.memory_cache_misses, metrics.storage_reads);
         assert_eq!(metrics.control_plane_unavailable_requests, 4);
     })
     .join()

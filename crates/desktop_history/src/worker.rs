@@ -20,6 +20,7 @@ use std::{
     rc::Rc,
     sync::Arc,
     thread::{self, ThreadId},
+    time::{Duration, Instant},
 };
 
 /// Worker-side decoder for one authenticated local segment.
@@ -146,8 +147,22 @@ impl<T: Clone> HistoryWorker<T> {
         request: PublicationRequest<'_>,
     ) -> Result<(), DesktopHistoryError> {
         self.ensure_owner()?;
+        let payload_bytes = u64::try_from(request.payload.len()).unwrap_or(u64::MAX);
+        let started = Instant::now();
         match self.store.publish(request) {
-            Ok(_) | Err(DesktopStorageError::SegmentAlreadyExists) => Ok(()),
+            Ok(_) => {
+                self.metrics.storage_writes = self.metrics.storage_writes.saturating_add(1);
+                self.metrics.storage_bytes_written = self
+                    .metrics
+                    .storage_bytes_written
+                    .saturating_add(payload_bytes);
+                self.metrics.storage_write_nanos = self
+                    .metrics
+                    .storage_write_nanos
+                    .saturating_add(duration_nanos(started.elapsed()));
+                Ok(())
+            }
+            Err(DesktopStorageError::SegmentAlreadyExists) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
@@ -371,12 +386,15 @@ impl<T: Clone> HistoryWorker<T> {
                     request.provider_state,
                 ));
             }
+            self.metrics.memory_cache_hits = self.metrics.memory_cache_hits.saturating_add(1);
             return Ok(HydrationOutcome::Ready {
                 publication,
                 memory_cache_hit: true,
             });
         }
+        self.metrics.memory_cache_misses = self.metrics.memory_cache_misses.saturating_add(1);
         self.metrics.storage_reads = self.metrics.storage_reads.saturating_add(1);
+        let read_started = Instant::now();
         let read = self
             .store
             .read_bounded_authorized(
@@ -392,7 +410,12 @@ impl<T: Clone> HistoryWorker<T> {
                     maximum,
                 } => DesktopHistoryError::DecodedHistoryTooLarge { requested, maximum },
                 error => DesktopHistoryError::Storage(error),
-            })?;
+            });
+        self.metrics.storage_read_nanos = self
+            .metrics
+            .storage_read_nanos
+            .saturating_add(duration_nanos(read_started.elapsed()));
+        let read = read?;
         match read {
             AuthorizedHistoryRead::Hit {
                 payload,
@@ -511,6 +534,7 @@ impl<T: Clone> HistoryWorker<T> {
         decoded_item_bytes: usize,
     ) -> Result<Option<Arc<HistoryPublication<T>>>, DesktopHistoryError> {
         self.ensure_owner()?;
+        let started = Instant::now();
         let observed_sequence = item.sequence.get();
         let mut candidate = self
             .handoffs
@@ -600,6 +624,10 @@ impl<T: Clone> HistoryWorker<T> {
                     }
                 };
                 self.metrics.live_items = self.metrics.live_items.saturating_add(1);
+                self.metrics.live_publish_nanos = self
+                    .metrics
+                    .live_publish_nanos
+                    .saturating_add(duration_nanos(started.elapsed()));
                 self.handoffs.insert(identity.clone(), candidate);
                 Ok(Some(publication))
             }
@@ -621,6 +649,7 @@ impl<T: Clone> HistoryWorker<T> {
         startup_cache_state: StartupCacheState,
     ) -> Result<Arc<HistoryPublication<T>>, DesktopHistoryError> {
         self.ensure_owner()?;
+        let started = Instant::now();
         let mut candidate = self
             .handoffs
             .remove(identity)
@@ -689,6 +718,10 @@ impl<T: Clone> HistoryWorker<T> {
             }
         };
         self.metrics.provider_snapshots = self.metrics.provider_snapshots.saturating_add(1);
+        self.metrics.snapshot_install_nanos = self
+            .metrics
+            .snapshot_install_nanos
+            .saturating_add(duration_nanos(started.elapsed()));
         self.handoffs.insert(identity.clone(), candidate);
         Ok(publication)
     }
@@ -768,9 +801,15 @@ impl<T: Clone> HistoryWorker<T> {
                 maximum: 0,
             });
         }
-        let (values, decoded_bytes) = decoder
+        let started = Instant::now();
+        let decode_result = decoder
             .decode(payload, maximum_decoded_bytes)
-            .map_err(DesktopHistoryError::Decode)?;
+            .map_err(DesktopHistoryError::Decode);
+        self.metrics.decode_nanos = self
+            .metrics
+            .decode_nanos
+            .saturating_add(duration_nanos(started.elapsed()));
+        let (values, decoded_bytes) = decode_result?;
         if decoded_bytes > maximum_decoded_bytes {
             return Err(DesktopHistoryError::DecodedHistoryTooLarge {
                 requested: decoded_bytes,
@@ -792,6 +831,10 @@ impl<T: Clone> HistoryWorker<T> {
             .fold(0_usize, |total, bytes| total.saturating_add(*bytes));
         self.buffered_live_bytes = self.buffered_live_bytes.saturating_sub(released);
     }
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn validate_decoded_history<T>(values: &[SequencedHistory<T>]) -> Result<u64, DesktopHistoryError> {

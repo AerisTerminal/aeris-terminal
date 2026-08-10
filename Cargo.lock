@@ -829,6 +829,19 @@ name = "axiusflow_market_data"
 version = "0.1.0"
 
 [[package]]
+name = "axiusflow_market_data_performance"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_coinbase_market_adapter",
+ "axiusflow_desktop_storage",
+ "axiusflow_market_data",
+ "axiusflow_provider_history",
+ "serde",
+ "serde_json",
+ "sysinfo",
+]
+
+[[package]]
 name = "axiusflow_market_protocol_adapter"
 version = "0.1.0"
 dependencies = [

@@ -118,27 +118,38 @@ pub fn aggregate_coinbase_bars(
     interval: CoinbaseInterval,
 ) -> Result<(Vec<MarketBar>, CoinbaseAggregationDiagnostics), String> {
     let mut diagnostics = CoinbaseAggregationDiagnostics::default();
-    let mut sorted = source.to_vec();
-    sorted.sort_by_key(|bar| bar.exchange_timestamp_seconds);
-    let mut deduped = Vec::with_capacity(sorted.len());
-    for bar in sorted {
-        bar.validate().map_err(|error| error.to_string())?;
-        if deduped.last().is_some_and(|previous: &MarketBar| {
-            previous.exchange_timestamp_seconds == bar.exchange_timestamp_seconds
-        }) {
-            diagnostics.duplicate_bars = diagnostics.duplicate_bars.saturating_add(1);
-            deduped.pop();
+    let mut sorted_storage = Vec::new();
+    let sorted = if source
+        .windows(2)
+        .all(|pair| pair[0].exchange_timestamp_seconds <= pair[1].exchange_timestamp_seconds)
+    {
+        source
+    } else {
+        sorted_storage.extend_from_slice(source);
+        sorted_storage.sort_by_key(|bar| bar.exchange_timestamp_seconds);
+        &sorted_storage
+    };
+    let mut output = Vec::<MarketBar>::new();
+    let mut previous_timestamp = None;
+    let mut index = 0;
+    while index < sorted.len() {
+        let timestamp = sorted[index].exchange_timestamp_seconds;
+        let mut next = index + 1;
+        while next < sorted.len() && sorted[next].exchange_timestamp_seconds == timestamp {
+            next += 1;
         }
-        deduped.push(bar);
-    }
-    diagnostics.source_bars = deduped.len() as u64;
-    for pair in deduped.windows(2) {
-        if pair[1].exchange_timestamp_seconds - pair[0].exchange_timestamp_seconds != 60 {
+        for bar in &sorted[index..next] {
+            bar.validate().map_err(|error| error.to_string())?;
+        }
+        diagnostics.duplicate_bars = diagnostics
+            .duplicate_bars
+            .saturating_add(u64::try_from(next - index - 1).unwrap_or(u64::MAX));
+        diagnostics.source_bars = diagnostics.source_bars.saturating_add(1);
+        if previous_timestamp.is_some_and(|previous| timestamp - previous != 60) {
             diagnostics.gaps = diagnostics.gaps.saturating_add(1);
         }
-    }
-    let mut output = Vec::<MarketBar>::new();
-    for bar in deduped {
+        previous_timestamp = Some(timestamp);
+        let bar = sorted[next - 1];
         let bucket = bucket_start(bar.exchange_timestamp_seconds, interval)?;
         if let Some(current) = output.last_mut()
             && current.exchange_timestamp_seconds == bucket
@@ -150,6 +161,7 @@ pub fn aggregate_coinbase_bars(
                 .volume
                 .checked_add(bar.volume)
                 .ok_or_else(|| "Coinbase aggregate volume overflow".to_string())?;
+            index = next;
             continue;
         }
         output.push(MarketBar {
@@ -161,6 +173,7 @@ pub fn aggregate_coinbase_bars(
             close: bar.close,
             volume: bar.volume,
         });
+        index = next;
     }
     for (index, bar) in output.iter_mut().enumerate() {
         bar.source_sequence = u64::try_from(index)
@@ -259,6 +272,17 @@ mod tests {
         assert_eq!(output[0].open, 100);
         assert_eq!(output[0].close, 103);
         assert_eq!(output[0].volume, 20);
+    }
+
+    #[test]
+    fn sorted_and_unsorted_sources_produce_the_same_bars() {
+        let sorted = [bar(0, 100), bar(60, 101), bar(120, 102), bar(180, 103)];
+        let unsorted = [sorted[2], sorted[0], sorted[3], sorted[1]];
+        let sorted_result =
+            aggregate_coinbase_bars(&sorted, CoinbaseInterval::Minute3).expect("aggregates");
+        let unsorted_result =
+            aggregate_coinbase_bars(&unsorted, CoinbaseInterval::Minute3).expect("aggregates");
+        assert_eq!(sorted_result, unsorted_result);
     }
 
     #[test]

@@ -74,6 +74,73 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 Persistent writes use revisioned or transactional publication so a crash cannot turn a partial write into current state. Credentials and sensitive provider material must use the native credential vault or zeroizing memory, not source files, logs, or plain-text configuration.
 
+## Local market-data execution
+
+The implemented local path is:
+
+```text
+Coinbase or Rithmic socket
+    -> provider-specific decode and continuity validation
+    -> ProviderSessionDriver generation fencing
+    -> canonical MarketEvent / MarketBar values
+    -> provider-history scheduling and coverage repair
+    -> encrypted immutable local segments plus SQLite metadata
+    -> worker-owned decoded cache and history/live handoff
+    -> resident-engine replay snapshot or delta
+    -> bounded desktop mailbox
+    -> chart bridge and Origin Charts
+```
+
+`ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
+
+The path is local first by construction. Provider credentials stay on the user's machine, provider traffic terminates in the resident process, durable history is stored under the user's local data root, and Axiusflow has no cloud market-data dependency. A future control plane may distribute application metadata or licensing state, but it must not become a prerequisite for local cache hydration or sit in the licensed market-data path.
+
+## Historical data and restart behavior
+
+`desktop_storage` stores authenticated immutable segments and a keyed SQLite catalog. Segment publication is stage, sync, link, catalog commit; interrupted or corrupt files are recovered or quarantined rather than admitted as valid history. Catalog rows record exact provider/account/entitlement, instrument, resolution, time range, and source/schema/calendar/adjustment/correction revisions.
+
+`provider_history::CoverageSnapshot` merges complete, confirmed-empty, invalidated, and quarantined ranges, then returns only the missing or damaged repair ranges. Visible repairs outrank adjacent prefetch. Provider paging, rate limits, continuation bounds, retry attempts, cancellation interests, and total in-flight work are bounded by `HistoryScheduler`.
+
+`desktop_history::HistoryWorker` is owned by a market-data worker thread, never GPUI. It reads and decrypts bounded segments, validates contiguous sequence, maintains a byte- and entry-bounded decoded cache, shares immutable publications across charts, and coordinates the history/live cutover. Live items are buffered during hydration; a verified covering snapshot admits only the contiguous suffix newer than its watermark.
+
+The current storage format already supports progressive recent-first reads because retained history is segmented and range-indexed. The current Coinbase composition does not yet expose arbitrary multi-year chart paging: it installs a fixed 300-bar working set and recomputes derived intervals when selected. That limit is an application-composition constraint, not a storage or provider-history constraint, and must be removed through a paged visible-range API rather than by loading years into one `Vec`.
+
+## Timeframes
+
+Provider-native history is requested at the closest supported source resolution. Coinbase bars are normalized and aggregated locally into the requested canonical interval; live one-minute trades incrementally update the active interval. Rithmic maps canonical chart intervals to its provider bar specifications behind its adapter.
+
+The durable identity includes resolution, so native or previously materialized resolutions cannot be confused. Recomputable derived intervals may be retained under the derived-data quota, but the current platform does not yet maintain a general cross-provider derived-timeframe cache. Until that exists, timeframe changes can repeat aggregation. The required design is one canonical lowest-practical source series per provider capability, page-local aggregation, immutable derived chunks keyed by source revision plus interval, and incremental tail updates. Calendar intervals must retain their explicit UTC/exchange-calendar rules instead of being approximated as fixed seconds.
+
+## Concurrency model
+
+- Provider sessions own their sockets and callback generations.
+- The resident market worker owns provider orchestration, history scheduling, storage access, aggregation, and history/live handoff.
+- Blocking history and storage work stays off GPUI and communicates through bounded channels.
+- Selection generations make obsolete symbol and timeframe results stale; stale work cannot overwrite the new selection.
+- Covering snapshots may replace older covering snapshots. Non-conflatable deltas, sequence gaps, and queue overflow require recovery rather than silent loss.
+- Work is bounded by queue item/byte capacities, scheduler in-flight limits, cache bytes, segment bytes, chart bindings, handoffs, retries, and deadlines. No request creates an unbounded thread pool or unbounded queue.
+
+Independent instruments should eventually be scheduled as independent bounded jobs so one slow provider request cannot head-of-line block another. The existing generation and cancellation contracts are the basis for that change; a second task system or cloud queue is not required.
+
+## Performance evidence and instrumentation
+
+Always-on feed diagnostics count trades, quotes, depth updates, publications, gaps, duplicates, malformed messages, stale callbacks, overflows, UI conflation, queue occupancy, memory, and lifecycle state. Opt-in fixed histograms cover socket-to-decode, decode-to-canonical, canonical-to-model, model-to-UI, UI-to-frame, and frame-to-present boundaries without unbounded label cardinality.
+
+`HistoryWorker::metrics` additionally records local storage operations and bytes, memory-cache hits and misses, decode work, provider snapshots, live items, duplicates, and cumulative storage-write, storage-read, decode, snapshot-install, and live-publication nanoseconds. These metrics contain no provider payloads, credentials, account text, or instrument text.
+
+`axiusflow_market_data_performance` is the deterministic offline regression runner. It uses the production Coinbase segment codec, encrypted `HistoryStore`, catalog coverage planner, and interval aggregator. Its JSON evidence records cold publication, warm catalog open and discovery, recent-first time to first usable segment, full warm read and decode, repeated timeframe-switch latency, payload/stored bytes, coverage gaps, resident memory, and sampled process CPU. CI runs the release binary on 100,000 bars, enforces broad anti-regression budgets, and retains the JSON artifact for build-to-build comparison. Provider-network benchmarks remain separate because provider latency, entitlements, and credentials are not deterministic CI inputs.
+
+The first recorded local release run on 250,000 one-minute bars produced 715 encrypted segments (15.5 MB payload): cold publication 1.37 seconds, warm catalog open 22 ms, coverage discovery 1 ms, full warm read 78 ms, decode 8 ms, and first recent segment in under 1 ms. Removing unconditional sort and duplicate-buffer copies reduced sorted-source timeframe aggregation from 7.2-8.4 ms to 1.3-3.1 ms across 5-minute through daily intervals on the same run. Machine-specific JSON is transient evidence under `.cache`, not a portable product guarantee.
+
+## Ranked local-data roadmap
+
+1. Replace the Coinbase 300-bar composition limit with a paged visible-range contract and recent-first publication. This has the largest user impact and moderate implementation risk because storage, coverage, and handoff already support the required pieces.
+2. Add immutable derived-timeframe chunks keyed by source revision and update only the active tail. This removes repeated aggregation during timeframe switching while keeping memory bounded.
+3. Split history scheduling into fair per-instrument lanes under one global bound, with generation cancellation before decode and aggregation. This prevents slow or obsolete work from delaying the active selection.
+4. Extend deterministic performance scenarios to symbol churn, interrupted publication recovery, concurrent live plus history, and multi-million tick streams. Use synthetic transports in CI and credentialed provider runs only as local evidence.
+5. Add chart-preparation and first-render timestamps to the existing latency chain so time to first pixels is measured across the process boundary rather than inferred from data readiness.
+6. Evaluate memory mapping only after paged reads and derived chunks are measured. Encryption and authenticated recovery currently require bounded read/decrypt buffers, so mapping ciphertext alone is not automatically a win.
+
 ### UI
 
 - `crates/ui/design_system`: Axiusflow theme tokens.

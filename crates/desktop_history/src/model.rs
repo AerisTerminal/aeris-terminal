@@ -81,12 +81,21 @@ pub enum HydrationOutcome<T> {
 /// Bounded work counters suitable for redacted diagnostics.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorkerMetrics {
+    pub storage_writes: u64,
+    pub storage_bytes_written: u64,
+    pub storage_write_nanos: u64,
     pub storage_reads: u64,
     pub storage_bytes_read: u64,
+    pub storage_read_nanos: u64,
+    pub memory_cache_hits: u64,
+    pub memory_cache_misses: u64,
     pub decode_operations: u64,
     pub decoded_bytes: u64,
+    pub decode_nanos: u64,
     pub provider_snapshots: u64,
+    pub snapshot_install_nanos: u64,
     pub live_items: u64,
+    pub live_publish_nanos: u64,
     pub duplicate_live_items: u64,
     pub control_plane_unavailable_requests: u64,
 }

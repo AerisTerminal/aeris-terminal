@@ -22,6 +22,7 @@ members = [
     "crates/ui/design_system",
     "crates/ui/terminal_ui",
     "tools/diagnostics_overhead",
+    "tools/market_data_performance",
     "tools/naming_check",
 ]
 resolver = "3"
