@@ -7,6 +7,8 @@ mod frame_poll_gate;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
 mod resident_market_worker;
+mod rithmic_engine_client;
+mod rithmic_engine_history;
 mod rithmic_history;
 mod rithmic_shell;
 #[cfg(feature = "diagnostics")]
@@ -45,9 +47,9 @@ use gpui_component::{
 };
 use gpui_platform::application;
 use resident_market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-    ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
+    ChartState, DesktopMarketGeneration, EngineSeriesRequest, MarketDataWorker,
+    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
 use std::{
     borrow::Cow,
@@ -1773,7 +1775,11 @@ impl TerminalApp {
         let request = self.series_browser.select(selection.generation, series);
         if self
             .market_worker
-            .try_request_rithmic_history(request)
+            .try_request_engine_series(EngineSeriesRequest {
+                selection_generation: request.selection_generation,
+                series_generation: request.series_generation,
+                interval: request.series.interval(),
+            })
             .is_ok()
         {
             self.reset_chart_surface(cx);

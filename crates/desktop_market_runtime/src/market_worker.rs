@@ -4,7 +4,6 @@
 //! entitlement service, or production transport. It exercises the same bounded
 //! binary protocol and application model that a future connected adapter will own.
 
-use crate::rithmic_series::RithmicSeriesRequest;
 use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
@@ -915,7 +914,7 @@ pub enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
     ProviderSearch(SearchProviderInstruments),
     ProviderSelect(SelectProviderInstrument),
-    RithmicHistory(RithmicSeriesRequest),
+    EngineSeries(EngineSeriesRequest),
     CoinbaseSelect(Box<CoinbaseSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
     Shutdown,
@@ -933,6 +932,13 @@ pub struct ChartViewportUpdate {
     pub start_unix_nanos: i64,
     pub end_unix_nanos: i64,
     pub selection_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineSeriesRequest {
+    pub selection_generation: NonZeroUsize,
+    pub series_generation: NonZeroUsize,
+    pub interval: ChartInterval,
 }
 
 pub struct PendingUiDiagnostics {
@@ -1293,7 +1299,7 @@ impl MarketDataWorker {
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
-                    | MarketWorkerCommand::RithmicHistory(_)
+                    | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
                     | MarketWorkerCommand::ChartViewport(_),
                 )
@@ -1301,7 +1307,7 @@ impl MarketDataWorker {
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
-                    | MarketWorkerCommand::RithmicHistory(_)
+                    | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
                     | MarketWorkerCommand::ChartViewport(_),
                 ) => {
@@ -1346,20 +1352,20 @@ impl MarketDataWorker {
     ///
     /// # Errors
     /// Returns the request when the command mailbox is full or disconnected.
-    pub fn try_request_rithmic_history(
+    pub fn try_request_engine_series(
         &self,
-        request: RithmicSeriesRequest,
-    ) -> Result<(), TrySendError<RithmicSeriesRequest>> {
+        request: EngineSeriesRequest,
+    ) -> Result<(), TrySendError<EngineSeriesRequest>> {
         let Some(commands) = self.commands.as_ref() else {
             return Err(TrySendError::Disconnected(request));
         };
         commands
-            .try_send(MarketWorkerCommand::RithmicHistory(request))
+            .try_send(MarketWorkerCommand::EngineSeries(request))
             .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::RithmicHistory(request)) => {
+                TrySendError::Full(MarketWorkerCommand::EngineSeries(request)) => {
                     TrySendError::Full(request)
                 }
-                TrySendError::Disconnected(MarketWorkerCommand::RithmicHistory(request)) => {
+                TrySendError::Disconnected(MarketWorkerCommand::EngineSeries(request)) => {
                     TrySendError::Disconnected(request)
                 }
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
@@ -1671,7 +1677,7 @@ fn run_worker(
             }
             MarketWorkerCommand::ProviderSearch(_)
             | MarketWorkerCommand::ProviderSelect(_)
-            | MarketWorkerCommand::RithmicHistory(_)
+            | MarketWorkerCommand::EngineSeries(_)
             | MarketWorkerCommand::CoinbaseSelect(_)
             | MarketWorkerCommand::ChartViewport(_) => {}
             MarketWorkerCommand::Shutdown => return,
@@ -1682,10 +1688,10 @@ fn run_worker(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
-        MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-        ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
-        ui_diagnostics_channel,
+        ChartState, EngineSeriesRequest, FixtureMarketWorker, MarketDataWorker,
+        MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
+        PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
+        market_worker_channel, ui_diagnostics_channel,
     };
     use axiusflow_application::ReplayStreamUpdate;
     use axiusflow_local_engine_protocol::{
@@ -1693,7 +1699,7 @@ mod tests {
         SelectProviderInstrument,
     };
     use axiusflow_market_data::DomFrame;
-    use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
+    use axiusflow_market_data::{ChartInterval, OrderBookRecoveryReason, OrderBookState};
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
@@ -2564,10 +2570,10 @@ mod tests {
             .try_select_provider(selection)
             .expect("selection enters the bounded channel");
         worker
-            .try_request_rithmic_history(crate::rithmic_series::RithmicSeriesRequest {
+            .try_request_engine_series(EngineSeriesRequest {
                 selection_generation: NonZeroUsize::MIN,
                 series_generation: NonZeroUsize::MIN,
-                series: crate::rithmic_series::RithmicSeries::Minute1,
+                interval: ChartInterval::Minute1,
             })
             .expect("history enters the bounded channel");
         assert!(matches!(
@@ -2580,7 +2586,7 @@ mod tests {
         ));
         assert!(matches!(
             command_rx.recv(),
-            Ok(MarketWorkerCommand::RithmicHistory(_))
+            Ok(MarketWorkerCommand::EngineSeries(_))
         ));
         let shutdown = thread::spawn(move || {
             assert!(matches!(

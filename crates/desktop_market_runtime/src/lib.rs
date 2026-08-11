@@ -1,6 +1,3 @@
-//! Bounded desktop presentation mailboxes and resident-engine client bridges.
+//! Bounded desktop presentation mailbox contracts.
 
 pub mod market_worker;
-pub mod rithmic_engine_client;
-mod rithmic_history;
-pub mod rithmic_series;

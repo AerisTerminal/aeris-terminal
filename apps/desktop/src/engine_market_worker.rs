@@ -296,7 +296,7 @@ fn process_command(
         }
         MarketWorkerCommand::ProviderSearch(_)
         | MarketWorkerCommand::ProviderSelect(_)
-        | MarketWorkerCommand::RithmicHistory(_) => {
+        | MarketWorkerCommand::EngineSeries(_) => {
             Err("Rithmic commands cannot enter the Coinbase engine client".to_string())
         }
     }

@@ -1,11 +1,11 @@
 use crate::{
-    market_worker::{
-        MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
-        ProviderCatalogCommand, ProviderCatalogEvent, market_worker_channel,
+    resident_market_worker::{
+        EngineSeriesRequest, MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage,
+        MarketWorkerSender, MarketWorkerStartup, ProviderCatalogCommand, ProviderCatalogEvent,
+        market_worker_channel,
     },
-    rithmic_history::{
-        RithmicHistoryTask, RithmicSeriesRequest, history_message, validate_engine_instrument,
-    },
+    rithmic_engine_history::{RithmicHistoryTask, history_message, validate_engine_instrument},
+    rithmic_history::{RithmicSeries, RithmicSeriesRequest},
 };
 use axiusflow_local_engine_client::{
     EngineClient, connect_or_start_engine, sibling_engine_executable,
@@ -47,9 +47,7 @@ pub fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
 }
 
 fn spawn_worker(
-    task: impl FnOnce(crate::market_worker::MarketWorkerSender, Receiver<MarketWorkerCommand>)
-    + Send
-    + 'static,
+    task: impl FnOnce(MarketWorkerSender, Receiver<MarketWorkerCommand>) + Send + 'static,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
@@ -68,10 +66,7 @@ fn spawn_worker(
     ))
 }
 
-fn run(
-    messages: &crate::market_worker::MarketWorkerSender,
-    commands: &Receiver<MarketWorkerCommand>,
-) {
+fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) {
     send_connection(
         messages,
         FeedConnectionState::Discovering,
@@ -144,7 +139,7 @@ fn run(
 }
 
 fn process_command(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &MarketWorkerSender,
     state: &mut WorkerState,
     command: MarketWorkerCommand,
 ) {
@@ -167,7 +162,16 @@ fn process_command(
                 publish_dispatch_rejection(messages, generation, ProviderCatalogCommand::Selection);
             }
         }
-        MarketWorkerCommand::RithmicHistory(request) => {
+        MarketWorkerCommand::EngineSeries(EngineSeriesRequest {
+            selection_generation,
+            series_generation,
+            interval,
+        }) => {
+            let request = RithmicSeriesRequest {
+                selection_generation,
+                series_generation,
+                series: RithmicSeries::from(interval),
+            };
             let result = state
                 .installed
                 .clone()
@@ -193,7 +197,7 @@ fn process_command(
 }
 
 fn handle_catalog_event(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &MarketWorkerSender,
     state: &mut WorkerState,
     event: envelope::Payload,
 ) {
@@ -239,7 +243,7 @@ fn handle_catalog_event(
 }
 
 fn publish_search_result(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &MarketWorkerSender,
     state: &mut WorkerState,
     result: ProviderInstrumentSearchResult,
 ) {
@@ -265,7 +269,7 @@ fn publish_search_result(
 }
 
 fn publish_selection(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &MarketWorkerSender,
     state: &mut WorkerState,
     selection: ProviderInstrumentSelection,
 ) {
@@ -301,7 +305,7 @@ fn publish_selection(
 }
 
 fn publish_dispatch_rejection(
-    messages: &crate::market_worker::MarketWorkerSender,
+    messages: &MarketWorkerSender,
     command_generation: u64,
     command: ProviderCatalogCommand,
 ) {
@@ -391,11 +395,7 @@ fn random_identity() -> Result<u64, String> {
         .get())
 }
 
-fn send_connection(
-    messages: &crate::market_worker::MarketWorkerSender,
-    state: FeedConnectionState,
-    message: &str,
-) {
+fn send_connection(messages: &MarketWorkerSender, state: FeedConnectionState, message: &str) {
     let _ = messages.send(MarketWorkerMessage::Connection {
         state,
         message: message.to_string(),

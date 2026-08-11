@@ -1,8 +1,8 @@
 pub(super) use axiusflow_desktop_market_runtime::market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
-    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
-    UiDiagnosticsFeedback, market_worker_channel,
+    ChartState, DesktopMarketGeneration, EngineSeriesRequest, MarketDataWorker,
+    MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
+    MarketWorkerSender, MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand,
+    ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
 };
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
@@ -10,5 +10,5 @@ pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String>
 }
 
 pub(super) fn start_rithmic() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    axiusflow_desktop_market_runtime::rithmic_engine_client::start()
+    crate::rithmic_engine_client::start()
 }

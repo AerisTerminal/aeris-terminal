@@ -1,4 +1,4 @@
-pub(crate) use crate::rithmic_series::{RithmicSeries, RithmicSeriesRequest};
+use crate::rithmic_history::{RithmicSeries, RithmicSeriesRequest};
 
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
@@ -31,7 +31,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
+use crate::resident_market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_DOM_LEVELS: usize = 20;
