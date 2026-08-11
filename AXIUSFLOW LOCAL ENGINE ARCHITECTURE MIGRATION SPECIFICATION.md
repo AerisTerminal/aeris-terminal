@@ -3281,7 +3281,9 @@ Verify recovery.
 
 # 98. MULTI-CHART TEST
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): `apps/engine/src/market_service.rs::twenty_chart_consumers_share_one_provider_and_remain_independent` creates one attached client representing five workspace IDs with four chart consumers each. The 20 consumers demand a repeated mix of all eight implemented BTC-USD/ETH-USD fixed-interval series. The test proves exactly eight history fetches, one realtime provider generation, bounded configured consumer/series/bar capacity, independent selection generations, continued shared-series publication after one consumer switches, and continued publication after that consumer is removed.
 
 Create a deterministic non-GPUI engine test representing:
 
@@ -3694,7 +3696,9 @@ No infinite loading.
 
 # 113. PHASE 5 — MULTI-CHART ENGINE DEMAND
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): the desktop engine bridge now assigns one consumer ID and one bounded command/message endpoint per chart while a single coordinator thread owns the one authenticated `EngineClient`. The opt-in `--multi-chart` proof opens BTC and ETH as two real GPUI/Origin chart windows without creating a second desktop engine client, provider session, or backend runtime; endpoint shutdown removes only that chart's consumer and detaches the client only after the last endpoint closes. A Windows release run visibly rendered both charts together with green streaming state while the single desktop and single resident engine remained responsive. Closing one native chart window left the other chart rendering and responsive. The deterministic section 98 test separately proves the 20-consumer, shared-series, single-provider-generation, switch-isolation, and close-isolation invariants.
 
 Implement multiple consumer IDs.
 

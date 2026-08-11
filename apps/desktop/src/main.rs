@@ -3891,8 +3891,11 @@ fn symbol_input_for_startup(
     }
 }
 
-fn desktop_window_options(cx: &mut App) -> WindowOptions {
-    let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
+    let mut bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+    let offset = if window_index == 0 { px(0.0) } else { px(48.0) };
+    bounds.origin.x += offset;
+    bounds.origin.y += offset;
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitleBar::title_bar_options()),
@@ -3993,7 +3996,8 @@ fn terminal_root(
     root
 }
 
-fn configured_market_worker() -> Result<Option<(MarketWorkerStartup, MarketDataWorker)>, String> {
+fn configured_market_workers()
+-> Result<Option<Vec<(MarketWorkerStartup, MarketDataWorker)>>, String> {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
         if argument == "--coinbase-live-smoke" {
@@ -4034,20 +4038,26 @@ fn configured_market_worker() -> Result<Option<(MarketWorkerStartup, MarketDataW
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
-            resident_market_worker::start_rithmic()?
+            vec![resident_market_worker::start_rithmic()?]
+        } else if argument == "--multi-chart" {
+            if arguments.next().is_some() {
+                eprintln!("usage: axiusflow_desktop --multi-chart");
+                std::process::exit(2);
+            }
+            engine_market_worker::start_multi_chart()?
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
         }
     } else {
-        resident_market_worker::start()?
+        vec![resident_market_worker::start()?]
     };
     Ok(Some(worker))
 }
 
 fn main() {
-    let (bootstrap, market_worker) = match configured_market_worker() {
-        Ok(Some(worker)) => worker,
+    let market_workers = match configured_market_workers() {
+        Ok(Some(workers)) => workers,
         Ok(None) => return,
         Err(error) => {
             eprintln!("Axiusflow market worker could not start: {error}");
@@ -4071,12 +4081,14 @@ fn main() {
                 KeyBinding::new("alt-f4", CloseWindow, None),
             ]);
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
-            let options = desktop_window_options(cx);
-
-            cx.open_window(options, move |window, cx| {
-                terminal_root(bootstrap, market_worker, window, cx)
-            })
-            .expect("the Axiusflow terminal window opens");
+            for (window_index, (bootstrap, market_worker)) in market_workers.into_iter().enumerate()
+            {
+                let options = desktop_window_options(window_index, cx);
+                cx.open_window(options, move |window, cx| {
+                    terminal_root(bootstrap, market_worker, window, cx)
+                })
+                .expect("the Axiusflow terminal window opens");
+            }
             cx.activate(true);
         });
 }

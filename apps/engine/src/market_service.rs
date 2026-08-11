@@ -13,6 +13,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
     CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseSession, ENTITLEMENT_CLASS,
@@ -171,6 +174,7 @@ struct LiveCoinbaseRealtime {
 #[cfg(test)]
 struct FixtureHistory {
     bars: Vec<MarketBar>,
+    fetches: Option<Arc<AtomicUsize>>,
 }
 
 #[cfg(test)]
@@ -194,11 +198,15 @@ struct FixtureRealtimeHarness {
     actions: SyncSender<FixtureRealtimeAction>,
     generations: Receiver<ProviderGeneration>,
     stops: Receiver<ProviderGeneration>,
+    history_fetches: Arc<AtomicUsize>,
 }
 
 #[cfg(test)]
 impl HistorySource for FixtureHistory {
     fn fetch(&mut self, series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
+        if let Some(fetches) = &self.fetches {
+            fetches.fetch_add(1, Ordering::AcqRel);
+        }
         let profile = coinbase_series_profile(series)?;
         let mut bars = self.bars.clone();
         for (index, bar) in bars.iter_mut().enumerate() {
@@ -381,7 +389,13 @@ impl MarketService {
     /// # Errors
     /// Returns an error when either bounded worker cannot start.
     pub(crate) fn start_fixture(bars: Vec<MarketBar>) -> Result<Self, String> {
-        Self::start_with_sources(FixtureHistory { bars }, None)
+        Self::start_with_sources(
+            FixtureHistory {
+                bars,
+                fetches: None,
+            },
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -389,8 +403,12 @@ impl MarketService {
         let (action_tx, action_rx) = mpsc::sync_channel(16);
         let (generation_tx, generation_rx) = mpsc::sync_channel(4);
         let (stop_tx, stop_rx) = mpsc::sync_channel(4);
+        let history_fetches = Arc::new(AtomicUsize::new(0));
         let service = Self::start_with_sources(
-            FixtureHistory { bars },
+            FixtureHistory {
+                bars,
+                fetches: Some(Arc::clone(&history_fetches)),
+            },
             Some(Box::new(FixtureRealtime {
                 actions: action_rx,
                 generations: generation_tx,
@@ -402,6 +420,7 @@ impl MarketService {
             actions: action_tx,
             generations: generation_rx,
             stops: stop_rx,
+            history_fetches,
         })
     }
 
@@ -1718,6 +1737,144 @@ mod tests {
                     if snapshot.provider_generation == 1 && !snapshot.forming
             ));
         }
+    }
+
+    fn phase_five_series() -> [SeriesKey; 8] {
+        [
+            selected_series("instrument:coinbase:btc:usd", 60),
+            selected_series("instrument:coinbase:btc:usd", 300),
+            selected_series("instrument:coinbase:btc:usd", 900),
+            selected_series("instrument:coinbase:btc:usd", 3_600),
+            selected_series("instrument:coinbase:eth:usd", 60),
+            selected_series("instrument:coinbase:eth:usd", 300),
+            selected_series("instrument:coinbase:eth:usd", 900),
+            selected_series("instrument:coinbase:eth:usd", 3_600),
+        ]
+    }
+
+    fn attach_twenty_chart_consumers(
+        service: &MarketService,
+        client_id: u64,
+        series: &[SeriesKey; 8],
+    ) {
+        service.attach(client_id).expect("client attaches");
+        for consumer_id in 1..=20 {
+            let workspace_id = (consumer_id - 1) / 4 + 1;
+            service
+                .register_consumer(client_id, workspace_id, consumer_id)
+                .expect("chart consumer registers");
+            service
+                .set_demand(
+                    client_id,
+                    consumer_id,
+                    1,
+                    &series[usize::try_from((consumer_id - 1) % 8).expect("series index")],
+                )
+                .expect("chart demand is accepted");
+        }
+    }
+
+    fn assert_initial_chart_snapshots(
+        service: &MarketService,
+        client_id: u64,
+        series: &[SeriesKey; 8],
+    ) {
+        for consumer_id in 1..=20 {
+            let expected = &series[usize::try_from((consumer_id - 1) % 8).expect("series index")];
+            assert!(matches!(
+                poll_until(service, client_id, consumer_id, |event| matches!(
+                    event,
+                    envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1
+                )),
+                envelope::Payload::SeriesSnapshot(snapshot)
+                    if snapshot.consumer_id == consumer_id
+                        && snapshot.series.as_ref() == Some(expected)
+            ));
+        }
+    }
+
+    #[test]
+    fn twenty_chart_consumers_share_one_provider_and_remain_independent() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        let client_id = 1;
+        let series = phase_five_series();
+        attach_twenty_chart_consumers(&harness.service, client_id, &series);
+        assert_initial_chart_snapshots(&harness.service, client_id, &series);
+        assert_eq!(
+            harness.history_fetches.load(Ordering::Acquire),
+            series.len()
+        );
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("one shared realtime generation starts")
+                .0
+                .get(),
+            1
+        );
+        assert!(matches!(
+            harness.generations.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("connect fixture");
+
+        harness
+            .service
+            .set_demand(client_id, 1, 2, &series[7])
+            .expect("one chart switches series");
+        assert!(matches!(
+            poll_until(&harness.service, client_id, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == 2 && snapshot.series.as_ref() == Some(&series[7])
+        ));
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
+            .expect("shared BTC trade");
+        assert!(matches!(
+            poll_until(&harness.service, client_id, 9, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot)
+                    if snapshot.forming && snapshot.generation == 1
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.bars.last().is_some_and(|bar| bar.close == 200)
+        ));
+
+        harness
+            .service
+            .remove_consumer(client_id, 1)
+            .expect("switched chart closes");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(2, "2.10", 2)))
+            .expect("remaining chart trade");
+        assert!(matches!(
+            poll_until(&harness.service, client_id, 9, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot)
+                    if snapshot.forming
+                        && snapshot.bars.last().is_some_and(|bar| bar.close == 210)
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1
+        ));
+        assert!(harness.service.poll_event(client_id, 1).is_err());
+        assert_eq!(
+            harness.history_fetches.load(Ordering::Acquire),
+            series.len()
+        );
+        assert!(matches!(
+            harness.generations.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
 
     #[test]

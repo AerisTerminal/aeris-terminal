@@ -29,7 +29,7 @@ use crate::resident_market_worker::{
     MarketWorkerStartup, market_worker_channel,
 };
 
-const WORKSPACE_ID: u64 = 1;
+const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 32;
@@ -44,145 +44,266 @@ pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String>
         .first()
         .cloned()
         .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
+    let mut workers = start_group(vec![(DEFAULT_WORKSPACE_ID, product)])?;
+    workers
+        .pop()
+        .ok_or_else(|| "Coinbase engine worker group is empty".to_string())
+}
+
+pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
+    let products = coinbase_products();
+    let btc = products
+        .first()
+        .cloned()
+        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
+    let eth = products
+        .get(1)
+        .cloned()
+        .ok_or_else(|| "Coinbase engine ETH product is unavailable".to_string())?;
+    start_group(vec![(1, btc), (2, eth)])
+}
+
+struct WorkerEndpoint {
+    consumer_id: u64,
+    messages: MarketWorkerSender,
+    commands: mpsc::Receiver<MarketWorkerCommand>,
+    shutdown: mpsc::SyncSender<()>,
+    model: MarketBarClientModel,
+    active_generation: u64,
+    active: bool,
+}
+
+fn start_group(
+    configurations: Vec<(u64, CoinbaseSpotProduct)>,
+) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let client_id = random_identity()?;
-    let consumer_id = random_identity()?;
-    let startup = MarketWorkerStartup::Loading(Box::new(
-        axiusflow_desktop_market_runtime::market_worker::CoinbaseWorkerStartup {
-            coinbase_product: product.clone(),
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: WORKER_LABEL.to_string(),
-        },
-    ));
-    let (message_tx, message_rx) =
-        market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
-    let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-    let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-    let selection_sequence = Arc::new(AtomicU64::new(INITIAL_GENERATION));
+    let mut workers = Vec::with_capacity(configurations.len());
+    let mut endpoints = Vec::with_capacity(configurations.len());
+    for (workspace_id, product) in configurations {
+        let consumer_id = random_identity()?;
+        let startup = MarketWorkerStartup::Loading(Box::new(
+            axiusflow_desktop_market_runtime::market_worker::CoinbaseWorkerStartup {
+                coinbase_product: product.clone(),
+                subscription_id: SUBSCRIPTION_ID.to_string(),
+                worker_label: WORKER_LABEL.to_string(),
+            },
+        ));
+        let (message_tx, message_rx) =
+            market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
+        let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let selection_sequence = Arc::new(AtomicU64::new(INITIAL_GENERATION));
+        workers.push((
+            startup,
+            MarketDataWorker::from_channels(
+                command_tx,
+                message_rx,
+                shutdown_rx,
+                None,
+                Some(selection_sequence),
+            ),
+        ));
+        endpoints.push((
+            workspace_id,
+            product,
+            WorkerEndpoint {
+                consumer_id,
+                messages: message_tx,
+                commands: command_rx,
+                shutdown: shutdown_tx,
+                model: empty_model(),
+                active_generation: INITIAL_GENERATION,
+                active: true,
+            },
+        ));
+    }
     thread::Builder::new()
         .name("axiusflow-engine-market-client".to_string())
         .spawn(move || {
-            let error_tx = message_tx.clone();
-            if let Err(error) =
-                run_worker(client_id, consumer_id, &product, &message_tx, &command_rx)
-            {
-                let _ = error_tx.send(MarketWorkerMessage::State {
+            if let Err(error) = run_workers(client_id, &mut endpoints) {
+                for (_, _, endpoint) in &endpoints {
+                    let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                        state: ChartState::Error,
+                        message: error.clone(),
+                    });
+                }
+            }
+            for (_, _, endpoint) in endpoints {
+                let _ = endpoint.shutdown.try_send(());
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(workers)
+}
+
+fn run_workers(
+    client_id: u64,
+    endpoints: &mut [(u64, CoinbaseSpotProduct, WorkerEndpoint)],
+) -> Result<(), String> {
+    for (_, _, endpoint) in endpoints.iter() {
+        let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+            state: FeedConnectionState::Discovering,
+            message: "Connecting to the resident market engine".to_string(),
+        });
+    }
+    let executable = sibling_engine_executable()?;
+    let mut client = connect_or_start_engine(&executable)?;
+    client.attach_client(client_id)?;
+    let result = run_attached_workers(&mut client, client_id, endpoints);
+    for (_, _, endpoint) in endpoints
+        .iter_mut()
+        .filter(|(_, _, endpoint)| endpoint.active)
+    {
+        let _ = client.remove_market_consumer(endpoint.consumer_id);
+        endpoint.active = false;
+        let _ = endpoint.shutdown.try_send(());
+    }
+    let detach_result = client.detach_client(client_id);
+    result.and(detach_result)
+}
+
+fn run_attached_workers(
+    client: &mut EngineClient,
+    client_id: u64,
+    endpoints: &mut [(u64, CoinbaseSpotProduct, WorkerEndpoint)],
+) -> Result<(), String> {
+    for (workspace_id, product, endpoint) in endpoints.iter_mut() {
+        client.register_consumer(client_id, *workspace_id, endpoint.consumer_id)?;
+        let _ =
+            endpoint.messages.send(MarketWorkerMessage::CoinbaseCatalog(
+                Ok(coinbase_products()),
+            ));
+        match request_snapshot(
+            client,
+            endpoint.consumer_id,
+            INITIAL_GENERATION,
+            series_key(product, ChartInterval::Minute1)?,
+            &mut endpoint.model,
+            &endpoint.messages,
+        ) {
+            Ok((snapshot, generation)) => {
+                send_publication(&endpoint.messages, snapshot, generation)?;
+                let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+                    state: FeedConnectionState::Discovering,
+                    message: "Historical bars are visible; Coinbase realtime is connecting"
+                        .to_string(),
+                });
+            }
+            Err(error) => {
+                let _ = endpoint.messages.send(MarketWorkerMessage::State {
                     state: ChartState::Error,
                     message: error,
                 });
             }
-            let _ = shutdown_tx.send(());
-        })
-        .map_err(|error| error.to_string())?;
-    Ok((
-        startup,
-        MarketDataWorker::from_channels(
-            command_tx,
-            message_rx,
-            shutdown_rx,
-            None,
-            Some(selection_sequence),
-        ),
-    ))
-}
-
-fn run_worker(
-    client_id: u64,
-    consumer_id: u64,
-    product: &CoinbaseSpotProduct,
-    messages: &MarketWorkerSender,
-    commands: &mpsc::Receiver<MarketWorkerCommand>,
-) -> Result<(), String> {
-    let _ = messages.send(MarketWorkerMessage::Connection {
-        state: FeedConnectionState::Discovering,
-        message: "Connecting to the resident market engine".to_string(),
-    });
-    let executable = sibling_engine_executable()?;
-    let mut client = connect_or_start_engine(&executable)?;
-    client.attach_client(client_id)?;
-    client.register_consumer(client_id, WORKSPACE_ID, consumer_id)?;
-    let _ = messages.send(MarketWorkerMessage::CoinbaseCatalog(
-        Ok(coinbase_products()),
-    ));
-    let mut model = empty_model();
-    let (snapshot, generation) = request_snapshot(
-        &mut client,
-        consumer_id,
-        INITIAL_GENERATION,
-        series_key(product, ChartInterval::Minute1)?,
-        &mut model,
-        messages,
-    )?;
-    send_publication(messages, snapshot, generation)?;
-    let _ = messages.send(MarketWorkerMessage::Connection {
-        state: FeedConnectionState::Discovering,
-        message: "Historical bars are visible; Coinbase realtime is connecting".to_string(),
-    });
-    let mut active_generation = INITIAL_GENERATION;
-
-    loop {
-        match commands.recv_timeout(POLL_INTERVAL) {
-            Ok(command) => match command {
-                MarketWorkerCommand::CoinbaseSelect(request) => {
-                    let series = match series_key(&request.product, request.interval) {
-                        Ok(series) => series,
-                        Err(error) => {
-                            let _ = messages.send(MarketWorkerMessage::State {
-                                state: ChartState::Error,
-                                message: error,
-                            });
-                            continue;
-                        }
-                    };
-                    let _ = messages.send(MarketWorkerMessage::CoinbaseSwitchMarker {
-                        sequence: request.sequence,
-                    });
-                    let _ = messages.send(MarketWorkerMessage::State {
-                        state: ChartState::Loading,
-                        message: "Loading Coinbase history through the resident engine".to_string(),
-                    });
-                    model = empty_model();
-                    active_generation = request.sequence;
-                    client.set_series_demand(consumer_id, request.sequence, series)?;
-                }
-                MarketWorkerCommand::Recovery(command) => {
-                    send_recovery(
-                        &mut client,
-                        consumer_id,
-                        active_generation,
-                        command,
-                        &mut model,
-                        messages,
-                    )?;
-                }
-                MarketWorkerCommand::ChartViewport(viewport) => {
-                    if viewport.selection_generation > 0 {
-                        client.set_market_viewport(
-                            consumer_id,
-                            viewport.selection_generation,
-                            viewport.start_unix_nanos,
-                            viewport.end_unix_nanos,
-                        )?;
-                    }
-                }
-                MarketWorkerCommand::Shutdown => break,
-                MarketWorkerCommand::RithmicSearch(_)
-                | MarketWorkerCommand::RithmicSelect(_)
-                | MarketWorkerCommand::RithmicHistory(_) => {
-                    return Err(
-                        "Rithmic commands cannot enter the Coinbase engine client".to_string()
-                    );
-                }
-            },
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if let Some(event) = client.poll_market_event(consumer_id)? {
-            apply_polled_event(event, consumer_id, active_generation, &mut model, messages)?;
         }
     }
-    let _ = client.remove_market_consumer(consumer_id);
-    let _ = client.detach_client(client_id);
+
+    while endpoints.iter().any(|(_, _, endpoint)| endpoint.active) {
+        for (_, _, endpoint) in endpoints
+            .iter_mut()
+            .filter(|(_, _, endpoint)| endpoint.active)
+        {
+            match endpoint.commands.try_recv() {
+                Ok(command) => {
+                    if let Err(error) = process_command(client, endpoint, command) {
+                        let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                            state: ChartState::Error,
+                            message: error,
+                        });
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    retire_endpoint(client, endpoint);
+                    continue;
+                }
+            }
+            if endpoint.active
+                && let Some(event) = client.poll_market_event(endpoint.consumer_id)?
+                && let Err(error) = apply_polled_event(
+                    event,
+                    endpoint.consumer_id,
+                    endpoint.active_generation,
+                    &mut endpoint.model,
+                    &endpoint.messages,
+                )
+            {
+                let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message: error,
+                });
+            }
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
     Ok(())
+}
+
+fn process_command(
+    client: &mut EngineClient,
+    endpoint: &mut WorkerEndpoint,
+    command: MarketWorkerCommand,
+) -> Result<(), String> {
+    match command {
+        MarketWorkerCommand::CoinbaseSelect(request) => {
+            let series = match series_key(&request.product, request.interval) {
+                Ok(series) => series,
+                Err(error) => {
+                    let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                        state: ChartState::Error,
+                        message: error,
+                    });
+                    return Ok(());
+                }
+            };
+            let _ = endpoint
+                .messages
+                .send(MarketWorkerMessage::CoinbaseSwitchMarker {
+                    sequence: request.sequence,
+                });
+            let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                state: ChartState::Loading,
+                message: "Loading Coinbase history through the resident engine".to_string(),
+            });
+            endpoint.model = empty_model();
+            endpoint.active_generation = request.sequence;
+            client.set_series_demand(endpoint.consumer_id, request.sequence, series)
+        }
+        MarketWorkerCommand::Recovery(command) => send_recovery(
+            client,
+            endpoint.consumer_id,
+            endpoint.active_generation,
+            command,
+            &mut endpoint.model,
+            &endpoint.messages,
+        ),
+        MarketWorkerCommand::ChartViewport(viewport) => {
+            if viewport.selection_generation > 0 {
+                client.set_market_viewport(
+                    endpoint.consumer_id,
+                    viewport.selection_generation,
+                    viewport.start_unix_nanos,
+                    viewport.end_unix_nanos,
+                )?;
+            }
+            Ok(())
+        }
+        MarketWorkerCommand::Shutdown => {
+            retire_endpoint(client, endpoint);
+            Ok(())
+        }
+        MarketWorkerCommand::RithmicSearch(_)
+        | MarketWorkerCommand::RithmicSelect(_)
+        | MarketWorkerCommand::RithmicHistory(_) => {
+            Err("Rithmic commands cannot enter the Coinbase engine client".to_string())
+        }
+    }
+}
+
+fn retire_endpoint(client: &mut EngineClient, endpoint: &mut WorkerEndpoint) {
+    let _ = client.remove_market_consumer(endpoint.consumer_id);
+    endpoint.active = false;
+    let _ = endpoint.shutdown.try_send(());
 }
 
 fn apply_polled_event(
