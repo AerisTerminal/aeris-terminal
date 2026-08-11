@@ -338,8 +338,7 @@ crates/
 │
 ├── adapters/
 │   ├── coinbase_market/
-│   ├── rithmic_protocol/
-│   └── market_protocol/
+│   └── rithmic_protocol/
 │
 ├── market_engine/
 │   ├── Cargo.toml
@@ -3802,9 +3801,9 @@ It must not hide cold-start failures.
 
 # 117. PHASE 9 — DELETE LEGACY RUNTIMES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-11): `desktop_market_runtime` and `desktop_provider_runtime` are deleted after their real owners moved to the resident engine, Rithmic adapter, observability, or the sole desktop presentation consumer. Dead Coinbase drivers/fixtures, the uncalled provider/history composition, old `application::stream_runtime`, the unconsumed desktop event/publication queue, the desktop-era Rithmic adapter module name, and the stale provider-runtime conformance script are also gone. Duplicate IPC and remaining dead bridge review are still open, so this phase remains unchecked.
+Evidence (2026-08-11): `desktop_market_runtime` and `desktop_provider_runtime` are deleted after their real owners moved to the resident engine, Rithmic adapter, observability, or the sole desktop presentation consumer. Dead Coinbase drivers/fixtures, the uncalled provider/history composition, old `application::stream_runtime`, the unconsumed desktop event/publication queue, the desktop-era Rithmic adapter module name, and the stale provider-runtime conformance script are also gone. The final duplicate-IPC audit found that the old protobuf market-stream schema and conversion adapter were used only by the deterministic disconnected desktop fixture; production publication already used `local_engine_protocol`. The fixture now drives the existing application replay model directly, its uncalled worker-thread bridge and startup variant are deleted, transport-neutral replay sequence/checksum types live with the application model, and the orphaned `protocols`, `market_protocol`, schema, build, dependency, workspace, and lockfile paths are removed. The shared bounded framing crate remains because protocol v10 actively uses it. No compatibility market protocol or dead fixture runtime remains.
 
 After Coinbase and Rithmic use the new engine:
 

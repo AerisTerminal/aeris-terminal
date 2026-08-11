@@ -50,7 +50,7 @@ GPUI demand
 
 - `crates/domain/instruments`: provider-neutral instrument identity.
 - `crates/domain/market_data`: canonical bars, intervals, order-book state, and related market semantics.
-- `crates/application`: generation-aware client models, provenance validation, replay snapshots, embedded deterministic replay input, and other provider-neutral pure state. It owns no worker, queue, socket, storage, or runtime lifecycle.
+- `crates/application`: generation-aware client models, provenance validation, replay snapshots, embedded deterministic replay input, transport-neutral replay checksums and sequence mechanics, and other provider-neutral pure state. It owns no worker, queue, socket, storage, or runtime lifecycle.
 - `crates/market_engine`: headless engine core with one explicitly owned demand registry, provider-session registry, bounded canonical series store, and immutable per-consumer publications. `apps/engine` owns and drives it on one coordinator thread; the core itself remains free of provider adapters, storage, IPC, GPUI, threads, and globals.
 
 These crates must not depend on UI or a particular provider.
@@ -59,7 +59,6 @@ These crates must not depend on UI or a particular provider.
 
 - `crates/adapters/coinbase_market`: Coinbase catalog, history, streaming, and wire behavior.
 - `crates/adapters/rithmic_protocol`: Rithmic protocol, network sessions, provider lifecycle and generation fencing, session contracts, catalog, history, and market-data behavior. It owns canonical collection and exact timestamp conversion for all 15 supported chart cadences, including daily-session aggregation into calendar weeks and months. Its lifecycle writes directly into the bounded feed accumulator owned by `observability`; there is no intermediate diagnostics wrapper.
-- `crates/adapters/market_protocol`: conversion between canonical market models and protobuf/wire representations.
 - `crates/provider_history`: provider-neutral pagination, rate limiting, coverage, scheduling, and history/live handoff.
 
 Provider-specific types stop at adapter boundaries. Downstream code consumes canonical identities and market models.
@@ -70,8 +69,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
 - `crates/local_engine_client`: blocking authenticated local-IPC client, native installation-token access, sibling-engine discovery/startup, framing, and typed engine commands. It contains no provider, market-state, storage, or GPUI behavior. Desktop calls its blocking connection/start APIs only from background workers; the resident engine reuses its installation-token access during process startup but not its client connection or process-start behavior.
 - `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, provider-neutral catalog search/selection, fixed-point series publication, and conflated order-book framing. Protocol version 10 is active; it makes series-demand and catalog success asynchronous and carries consumer generation, provider session generation, publication generation, decimal precision, canonical bars with exact nanosecond exchange ordering, forming-tail state, bounded market-event polling, entitlement revision, definition revision, exact fixed-time, trade-count, session-day, calendar-week, or calendar-month cadence identity, generation-fenced canonical catalog results, and selected-instrument metadata. The stable `v8` endpoint generation plus strict protocol negotiation prevents an incompatible older resident engine from being mistaken for a compatible endpoint or a second engine from starting against the same local state.
-- `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
-- `crates/transport`: small transport framing primitives.
+- `crates/transport`: shared bounded length-prefixed framing used by the local engine protocol.
 
 Persistent writes use revisioned or transactional publication so a crash cannot turn a partial write into current state. Credentials and sensitive provider material must use the native credential vault or zeroizing memory, not source files, logs, or plain-text configuration.
 
@@ -98,7 +96,7 @@ This production slice supports BTC-USD and ETH-USD history plus realtime at 1m, 
 
 The obsolete `desktop_market_runtime` workspace crate is deleted. Its only remaining behavior—the bounded presentation mailbox, application-model handoff, and deterministic disconnected fixture—now lives in the `axiusflow_desktop` package alongside its sole consumer and retains the same bounded conflation and recovery tests. The app-local `rithmic_engine_client` and `rithmic_engine_history` modules are engine-protocol presentation clients only: they forward bounded provider-neutral catalog and series demand, continuously poll canonical chart and order-book snapshots, convert them into application/presentation models, and cancel obsolete demand by removing their engine consumer. `apps/desktop` depends on neither `rithmic_protocol` nor `desktop_provider_runtime`. The app-local Rithmic shell and series browser contain presentation state only. No desktop layer loads credentials or creates provider sessions. `apps/engine/src/rithmic_history.rs` owns native-vault history credential loading, bounded replay planning, the authenticated history connection, all 15 cadence collection, and exact-time publication; `apps/engine/src/rithmic_realtime.rs` owns both the authenticated catalog/quote lifecycle and the separate trade/depth lifecycle, including bounded transport retry and native power/network transitions. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, paging, and provider-specific canonical conversion. The chart and DOM bridges retain consumer-side stale and identity rejection as defense in depth, not as second market-state owners.
 
-The obsolete Coinbase desktop provider driver, event bridge, deterministic session fixture, feature flag, and the entire `desktop_provider_runtime` crate are deleted. The surviving Rithmic lifecycle, generation fence, vault boundary, and session contract live with the Rithmic adapter and report state directly to the engine-owned caller. The adapter retains only bounded provider callback queues that are actually consumed, while `observability::FeedDiagnostics` owns the metrics accumulator directly. The old `application::stream_runtime` immutable-publication wrapper and unconsumed desktop event/publication queue are also deleted.
+The obsolete Coinbase desktop provider driver, event bridge, deterministic session fixture, feature flag, and the entire `desktop_provider_runtime` crate are deleted. The surviving Rithmic lifecycle, generation fence, vault boundary, and session contract live with the Rithmic adapter and report state directly to the engine-owned caller. The adapter retains only bounded provider callback queues that are actually consumed, while `observability::FeedDiagnostics` owns the metrics accumulator directly. The old `application::stream_runtime` immutable-publication wrapper and unconsumed desktop event/publication queue are also deleted. The unused protobuf market-stream schema, generated-protocol crate, and conversion adapter are deleted; production desktop-to-engine publication has exactly one wire contract in `local_engine_protocol`. The deterministic disconnected benchmark fixture now submits replay snapshots and deltas directly to the same application model used by engine publications and owns no thread or wire protocol.
 
 The path is local by construction. Provider credentials stay on the user's machine, provider traffic terminates in a local worker, and durable history is stored under the user's local data root. No remote Axiusflow service, licensing gateway, or network chart service exists in the product architecture.
 
@@ -168,14 +166,13 @@ The first direct-path Windows release run after removing the engine subscription
 - `crates/platform_runtime`: native credential, display timing, network, power, and I/O cancellation facilities.
 - `crates/observability`: bounded feed diagnostics and latency evidence.
 - `tools`: conformance, naming, and overhead measurement utilities; tools are not runtime architecture.
-- `schemas/protobuf`: versioned shared wire schemas.
 - `provider_kit`: vendor reference material, not application source or a design template.
 
 ## Data correctness
 
 Every streamed view has a local series identity, session generation, publication generation, and source sequence. A selection change invalidates older work. Covering snapshots establish a known state; deltas are accepted only when their sequence and session continue that state. A new session requires a covering snapshot, and older sessions or publication generations are rejected. A detected gap, stale response, or provider reconnect requires recovery from a covering snapshot.
 
-The transient market-stream schema is version 2. Removed distributed partition fields are reserved in Protobuf and cannot be reused; session generation lives once on the market-event header, while publication generation identifies covering snapshot revisions. Persisted workspace and encrypted history use separate versioned schemas and are unaffected by this transient contract.
+Application replay snapshots retain session generation, publication generation, source sequence, provenance, and checksum evidence as pure in-process values; they are not a second IPC protocol. Desktop-to-engine traffic uses only versioned `local_engine_protocol`, while Rithmic vendor protobuf remains isolated inside its adapter. Persisted workspace and encrypted history use separate versioned schemas.
 
 History and live data meet at one explicit handoff boundary:
 

@@ -1,13 +1,14 @@
 //! Desktop market presentation mailbox and deterministic disconnected fixture.
 //!
 //! This module does not implement or claim a socket, WebSocket, live provider,
-//! entitlement service, or production transport. It exercises the same bounded
-//! binary protocol and application model that a future connected adapter will own.
+//! entitlement service, or production transport. The fixture exercises the same
+//! application replay model used by engine publications without inventing a
+//! second desktop wire protocol.
 
 use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
-    MarketGeneration, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
+    MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_local_engine_protocol::{
@@ -16,11 +17,6 @@ use axiusflow_local_engine_protocol::{
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::DomFrame;
-use axiusflow_market_protocol_adapter::{
-    BinaryMarketBarStreamDecoder, DecimalConvention, ProjectedMarketBarUpdate,
-    encode_market_bar_stream_frame, try_encode_replay_delta_envelope,
-    try_encode_replay_snapshot_chunk_envelopes,
-};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
 use std::{
@@ -29,9 +25,8 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        mpsc::{Receiver, SyncSender, TrySendError},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -59,16 +54,7 @@ impl std::fmt::Display for ProviderCommandUnavailable {
 impl std::error::Error for ProviderCommandUnavailable {}
 
 const SUBSCRIPTION_ID: &str = "desktop_fixture_market_bars";
-const INITIAL_BAR_COUNT: usize = 576;
-const STARTUP_DELTA_COUNT: usize = 24;
-const RECOVERY_BAR_COUNT: usize = INITIAL_BAR_COUNT + STARTUP_DELTA_COUNT;
-const MODEL_ITEM_CAPACITY: usize = RECOVERY_BAR_COUNT;
-const MESSAGE_CAPACITY: usize = 32;
-const COMMAND_CAPACITY: usize = 1;
-const SNAPSHOT_CHUNK_ITEMS: usize = 64;
-const MAXIMUM_FRAME_BYTES: usize = 65_536;
-const MAXIMUM_BUFFERED_BYTES: usize = 131_072;
-const FRAGMENT_BYTES: usize = 7;
+const MODEL_ITEM_CAPACITY: usize = 600;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -107,7 +93,6 @@ pub struct MarketWorkerBootstrap {
 pub enum MarketWorkerStartup {
     Rithmic,
     Loading(Box<CoinbaseWorkerStartup>),
-    Ready(Box<MarketWorkerBootstrap>),
 }
 
 pub struct CoinbaseWorkerStartup {
@@ -1125,39 +1110,6 @@ pub struct MarketDataWorker {
 }
 
 impl MarketDataWorker {
-    /// Starts the deterministic fixture worker.
-    ///
-    /// # Errors
-    /// Returns an error if its worker thread cannot be created or bootstrapped.
-    pub fn start() -> Result<(MarketWorkerStartup, Self), String> {
-        let (bootstrap_tx, bootstrap_rx) = mpsc::sync_channel(1);
-        let (message_tx, message_rx) =
-            market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
-        let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("axiusflow-market-fixture-worker".to_string())
-            .spawn(move || {
-                run_worker(&bootstrap_tx, &message_tx, &command_rx);
-                let _ = shutdown_tx.send(());
-            })
-            .map_err(|error| error.to_string())?;
-        let bootstrap = bootstrap_rx
-            .recv()
-            .map_err(|_| "market fixture worker stopped before bootstrap".to_string())??;
-        Ok((
-            MarketWorkerStartup::Ready(Box::new(bootstrap)),
-            Self {
-                commands: Some(command_tx),
-                messages: Some(message_rx),
-                shutdown_complete: shutdown_rx,
-                connected: true,
-                ui_diagnostics: None,
-                coinbase_sequence: None,
-            },
-        ))
-    }
-
     #[must_use]
     pub const fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,
@@ -1413,7 +1365,7 @@ impl MarketDataWorker {
         !matches!(
             self.shutdown_complete
                 .recv_timeout(CONFIRMED_SHUTDOWN_TIMEOUT),
-            Err(mpsc::RecvTimeoutError::Timeout)
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         )
     }
 }
@@ -1428,52 +1380,21 @@ impl Drop for MarketDataWorker {
 }
 
 pub struct FixtureMarketWorker {
-    expected_subscription_id: String,
     source: EmbeddedReplaySource,
-    convention: DecimalConvention,
-    decoder: BinaryMarketBarStreamDecoder,
     model: MarketBarClientModel,
-    publisher_context: Option<ReplaySnapshot>,
-    maximum_frame_bytes: NonZeroUsize,
 }
 
 impl FixtureMarketWorker {
-    /// Creates a fixture worker with the default decimal convention.
+    /// Creates a deterministic disconnected fixture worker.
     ///
     /// # Errors
-    /// Returns an error if the convention or bounded decoder cannot be created.
+    /// Retained for the common worker-start contract; construction is infallible.
     pub fn try_new() -> Result<Self, String> {
-        Self::try_new_with_convention("usd_minor", "shares")
-    }
-
-    /// Creates a fixture worker with an explicit decimal convention.
-    ///
-    /// # Errors
-    /// Returns an error if the convention or bounded decoder cannot be created.
-    pub fn try_new_with_convention(price_unit: &str, quantity_unit: &str) -> Result<Self, String> {
-        let convention = DecimalConvention::try_new(price_unit, quantity_unit)
-            .map_err(|error| error.to_string())?;
-        let maximum_frame_bytes =
-            NonZeroUsize::new(MAXIMUM_FRAME_BYTES).unwrap_or(NonZeroUsize::MIN);
-        let maximum_buffered_bytes =
-            NonZeroUsize::new(MAXIMUM_BUFFERED_BYTES).unwrap_or(NonZeroUsize::MIN);
-        let decoder = BinaryMarketBarStreamDecoder::try_new(
-            convention.clone(),
-            ReplayProvenance::EmbeddedFixture,
-            maximum_frame_bytes,
-            maximum_buffered_bytes,
-        )
-        .map_err(|error| error.to_string())?;
         Ok(Self {
-            expected_subscription_id: SUBSCRIPTION_ID.to_string(),
             source: EmbeddedReplaySource,
-            convention,
-            decoder,
             model: MarketBarClientModel::new(
                 NonZeroUsize::new(MODEL_ITEM_CAPACITY).unwrap_or(NonZeroUsize::MIN),
             ),
-            publisher_context: None,
-            maximum_frame_bytes,
         })
     }
 
@@ -1498,40 +1419,16 @@ impl FixtureMarketWorker {
         let snapshot = snapshot
             .try_with_publication_generation(generation)
             .map_err(|error| error.to_string())?;
-        let snapshot_id = format!(
-            "desktop_fixture_generation_{}_sequence_{}",
-            snapshot.evidence().publication_generation,
-            snapshot.evidence().last_sequence
-        );
-        let envelopes = try_encode_replay_snapshot_chunk_envelopes(
-            SUBSCRIPTION_ID,
-            snapshot_id,
-            &snapshot,
-            &self.convention,
-            NonZeroUsize::new(SNAPSHOT_CHUNK_ITEMS).unwrap_or(NonZeroUsize::MIN),
-        )
-        .map_err(|error| error.to_string())?;
-        let mut projected = Vec::new();
-        let envelope_count = envelopes.len();
-        for (index, envelope) in envelopes.into_iter().enumerate() {
-            let frame = encode_market_bar_stream_frame(&envelope, self.maximum_frame_bytes)
-                .map_err(|error| error.to_string())?;
-            let updates = self.decode_frame(&frame)?;
-            if index + 1 < envelope_count && !updates.is_empty() {
-                return Err("chunked fixture snapshot published before completion".to_string());
-            }
-            projected.extend(updates);
-        }
-        let publication = self.finish_publication(projected)?;
+        let publication =
+            self.finish_publication(ReplayStreamUpdate::Snapshot(snapshot.clone()))?;
         let ReplayStreamUpdate::Snapshot(decoded_snapshot) = publication.update else {
-            return Err("fixture snapshot chunks projected a delta".to_string());
+            return Err("fixture snapshot published a delta".to_string());
         };
-        self.publisher_context = Some(snapshot);
         Ok(MarketWorkerBootstrap {
             snapshot: decoded_snapshot,
             subscription_id: SUBSCRIPTION_ID.to_string(),
             generation: publication.generation,
-            worker_label: "binary fixture worker · disconnected".to_string(),
+            worker_label: "deterministic fixture · disconnected".to_string(),
         })
     }
 
@@ -1550,138 +1447,28 @@ impl FixtureMarketWorker {
         else {
             return Ok(None);
         };
-        let context = self
-            .publisher_context
-            .as_ref()
-            .ok_or_else(|| "fixture publisher has no snapshot context".to_string())?;
-        let envelope = try_encode_replay_delta_envelope(
-            SUBSCRIPTION_ID,
-            context.instrument(),
-            context.bar_definition(),
-            &delta,
-            &self.convention,
-        )
-        .map_err(|error| error.to_string())?;
-        let frame = encode_market_bar_stream_frame(&envelope, self.maximum_frame_bytes)
-            .map_err(|error| error.to_string())?;
-        let projected = self.decode_frame(&frame)?;
-        self.finish_publication(projected).map(Some)
-    }
-
-    fn decode_frame(&mut self, frame: &[u8]) -> Result<Vec<ProjectedMarketBarUpdate>, String> {
-        let mut projected = Vec::new();
-        for chunk in frame.chunks(FRAGMENT_BYTES) {
-            projected.extend(
-                self.decoder
-                    .push(chunk)
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        Ok(projected)
+        self.finish_publication(ReplayStreamUpdate::Delta(delta))
+            .map(Some)
     }
 
     fn finish_publication(
         &mut self,
-        mut projected: Vec<ProjectedMarketBarUpdate>,
+        update: ReplayStreamUpdate,
     ) -> Result<MarketWorkerPublication, String> {
-        if projected.len() != 1 {
-            return Err(format!(
-                "binary fixture frame projected {} updates instead of one",
-                projected.len()
-            ));
-        }
-        let projected = projected
-            .pop()
-            .ok_or_else(|| "binary fixture frame projected no update".to_string())?;
-        if projected.subscription_id != self.expected_subscription_id {
-            return Err("binary fixture subscription identity changed".to_string());
-        }
         let outcome = self
             .model
-            .apply_update(projected.update.clone())
+            .apply_update(update.clone())
             .map_err(|error| error.to_string())?;
         let MarketBarModelOutcome::Published(generation) = outcome else {
-            return Err("binary fixture update did not publish a client generation".to_string());
+            return Err("fixture update did not publish a client generation".to_string());
         };
         Ok(MarketWorkerPublication {
-            update: projected.update,
+            update,
             generation,
             subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: "binary fixture worker · disconnected".to_string(),
+            worker_label: "deterministic fixture · disconnected".to_string(),
             ui_diagnostics: None,
         })
-    }
-
-    fn recover(&mut self) -> Result<MarketWorkerBootstrap, String> {
-        self.decoder.reset();
-        self.publish_snapshot(RECOVERY_BAR_COUNT)
-    }
-}
-
-fn run_worker(
-    bootstrap_tx: &SyncSender<Result<MarketWorkerBootstrap, String>>,
-    message_tx: &MarketWorkerSender,
-    command_rx: &Receiver<MarketWorkerCommand>,
-) {
-    let mut worker = match FixtureMarketWorker::try_new() {
-        Ok(worker) => worker,
-        Err(error) => {
-            let _ = bootstrap_tx.send(Err(error));
-            return;
-        }
-    };
-    let bootstrap = match worker.publish_snapshot(INITIAL_BAR_COUNT) {
-        Ok(bootstrap) => bootstrap,
-        Err(error) => {
-            let _ = bootstrap_tx.send(Err(error));
-            return;
-        }
-    };
-    let mut previous_sequence = bootstrap.snapshot.stream().last_sequence();
-    if bootstrap_tx.send(Ok(bootstrap)).is_err() {
-        return;
-    }
-    for _ in 0..STARTUP_DELTA_COUNT {
-        let publication = match worker.publish_delta(previous_sequence) {
-            Ok(Some(publication)) => publication,
-            Ok(None) => break,
-            Err(error) => {
-                let _ = message_tx.send(MarketWorkerMessage::State {
-                    state: ChartState::Error,
-                    message: error,
-                });
-                return;
-            }
-        };
-        previous_sequence = publication.generation.sequence_range().1;
-        if message_tx
-            .send(MarketWorkerMessage::Update(publication))
-            .is_err()
-        {
-            return;
-        }
-    }
-    while let Ok(command) = command_rx.recv() {
-        match command {
-            MarketWorkerCommand::Recovery(command) => {
-                let result = worker.recover();
-                if message_tx
-                    .send(MarketWorkerMessage::Recovery {
-                        request_id: command.request_id,
-                        result,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            MarketWorkerCommand::ProviderSearch(_)
-            | MarketWorkerCommand::ProviderSelect(_)
-            | MarketWorkerCommand::EngineSeries(_)
-            | MarketWorkerCommand::CoinbaseSelect(_)
-            | MarketWorkerCommand::ChartViewport(_) => {}
-            MarketWorkerCommand::Shutdown => return,
-        }
     }
 }
 
@@ -1689,9 +1476,9 @@ fn run_worker(
 mod tests {
     use super::{
         ChartState, EngineSeriesRequest, FixtureMarketWorker, MarketDataWorker,
-        MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
-        PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
-        market_worker_channel, ui_diagnostics_channel,
+        MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, PendingUiDiagnostics,
+        ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
+        ui_diagnostics_channel,
     };
     use axiusflow_application::ReplayStreamUpdate;
     use axiusflow_local_engine_protocol::{
@@ -1710,20 +1497,6 @@ mod tests {
         },
         thread,
     };
-
-    #[test]
-    fn shipping_worker_bootstraps_only_the_disconnected_fixture() {
-        let (startup, worker) = MarketDataWorker::start().expect("fixture worker starts");
-        let MarketWorkerStartup::Ready(bootstrap) = startup else {
-            panic!("fixture worker must bootstrap a ready chart");
-        };
-        assert_eq!(bootstrap.subscription_id, "desktop_fixture_market_bars");
-        assert_eq!(
-            bootstrap.worker_label,
-            "binary fixture worker · disconnected"
-        );
-        assert!(worker.is_connected());
-    }
 
     #[test]
     fn chart_states_have_explicit_user_facing_labels() {

@@ -1,9 +1,4 @@
-//! Stable protocol metadata and transport-neutral stream mechanics.
-//!
-//! Generated Protobuf data-transfer objects are namespaced under [`protobuf`].
-//! Domain crates must not depend on this crate.
-
-pub mod protobuf;
+//! Transport-neutral replay provenance, checksum, and sequence mechanics.
 
 use core::fmt;
 use sha2::{Digest, Sha256};
@@ -11,18 +6,6 @@ use std::error::Error;
 
 /// Maximum items accepted in one client snapshot.
 pub const MAX_STREAM_SNAPSHOT_ITEMS: usize = 2_048;
-
-/// Metadata required on every durable Axiusflow event.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EventMetadata {
-    pub event_id: String,
-    pub event_time_unix_nanos: i64,
-    pub publication_time_unix_nanos: i64,
-    pub producer: String,
-    pub schema_version: u32,
-    pub correlation_id: String,
-    pub causation_id: String,
-}
 
 /// Canonical evidence retained with each displayed or replayed market value.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,13 +322,6 @@ impl<T> StreamDelta<T> {
     pub const fn item(&self) -> &T {
         &self.item
     }
-}
-
-/// A transport-neutral client stream message.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StreamUpdate<T> {
-    Snapshot(StreamSnapshot<T>),
-    Delta(StreamDelta<T>),
 }
 
 /// Result of sequence-checking one delta against client state.

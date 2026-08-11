@@ -1,12 +1,12 @@
 //! Request context and provenance-bearing market values.
 
 use crate::errors::ReplayValidationError;
-use axiusflow_instruments::InstrumentRevision;
-use axiusflow_market_data::{BarDefinition, MarketBar};
-use axiusflow_protocols::{
+use crate::stream::{
     MarketEventProvenance, MarketSnapshotIdentityRef, MarketValueChecksumRef, Provenanced,
     SnapshotEvidence, compute_market_snapshot_checksum,
 };
+use axiusflow_instruments::InstrumentRevision;
+use axiusflow_market_data::{BarDefinition, MarketBar};
 
 /// Request metadata propagated through application boundaries.
 #[derive(Clone, Debug, Eq, PartialEq)]

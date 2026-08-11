@@ -655,7 +655,7 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_instruments",
  "axiusflow_market_data",
- "axiusflow_protocols",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -683,7 +683,6 @@ dependencies = [
  "axiusflow_market_data",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
- "axiusflow_transport",
  "rustls",
  "serde",
  "serde_json",
@@ -708,7 +707,6 @@ dependencies = [
  "axiusflow_local_engine_client",
  "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
- "axiusflow_market_protocol_adapter",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
@@ -817,18 +815,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_market_protocol_adapter"
-version = "0.1.0"
-dependencies = [
- "axiusflow_application",
- "axiusflow_instruments",
- "axiusflow_market_data",
- "axiusflow_protocols",
- "axiusflow_transport",
- "prost",
-]
-
-[[package]]
 name = "axiusflow_naming_check"
 version = "0.1.0"
 
@@ -847,16 +833,6 @@ dependencies = [
  "wayland-protocols",
  "windows-sys 0.61.2",
  "zbus",
-]
-
-[[package]]
-name = "axiusflow_protocols"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "sha2 0.10.9",
 ]
 
 [[package]]

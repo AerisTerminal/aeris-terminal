@@ -5,11 +5,11 @@ use crate::provenance::{
     ProvenancedMarketBar, ReplayProvenance, embedded_event_provenance, try_provenanced_market_bar,
 };
 use crate::replay_snapshot::ReplaySnapshot;
+use crate::stream::{MAX_STREAM_SNAPSHOT_ITEMS, StreamDelta, StreamProtocolError};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_market_data::{BarDefinition, MarketBar};
-use axiusflow_protocols::{MAX_STREAM_SNAPSHOT_ITEMS, StreamDelta, StreamProtocolError};
 
 /// Maximum bars accepted by the embedded replay boundary.
 pub const MAX_EMBEDDED_REPLAY_BARS: usize = MAX_STREAM_SNAPSHOT_ITEMS;

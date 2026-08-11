@@ -706,27 +706,6 @@ fn terminal_startup_state(
             provider: TerminalProvider::Coinbase,
             coinbase_product: Some(startup.coinbase_product),
         },
-        MarketWorkerStartup::Ready(bootstrap) => {
-            let MarketWorkerBootstrap {
-                snapshot,
-                subscription_id,
-                generation,
-                worker_label,
-            } = *bootstrap;
-            let replay_label = generation_status(&worker_label, &subscription_id, &generation);
-            TerminalStartupState {
-                chart: Some(cx.new(move |_| OriginChartView::with_replay(&snapshot))),
-                chart_state: ChartState::Ready,
-                chart_state_message: "market snapshot is current".to_string(),
-                replay_label,
-                worker_label,
-                subscription_id,
-                connection_state: Some(FeedConnectionState::Streaming),
-                connection_message: Some("Local market fixture is ready".to_string()),
-                provider: TerminalProvider::Coinbase,
-                coinbase_product: None,
-            }
-        }
     }
 }
 
@@ -3888,7 +3867,7 @@ fn symbol_input_for_startup(
         MarketWorkerStartup::Rithmic => {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
         }
-        MarketWorkerStartup::Loading(_) | MarketWorkerStartup::Ready(_) => {
+        MarketWorkerStartup::Loading(_) => {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search Coinbase spot markets"))
         }
     }

@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 axiusflow_instruments = { path = "../domain/instruments" }
 axiusflow_market_data = { path = "../domain/market_data" }
-axiusflow_protocols = { path = "../protocols" }
+sha2.workspace = true
 
 [lints]
 workspace = true

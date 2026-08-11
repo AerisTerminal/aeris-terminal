@@ -11,7 +11,6 @@ axiusflow_desktop_storage = { path = "../../desktop_storage" }
 axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_platform_runtime = { path = "../../platform_runtime" }
 axiusflow_provider_history = { path = "../../provider_history" }
-axiusflow_transport = { path = "../../transport" }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

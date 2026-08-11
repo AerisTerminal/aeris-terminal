@@ -1,8 +1,8 @@
 //! Validation failures at the replay application boundary.
 
+use crate::stream::StreamProtocolError;
 use axiusflow_instruments::InstrumentValidationError;
 use axiusflow_market_data::MarketDataValidationError;
-use axiusflow_protocols::StreamProtocolError;
 use core::fmt;
 use std::error::Error;
 
