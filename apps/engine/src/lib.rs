@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -29,6 +29,24 @@ use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as
 const WORKSPACE_SCHEMA_REVISION: u32 = 1;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
+
+/// Process-wide resident-engine shutdown state shared with authenticated sessions.
+#[derive(Clone, Default)]
+pub struct EngineShutdown {
+    requested: Arc<AtomicBool>,
+}
+
+impl EngineShutdown {
+    /// Returns whether complete engine shutdown has been authenticated and accepted.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
+}
 
 /// Shared resident-engine state visible to authenticated clients.
 #[derive(Clone)]
@@ -575,7 +593,7 @@ pub fn serve_client_with_state(
     engine_epoch: u64,
     state: &EngineState,
 ) -> Result<(), String> {
-    serve_client_with_services(stream, installation_token, engine_epoch, state, None)
+    serve_client_with_services(stream, installation_token, engine_epoch, state, None, None)
 }
 
 /// Serves one authenticated client with workspace and resident market ownership.
@@ -595,6 +613,29 @@ pub fn serve_client_with_market(
         engine_epoch,
         state,
         Some(market),
+        None,
+    )
+}
+
+/// Serves one authenticated client with market ownership and process shutdown control.
+///
+/// # Errors
+/// Returns an error for I/O, framing, authentication setup, or malformed requests.
+pub fn serve_client_with_market_and_shutdown(
+    stream: LocalSocketStream,
+    installation_token: &[u8],
+    engine_epoch: u64,
+    state: &EngineState,
+    market: &MarketService,
+    shutdown: &EngineShutdown,
+) -> Result<(), String> {
+    serve_client_with_services(
+        stream,
+        installation_token,
+        engine_epoch,
+        state,
+        Some(market),
+        Some(shutdown),
     )
 }
 
@@ -604,6 +645,7 @@ fn serve_client_with_services(
     engine_epoch: u64,
     state: &EngineState,
     market: Option<&MarketService>,
+    shutdown: Option<&EngineShutdown>,
 ) -> Result<(), String> {
     if installation_token.len() != INSTALLATION_TOKEN_BYTES {
         return Err("installation credential has an invalid length".to_string());
@@ -627,16 +669,18 @@ fn serve_client_with_services(
         engine_epoch,
         workspace_revision: state.workspace().workspace_revision,
     }))?;
-    serve_authenticated_session(&mut connection, state, market)
+    serve_authenticated_session(&mut connection, state, market, shutdown)
 }
 
 fn serve_authenticated_session(
     connection: &mut FramedConnection,
     state: &EngineState,
     market: Option<&MarketService>,
+    shutdown: Option<&EngineShutdown>,
 ) -> Result<(), String> {
     let mut attached_client = None;
-    let result = serve_authenticated_messages(connection, state, market, &mut attached_client);
+    let result =
+        serve_authenticated_messages(connection, state, market, shutdown, &mut attached_client);
     if let (Some(market), Some(client_id)) = (market, attached_client) {
         let _ = market.detach(client_id);
     }
@@ -647,6 +691,7 @@ fn serve_authenticated_messages(
     connection: &mut FramedConnection,
     state: &EngineState,
     market: Option<&MarketService>,
+    shutdown: Option<&EngineShutdown>,
     attached_client: &mut Option<u64>,
 ) -> Result<(), String> {
     loop {
@@ -655,6 +700,10 @@ fn serve_authenticated_messages(
             Err(error) if error == "local engine connection closed" => return Ok(()),
             Err(error) => return Err(error),
         };
+        if shutdown.is_some_and(EngineShutdown::is_requested) {
+            connection.send(cancelled_mutation_fault("engine is shutting down"))?;
+            return Ok(());
+        }
         match payload {
             envelope::Payload::RestoreWorkspace(_) => {
                 connection.send(envelope::Payload::WorkspaceState(state.workspace()))?;
@@ -667,6 +716,32 @@ fn serve_authenticated_messages(
             }
             envelope::Payload::SetViewport(viewport) => {
                 apply_viewport(state, viewport, connection)?;
+            }
+            envelope::Payload::SetEngineResourceMode(command) => {
+                let Ok(mode) = ResourceMode::try_from(command.resource_mode) else {
+                    connection.send(envelope::Payload::Fault(Fault {
+                        code: EngineFaultCode::MalformedMessage as i32,
+                        redacted_detail: "engine resource mode is invalid".to_string(),
+                    }))?;
+                    continue;
+                };
+                connection.send(envelope::Payload::WorkspaceState(
+                    state.set_resource_mode(mode),
+                ))?;
+            }
+            envelope::Payload::ShutdownEngine(_) => {
+                let Some(shutdown) = shutdown else {
+                    connection.send(cancelled_mutation_fault(
+                        "engine shutdown is unavailable in this session",
+                    ))?;
+                    continue;
+                };
+                state.set_resource_mode(ResourceMode::OfflineSuspended);
+                shutdown.request();
+                connection.send(envelope::Payload::Goodbye(Goodbye {
+                    reason: "engine shutdown accepted".to_string(),
+                }))?;
+                return Ok(());
             }
             envelope::Payload::InstallProviderInstrument(instrument) => {
                 let market = require_market(market)?;
@@ -963,11 +1038,14 @@ mod tests {
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
     use axiusflow_local_engine_client::EngineClient;
     use axiusflow_local_engine_protocol::{
-        InstallProviderInstrument, SeriesCadence, SeriesKey, envelope,
+        InstallProviderInstrument, ResourceMode, SeriesCadence, SeriesKey, envelope,
     };
     use axiusflow_market_data::MarketBar;
 
-    use super::{EngineState, MarketService, bind_listener, serve_client_with_market};
+    use super::{
+        EngineShutdown, EngineState, MarketService, bind_listener, serve_client_with_market,
+        serve_client_with_market_and_shutdown,
+    };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
     const WARMUP_SAMPLES: usize = 32;
@@ -1347,6 +1425,45 @@ mod tests {
             latency.p95 < 50_000_000,
             "{label} p95 exceeded 50 ms: {} ns",
             latency.p95
+        );
+    }
+
+    #[test]
+    fn authenticated_lifecycle_commands_update_mode_and_request_shutdown() {
+        let socket_name = socket_name("lifecycle");
+        let listener = bind_listener(&socket_name).expect("bind lifecycle endpoint");
+        let token = [13_u8; 32];
+        let state = EngineState::default();
+        let server_state = state.clone();
+        let shutdown = EngineShutdown::default();
+        let server_shutdown = shutdown.clone();
+        let market =
+            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept lifecycle client");
+            serve_client_with_market_and_shutdown(
+                stream,
+                &token,
+                17,
+                &server_state,
+                &market,
+                &server_shutdown,
+            )
+            .expect("serve lifecycle client");
+        });
+
+        let mut client = EngineClient::connect(&socket_name, &token).expect("connect lifecycle");
+        let interactive = client
+            .set_engine_resource_mode(ResourceMode::Interactive)
+            .expect("set interactive resource mode");
+        assert_eq!(interactive.resource_mode, ResourceMode::Interactive as i32);
+        client.shutdown_engine().expect("request engine shutdown");
+        server.join().expect("join lifecycle server");
+
+        assert!(shutdown.is_requested());
+        assert_eq!(
+            state.workspace().resource_mode,
+            ResourceMode::OfflineSuspended as i32
         );
     }
 

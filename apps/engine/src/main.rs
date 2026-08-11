@@ -4,46 +4,89 @@
 )]
 
 use std::{
+    ffi::{OsStr, OsString},
     process,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use axiusflow_engine::{
-    EngineState, MarketService, bind_listener, default_engine_state_root, serve_client_with_market,
+    EngineShutdown, EngineState, MarketService, bind_listener, default_engine_state_root,
+    serve_client_with_market_and_shutdown,
 };
-use axiusflow_local_engine_client::{ENGINE_SOCKET_NAME, native_installation_token};
-use interprocess::local_socket::traits::Listener as _;
+use axiusflow_local_engine_client::{ENGINE_SOCKET_NAME, EngineClient, native_installation_token};
+use interprocess::local_socket::{ListenerNonblockingMode, traits::Listener as _};
 
 fn main() {
-    if std::env::args_os().len() != 1 {
-        eprintln!("axiusflow_engine does not accept provider or chart commands");
-        process::exit(2);
-    }
-    if let Err(error) = run() {
+    let command = match parse_command(std::env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("{error}");
+            process::exit(2);
+        }
+    };
+    let result = match command {
+        EngineCommand::Run => run(),
+        EngineCommand::Shutdown => shutdown_running_engine(),
+    };
+    if let Err(error) = result {
         eprintln!("Axiusflow engine failed: {error}");
         process::exit(1);
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EngineCommand {
+    Run,
+    Shutdown,
+}
+
+fn parse_command(mut arguments: impl Iterator<Item = OsString>) -> Result<EngineCommand, String> {
+    match (arguments.next(), arguments.next()) {
+        (None, None) => Ok(EngineCommand::Run),
+        (Some(argument), None) if argument == OsStr::new("--shutdown") => {
+            Ok(EngineCommand::Shutdown)
+        }
+        _ => Err("usage: axiusflow_engine [--shutdown]".to_string()),
+    }
+}
+
+fn shutdown_running_engine() -> Result<(), String> {
+    let token = native_installation_token()?;
+    EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())?.shutdown_engine()
+}
+
 fn run() -> Result<(), String> {
     const MAXIMUM_CLIENTS: usize = 4;
+    const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const CLIENT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
     let token = Arc::new(native_installation_token()?);
     let listener = bind_listener(ENGINE_SOCKET_NAME).map_err(|error| error.to_string())?;
-    register_engine_autostart();
+    listener
+        .set_nonblocking(ListenerNonblockingMode::Accept)
+        .map_err(|error| error.to_string())?;
     let mut epoch_bytes = [0_u8; 8];
     getrandom::fill(&mut epoch_bytes).map_err(|error| error.to_string())?;
     let engine_epoch = u64::from_le_bytes(epoch_bytes).max(1);
     let state = EngineState::open(default_engine_state_root()?)?;
     let market = MarketService::start()?;
     let active_clients = Arc::new(AtomicUsize::new(0));
+    let shutdown = EngineShutdown::default();
 
-    loop {
-        let stream = listener.accept().map_err(|error| error.to_string())?;
+    while !shutdown.is_requested() {
+        let stream = match listener.accept() {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(ACCEPT_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if active_clients
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < MAXIMUM_CLIENTS).then_some(active + 1)
@@ -57,15 +100,17 @@ fn run() -> Result<(), String> {
         let state = state.clone();
         let market = market.clone();
         let active_clients = Arc::clone(&active_clients);
+        let shutdown = shutdown.clone();
         thread::Builder::new()
             .name("axiusflow-engine-client".to_string())
             .spawn(move || {
-                if let Err(error) = serve_client_with_market(
+                if let Err(error) = serve_client_with_market_and_shutdown(
                     stream,
                     token.as_slice(),
                     engine_epoch,
                     &state,
                     &market,
+                    &shutdown,
                 ) {
                     eprintln!("Axiusflow engine rejected a local client: {error}");
                 }
@@ -73,37 +118,34 @@ fn run() -> Result<(), String> {
             })
             .map_err(|error| error.to_string())?;
     }
+    drop(listener);
+    let deadline = Instant::now() + CLIENT_SHUTDOWN_DEADLINE;
+    while active_clients.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+        thread::sleep(ACCEPT_POLL_INTERVAL);
+    }
+    Ok(())
 }
 
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
-fn register_engine_autostart() {
-    use std::os::windows::process::CommandExt as _;
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
 
-    let Ok(executable) = std::env::current_exe() else {
-        return;
-    };
-    let _ = thread::Builder::new()
-        .name("axiusflow-engine-autostart".to_string())
-        .spawn(move || {
-            let command = format!("\"{}\"", executable.display());
-            let mut process = std::process::Command::new("reg.exe");
-            process.args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "AxiusflowEngine",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &command,
-                "/f",
-            ]);
-            process.creation_flags(0x0800_0000);
-            if !matches!(process.status(), Ok(status) if status.success()) {
-                eprintln!("Axiusflow engine login startup registration failed");
-            }
-        });
+    use super::{EngineCommand, parse_command};
+
+    #[test]
+    fn lifecycle_command_line_accepts_only_run_or_complete_shutdown() {
+        assert_eq!(
+            parse_command(Vec::new().into_iter()),
+            Ok(EngineCommand::Run)
+        );
+        assert_eq!(
+            parse_command(vec![OsString::from("--shutdown")].into_iter()),
+            Ok(EngineCommand::Shutdown)
+        );
+        assert!(parse_command(vec![OsString::from("--provider")].into_iter()).is_err());
+        assert!(
+            parse_command(vec![OsString::from("--shutdown"), OsString::from("extra")].into_iter())
+                .is_err()
+        );
+    }
 }
-
-#[cfg(not(all(target_os = "windows", not(debug_assertions))))]
-fn register_engine_autostart() {}

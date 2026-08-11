@@ -1957,6 +1957,8 @@ Do not warm the entire exchange catalog.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): protocol v10 lifecycle commands now cross the authenticated local boundary. `SetEngineResourceMode` updates and acknowledges the engine-owned workspace state, while `ShutdownEngine` marks the engine offline/suspended, rejects subsequent demand, closes the listener, waits at most two seconds for client sessions, and exits. The shipping `axiusflow_engine --shutdown` command exercises that boundary without starting a missing engine. Ordinary desktop detachment continues to provide the existing Keep Engine Warm behavior. User-facing lifetime-mode selection, Keep Markets Live provider policy, bounded provider/persistence teardown, and warm-reopen proof remain incomplete, so this section stays unchecked.
+
 Support at least these product modes conceptually.
 
 ## Mode A — Exit Completely
@@ -2030,6 +2032,8 @@ Reopening the UI should effectively attach to an already-running trading termina
 # 47. MACHINE REBOOT
 
 - [ ] **Status: Not verified complete**
+
+Progress evidence (2026-08-11): engine startup no longer writes an unconditional Windows `HKCU` login-start entry. The obsolete development-machine entry created by the previous behavior was removed during verification. Optional user-controlled enable/disable policy, equivalent native behavior on every supported platform, persisted preference ownership, and reboot-to-warm validation are not implemented, so this section stays unchecked.
 
 Do not claim state remains in RAM after machine power-off.
 
@@ -2108,7 +2112,7 @@ It does NOT own engine market state.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): the blocking authenticated client, local framing, native installation-token access, sibling-engine discovery/start, and typed workspace/market commands now live in `crates/local_engine_client`. Desktop background workers depend on that narrow client support instead of linking `apps/engine` as a backend library, while the engine application retains server and market ownership. Both the production Coinbase bridge and transitional Rithmic engine bridge use it off GPUI; the latter installs its canonical instrument, submits series demand, polls covering series and order-book snapshots, and removes cancelled consumers without opening provider history or depth sockets. Focused tests prove protocol-v9 socket fencing, occupied-endpoint retry without spawning a competing engine, and authenticated client/server exchanges. Reconnect with active-consumer restoration remains incomplete, so this section stays unchecked.
+Progress evidence (2026-08-11): the blocking authenticated client, local framing, native installation-token access, sibling-engine discovery/start, typed workspace/market commands, resource-mode control, and complete shutdown now live in `crates/local_engine_client`. Desktop background workers depend on that narrow client support instead of linking `apps/engine` as a backend library, while the engine application retains server and market ownership. Both production Coinbase and Rithmic presentation bridges use it off GPUI; the latter installs its canonical instrument, submits series demand, polls covering series and order-book snapshots, and removes cancelled consumers without opening provider history or depth sockets. The engine application itself uses the same authenticated client for `--shutdown`. Focused tests prove protocol-v10 socket fencing, occupied-endpoint retry without spawning a competing engine, authenticated client/server exchanges, acknowledged resource-mode updates, and shutdown signaling. Reconnect with active-consumer restoration remains incomplete, so this section stays unchecked.
 
 Use:
 
@@ -2844,6 +2848,8 @@ Do not wait for all provider connections before opening the window.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): the shipping engine process binds the fixed local endpoint, opens persisted workspace and market state, starts the market service, and enters a nonblocking accept loop independently of provider readiness. One optimized Windows cold process run reached acknowledgement of a real authenticated shutdown request `1,132.567 ms` after launch. That is lifecycle-path evidence, not a startup distribution or a measurement through first usable local snapshot, so this section stays unchecked.
+
 Engine startup:
 
 ```text
@@ -2928,6 +2934,8 @@ No GPUI process remains.
 # 84. COMPLETE EXIT
 
 - [ ] **Status: Not verified complete**
+
+Progress evidence (2026-08-11): `axiusflow_engine --shutdown` now connects only to an existing engine, authenticates with the native installation token, requests complete shutdown, and requires the engine's acknowledgement. The engine stops accepting new connections, rejects later demand, closes the listener, gives client sessions a two-second process-exit deadline, and returns success. An optimized Windows run exited with code zero `3.902 ms` after acknowledgement and left no engine process. Explicit provider/history cancellation and joins, final bounded persistence, desktop user action, and update/uninstall integration remain incomplete, so this section stays unchecked.
 
 Desktop requests engine shutdown.
 
@@ -3790,6 +3798,8 @@ Verify:
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): the authenticated resource-mode boundary and a real complete-exit command are implemented, unconditional Windows login registration is removed, and the optimized production engine was observed acknowledging shutdown and exiting cleanly. Existing desktop detach behavior preserves the resident engine. User-owned lifetime preferences, Keep Markets Live policy, optional cross-platform login startup, staged provider/persistence shutdown, and warm snapshot-to-render verification remain incomplete, so Phase 8 stays unchecked.
+
 Only after cold behavior works correctly:
 
 Implement:
@@ -3836,6 +3846,8 @@ Progress evidence (2026-08-11): the release-only resident-engine verifier now me
 Progress evidence (2026-08-11): schema 8 of the optimized desktop `--windowed-benchmark` samples process working set before GPUI setup and after completion, observes the real Origin replay queue immediately before and after every one-update-per-frame delta submission, installs one real 600-bar same-series covering snapshot through `OriginChartView::load_replay`, times every GPUI frame registration, and records the production input, instrument, and interval callback boundaries. Four immediate Windows runs opened a native window and rendered 256 measured replay frames; every run observed queue depth `0` before submission, `1` after submission, zero overflows, one covering-install sample, 418 frame-scheduling samples, 128 samples for each interaction handler, an advancing DWM timeline, and zero late, dropped, or missed-frame growth. Input-change, Enter-submit, instrument-selection, and interval-selection p99 ranges were `0.0003-0.0007 ms`, `0.0067-0.0810 ms`, `0.0014-0.0028 ms`, and `0.0064-0.0132 ms`; snapshot installation measured `0.2105-0.2379 ms`, replacement start to next-frame callback measured `5.3870-6.0956 ms`, frame-registration p99 measured `0.0006-0.0008 ms`, worst update-to-frame p99 was `7.3820 ms`, first-frame latency ranged from `23.1223` to `30.1152 ms`, and working-set growth ranged from `66,101,248` to `66,744,320` bytes. The verifier fails without writing evidence if queue, replacement, callback, command-batch, or foreground-timing invariants fail. It makes no resident-engine demand-latency claim, while Section 102 retains independent cached symbol/timeframe evidence. This closes the deterministic input/symbol/timeframe foreground-handler gap in addition to the single-window working-set, chart-queue, snapshot-install, and frame-scheduling gaps. Full desktop-process warm reopen through a resident-engine snapshot and rendered frame, cold startup, multi-tab switching and memory, resident-engine memory, provider-to-engine latency, and reconnect measurement remain open, so Phase 10 remains unchecked.
 
 Progress evidence (2026-08-11): schema 3 of the release-only engine verifier adds sampled process working set to the existing production coordinator, authenticated local IPC, cached timeframe/symbol switching, attach/restore, and 20-consumer shared-series workload. The first Windows release run measured 9,940,992 bytes before engine startup, 11,128,832 bytes after startup, and 12,255,232 bytes after the complete workload: 2,314,240 bytes sampled total growth and 1,126,400 bytes sampled post-start workload growth. The same run measured IPC demand at `0.0769/0.0963/0.1129 ms`, timeframe switching at `0.0957/0.1249/0.1693 ms`, symbol switching at `0.0990/0.1317/0.1978 ms`, attach/restore at `0.1023/0.1742/0.2298 ms`, and the complete 20-consumer batch at `1.8255/2.0952/2.2435 ms` p50/p95/p99. This closes the deterministic engine-workload memory-measurement gap without inventing a budget, but it is test-process evidence rather than a standalone resident-engine endurance measurement. Full desktop-process warm reopen through a resident-engine snapshot and rendered frame, cold startup, multi-tab switching and memory, standalone resident-engine endurance memory, provider-to-engine latency, and reconnect measurement remain open, so Phase 10 remains unchecked.
+
+Progress evidence (2026-08-11): one optimized standalone Windows engine process reached authenticated shutdown acknowledgement `1,132.567 ms` after launch, measured `10,641,408` bytes of working set immediately before the request, and exited with code zero `3.902 ms` after acknowledgement, leaving no engine process. This covers the production executable, native installation credential, fixed local endpoint, lifecycle request, and bounded exit in one cold sample. It is not startup percentile, first-usable-snapshot, warm-reopen, provider-disconnect, endurance-memory, or persistence-flush evidence, so Phase 10 remains unchecked.
 
 Only after correctness:
 
@@ -5151,6 +5163,8 @@ Do NOT accidentally support multiple desktop processes through undefined behavio
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): `axiusflow_engine --shutdown` is now a concrete authenticated process-termination command suitable for explicit user, update, uninstall, and incompatible-engine-replacement callers. It does not start an absent engine and returns failure when no engine is reachable. The server stops accepting connections and the verified production process exits. Engine PID/client/provider/resource diagnostics, a user-facing lifetime-mode control, and actual update/uninstall/system-session callers remain incomplete, so this section stays unchecked.
+
 Warm background mode is a user-controlled product feature.
 
 It must not create an immortal process.
@@ -5184,6 +5198,8 @@ Do not leave Axiusflow engine processes orphaned after uninstall/update.
 # 165. SHUTDOWN HAS DEADLINES
 
 - [ ] **Status: Not verified complete**
+
+Progress evidence (2026-08-11): authenticated shutdown now marks lifecycle state offline/suspended, stops the accept loop, rejects subsequent demand, closes the IPC listener, and gives existing client sessions a two-second process-exit deadline. The optimized production process exited `3.902 ms` after acknowledgement in the observed run. Provider/history cancellation, explicit worker joins, bounded final persistence, stage diagnostics, and forced termination after stuck external I/O are not yet owned by this path; process exit still supplies the final worker teardown. This section therefore stays unchecked.
 
 Graceful shutdown is bounded.
 

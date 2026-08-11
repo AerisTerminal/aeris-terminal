@@ -16,9 +16,9 @@ use std::{
 use axiusflow_local_engine_protocol::{
     AttachClient, ClientHello, ClientKind, DetachClient, EngineReady, Envelope, EnvelopeDecoder,
     InstallProviderInstrument, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
-    RegisterConsumer, RemoveConsumer, RestoreWorkspace, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesDemand, SeriesKey, SetSelection, SetViewport, ViewportDemand,
-    WorkspaceState, encode_envelope, envelope,
+    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineResourceMode, SetSelection,
+    SetViewport, ShutdownEngine, ViewportDemand, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
@@ -147,6 +147,37 @@ impl EngineClient {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected workspace reply".to_string()),
+        }
+    }
+
+    /// Changes the resident engine's operational resource mode.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated command fails or its reply is invalid.
+    pub fn set_engine_resource_mode(
+        &mut self,
+        mode: ResourceMode,
+    ) -> Result<WorkspaceState, String> {
+        self.connection
+            .send(envelope::Payload::SetEngineResourceMode(
+                SetEngineResourceMode {
+                    resource_mode: mode as i32,
+                },
+            ))?;
+        self.receive_workspace()
+    }
+
+    /// Requests complete resident-engine shutdown and consumes this connection.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated command fails or is not acknowledged.
+    pub fn shutdown_engine(mut self) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::ShutdownEngine(ShutdownEngine {}))?;
+        match self.connection.receive()? {
+            envelope::Payload::Goodbye(_) => Ok(()),
+            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+            _ => Err("engine returned an unexpected shutdown reply".to_string()),
         }
     }
 
