@@ -216,7 +216,15 @@ Never trade determinism, recoverability, security, or cross-platform correctness
 
 ## Repository documentation rule
 
-The only Markdown files allowed in the Axiusflow repository are root-level `ARCHITECTURE.md` and `AGENTS.md`. Do not create plans, reports, reviews, roadmaps, temporary Markdown, package READMEs, or duplicate architecture documents. Put durable architecture here, executable behavior in code and tests, and transient work notes outside the repository.
+The only Markdown files allowed in the Axiusflow repository are these three root-level files:
+
+- `ARCHITECTURE.md`: authoritative current implemented architecture.
+- `AGENTS.md`: repository engineering and delivery instructions.
+- `AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md`: approved target-state contract for migrating market-data ownership into the resident engine.
+
+The migration specification may intentionally differ from this document while work is incomplete. As each migration slice ships, update this document to describe the new current behavior. A change to the approved target must update both architecture documents in the same commit and clearly preserve the distinction between current and target state.
+
+Do not create any other plans, reports, reviews, roadmaps, temporary Markdown, package READMEs, or duplicate architecture documents. Put current durable architecture here, executable behavior in code and tests, approved migration requirements in the migration specification, and transient work notes outside the repository.
 
 `Origin_charts/` is a separate repository with its own root-level `ARCHITECTURE.md` and `AGENTS.md`. Its Markdown inventory is not part of Axiusflow, and its files must not be changed from this repository unless coordinated Origin work is explicitly requested.
 

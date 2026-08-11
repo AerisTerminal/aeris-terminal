@@ -73,18 +73,21 @@ A test harness that bypasses the failing path is not proof. If runtime verificat
 - Never use destructive Git commands, force-push, or delete broad paths. Resolve exact targets first.
 - Never commit secrets, credentials, local data, provider entitlements, build outputs, or vendor material accidentally.
 - Edit existing files when that is clearer. Create a new module only when it improves a real ownership boundary.
-- Keep `ARCHITECTURE.md` authoritative. Do not create architecture diaries, duplicate plans, or speculative decision-document trees.
+- Keep `ARCHITECTURE.md` authoritative for implemented behavior. `AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md` is the approved target-state migration contract and may intentionally describe behavior not implemented yet. Do not create any other architecture diaries, duplicate plans, or speculative decision-document trees.
 
 ## Markdown and architecture consistency
 
-Exactly two Markdown files may exist in the Axiusflow repository:
+Exactly three Markdown files may exist in the Axiusflow repository:
 
 - `ARCHITECTURE.md`
 - `AGENTS.md`
+- `AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md`
 
 Origin Charts has its own repository and two-file inventory. Do not clone it into this workspace or count or modify its files as part of Axiusflow work.
 
 Do not create any other `.md` file, including temporary plans, reports, reviews, generated output, package READMEs, or nested agent files. If a tool creates one during work, remove it before committing.
+
+The migration specification defines the approved future engine-owned market-data topology. During implementation, keep its target requirements intact and update `ARCHITECTURE.md` as each migration slice becomes current behavior. If the approved target itself changes, update both documents in the same commit and keep the distinction between implemented and target behavior explicit.
 
 Keep `ARCHITECTURE.md` synchronized with the implementation. A change to process topology, crate responsibilities, dependency direction, data flow, mutable ownership, persistence, security, platform support, provider/UI boundaries, or verification gates must update it in the same commit. Before delivery, compare its claims with Cargo manifests, public exports, application entry points, and actual call paths.
 
