@@ -4,7 +4,6 @@ use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -41,19 +40,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_TIMEOUT: Duration = Duration::from_secs(35);
 const ENGINE_WORKSPACE_ID: u64 = 1;
 
-#[derive(Clone)]
-pub(crate) struct InstalledRithmicInstrument {
-    pub(crate) session_generation: u64,
-    pub(crate) selection_generation: NonZeroUsize,
-    pub(crate) descriptor: InstrumentDescriptor,
-    pub(crate) entitlement_id: String,
-}
-
 struct HistoryFetchRequest {
     selection_generation: NonZeroUsize,
     series_generation: NonZeroUsize,
     series: RithmicSeries,
-    instrument: InstalledRithmicInstrument,
+    instrument: InstallProviderInstrument,
     stop: Arc<AtomicBool>,
 }
 
@@ -140,12 +131,17 @@ impl RithmicHistoryTask {
     pub(crate) fn request(
         &mut self,
         request: RithmicSeriesRequest,
-        instrument: InstalledRithmicInstrument,
+        instrument: InstallProviderInstrument,
     ) -> Result<(), String> {
-        if request.selection_generation != instrument.selection_generation {
+        if u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX)
+            != instrument.selection_generation
+        {
             return Err("Rithmic history selection is stale".to_string());
         }
-        if instrument.session_generation == 0 || !request.series.supports_native_history() {
+        if instrument.session_generation == 0
+            || validate_engine_instrument(&instrument).is_err()
+            || !request.series.supports_native_history()
+        {
             return Err("Rithmic history series is unavailable".to_string());
         }
         self.cancel();
@@ -248,7 +244,7 @@ impl EngineHistorySession {
     ) -> Result<MarketWorkerBootstrap, String> {
         let series = engine_series_key(request)?;
         self.client
-            .install_provider_instrument(engine_instrument(&request.instrument)?)?;
+            .install_provider_instrument(request.instrument.clone())?;
         self.client.set_series_demand(
             self.consumer_id,
             u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX),
@@ -425,26 +421,21 @@ fn publish_history_result(
     });
 }
 
-fn engine_instrument(
-    installed: &InstalledRithmicInstrument,
-) -> Result<InstallProviderInstrument, String> {
-    installed
-        .descriptor
-        .validate()
-        .map_err(|error| error.to_string())?;
-    Ok(InstallProviderInstrument {
-        provider: "rithmic".to_string(),
-        session_generation: installed.session_generation,
-        selection_generation: u64::try_from(installed.selection_generation.get())
-            .unwrap_or(u64::MAX),
-        instrument_id: installed.descriptor.instrument_id.clone(),
-        provider_symbol: installed.descriptor.provider_symbol.clone(),
-        display_symbol: installed.descriptor.display_symbol.clone(),
-        venue_id: installed.descriptor.venue_id.clone(),
-        price_scale: u32::from(installed.descriptor.price_scale),
-        quantity_scale: u32::from(installed.descriptor.quantity_scale),
-        entitlement_id: installed.entitlement_id.clone(),
-    })
+pub(crate) fn validate_engine_instrument(
+    instrument: &InstallProviderInstrument,
+) -> Result<(), String> {
+    if instrument.provider != "rithmic"
+        || instrument.instrument_id.trim().is_empty()
+        || instrument.provider_symbol.trim().is_empty()
+        || instrument.display_symbol.trim().is_empty()
+        || instrument.venue_id.trim().is_empty()
+        || instrument.entitlement_id.trim().is_empty()
+        || instrument.price_scale > 18
+        || instrument.quantity_scale > 18
+    {
+        return Err("Rithmic engine instrument is invalid".to_string());
+    }
+    Ok(())
 }
 
 fn engine_series_key(request: &HistoryFetchRequest) -> Result<SeriesKey, String> {
@@ -463,7 +454,7 @@ fn engine_series_key(request: &HistoryFetchRequest) -> Result<SeriesKey, String>
     };
     Ok(SeriesKey {
         provider: "rithmic".to_string(),
-        instrument_id: request.instrument.descriptor.instrument_id.clone(),
+        instrument_id: request.instrument.instrument_id.clone(),
         cadence_value,
         definition_revision: 1,
         entitlement_id: request.instrument.entitlement_id.clone(),
@@ -478,21 +469,24 @@ fn bootstrap_from_snapshot(
     if snapshot.provider_generation < request.instrument.session_generation
         || snapshot.bars.is_empty()
         || snapshot.bars.len() > MAXIMUM_VISIBLE_BARS
-        || snapshot.price_scale != u32::from(request.instrument.descriptor.price_scale)
-        || snapshot.quantity_scale != u32::from(request.instrument.descriptor.quantity_scale)
+        || snapshot.price_scale != request.instrument.price_scale
+        || snapshot.quantity_scale != request.instrument.quantity_scale
     {
         return Err("Rithmic engine snapshot is invalid".to_string());
     }
-    let descriptor = &request.instrument.descriptor;
+    let price_scale = u8::try_from(request.instrument.price_scale)
+        .map_err(|_| "Rithmic engine price scale is invalid".to_string())?;
+    let quantity_scale = u8::try_from(request.instrument.quantity_scale)
+        .map_err(|_| "Rithmic engine quantity scale is invalid".to_string())?;
     let instrument = InstrumentRevision {
-        instrument_id: InstrumentId::try_new(descriptor.instrument_id.clone())
+        instrument_id: InstrumentId::try_new(request.instrument.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: 1,
         asset_class: AssetClass::Future,
-        symbol: descriptor.display_symbol.clone(),
-        venue_id: descriptor.venue_id.clone(),
+        symbol: request.instrument.display_symbol.clone(),
+        venue_id: request.instrument.venue_id.clone(),
         trading_currency: "USD".to_string(),
-        precision: InstrumentPrecision::try_new(descriptor.price_scale, descriptor.quantity_scale)
+        precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     };
@@ -529,7 +523,7 @@ fn bootstrap_from_snapshot(
         snapshot: replay,
         subscription_id: format!(
             "{}  ·  {}",
-            descriptor.provider_symbol,
+            request.instrument.provider_symbol,
             request.series.label()
         ),
         generation,
@@ -602,7 +596,7 @@ fn dom_from_snapshot(
     if snapshot.consumer_id == 0
         || snapshot.generation != expected_generation
         || snapshot.provider != "rithmic"
-        || snapshot.instrument_id != request.instrument.descriptor.instrument_id
+        || snapshot.instrument_id != request.instrument.instrument_id
         || snapshot.entitlement_id != request.instrument.entitlement_id
         || snapshot.provider_generation < request.instrument.session_generation
         || snapshot.selection_generation != expected_selection
@@ -659,8 +653,10 @@ fn dom_from_snapshot(
         session_generation: snapshot.provider_generation,
         selection_generation: snapshot.selection_generation,
         precision: InstrumentPrecision::try_new(
-            request.instrument.descriptor.price_scale,
-            request.instrument.descriptor.quantity_scale,
+            u8::try_from(request.instrument.price_scale)
+                .map_err(|_| "Rithmic engine price scale is invalid".to_string())?,
+            u8::try_from(request.instrument.quantity_scale)
+                .map_err(|_| "Rithmic engine quantity scale is invalid".to_string())?,
         )
         .map_err(|error| error.to_string())?,
     };
@@ -734,18 +730,17 @@ mod tests {
         NonZeroUsize::new(value).expect("test generation is non-zero")
     }
 
-    fn installed() -> InstalledRithmicInstrument {
-        InstalledRithmicInstrument {
+    fn installed() -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: "rithmic".to_string(),
             session_generation: 7,
-            selection_generation: nonzero(2),
-            descriptor: InstrumentDescriptor {
-                instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
-                provider_symbol: "MNQU6".to_string(),
-                display_symbol: "MNQU6".to_string(),
-                venue_id: "CME".to_string(),
-                price_scale: 2,
-                quantity_scale: 0,
-            },
+            selection_generation: 2,
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            provider_symbol: "MNQU6".to_string(),
+            display_symbol: "MNQU6".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
             entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
         }
     }
@@ -820,7 +815,7 @@ mod tests {
                 consumer_id: 5,
                 generation: 3,
                 provider: "rithmic".to_string(),
-                instrument_id: request.instrument.descriptor.instrument_id.clone(),
+                instrument_id: request.instrument.instrument_id.clone(),
                 entitlement_id: request.instrument.entitlement_id.clone(),
                 provider_generation: 8,
                 selection_generation: 2,

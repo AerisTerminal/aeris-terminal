@@ -11,7 +11,10 @@ use axiusflow_application::{
     MarketGeneration, ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate,
 };
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
-use axiusflow_desktop_provider_runtime::SessionGeneration;
+use axiusflow_local_engine_protocol::{
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
+    SearchProviderInstruments, SelectProviderInstrument,
+};
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::DomFrame;
 use axiusflow_market_protocol_adapter::{
@@ -21,12 +24,9 @@ use axiusflow_market_protocol_adapter::{
 };
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
-use axiusflow_rithmic_protocol_adapter::{
-    RithmicCatalogEvent, RithmicInstrumentSelection, RithmicSymbolSearch,
-};
 use std::{
     collections::VecDeque,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -47,6 +47,17 @@ impl std::fmt::Display for MailboxDisconnected {
 }
 
 impl std::error::Error for MailboxDisconnected {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderCommandUnavailable;
+
+impl std::fmt::Display for ProviderCommandUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("provider command mailbox is unavailable")
+    }
+}
+
+impl std::error::Error for ProviderCommandUnavailable {}
 
 const SUBSCRIPTION_ID: &str = "desktop_fixture_market_bars";
 const INITIAL_BAR_COUNT: usize = 576;
@@ -95,7 +106,7 @@ pub struct MarketWorkerBootstrap {
 }
 
 pub enum MarketWorkerStartup {
-    Shell(crate::rithmic_shell::RithmicShellState),
+    Rithmic,
     Loading(Box<CoinbaseWorkerStartup>),
     Ready(Box<MarketWorkerBootstrap>),
 }
@@ -104,6 +115,21 @@ pub struct CoinbaseWorkerStartup {
     pub coinbase_product: CoinbaseSpotProduct,
     pub subscription_id: String,
     pub worker_label: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderCatalogCommand {
+    Search,
+    Selection,
+}
+
+pub enum ProviderCatalogEvent {
+    SearchCompleted(ProviderInstrumentSearchResult),
+    SelectionInstalled(InstallProviderInstrument),
+    CommandRejected {
+        rejection: ProviderCatalogRejected,
+        command: ProviderCatalogCommand,
+    },
 }
 
 pub struct MarketWorkerPublication {
@@ -129,7 +155,7 @@ pub enum MarketWorkerMessage {
         state: FeedConnectionState,
         message: String,
     },
-    RithmicCatalog(RithmicCatalogEvent),
+    ProviderCatalog(ProviderCatalogEvent),
     RithmicHistory {
         selection_generation: NonZeroUsize,
         series_generation: NonZeroUsize,
@@ -328,7 +354,7 @@ impl MarketWorkerSender {
                 self.send_connection(queue, message);
                 None
             }
-            message @ MarketWorkerMessage::RithmicCatalog(_) => {
+            message @ MarketWorkerMessage::ProviderCatalog(_) => {
                 self.send_rithmic_catalog(queue, message);
                 None
             }
@@ -393,7 +419,7 @@ impl MarketWorkerSender {
     ) {
         if let Some(index) = queue
             .iter()
-            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicCatalog(_)))
+            .position(|queued| matches!(queued, MarketWorkerMessage::ProviderCatalog(_)))
         {
             queue[index] = message;
             return;
@@ -663,7 +689,7 @@ impl MarketWorkerSender {
         }
     }
 
-    fn record_coalesced_generation(&self, generation: SessionGeneration, count: u64) {
+    fn record_coalesced_generation(&self, generation: NonZeroU64, count: u64) {
         self.mailbox
             .coalesced_updates
             .lock()
@@ -726,7 +752,7 @@ fn rithmic_message_generation(message: &MarketWorkerMessage) -> Option<(usize, u
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CoalescedUiUpdates {
-    pub generation: SessionGeneration,
+    pub generation: NonZeroU64,
     pub count: u64,
 }
 
@@ -743,7 +769,7 @@ impl GenerationCoalescingQueue {
         }
     }
 
-    fn record(&mut self, generation: SessionGeneration, count: u64) {
+    fn record(&mut self, generation: NonZeroU64, count: u64) {
         if let Some(existing) = self
             .counts
             .iter_mut()
@@ -761,19 +787,17 @@ impl GenerationCoalescingQueue {
     }
 }
 
-fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<SessionGeneration> {
+fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<NonZeroU64> {
     match message {
         MarketWorkerMessage::Update(publication) => publication
             .ui_diagnostics
             .as_ref()
             .map(PendingUiDiagnostics::generation),
-        MarketWorkerMessage::Diagnostics(snapshot) => {
-            snapshot.session_generation.map(SessionGeneration::new)
-        }
+        MarketWorkerMessage::Diagnostics(snapshot) => snapshot.session_generation,
         MarketWorkerMessage::Recovery { .. }
         | MarketWorkerMessage::State { .. }
         | MarketWorkerMessage::Connection { .. }
-        | MarketWorkerMessage::RithmicCatalog(_)
+        | MarketWorkerMessage::ProviderCatalog(_)
         | MarketWorkerMessage::RithmicHistory { .. }
         | MarketWorkerMessage::RithmicLive { .. }
         | MarketWorkerMessage::RithmicDom(_)
@@ -889,8 +913,8 @@ fn mailbox_overflow_state() -> MarketWorkerMessage {
 
 pub enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
-    RithmicSearch(RithmicSymbolSearch),
-    RithmicSelect(RithmicInstrumentSelection),
+    ProviderSearch(SearchProviderInstruments),
+    ProviderSelect(SelectProviderInstrument),
     RithmicHistory(RithmicSeriesRequest),
     CoinbaseSelect(Box<CoinbaseSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
@@ -912,7 +936,7 @@ pub struct ChartViewportUpdate {
 }
 
 pub struct PendingUiDiagnostics {
-    generation: SessionGeneration,
+    generation: NonZeroU64,
     origin: Instant,
     ui_enqueue_nanos: i64,
     frame_submit_nanos: i64,
@@ -920,7 +944,7 @@ pub struct PendingUiDiagnostics {
 
 impl PendingUiDiagnostics {
     #[must_use]
-    pub fn new(generation: SessionGeneration) -> Self {
+    pub fn new(generation: NonZeroU64) -> Self {
         Self {
             generation,
             origin: Instant::now(),
@@ -948,7 +972,7 @@ impl PendingUiDiagnostics {
     }
 
     #[must_use]
-    pub const fn generation(&self) -> SessionGeneration {
+    pub const fn generation(&self) -> NonZeroU64 {
         self.generation
     }
 
@@ -959,13 +983,13 @@ impl PendingUiDiagnostics {
 
 pub enum UiDiagnosticsFeedback {
     Presented {
-        generation: SessionGeneration,
+        generation: NonZeroU64,
         ui_enqueue_nanos: i64,
         frame_submit_nanos: i64,
         present_nanos: i64,
     },
     Coalesced {
-        generation: SessionGeneration,
+        generation: NonZeroU64,
     },
 }
 
@@ -1078,7 +1102,7 @@ pub fn ui_diagnostics_channel(
     )
 }
 
-fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> SessionGeneration {
+fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> NonZeroU64 {
     match feedback {
         UiDiagnosticsFeedback::Presented { generation, .. }
         | UiDiagnosticsFeedback::Coalesced { generation } => *generation,
@@ -1267,16 +1291,16 @@ impl MarketDataWorker {
                 }
                 TrySendError::Full(
                     MarketWorkerCommand::Shutdown
-                    | MarketWorkerCommand::RithmicSearch(_)
-                    | MarketWorkerCommand::RithmicSelect(_)
+                    | MarketWorkerCommand::ProviderSearch(_)
+                    | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::RithmicHistory(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
                     | MarketWorkerCommand::ChartViewport(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
-                    | MarketWorkerCommand::RithmicSearch(_)
-                    | MarketWorkerCommand::RithmicSelect(_)
+                    | MarketWorkerCommand::ProviderSearch(_)
+                    | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::RithmicHistory(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
                     | MarketWorkerCommand::ChartViewport(_),
@@ -1289,53 +1313,33 @@ impl MarketDataWorker {
     /// Enqueues a Rithmic symbol search without blocking.
     ///
     /// # Errors
-    /// Returns the search when the command mailbox is full or disconnected.
-    pub fn try_search_rithmic(
+    /// Returns an error when the command mailbox is full or disconnected.
+    pub fn try_search_provider(
         &self,
-        search: RithmicSymbolSearch,
-    ) -> Result<(), TrySendError<RithmicSymbolSearch>> {
+        search: SearchProviderInstruments,
+    ) -> Result<(), ProviderCommandUnavailable> {
         let Some(commands) = self.commands.as_ref() else {
-            return Err(TrySendError::Disconnected(search));
+            return Err(ProviderCommandUnavailable);
         };
         commands
-            .try_send(MarketWorkerCommand::RithmicSearch(search))
-            .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::RithmicSearch(search)) => {
-                    TrySendError::Full(search)
-                }
-                TrySendError::Disconnected(MarketWorkerCommand::RithmicSearch(search)) => {
-                    TrySendError::Disconnected(search)
-                }
-                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    unreachable!("Rithmic search send errors retain the search command")
-                }
-            })
+            .try_send(MarketWorkerCommand::ProviderSearch(search))
+            .map_err(|_| ProviderCommandUnavailable)
     }
 
     /// Enqueues a Rithmic selection without blocking.
     ///
     /// # Errors
-    /// Returns the selection when the command mailbox is full or disconnected.
-    pub fn try_select_rithmic(
+    /// Returns an error when the command mailbox is full or disconnected.
+    pub fn try_select_provider(
         &self,
-        selection: RithmicInstrumentSelection,
-    ) -> Result<(), TrySendError<RithmicInstrumentSelection>> {
+        selection: SelectProviderInstrument,
+    ) -> Result<(), ProviderCommandUnavailable> {
         let Some(commands) = self.commands.as_ref() else {
-            return Err(TrySendError::Disconnected(selection));
+            return Err(ProviderCommandUnavailable);
         };
         commands
-            .try_send(MarketWorkerCommand::RithmicSelect(selection))
-            .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::RithmicSelect(selection)) => {
-                    TrySendError::Full(selection)
-                }
-                TrySendError::Disconnected(MarketWorkerCommand::RithmicSelect(selection)) => {
-                    TrySendError::Disconnected(selection)
-                }
-                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    unreachable!("Rithmic selection send errors retain the selection command")
-                }
-            })
+            .try_send(MarketWorkerCommand::ProviderSelect(selection))
+            .map_err(|_| ProviderCommandUnavailable)
     }
 
     /// Enqueues a Rithmic history request without blocking.
@@ -1665,8 +1669,8 @@ fn run_worker(
                     return;
                 }
             }
-            MarketWorkerCommand::RithmicSearch(_)
-            | MarketWorkerCommand::RithmicSelect(_)
+            MarketWorkerCommand::ProviderSearch(_)
+            | MarketWorkerCommand::ProviderSelect(_)
             | MarketWorkerCommand::RithmicHistory(_)
             | MarketWorkerCommand::CoinbaseSelect(_)
             | MarketWorkerCommand::ChartViewport(_) => {}
@@ -1680,17 +1684,17 @@ mod tests {
     use super::{
         ChartState, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
         MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-        UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
+        ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
+        ui_diagnostics_channel,
     };
     use axiusflow_application::ReplayStreamUpdate;
-    use axiusflow_desktop_provider_runtime::SessionGeneration;
+    use axiusflow_local_engine_protocol::{
+        ProviderCatalogRejected, ProviderCatalogRejectionReason, SearchProviderInstruments,
+        SelectProviderInstrument,
+    };
     use axiusflow_market_data::DomFrame;
     use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
-    use axiusflow_rithmic_protocol_adapter::{
-        RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
-        RithmicReadOnlySubscription, RithmicSymbolSearch, SearchPattern,
-    };
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
@@ -1852,7 +1856,7 @@ mod tests {
         assert_eq!(
             sender.try_take_coalesced_update(),
             Some(super::CoalescedUiUpdates {
-                generation: SessionGeneration::new(NonZeroU64::MIN),
+                generation: NonZeroU64::MIN,
                 count: 1,
             })
         );
@@ -1868,8 +1872,8 @@ mod tests {
                 wake_counter.fetch_add(1, Ordering::AcqRel);
             }),
         );
-        let retired_generation = SessionGeneration::new(NonZeroU64::MIN);
-        let generation = SessionGeneration::new(NonZeroU64::new(2).expect("generation is nonzero"));
+        let retired_generation = NonZeroU64::MIN;
+        let generation = NonZeroU64::new(2).expect("generation is nonzero");
         assert!(
             sender
                 .send(UiDiagnosticsFeedback::Coalesced {
@@ -1992,7 +1996,7 @@ mod tests {
     #[test]
     fn mailbox_overflow_counts_discarded_market_publications_by_generation() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let generation = NonZeroU64::MIN;
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         let previous_sequence = bootstrap.snapshot.stream().last_sequence();
@@ -2038,7 +2042,7 @@ mod tests {
     fn diagnostics_never_reduce_market_mailbox_capacity() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
-        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let generation = NonZeroU64::MIN;
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         let previous_sequence = bootstrap.snapshot.stream().last_sequence();
@@ -2097,7 +2101,7 @@ mod tests {
     #[test]
     fn non_delta_overflow_counts_a_discarded_covering_snapshot() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let generation = NonZeroU64::MIN;
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         assert!(
@@ -2336,14 +2340,19 @@ mod tests {
     #[test]
     fn latest_rithmic_catalog_result_is_conflated_without_displacing_market_state() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let generation = SessionGeneration::new(NonZeroU64::MIN);
+        let generation = NonZeroU64::MIN;
         assert!(
             sender
-                .send(MarketWorkerMessage::RithmicCatalog(
-                    RithmicCatalogEvent::CommandRejected {
-                        session_generation: Some(generation),
-                        command_generation: NonZeroUsize::MIN,
-                        reason: RithmicCatalogRejection::SupersededSearch,
+                .send(MarketWorkerMessage::ProviderCatalog(
+                    ProviderCatalogEvent::CommandRejected {
+                        rejection: ProviderCatalogRejected {
+                            consumer_id: 1,
+                            provider: "rithmic".to_string(),
+                            provider_generation: Some(generation.get()),
+                            command_generation: 1,
+                            reason: ProviderCatalogRejectionReason::SupersededSearch as i32,
+                        },
+                        command: ProviderCatalogCommand::Search,
                     },
                 ))
                 .is_ok()
@@ -2351,11 +2360,16 @@ mod tests {
         let latest_generation = NonZeroUsize::new(2).expect("generation is nonzero");
         assert!(
             sender
-                .send(MarketWorkerMessage::RithmicCatalog(
-                    RithmicCatalogEvent::CommandRejected {
-                        session_generation: Some(generation),
-                        command_generation: latest_generation,
-                        reason: RithmicCatalogRejection::InstrumentUnavailable,
+                .send(MarketWorkerMessage::ProviderCatalog(
+                    ProviderCatalogEvent::CommandRejected {
+                        rejection: ProviderCatalogRejected {
+                            consumer_id: 1,
+                            provider: "rithmic".to_string(),
+                            provider_generation: Some(generation.get()),
+                            command_generation: latest_generation.get() as u64,
+                            reason: ProviderCatalogRejectionReason::InstrumentUnavailable as i32,
+                        },
+                        command: ProviderCatalogCommand::Selection,
                     },
                 ))
                 .is_ok()
@@ -2364,13 +2378,17 @@ mod tests {
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RithmicCatalog(
-                RithmicCatalogEvent::CommandRejected {
-                    command_generation,
-                    reason: RithmicCatalogRejection::InstrumentUnavailable,
-                    ..
+            [MarketWorkerMessage::ProviderCatalog(
+                ProviderCatalogEvent::CommandRejected {
+                    rejection: ProviderCatalogRejected {
+                        command_generation,
+                        reason,
+                        ..
+                    },
+                    command: ProviderCatalogCommand::Selection,
                 }
-            )] if *command_generation == latest_generation
+            )] if *command_generation == latest_generation.get() as u64
+                && *reason == ProviderCatalogRejectionReason::InstrumentUnavailable as i32
         ));
 
         assert!(
@@ -2383,11 +2401,16 @@ mod tests {
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::RithmicCatalog(
-                    RithmicCatalogEvent::CommandRejected {
-                        session_generation: Some(generation),
-                        command_generation: latest_generation,
-                        reason: RithmicCatalogRejection::SubscriptionRejected,
+                .send(MarketWorkerMessage::ProviderCatalog(
+                    ProviderCatalogEvent::CommandRejected {
+                        rejection: ProviderCatalogRejected {
+                            consumer_id: 1,
+                            provider: "rithmic".to_string(),
+                            provider_generation: Some(generation.get()),
+                            command_generation: latest_generation.get() as u64,
+                            reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
+                        },
+                        command: ProviderCatalogCommand::Selection,
                     },
                 ))
                 .is_ok()
@@ -2518,31 +2541,27 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
-        let search = RithmicSymbolSearch::try_new(
-            NonZeroUsize::MIN,
-            "ES",
-            None,
-            None,
-            None,
-            SearchPattern::Contains,
-            NonZeroUsize::new(16).expect("result bound is nonzero"),
-        )
-        .expect("search validates");
-        let selection = RithmicInstrumentSelection::try_new(
-            NonZeroUsize::MIN,
-            NonZeroUsize::MIN,
-            "ESU6",
-            "CME",
-            "rithmic-test-cme",
-            RithmicReadOnlySubscription::try_new(true, true, false)
-                .expect("read-only subscription validates"),
-        )
-        .expect("selection validates");
+        let search = SearchProviderInstruments {
+            consumer_id: 0,
+            search_generation: 1,
+            provider: "rithmic".to_string(),
+            query: "ES".to_string(),
+            maximum_results: 16,
+        };
+        let selection = SelectProviderInstrument {
+            consumer_id: 0,
+            selection_generation: 1,
+            search_generation: 1,
+            provider: "rithmic".to_string(),
+            symbol: "ESU6".to_string(),
+            exchange: "CME".to_string(),
+            entitlement_id: "rithmic-test-cme".to_string(),
+        };
         worker
-            .try_search_rithmic(search)
+            .try_search_provider(search)
             .expect("search enters the bounded channel");
         worker
-            .try_select_rithmic(selection)
+            .try_select_provider(selection)
             .expect("selection enters the bounded channel");
         worker
             .try_request_rithmic_history(crate::rithmic_series::RithmicSeriesRequest {
@@ -2553,11 +2572,11 @@ mod tests {
             .expect("history enters the bounded channel");
         assert!(matches!(
             command_rx.recv(),
-            Ok(MarketWorkerCommand::RithmicSearch(_))
+            Ok(MarketWorkerCommand::ProviderSearch(_))
         ));
         assert!(matches!(
             command_rx.recv(),
-            Ok(MarketWorkerCommand::RithmicSelect(_))
+            Ok(MarketWorkerCommand::ProviderSelect(_))
         ));
         assert!(matches!(
             command_rx.recv(),

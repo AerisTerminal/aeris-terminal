@@ -713,7 +713,6 @@ dependencies = [
  "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
- "axiusflow_rithmic_protocol_adapter",
  "axiusflow_terminal_ui",
  "getrandom 0.4.3",
  "gpui",
@@ -739,14 +738,12 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_application",
  "axiusflow_coinbase_market_adapter",
- "axiusflow_desktop_provider_runtime",
  "axiusflow_instruments",
  "axiusflow_local_engine_client",
  "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
  "axiusflow_observability",
- "axiusflow_rithmic_protocol_adapter",
  "axiusflow_terminal_ui",
  "getrandom 0.4.3",
 ]

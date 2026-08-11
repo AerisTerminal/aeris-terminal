@@ -9,14 +9,12 @@ publish.workspace = true
 [dependencies]
 axiusflow_application = { path = "../application" }
 axiusflow_coinbase_market_adapter = { path = "../adapters/coinbase_market" }
-axiusflow_desktop_provider_runtime = { path = "../desktop_provider_runtime" }
 axiusflow_instruments = { path = "../domain/instruments" }
 axiusflow_local_engine_client = { path = "../local_engine_client" }
 axiusflow_local_engine_protocol = { path = "../local_engine_protocol" }
 axiusflow_market_data = { path = "../domain/market_data" }
 axiusflow_market_protocol_adapter = { path = "../adapters/market_protocol" }
 axiusflow_observability = { path = "../observability" }
-axiusflow_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 axiusflow_terminal_ui = { path = "../ui/terminal_ui", default-features = false }
 getrandom.workspace = true
 

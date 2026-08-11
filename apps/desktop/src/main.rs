@@ -19,13 +19,12 @@ use axiusflow_chart_integration::{
 };
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
+use axiusflow_local_engine_protocol::{
+    InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
+    SearchProviderInstruments, SelectProviderInstrument,
+};
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
-use axiusflow_rithmic_protocol_adapter::{
-    RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
-    RithmicProviderCommandError as RithmicCommandError, RithmicReadOnlySubscription,
-    RithmicSymbolSearch, SearchPattern,
-};
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 #[cfg(target_os = "windows")]
 use gpui::WindowControlArea;
@@ -48,7 +47,7 @@ use gpui_platform::application;
 use resident_market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-    UiDiagnosticsFeedback,
+    ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
 use std::{
     borrow::Cow,
@@ -184,9 +183,7 @@ fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> Chart
     }
 }
 
-fn default_rithmic_contract_index(
-    results: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
-) -> Option<usize> {
+fn default_rithmic_contract_index(results: &[ProviderInstrumentSummary]) -> Option<usize> {
     results
         .iter()
         .enumerate()
@@ -201,7 +198,7 @@ fn default_rithmic_contract_index(
 }
 
 fn reconnect_contract_index(
-    results: &[axiusflow_rithmic_protocol_adapter::SymbolSearchResult],
+    results: &[ProviderInstrumentSummary],
     target: &RithmicReconnectTarget,
 ) -> Option<usize> {
     results
@@ -350,10 +347,6 @@ impl RithmicSessionRetirement {
             Self::None | Self::Offline | Self::Recovering => None,
         }
     }
-}
-
-fn rithmic_production_subscription() -> Result<RithmicReadOnlySubscription, RithmicCommandError> {
-    RithmicReadOnlySubscription::try_new(false, true, false)
 }
 
 const fn should_apply_rithmic_worker_stop(
@@ -680,7 +673,9 @@ fn terminal_startup_state(
     cx: &mut Context<TerminalApp>,
 ) -> TerminalStartupState {
     match startup {
-        MarketWorkerStartup::Shell(shell) => {
+        MarketWorkerStartup::Rithmic => {
+            let shell = rithmic_shell::RithmicShellState::local()
+                .expect("fixed Rithmic Test profile validates");
             let profile = shell.profile_label();
             let connection = shell.connection();
             let message = shell.message().to_string();
@@ -1305,7 +1300,7 @@ impl TerminalApp {
             MarketWorkerMessage::Connection { state, message } => {
                 self.apply_connection_state(state, message, cx);
             }
-            MarketWorkerMessage::RithmicCatalog(event) => {
+            MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_rithmic_catalog(event, cx);
             }
             MarketWorkerMessage::RithmicHistory {
@@ -1551,23 +1546,15 @@ impl TerminalApp {
                 return false;
             }
         };
-        let search = RithmicSymbolSearch::try_new(
-            request.request_id,
-            request.query,
-            None,
-            None,
-            None,
-            SearchPattern::Equals,
-            std::num::NonZeroUsize::new(rithmic_shell::MAXIMUM_SYMBOL_RESULTS)
-                .unwrap_or(std::num::NonZeroUsize::MIN),
-        );
-        let Ok(search) = search else {
-            self.symbol_browser.reject_search(request.request_id);
-            self.symbol_message = "Symbol search request is invalid".to_string();
-            cx.notify();
-            return false;
+        let search = SearchProviderInstruments {
+            consumer_id: 0,
+            search_generation: u64::try_from(request.request_id.get()).unwrap_or(u64::MAX),
+            provider: "rithmic".to_string(),
+            query: request.query,
+            maximum_results: u32::try_from(rithmic_shell::MAXIMUM_SYMBOL_RESULTS)
+                .unwrap_or(u32::MAX),
         };
-        let dispatched = if self.market_worker.try_search_rithmic(search).is_ok() {
+        let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
             self.symbol_message = "Searching Rithmic Test symbols".to_string();
             true
         } else {
@@ -1641,23 +1628,16 @@ impl TerminalApp {
             "rithmic-test:{}:{}",
             selection.instrument.exchange, selection.instrument.symbol
         );
-        let request = rithmic_production_subscription().and_then(|subscription| {
-            RithmicInstrumentSelection::try_new(
-                selection.generation,
-                selection.search_generation,
-                selection.instrument.symbol.clone(),
-                selection.instrument.exchange.clone(),
-                entitlement_id,
-                subscription,
-            )
-        });
-        let Ok(request) = request else {
-            self.symbol_browser.reject_selection(selection.generation);
-            self.symbol_message = "Symbol selection is invalid".to_string();
-            cx.notify();
-            return false;
+        let request = SelectProviderInstrument {
+            consumer_id: 0,
+            selection_generation: u64::try_from(selection.generation.get()).unwrap_or(u64::MAX),
+            search_generation: u64::try_from(selection.search_generation.get()).unwrap_or(u64::MAX),
+            provider: "rithmic".to_string(),
+            symbol: selection.instrument.symbol.clone(),
+            exchange: selection.instrument.exchange.clone(),
+            entitlement_id,
         };
-        let dispatched = if self.market_worker.try_select_rithmic(request).is_ok() {
+        let dispatched = if self.market_worker.try_select_provider(request).is_ok() {
             self.symbol_selection_pending = true;
             self.dom
                 .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
@@ -1675,17 +1655,16 @@ impl TerminalApp {
         dispatched
     }
 
-    fn apply_rithmic_catalog(&mut self, event: RithmicCatalogEvent, cx: &mut Context<Self>) {
+    fn apply_rithmic_catalog(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
         match event {
-            RithmicCatalogEvent::SearchCompleted {
-                search_generation,
-                symbols,
-                ..
-            } => {
-                let result_count = symbols.results.len();
+            ProviderCatalogEvent::SearchCompleted(result) => {
+                let Some(search_generation) = usize_generation(result.search_generation) else {
+                    return;
+                };
+                let result_count = result.instruments.len();
                 let applied = self
                     .symbol_browser
-                    .apply_results(search_generation, symbols.results);
+                    .apply_results(search_generation, result.instruments);
                 if applied {
                     self.symbol_message = format!("{result_count} matching symbols");
                 }
@@ -1711,15 +1690,17 @@ impl TerminalApp {
                     }
                 }
             }
-            event @ RithmicCatalogEvent::SelectionInstalled { .. } => {
-                self.apply_rithmic_selection(event, cx);
+            ProviderCatalogEvent::SelectionInstalled(instrument) => {
+                self.apply_rithmic_selection(&instrument, cx);
             }
-            RithmicCatalogEvent::CommandRejected {
-                command_generation,
-                reason,
-                ..
-            } => {
-                let (rejected, selection_rejected) = match catalog_rejection_domain(reason) {
+            ProviderCatalogEvent::CommandRejected { rejection, command } => {
+                let Some(command_generation) = usize_generation(rejection.command_generation)
+                else {
+                    return;
+                };
+                let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
+                    .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
+                let (rejected, selection_rejected) = match catalog_rejection_domain(command) {
                     CatalogCommandDomain::Search => {
                         (self.symbol_browser.reject_search(command_generation), false)
                     }
@@ -1732,7 +1713,7 @@ impl TerminalApp {
                     if selection_rejected {
                         self.symbol_selection_pending = false;
                     }
-                    self.symbol_message = catalog_rejection_message(reason).to_string();
+                    self.symbol_message = catalog_rejection_message(reason, command).to_string();
                     if let Some(target) = self.rithmic_reconnect.target().cloned() {
                         self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
                         self.retire_rithmic_session(cx);
@@ -1743,14 +1724,13 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn apply_rithmic_selection(&mut self, event: RithmicCatalogEvent, cx: &mut Context<Self>) {
-        let RithmicCatalogEvent::SelectionInstalled {
-            selection_generation,
-            instrument,
-            ..
-        } = event
-        else {
-            unreachable!("selection handler receives only installed selections");
+    fn apply_rithmic_selection(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection_generation) = usize_generation(instrument.selection_generation) else {
+            return;
         };
         if !self.symbol_browser.confirm_selection(selection_generation) {
             return;
@@ -2806,22 +2786,30 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
     }
 }
 
-fn catalog_rejection_message(reason: RithmicCatalogRejection) -> &'static str {
+fn catalog_rejection_message(
+    reason: ProviderCatalogRejectionReason,
+    command: ProviderCatalogCommand,
+) -> &'static str {
     match reason {
-        RithmicCatalogRejection::SearchRejected => "Rithmic Test rejected the symbol search",
-        RithmicCatalogRejection::SupersededSearch => "A newer symbol search replaced this one",
-        RithmicCatalogRejection::InstrumentUnavailable => {
+        ProviderCatalogRejectionReason::SearchRejected => "Rithmic Test rejected the symbol search",
+        ProviderCatalogRejectionReason::SupersededSearch => {
+            "A newer symbol search replaced this one"
+        }
+        ProviderCatalogRejectionReason::InstrumentUnavailable => {
             "The selected symbol is no longer available"
         }
-        RithmicCatalogRejection::SubscriptionRejected => {
+        ProviderCatalogRejectionReason::SubscriptionRejected => {
             "Rithmic Test rejected the market subscription"
         }
-        RithmicCatalogRejection::SearchDispatchUnavailable => {
+        ProviderCatalogRejectionReason::DispatchUnavailable
+            if command == ProviderCatalogCommand::Search =>
+        {
             "The Rithmic search could not be scheduled"
         }
-        RithmicCatalogRejection::SelectionDispatchUnavailable => {
+        ProviderCatalogRejectionReason::DispatchUnavailable => {
             "The Rithmic selection could not be scheduled"
         }
+        ProviderCatalogRejectionReason::Unspecified => "The Rithmic catalog request failed",
     }
 }
 
@@ -2831,15 +2819,17 @@ enum CatalogCommandDomain {
     Selection,
 }
 
-const fn catalog_rejection_domain(reason: RithmicCatalogRejection) -> CatalogCommandDomain {
-    match reason {
-        RithmicCatalogRejection::SearchRejected
-        | RithmicCatalogRejection::SupersededSearch
-        | RithmicCatalogRejection::SearchDispatchUnavailable => CatalogCommandDomain::Search,
-        RithmicCatalogRejection::InstrumentUnavailable
-        | RithmicCatalogRejection::SubscriptionRejected
-        | RithmicCatalogRejection::SelectionDispatchUnavailable => CatalogCommandDomain::Selection,
+const fn catalog_rejection_domain(command: ProviderCatalogCommand) -> CatalogCommandDomain {
+    match command {
+        ProviderCatalogCommand::Search => CatalogCommandDomain::Search,
+        ProviderCatalogCommand::Selection => CatalogCommandDomain::Selection,
     }
+}
+
+fn usize_generation(generation: u64) -> Option<std::num::NonZeroUsize> {
+    usize::try_from(generation)
+        .ok()
+        .and_then(std::num::NonZeroUsize::new)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3889,7 +3879,7 @@ fn symbol_input_for_startup(
     cx: &mut App,
 ) -> Entity<InputState> {
     match startup {
-        MarketWorkerStartup::Shell(_) => {
+        MarketWorkerStartup::Rithmic => {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
         }
         MarketWorkerStartup::Loading(_) | MarketWorkerStartup::Ready(_) => {
@@ -4090,19 +4080,17 @@ fn main() {
 mod tests {
     use super::{
         CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls,
-        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
         RithmicSessionRetirement, SidePanel, TerminalProvider, WindowCommand,
         bounded_status_detail, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
         connection_presentation, default_rithmic_contract_index, fullscreen_escape_command,
         gpui_color, instrument_selector_label, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, rithmic_production_subscription, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop,
+        reconnect_contract_index, rithmic_ready_action, series_selector_label,
+        should_apply_rithmic_worker_stop,
     };
     use axiusflow_design_system::ThemeColor;
+    use axiusflow_local_engine_protocol::ProviderInstrumentSummary;
     use axiusflow_observability::FeedConnectionState;
-    use axiusflow_rithmic_protocol_adapter::{
-        RithmicCatalogRejection, RithmicReadOnlySubscription, SymbolSearchResult,
-    };
     #[test]
     fn escape_exits_fullscreen_without_stealing_regular_escape() {
         assert_eq!(
@@ -4122,26 +4110,14 @@ mod tests {
 
     #[test]
     fn catalog_rejections_preserve_search_and_selection_generation_domains() {
-        for reason in [
-            RithmicCatalogRejection::SearchRejected,
-            RithmicCatalogRejection::SupersededSearch,
-            RithmicCatalogRejection::SearchDispatchUnavailable,
-        ] {
-            assert_eq!(
-                catalog_rejection_domain(reason),
-                CatalogCommandDomain::Search
-            );
-        }
-        for reason in [
-            RithmicCatalogRejection::InstrumentUnavailable,
-            RithmicCatalogRejection::SubscriptionRejected,
-            RithmicCatalogRejection::SelectionDispatchUnavailable,
-        ] {
-            assert_eq!(
-                catalog_rejection_domain(reason),
-                CatalogCommandDomain::Selection
-            );
-        }
+        assert_eq!(
+            catalog_rejection_domain(ProviderCatalogCommand::Search),
+            CatalogCommandDomain::Search
+        );
+        assert_eq!(
+            catalog_rejection_domain(ProviderCatalogCommand::Selection),
+            CatalogCommandDomain::Selection
+        );
     }
 
     #[test]
@@ -4158,7 +4134,7 @@ mod tests {
 
     #[test]
     fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
-        let result = |symbol: &str, expiration: &str| SymbolSearchResult {
+        let result = |symbol: &str, expiration: &str| ProviderInstrumentSummary {
             symbol: symbol.to_string(),
             exchange: "CME-Delayed".to_string(),
             name: None,
@@ -4171,7 +4147,7 @@ mod tests {
             result("MNQU6-MNQZ6", "20260918"),
             result("MNQZ6", "20261218"),
             result("MNQU6", "20260918"),
-            SymbolSearchResult {
+            ProviderInstrumentSummary {
                 symbol: "NQ".to_string(),
                 exchange: "CME-Delayed".to_string(),
                 name: None,
@@ -4185,7 +4161,7 @@ mod tests {
 
     #[test]
     fn reconnect_contract_requires_the_exact_symbol_and_exchange() {
-        let result = |exchange: &str| SymbolSearchResult {
+        let result = |exchange: &str| ProviderInstrumentSummary {
             symbol: "MNQU6".to_string(),
             exchange: exchange.to_string(),
             name: None,
@@ -4276,18 +4252,6 @@ mod tests {
             Some(FeedConnectionState::Streaming)
         ));
         assert!(!should_apply_rithmic_worker_stop(true, None));
-    }
-
-    #[test]
-    fn production_rithmic_selection_leaves_trades_and_depth_to_the_resident_engine() {
-        assert_eq!(
-            rithmic_production_subscription(),
-            RithmicReadOnlySubscription::try_new(false, true, false)
-        );
-        assert_ne!(
-            rithmic_production_subscription(),
-            RithmicReadOnlySubscription::try_new(true, true, true)
-        );
     }
 
     #[test]

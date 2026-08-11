@@ -294,8 +294,8 @@ fn process_command(
             retire_endpoint(client, endpoint);
             Ok(())
         }
-        MarketWorkerCommand::RithmicSearch(_)
-        | MarketWorkerCommand::RithmicSelect(_)
+        MarketWorkerCommand::ProviderSearch(_)
+        | MarketWorkerCommand::ProviderSelect(_)
         | MarketWorkerCommand::RithmicHistory(_) => {
             Err("Rithmic commands cannot enter the Coinbase engine client".to_string())
         }

@@ -1,7 +1,4 @@
-use axiusflow_market_data::{
-    ChartAggregation, ChartInterval, RithmicChartAggregation, RithmicTimeUnit,
-};
-use axiusflow_rithmic_protocol_adapter::{RithmicTimeBarResolution, TimeBarType};
+use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,33 +63,6 @@ impl RithmicSeries {
             ChartAggregation::CalendarMonth => Some(30 * 24 * 60 * 60),
             ChartAggregation::Trades(_) => None,
         }
-    }
-
-    /// Resolves the exact provider time-bar resolution.
-    ///
-    /// # Errors
-    /// Returns an error when the series has no exact native history resolution.
-    pub fn resolution(self) -> Result<RithmicTimeBarResolution, String> {
-        if !self.supports_native_history() {
-            return Err(format!(
-                "{} has no exact Rithmic time-bar resolution",
-                self.label()
-            ));
-        }
-        let Some(RithmicChartAggregation::Time { unit, period }) =
-            self.interval().rithmic_aggregation()
-        else {
-            return Err(format!(
-                "{} has no exact Rithmic time-bar resolution",
-                self.label()
-            ));
-        };
-        let bar_type = match unit {
-            RithmicTimeUnit::Minute => TimeBarType::Minute,
-            RithmicTimeUnit::Day => TimeBarType::Daily,
-        };
-        RithmicTimeBarResolution::try_new(self.label(), bar_type, period)
-            .map_err(|_| "Rithmic series is unavailable".to_string())
     }
 }
 

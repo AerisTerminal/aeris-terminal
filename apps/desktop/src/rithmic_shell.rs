@@ -1,11 +1,45 @@
-use axiusflow_rithmic_protocol_adapter::SymbolSearchResult;
+use axiusflow_local_engine_protocol::ProviderInstrumentSummary;
+use axiusflow_observability::{FeedConnectionState, FeedIdentity};
 use std::num::NonZeroUsize;
 
-#[cfg(test)]
-use axiusflow_observability::FeedConnectionState;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RithmicShellState {
+    pub(crate) identity: FeedIdentity,
+    connection: FeedConnectionState,
+    message: String,
+}
 
-#[cfg(test)]
-use axiusflow_desktop_market_runtime::rithmic_shell::RithmicShellState;
+impl RithmicShellState {
+    pub(crate) fn local() -> Result<Self, String> {
+        let identity = FeedIdentity::try_new("rithmic", "RITHMIC_TEST", "Test")
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            identity,
+            connection: FeedConnectionState::Disconnected,
+            message: "Local shell ready; provider login has not started".to_string(),
+        })
+    }
+
+    pub(crate) const fn connection(&self) -> FeedConnectionState {
+        self.connection
+    }
+
+    pub(crate) fn profile_label(&self) -> String {
+        let provider = match self.identity.provider() {
+            "rithmic" => "Rithmic",
+            provider => provider,
+        };
+        let system = match self.identity.system() {
+            "RITHMIC_TEST" => "Rithmic Test",
+            system => system,
+        };
+        format!("{provider} / {system} / {}", self.identity.environment())
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
 
 pub(crate) const MAXIMUM_SYMBOL_QUERY_BYTES: usize = 64;
 pub(crate) const MAXIMUM_SYMBOL_RESULTS: usize = 64;
@@ -20,7 +54,7 @@ pub(crate) struct RithmicSymbolSearchRequest {
 pub(crate) struct RithmicSymbolSelection {
     pub(crate) generation: NonZeroUsize,
     pub(crate) search_generation: NonZeroUsize,
-    pub(crate) instrument: SymbolSearchResult,
+    pub(crate) instrument: ProviderInstrumentSummary,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -28,7 +62,7 @@ pub(crate) struct RithmicSymbolBrowser {
     next_search_id: usize,
     pending_search_id: Option<NonZeroUsize>,
     completed_search_id: Option<NonZeroUsize>,
-    results: Vec<SymbolSearchResult>,
+    results: Vec<ProviderInstrumentSummary>,
     selection_generation: usize,
     pending_selection: Option<RithmicSymbolSelection>,
     selected: Option<RithmicSymbolSelection>,
@@ -59,7 +93,7 @@ impl RithmicSymbolBrowser {
     pub(crate) fn apply_results(
         &mut self,
         request_id: NonZeroUsize,
-        results: Vec<SymbolSearchResult>,
+        results: Vec<ProviderInstrumentSummary>,
     ) -> bool {
         if self.pending_search_id != Some(request_id) || results.len() > MAXIMUM_SYMBOL_RESULTS {
             return false;
@@ -113,7 +147,7 @@ impl RithmicSymbolBrowser {
         self.pending_search_id
     }
 
-    pub(crate) fn results(&self) -> &[SymbolSearchResult] {
+    pub(crate) fn results(&self) -> &[ProviderInstrumentSummary] {
         &self.results
     }
 
@@ -150,8 +184,8 @@ pub(crate) const fn connection_label(connection: FeedConnectionState) -> &'stati
 mod tests {
     use super::*;
 
-    fn result(symbol: &str) -> SymbolSearchResult {
-        SymbolSearchResult {
+    fn result(symbol: &str) -> ProviderInstrumentSummary {
+        ProviderInstrumentSummary {
             symbol: symbol.to_string(),
             exchange: "CME".to_string(),
             name: Some(format!("{symbol} future")),
@@ -169,7 +203,7 @@ mod tests {
         assert_eq!(shell.identity.environment(), "Test");
         assert_eq!(shell.connection(), FeedConnectionState::Disconnected);
         assert_eq!(connection_label(shell.connection()), "Not connected");
-        assert_eq!(shell.profile_label(), "Rithmic · Rithmic Test · Test");
+        assert_eq!(shell.profile_label(), "Rithmic / Rithmic Test / Test");
         assert!(shell.message().contains("login has not started"));
     }
 
