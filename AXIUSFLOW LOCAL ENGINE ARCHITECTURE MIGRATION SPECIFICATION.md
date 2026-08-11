@@ -3716,6 +3716,8 @@ This proves the core architecture is genuinely multi-chart rather than another s
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): the production Coinbase path now has one bounded resident-engine local-history worker using the existing authenticated SQLite catalog, encrypted immutable segments, and native-vault keys under the engine data root. Hot memory is checked first; retained disk bars publish as `Partial/Durable` before provider repair, provider bars publish as `Ready/Pending` before persistence is queued, and persistence success/failure becomes independent `Durable`/`Degraded` state. Deterministic tests prove encrypted restart reads, disk-before-provider ordering, retained-data survival when provider repair fails, memory-before-persistence ordering, and usable provider history under total storage failure. An isolated Windows release run created encrypted segments, then crash-restarted the same root with both processes responsive, retained all prior segments, added the refreshed range, and quarantined nothing. This phase remains unchecked because the general derived-series cache and direct Rithmic/legacy-smoke desktop storage callers are intentionally removed only with their later migration slices.
+
 Move storage/history behind engine.
 
 Ensure:

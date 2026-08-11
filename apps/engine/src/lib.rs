@@ -1,5 +1,6 @@
 //! Resident engine process boundary and authenticated local sessions.
 
+mod local_history;
 mod market_service;
 
 pub use market_service::MarketService;

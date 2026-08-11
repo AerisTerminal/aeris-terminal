@@ -34,8 +34,11 @@ use axiusflow_market_engine::{
 };
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 
+use crate::local_history::LocalHistoryStore;
+
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
+const STORAGE_CAPACITY: usize = 16;
 const REALTIME_CAPACITY: usize = 2_048;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 4_096;
@@ -69,11 +72,22 @@ enum Command {
         ProviderGeneration,
         Result<HistorySnapshot, String>,
     ),
+    LocalHistoryCompleted(
+        BarSeriesKey,
+        ProviderGeneration,
+        Result<Option<Vec<MarketBar>>, String>,
+    ),
+    PersistenceCompleted(BarSeriesKey, ProviderGeneration, Result<(), String>),
 }
 
 struct HistoryRequest {
     series: BarSeriesKey,
     provider_generation: ProviderGeneration,
+}
+
+enum StorageRequest {
+    Read(BarSeriesKey, ProviderGeneration),
+    Persist(BarSeriesKey, ProviderGeneration, Vec<MarketBar>),
 }
 
 struct HistorySnapshot {
@@ -377,9 +391,15 @@ impl MarketService {
     /// # Errors
     /// Returns an error when provider configuration or either bounded worker cannot start.
     pub fn start() -> Result<Self, String> {
+        let storage = LocalHistoryStore::open(
+            &crate::default_engine_state_root()?
+                .join("market-history")
+                .join("coinbase"),
+        );
         Self::start_with_sources(
             LiveCoinbaseHistory::try_new()?,
             Some(Box::new(LiveCoinbaseRealtime::try_new()?)),
+            Some(storage),
         )
     }
 
@@ -394,6 +414,7 @@ impl MarketService {
                 bars,
                 fetches: None,
             },
+            None,
             None,
         )
     }
@@ -414,6 +435,7 @@ impl MarketService {
                 generations: generation_tx,
                 stops: stop_tx,
             })),
+            None,
         )?;
         Ok(FixtureRealtimeHarness {
             service,
@@ -426,16 +448,18 @@ impl MarketService {
 
     #[cfg(test)]
     fn start_with_source(source: impl HistorySource) -> Result<Self, String> {
-        Self::start_with_sources(source, None)
+        Self::start_with_sources(source, None, None)
     }
 
     fn start_with_sources(
         source: impl HistorySource,
         realtime: Option<Box<dyn RealtimeSource>>,
+        storage: Option<Result<LocalHistoryStore, String>>,
     ) -> Result<Self, String> {
         let engine = configured_engine()?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
         let (realtime_tx, realtime_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_control_tx, realtime_control_rx) = mpsc::sync_channel(1);
         let realtime_overflow = Arc::new(AtomicBool::new(false));
@@ -444,6 +468,13 @@ impl MarketService {
         thread::Builder::new()
             .name("axiusflow-coinbase-history".to_string())
             .spawn(move || run_history_worker(source, &history_rx, &completion_tx))
+            .map_err(|error| error.to_string())?;
+        let storage_completion_tx = command_tx.clone();
+        thread::Builder::new()
+            .name("axiusflow-local-history".to_string())
+            .spawn(move || {
+                run_storage_worker(storage, &storage_rx, &storage_completion_tx);
+            })
             .map_err(|error| error.to_string())?;
         if let Some(realtime) = realtime {
             let overflow = Arc::clone(&realtime_overflow);
@@ -466,10 +497,13 @@ impl MarketService {
             .spawn(move || {
                 run_coordinator(
                     engine,
-                    &command_rx,
-                    &history_tx,
-                    &realtime_control_tx,
-                    &realtime_rx,
+                    CoordinatorChannels {
+                        commands: &command_rx,
+                        history: &history_tx,
+                        storage: &storage_tx,
+                        realtime_control: &realtime_control_tx,
+                        realtime: &realtime_rx,
+                    },
                     &realtime_overflow,
                     &realtime_stop,
                 );
@@ -651,6 +685,36 @@ fn run_history_worker(
     }
 }
 
+fn run_storage_worker(
+    mut storage: Option<Result<LocalHistoryStore, String>>,
+    requests: &Receiver<StorageRequest>,
+    completions: &SyncSender<Command>,
+) {
+    while let Ok(request) = requests.recv() {
+        let completion = match request {
+            StorageRequest::Read(series, generation) => {
+                let result = match storage.as_mut() {
+                    Some(Ok(storage)) => storage.read_latest(&series),
+                    Some(Err(error)) => Err(error.clone()),
+                    None => Ok(None),
+                };
+                Command::LocalHistoryCompleted(series, generation, result)
+            }
+            StorageRequest::Persist(series, generation, bars) => {
+                let result = match storage.as_mut() {
+                    Some(Ok(storage)) => storage.persist(&series, &bars),
+                    Some(Err(error)) => Err(error.clone()),
+                    None => Ok(()),
+                };
+                Command::PersistenceCompleted(series, generation, result)
+            }
+        };
+        if completions.send(completion).is_err() {
+            return;
+        }
+    }
+}
+
 fn run_realtime_worker(
     mut source: Box<dyn RealtimeSource>,
     control: &Receiver<RealtimeControl>,
@@ -707,23 +771,31 @@ fn try_emit_realtime(
     }
 }
 
+#[derive(Clone, Copy)]
+struct CoordinatorChannels<'a> {
+    commands: &'a Receiver<Command>,
+    history: &'a SyncSender<HistoryRequest>,
+    storage: &'a SyncSender<StorageRequest>,
+    realtime_control: &'a SyncSender<RealtimeControl>,
+    realtime: &'a Receiver<RealtimeEvent>,
+}
+
 fn run_coordinator(
     engine: MarketEngine,
-    commands: &Receiver<Command>,
-    history: &SyncSender<HistoryRequest>,
-    realtime_control: &SyncSender<RealtimeControl>,
-    realtime: &Receiver<RealtimeEvent>,
+    channels: CoordinatorChannels<'_>,
     realtime_overflow: &AtomicBool,
     realtime_stop: &Arc<AtomicBool>,
 ) {
     let mut coordinator = Coordinator {
         engine,
-        history,
-        realtime_control,
+        history: channels.history,
+        storage: channels.storage,
+        realtime_control: channels.realtime_control,
         realtime_stop,
         attached: BTreeSet::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeSet::new(),
+        local_loaded: BTreeSet::new(),
         events: BTreeMap::new(),
         live: BTreeMap::new(),
         realtime_started: false,
@@ -731,7 +803,7 @@ fn run_coordinator(
     };
     loop {
         for _ in 0..REALTIME_DRAIN_BUDGET {
-            match realtime.try_recv() {
+            match channels.realtime.try_recv() {
                 Ok(event) => coordinator.handle_realtime(event),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
@@ -740,7 +812,7 @@ fn run_coordinator(
             coordinator.realtime_interrupted("Coinbase realtime queue overflowed");
         }
         coordinator.publish_live();
-        match commands.recv_timeout(COORDINATOR_TICK) {
+        match channels.commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) => coordinator.handle_command(command),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -751,11 +823,13 @@ fn run_coordinator(
 struct Coordinator<'a> {
     engine: MarketEngine,
     history: &'a SyncSender<HistoryRequest>,
+    storage: &'a SyncSender<StorageRequest>,
     realtime_control: &'a SyncSender<RealtimeControl>,
     realtime_stop: &'a Arc<AtomicBool>,
     attached: BTreeSet<ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
+    local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
     realtime_started: bool,
@@ -846,6 +920,12 @@ impl Coordinator<'_> {
             Command::HistoryCompleted(series, generation, result) => {
                 self.history_completed(&series, generation, result);
             }
+            Command::LocalHistoryCompleted(series, generation, result) => {
+                self.local_history_completed(&series, generation, result);
+            }
+            Command::PersistenceCompleted(series, generation, result) => {
+                self.persistence_completed(&series, generation, &result);
+            }
         }
     }
 
@@ -924,7 +1004,8 @@ impl Coordinator<'_> {
             self.pending.entry(series.clone()).or_default().push(waiter);
             if first {
                 let generation = self.current_provider_generation();
-                if let Err(detail) = self.enqueue_history(series, generation)
+                if self.enqueue_local_history(series, generation).is_err()
+                    && let Err(detail) = self.enqueue_history(series, generation)
                     && let Some(waiters) = self.pending.remove(series)
                 {
                     fail_waiters(&mut self.events, waiters, detail);
@@ -932,6 +1013,72 @@ impl Coordinator<'_> {
             }
         }
         let _ = reply.send(Ok(()));
+    }
+
+    fn enqueue_local_history(
+        &self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> Result<(), &'static str> {
+        match self
+            .storage
+            .try_send(StorageRequest::Read(series.clone(), generation))
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err("local history capacity is temporarily exhausted"),
+            Err(TrySendError::Disconnected(_)) => Err("local history worker is unavailable"),
+        }
+    }
+
+    fn local_history_completed(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        result: Result<Option<Vec<MarketBar>>, String>,
+    ) {
+        if generation != self.current_provider_generation() {
+            return;
+        }
+        match result {
+            Ok(Some(bars)) if !bars.is_empty() => {
+                let Ok(profile) = coinbase_series_profile(series) else {
+                    return;
+                };
+                if let Ok(publications) = self.engine.install_history(
+                    generation,
+                    series,
+                    profile.price_scale,
+                    profile.quantity_scale,
+                    bars,
+                ) {
+                    self.local_loaded.insert((series.clone(), generation));
+                    for publication in publications {
+                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                            publish_state(
+                                events,
+                                &publication,
+                                SeriesLoadState::Partial,
+                                PersistenceState::Durable,
+                                Some("Showing retained local history while provider repair runs"),
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(Some(_) | None) => {}
+            Err(_) => {
+                self.broadcast_persistence_for(
+                    series,
+                    PersistenceState::Degraded,
+                    Some("Local history is unavailable; provider repair continues"),
+                );
+            }
+        }
+        if let Err(detail) = self.enqueue_history(series, generation)
+            && let Some(waiters) = self.pending.remove(series)
+        {
+            fail_waiters(&mut self.events, waiters, detail);
+        }
     }
 
     fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
@@ -990,7 +1137,15 @@ impl Coordinator<'_> {
             return;
         }
         let Ok(snapshot) = result else {
-            if let Some(waiters) = self.pending.remove(series) {
+            if self.local_loaded.contains(&(series.clone(), generation)) {
+                self.pending.remove(series);
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Durable,
+                    Some("Retained local history is usable; provider repair is unavailable"),
+                );
+            } else if let Some(waiters) = self.pending.remove(series) {
                 fail_waiters(
                     &mut self.events,
                     waiters,
@@ -1005,6 +1160,9 @@ impl Coordinator<'_> {
             return;
         };
         let bars = snapshot.bars;
+        if self.local_loaded.remove(&(series.clone(), generation)) {
+            self.engine.invalidate_series(series);
+        }
         let installed = self.engine.install_history(
             generation,
             series,
@@ -1023,7 +1181,27 @@ impl Coordinator<'_> {
         };
         for publication in publications {
             if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                publish_ready(events, &publication);
+                publish_state(
+                    events,
+                    &publication,
+                    SeriesLoadState::Ready,
+                    PersistenceState::Pending,
+                    None,
+                );
+            }
+        }
+        match self.storage.try_send(StorageRequest::Persist(
+            series.clone(),
+            generation,
+            bars.clone(),
+        )) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                self.broadcast_persistence_for(
+                    series,
+                    PersistenceState::Degraded,
+                    Some("Local history persistence is unavailable"),
+                );
             }
         }
         if let Some(live) = self.live.get_mut(series) {
@@ -1044,6 +1222,95 @@ impl Coordinator<'_> {
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
+    }
+
+    fn persistence_completed(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        result: &Result<(), String>,
+    ) {
+        if generation != self.current_provider_generation() {
+            return;
+        }
+        let (state, detail) = if result.is_ok() {
+            (PersistenceState::Durable, None)
+        } else {
+            (
+                PersistenceState::Degraded,
+                Some("Local history persistence is degraded"),
+            )
+        };
+        self.broadcast_persistence_for(series, state, detail);
+    }
+
+    fn broadcast_persistence_for(
+        &mut self,
+        selected: &BarSeriesKey,
+        persistence: PersistenceState,
+        detail: Option<&str>,
+    ) {
+        let load_state = |consumer_id, series: &BarSeriesKey| {
+            if self
+                .live
+                .get(series)
+                .is_some_and(|live| live.connected && live.history_ready)
+            {
+                SeriesLoadState::Live
+            } else if self.engine.latest_publication(consumer_id).is_some() {
+                SeriesLoadState::Ready
+            } else {
+                SeriesLoadState::Resolving
+            }
+        };
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            if series == selected {
+                let state = load_state(*consumer_id, series);
+                events.series_state = Some(series_state_with_persistence(
+                    *consumer_id,
+                    generation,
+                    ipc_series(series),
+                    state,
+                    persistence,
+                    detail.map(str::to_string),
+                ));
+            }
+        }
+    }
+
+    fn broadcast_series_resolution_for(
+        &mut self,
+        selected: &BarSeriesKey,
+        state: SeriesLoadState,
+        persistence: PersistenceState,
+        detail: Option<&str>,
+    ) {
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            if series == selected {
+                events.series_state = Some(series_state_with_persistence(
+                    *consumer_id,
+                    generation,
+                    ipc_series(series),
+                    state,
+                    persistence,
+                    detail.map(str::to_string),
+                ));
+            }
+        }
     }
 
     fn handle_realtime(&mut self, event: RealtimeEvent) {
@@ -1430,14 +1697,31 @@ fn publish_ready(
     events: &mut ConsumerEvents,
     publication: &axiusflow_market_engine::ConsumerPublication,
 ) {
+    publish_state(
+        events,
+        publication,
+        SeriesLoadState::Ready,
+        PersistenceState::NotRequested,
+        None,
+    );
+}
+
+fn publish_state(
+    events: &mut ConsumerEvents,
+    publication: &axiusflow_market_engine::ConsumerPublication,
+    state: SeriesLoadState,
+    persistence: PersistenceState,
+    detail: Option<&str>,
+) {
     let series = ipc_series(&publication.snapshot.series);
     events.snapshot = Some(snapshot_message(publication));
-    events.series_state = Some(series_state(
+    events.series_state = Some(series_state_with_persistence(
         publication.consumer_id,
         publication.generation,
         series,
-        SeriesLoadState::Ready,
-        None,
+        state,
+        persistence,
+        detail.map(str::to_string),
     ));
 }
 
@@ -1470,12 +1754,30 @@ fn series_state(
     state: SeriesLoadState,
     detail: Option<String>,
 ) -> envelope::Payload {
+    series_state_with_persistence(
+        consumer_id,
+        generation,
+        series,
+        state,
+        PersistenceState::NotRequested,
+        detail,
+    )
+}
+
+fn series_state_with_persistence(
+    consumer_id: ConsumerId,
+    generation: GenerationId,
+    series: SeriesKey,
+    state: SeriesLoadState,
+    persistence: PersistenceState,
+    detail: Option<String>,
+) -> envelope::Payload {
     envelope::Payload::SeriesState(SeriesState {
         consumer_id: consumer_id.0.get(),
         generation: generation.0.get(),
         series: Some(series),
         state: state as i32,
-        persistence: PersistenceState::NotRequested as i32,
+        persistence: persistence as i32,
         detail,
     })
 }
@@ -1874,6 +2176,138 @@ mod tests {
         assert!(matches!(
             harness.generations.try_recv(),
             Err(TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn storage_failure_degrades_persistence_without_hiding_provider_history() {
+        let service = MarketService::start_with_sources(
+            FixtureHistory {
+                bars: vec![history_bar()],
+                fetches: None,
+            },
+            None,
+            Some(Err("fixture storage failure".to_string())),
+        )
+        .expect("service starts with degraded storage");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("demand remains usable");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(_)
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.bars.len() == 1
+        ));
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesState(state)
+                    if state.persistence == PersistenceState::Degraded as i32
+            )),
+            envelope::Payload::SeriesState(state)
+                if state.state == SeriesLoadState::Ready as i32
+                    && state.persistence == PersistenceState::Degraded as i32
+        ));
+    }
+
+    #[test]
+    fn retained_history_publishes_before_provider_repair_and_survives_its_failure() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &internal_series(&btc()).expect("series"),
+            )
+            .expect("demand installs");
+        let mut events = BTreeMap::new();
+        events.insert(consumer_id, ConsumerEvents::default());
+        let series = internal_series(&btc()).expect("series");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        let mut coordinator = Coordinator {
+            engine,
+            history: &history_tx,
+            storage: &storage_tx,
+            realtime_control: &realtime_tx,
+            realtime_stop: &realtime_stop,
+            attached: BTreeSet::new(),
+            pending: BTreeMap::from([(
+                series.clone(),
+                vec![DemandWaiter {
+                    consumer_id,
+                    generation: GenerationId(id(1).expect("generation")),
+                }],
+            )]),
+            history_inflight: BTreeSet::new(),
+            local_loaded: BTreeSet::new(),
+            events,
+            live: BTreeMap::new(),
+            realtime_started: false,
+            realtime_connected: false,
+        };
+        let local = MarketBar {
+            close: 99,
+            ..history_bar()
+        };
+        coordinator.local_history_completed(&series, generation, Ok(Some(vec![local])));
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial as i32
+                    && state.persistence == PersistenceState::Durable as i32
+        ));
+        assert!(
+            history_rx.try_recv().is_ok(),
+            "provider repair is queued after local publication"
+        );
+        coordinator.history_completed(&series, generation, Err("provider unavailable".to_string()));
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial as i32
+                    && state.persistence == PersistenceState::Durable as i32
+        ));
+        assert!(coordinator.events[&consumer_id].snapshot.is_some());
+        coordinator.history_completed(
+            &series,
+            generation,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: vec![history_bar()],
+            }),
+        );
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Ready as i32
+                    && state.persistence == PersistenceState::Pending as i32
+        ));
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Persist(ref persisted, current, ref bars))
+                if persisted == &series && current == generation && bars == &[history_bar()]
         ));
     }
 
