@@ -29,8 +29,8 @@ use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
-/// Stable per-user local socket name for protocol version four.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v4";
+/// Stable per-user local socket name for protocol version five.
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v5";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 
@@ -1159,13 +1159,10 @@ fn dispatch_market_command(
                 send_market_fault(connection, "series demand has no identity")?;
                 return Ok(());
             };
-            match market.set_demand(client_id, demand.consumer_id, demand.generation, &series) {
-                Ok(messages) => {
-                    for message in messages {
-                        connection.send(message)?;
-                    }
-                }
-                Err(error) => send_market_fault(connection, error)?,
+            if let Err(error) =
+                market.set_demand(client_id, demand.consumer_id, demand.generation, &series)
+            {
+                send_market_fault(connection, error)?;
             }
         }
         envelope::Payload::ViewportDemand(viewport) => {
@@ -1375,21 +1372,30 @@ mod tests {
                 },
             )
             .expect("send demand");
-        assert!(matches!(
-            client.receive_market_event().expect("resolving state"),
-            envelope::Payload::SeriesState(state) if state.generation == 1
-        ));
-        assert!(matches!(
-            client.receive_market_event().expect("covering snapshot"),
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.bars.len() == 1
-                    && snapshot.price_scale == 2
-                    && snapshot.quantity_scale == 8
-        ));
-        assert!(matches!(
-            client.receive_market_event().expect("ready state"),
-            envelope::Payload::SeriesState(state) if state.generation == 1
-        ));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut snapshot_received = false;
+        let mut ready_received = false;
+        while !snapshot_received || !ready_received {
+            if let Some(event) = client.poll_market_event(1).expect("poll market event") {
+                match event {
+                    envelope::Payload::SeriesSnapshot(snapshot) => {
+                        snapshot_received = snapshot.bars.len() == 1
+                            && snapshot.price_scale == 2
+                            && snapshot.quantity_scale == 8;
+                    }
+                    envelope::Payload::SeriesState(state) => {
+                        ready_received = state.generation == 1
+                            && state.state
+                                == axiusflow_local_engine_protocol::SeriesLoadState::Ready as i32;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "market snapshot polling timed out"
+            );
+        }
         assert_eq!(
             client.poll_market_event(1).expect("poll market event"),
             None

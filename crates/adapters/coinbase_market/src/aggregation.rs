@@ -1,12 +1,20 @@
-//! Bounded deterministic one-minute aggregation for Coinbase spot trades.
+//! Bounded deterministic fixed-interval aggregation for Coinbase spot trades.
 
 use crate::{CanonicalTrade, FixedPointValue};
 use axiusflow_market_data::MarketBar;
 use core::fmt;
-use std::{collections::VecDeque, error::Error, num::NonZeroUsize};
+use std::{
+    collections::VecDeque,
+    error::Error,
+    num::{NonZeroU32, NonZeroUsize},
+};
 
-const ONE_MINUTE_NANOS: i64 = 60_000_000_000;
+#[cfg(test)]
 const ONE_MINUTE_SECONDS: i64 = 60;
+const ONE_MINUTE_SECONDS_U32: u32 = 60;
+#[cfg(test)]
+const ONE_MINUTE_NANOS: i64 = 60_000_000_000;
+const MAXIMUM_FIXED_INTERVAL_SECONDS: u32 = 86_400;
 const MAXIMUM_DECIMAL_SCALE: u8 = 18;
 
 /// Hard ceiling for retained completed bars in one product aggregator.
@@ -14,7 +22,7 @@ pub const MAXIMUM_AGGREGATED_HISTORY_BARS: usize = 4_096;
 
 #[derive(Clone, Copy)]
 struct InFlightBar {
-    minute_unix_seconds: i64,
+    bucket_unix_seconds: i64,
     open: i64,
     high: i64,
     low: i64,
@@ -39,6 +47,7 @@ pub struct CoinbaseBarAggregatorConfig {
     instrument_id: String,
     price_scale: u8,
     quantity_scale: u8,
+    interval_seconds: NonZeroU32,
     maximum_history_bars: NonZeroUsize,
 }
 
@@ -54,6 +63,28 @@ impl CoinbaseBarAggregatorConfig {
         quantity_scale: u8,
         maximum_history_bars: NonZeroUsize,
     ) -> Result<Self, CoinbaseBarAggregationError> {
+        Self::try_new_interval(
+            product_id,
+            price_scale,
+            quantity_scale,
+            NonZeroU32::new(ONE_MINUTE_SECONDS_U32).unwrap_or(NonZeroU32::MIN),
+            maximum_history_bars,
+        )
+    }
+
+    /// Creates a validated Coinbase spot aggregation profile for one fixed interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed identity, unsupported scales, or an interval
+    /// that is not an exact minute multiple up to one day.
+    pub fn try_new_interval(
+        product_id: impl Into<String>,
+        price_scale: u8,
+        quantity_scale: u8,
+        interval_seconds: NonZeroU32,
+        maximum_history_bars: NonZeroUsize,
+    ) -> Result<Self, CoinbaseBarAggregationError> {
         let product_id = product_id.into();
         let Some((base, quote)) = product_id.split_once('-') else {
             return Err(CoinbaseBarAggregationError::InvalidConfiguration);
@@ -66,6 +97,10 @@ impl CoinbaseBarAggregatorConfig {
             })
             || price_scale > MAXIMUM_DECIMAL_SCALE
             || quantity_scale > MAXIMUM_DECIMAL_SCALE
+            || !interval_seconds
+                .get()
+                .is_multiple_of(ONE_MINUTE_SECONDS_U32)
+            || interval_seconds.get() > MAXIMUM_FIXED_INTERVAL_SECONDS
             || maximum_history_bars.get() > MAXIMUM_AGGREGATED_HISTORY_BARS
         {
             return Err(CoinbaseBarAggregationError::InvalidConfiguration);
@@ -76,6 +111,7 @@ impl CoinbaseBarAggregatorConfig {
             product_id,
             price_scale,
             quantity_scale,
+            interval_seconds,
             maximum_history_bars,
         })
     }
@@ -103,9 +139,15 @@ impl CoinbaseBarAggregatorConfig {
     pub const fn quantity_scale(&self) -> u8 {
         self.quantity_scale
     }
+
+    /// Fixed UTC-aligned aggregation interval.
+    #[must_use]
+    pub const fn interval_seconds(&self) -> NonZeroU32 {
+        self.interval_seconds
+    }
 }
 
-/// Deterministic, bounded one-minute bar aggregator for one Coinbase product.
+/// Deterministic, bounded fixed-interval bar aggregator for one Coinbase product.
 pub struct CoinbaseBarAggregator {
     config: CoinbaseBarAggregatorConfig,
     in_flight: Option<InFlightBar>,
@@ -162,7 +204,7 @@ impl CoinbaseBarAggregator {
         self.activity_started = false;
     }
 
-    /// Atomically seeds completed history and the newest still-open minute.
+    /// Atomically seeds completed history and the newest still-open bucket.
     ///
     /// Source sequences are reassigned contiguously for this local bar stream.
     /// Seeding is permitted exactly once and must precede every live trade.
@@ -178,7 +220,7 @@ impl CoinbaseBarAggregator {
         self.seed(bars, true, false)
     }
 
-    /// Atomically seeds completed history before a live current minute.
+    /// Atomically seeds completed history before a live current bucket.
     ///
     /// # Errors
     ///
@@ -207,6 +249,19 @@ impl CoinbaseBarAggregator {
         self.seed(bars, false, true)
     }
 
+    /// Seeds canonical history whose newest bar is still forming.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for repeated seeding, invalid or discontinuous bars,
+    /// or sequence exhaustion.
+    pub fn seed_canonical_backfill(
+        &mut self,
+        bars: &[MarketBar],
+    ) -> Result<usize, CoinbaseBarAggregationError> {
+        self.seed(bars, true, true)
+    }
+
     fn seed(
         &mut self,
         bars: &[MarketBar],
@@ -217,6 +272,7 @@ impl CoinbaseBarAggregator {
             return Err(CoinbaseBarAggregationError::AlreadyInitialized);
         }
         let mut previous = None;
+        let interval_seconds = i64::from(self.config.interval_seconds.get());
         for bar in bars {
             let mut validated = *bar;
             if !preserve_sequence {
@@ -227,10 +283,10 @@ impl CoinbaseBarAggregator {
                 .map_err(|_| CoinbaseBarAggregationError::InvalidBar)?;
             if previous.is_some_and(|previous: MarketBar| {
                 bar.exchange_timestamp_seconds <= previous.exchange_timestamp_seconds
-                    || bar.exchange_timestamp_seconds % ONE_MINUTE_SECONDS != 0
+                    || bar.exchange_timestamp_seconds % interval_seconds != 0
                     || preserve_sequence
                         && previous.source_sequence.checked_add(1) != Some(bar.source_sequence)
-            }) || previous.is_none() && bar.exchange_timestamp_seconds % ONE_MINUTE_SECONDS != 0
+            }) || previous.is_none() && bar.exchange_timestamp_seconds % interval_seconds != 0
             {
                 return Err(CoinbaseBarAggregationError::InvalidBar);
             }
@@ -266,7 +322,7 @@ impl CoinbaseBarAggregator {
         let in_flight = newest_is_in_flight
             .then(|| {
                 retained.last().map(|bar| InFlightBar {
-                    minute_unix_seconds: bar.exchange_timestamp_seconds,
+                    bucket_unix_seconds: bar.exchange_timestamp_seconds,
                     open: bar.open,
                     high: bar.high,
                     low: bar.low,
@@ -286,7 +342,7 @@ impl CoinbaseBarAggregator {
         Ok(seeded)
     }
 
-    /// Applies one canonical trade and emits the completed bar on minute roll.
+    /// Applies one canonical trade and emits the completed bar on bucket roll.
     ///
     /// # Errors
     ///
@@ -317,11 +373,15 @@ impl CoinbaseBarAggregator {
         if price <= 0 || size <= 0 {
             return Err(CoinbaseBarAggregationError::InvalidBar);
         }
-        let minute = trade.trade_time_unix_nanos.div_euclid(ONE_MINUTE_NANOS) * ONE_MINUTE_SECONDS;
+        let interval_seconds = i64::from(self.config.interval_seconds.get());
+        let interval_nanos = interval_seconds
+            .checked_mul(1_000_000_000)
+            .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
+        let bucket = trade.trade_time_unix_nanos.div_euclid(interval_nanos) * interval_seconds;
         self.activity_started = true;
         let mut completed = None;
         match &mut self.in_flight {
-            Some(bar) if bar.minute_unix_seconds == minute => {
+            Some(bar) if bar.bucket_unix_seconds == bucket => {
                 bar.high = bar.high.max(price);
                 bar.low = bar.low.min(price);
                 bar.close = price;
@@ -337,24 +397,24 @@ impl CoinbaseBarAggregator {
                     .in_flight
                     .take()
                     .ok_or(CoinbaseBarAggregationError::InvalidBar)?;
-                if minute < finished.minute_unix_seconds {
+                if bucket < finished.bucket_unix_seconds {
                     self.late_trades = self.late_trades.saturating_add(1);
                     self.in_flight = Some(finished);
                     return Ok(None);
                 }
                 completed = Some(self.complete(finished)?);
-                self.open_bar(minute, price, size, trade);
+                self.open_bar(bucket, price, size, trade);
             }
             None => {
                 if self
                     .history
                     .back()
-                    .is_some_and(|bar| minute <= bar.exchange_timestamp_seconds)
+                    .is_some_and(|bar| bucket <= bar.exchange_timestamp_seconds)
                 {
                     self.late_trades = self.late_trades.saturating_add(1);
                     return Ok(None);
                 }
-                self.open_bar(minute, price, size, trade);
+                self.open_bar(bucket, price, size, trade);
             }
         }
         Ok(completed)
@@ -372,12 +432,12 @@ impl CoinbaseBarAggregator {
         self.late_trades
     }
 
-    /// The in-flight minute without completing it.
+    /// The in-flight bucket without completing it.
     #[must_use]
     pub fn in_flight(&self) -> Option<MarketBar> {
         self.in_flight.as_ref().map(|bar| MarketBar {
             source_sequence: self.next_sequence,
-            exchange_timestamp_seconds: bar.minute_unix_seconds,
+            exchange_timestamp_seconds: bar.bucket_unix_seconds,
             open: bar.open,
             high: bar.high,
             low: bar.low,
@@ -386,9 +446,9 @@ impl CoinbaseBarAggregator {
         })
     }
 
-    fn open_bar(&mut self, minute: i64, price: i64, size: i64, trade: &CanonicalTrade) {
+    fn open_bar(&mut self, bucket: i64, price: i64, size: i64, trade: &CanonicalTrade) {
         self.in_flight = Some(InFlightBar {
-            minute_unix_seconds: minute,
+            bucket_unix_seconds: bucket,
             open: price,
             high: price,
             low: price,
@@ -405,7 +465,7 @@ impl CoinbaseBarAggregator {
     ) -> Result<CoinbaseAggregatedBar, CoinbaseBarAggregationError> {
         let completed = MarketBar {
             source_sequence: self.next_sequence,
-            exchange_timestamp_seconds: bar.minute_unix_seconds,
+            exchange_timestamp_seconds: bar.bucket_unix_seconds,
             open: bar.open,
             high: bar.high,
             low: bar.low,
@@ -494,7 +554,7 @@ mod tests {
     };
     use crate::{CanonicalTrade, FixedPointValue};
     use axiusflow_market_data::MarketBar;
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU32, NonZeroUsize};
 
     fn aggregator() -> CoinbaseBarAggregator {
         CoinbaseBarAggregator::new(
@@ -555,6 +615,40 @@ mod tests {
         assert_eq!(completed.close, 10_150);
         assert_eq!(completed.volume, 100_000_000);
         assert_eq!(completed.source_sequence, 1);
+    }
+
+    #[test]
+    fn fixed_interval_uses_one_shared_history_live_handoff() {
+        let mut aggregator = CoinbaseBarAggregator::new(
+            CoinbaseBarAggregatorConfig::try_new_interval(
+                "BTC-USD",
+                2,
+                8,
+                NonZeroU32::new(300).expect("nonzero interval"),
+                NonZeroUsize::new(4).expect("nonzero retention"),
+            )
+            .expect("five-minute config validates"),
+        );
+        aggregator
+            .seed_completed_history(&[bar(100, 10_000), bar(105, 10_100)])
+            .expect("five-minute history seeds");
+        aggregator
+            .apply_trade(&trade(110, "102.00", "0.5"))
+            .expect("five-minute bucket opens");
+        aggregator
+            .apply_trade(&trade(114, "103.00", "0.5"))
+            .expect("same five-minute bucket updates");
+        let completed = aggregator
+            .apply_trade(&trade(115, "104.00", "0.5"))
+            .expect("next five-minute bucket opens")
+            .expect("five-minute bucket completes");
+        assert_eq!(
+            completed.exchange_timestamp_seconds,
+            110 * ONE_MINUTE_SECONDS
+        );
+        assert_eq!(completed.source_sequence, 3);
+        assert_eq!(completed.open, 10_200);
+        assert_eq!(completed.close, 10_300);
     }
 
     #[test]
@@ -641,6 +735,24 @@ mod tests {
             aggregator.history()[..2],
             [bar(100, 10_000), bar(101, 10_100)]
         );
+    }
+
+    #[test]
+    fn canonical_forming_tail_resumes_without_rewriting_sequence() {
+        let mut aggregator = aggregator();
+        aggregator
+            .seed_canonical_backfill(&[bar(100, 10_000), bar(101, 10_100)])
+            .expect("canonical forming tail seeds");
+        aggregator
+            .apply_trade(&trade(101, "102.00", "0.5"))
+            .expect("cached forming tail resumes");
+        let completed = aggregator
+            .apply_trade(&trade(102, "103.00", "0.5"))
+            .expect("forming tail rolls")
+            .expect("cached tail completes");
+        assert_eq!(completed.source_sequence, 102);
+        assert_eq!(completed.open, 10_100);
+        assert_eq!(completed.close, 10_200);
     }
 
     #[test]

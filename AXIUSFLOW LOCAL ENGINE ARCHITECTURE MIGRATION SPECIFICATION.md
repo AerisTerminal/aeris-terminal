@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 6 of 180 tasks complete.**
+**Verified progress: 8 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -3620,7 +3620,7 @@ Write deterministic tests.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the default desktop Coinbase startup attaches a bounded `EngineClient` to protocol-v4 IPC; `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Origin.
+Evidence (2026-08-11): the default desktop Coinbase startup attaches a bounded `EngineClient` to the current protocol-v5 IPC; `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Origin.
 
 Move Coinbase execution into `axiusflow_engine`.
 
@@ -3658,7 +3658,9 @@ Prove Coinbase first.
 
 # 112. PHASE 4 — TIMEFRAME/SYMBOL SWITCHING
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): the engine and default desktop now support BTC-USD and ETH-USD at 1m, 5m, 15m, and 1h over asynchronous protocol-v5 demand and bounded event polling. One shared Coinbase realtime session routes both products into per-series fixed-interval history/live handoffs; cached forming tails resume without rewriting their canonical sequence. Deterministic delayed-history churn drives the exact `BTC 1m to 5m to 15m to 1h to 1m to ETH 1m to BTC 1m` sequence and proves only the latest generation can publish, while a separate test proves all switches reuse one realtime start. A Windows release desktop/engine run captured all seven corresponding Origin chart states with green connection status and visible candles; both processes remained responsive, the engine retained only two established Coinbase TLS connections, and no stale overwrite, hang, or infinite loading state appeared.
 
 Before moving Rithmic:
 
@@ -4672,7 +4674,7 @@ If any earlier wording appears weaker than a rule below, follow the stricter rul
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): protocol-v4 bounded market-event polling now carries explicit provider/series state and forming-tail covering snapshots from the resident engine to the existing desktop model and Origin chart. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
+Evidence (2026-08-11): current protocol-v5 bounded market-event polling carries explicit provider/series state and forming-tail covering snapshots from the resident engine to the existing desktop model and Origin chart. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
 
 Do not interpret successful Coinbase historical candles as completion of the Coinbase migration.
 

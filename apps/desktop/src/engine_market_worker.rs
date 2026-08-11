@@ -32,14 +32,18 @@ use crate::resident_market_worker::{
 const WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 32;
-const COMMAND_CAPACITY: usize = 1;
+const COMMAND_CAPACITY: usize = 32;
 const MODEL_CAPACITY: usize = 350;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    let product = btc_product();
+    let products = coinbase_products();
+    let product = products
+        .first()
+        .cloned()
+        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
     let client_id = random_identity()?;
     let consumer_id = random_identity()?;
     let startup = MarketWorkerStartup::Loading(Box::new(
@@ -96,9 +100,9 @@ fn run_worker(
     let mut client = connect_or_start_engine(&executable)?;
     client.attach_client(client_id)?;
     client.register_consumer(client_id, WORKSPACE_ID, consumer_id)?;
-    let _ = messages.send(MarketWorkerMessage::CoinbaseCatalog(Ok(vec![
-        product.clone(),
-    ])));
+    let _ = messages.send(MarketWorkerMessage::CoinbaseCatalog(
+        Ok(coinbase_products()),
+    ));
     let mut model = empty_model();
     let (snapshot, generation) = request_snapshot(
         &mut client,
@@ -137,16 +141,8 @@ fn run_worker(
                         message: "Loading Coinbase history through the resident engine".to_string(),
                     });
                     model = empty_model();
-                    let (snapshot, generation) = request_snapshot(
-                        &mut client,
-                        consumer_id,
-                        request.sequence,
-                        series,
-                        &mut model,
-                        messages,
-                    )?;
                     active_generation = request.sequence;
-                    send_publication(messages, snapshot, generation)?;
+                    client.set_series_demand(consumer_id, request.sequence, series)?;
                 }
                 MarketWorkerCommand::Recovery(command) => {
                     send_recovery(
@@ -289,7 +285,11 @@ fn request_snapshot(
     client.set_series_demand(consumer_id, generation, series)?;
     let mut accepted = None;
     loop {
-        match client.receive_market_event()? {
+        let Some(event) = client.poll_market_event(consumer_id)? else {
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        };
+        match event {
             envelope::Payload::SeriesState(state) => {
                 let load_state = SeriesLoadState::try_from(state.state)
                     .map_err(|_| "engine returned an invalid series state".to_string())?;
@@ -300,7 +300,7 @@ fn request_snapshot(
                             message: "Resident engine is resolving Coinbase history".to_string(),
                         });
                     }
-                    SeriesLoadState::Ready => {
+                    SeriesLoadState::Ready | SeriesLoadState::Live => {
                         return accepted.ok_or_else(|| {
                             "engine marked history ready without a covering snapshot".to_string()
                         });
@@ -313,8 +313,11 @@ fn request_snapshot(
                     SeriesLoadState::Superseded => {
                         return Err("Coinbase history demand was superseded".to_string());
                     }
-                    SeriesLoadState::Empty | SeriesLoadState::Partial | SeriesLoadState::Live => {}
+                    SeriesLoadState::Empty | SeriesLoadState::Partial => {}
                 }
+            }
+            envelope::Payload::ProviderState(state) => {
+                apply_provider_state(&state, messages)?;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
                 let replay = replay_snapshot(&snapshot)?;
@@ -393,12 +396,16 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .map_err(|_| "engine price scale is invalid".to_string())?;
     let quantity_scale = u8::try_from(snapshot.quantity_scale)
         .map_err(|_| "engine quantity scale is invalid".to_string())?;
+    let product = coinbase_products()
+        .into_iter()
+        .find(|product| product.instrument_id == series.instrument_id)
+        .ok_or_else(|| "engine snapshot instrument is unsupported".to_string())?;
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_revision),
         asset_class: AssetClass::CryptoAsset,
-        symbol: "BTC/USD".to_string(),
+        symbol: product.display_symbol,
         venue_id: "COINBASE".to_string(),
         trading_currency: "USD".to_string(),
         precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
@@ -474,33 +481,52 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
 }
 
 fn series_key(product: &CoinbaseSpotProduct, interval: ChartInterval) -> Result<SeriesKey, String> {
-    if product.product_id != "BTC-USD"
-        || product.instrument_id != "instrument:coinbase:btc:usd"
-        || interval != ChartInterval::Minute1
+    let supported_product = coinbase_products().into_iter().any(|supported| {
+        product.product_id == supported.product_id
+            && product.instrument_id == supported.instrument_id
+            && product.price_scale == supported.price_scale
+            && product.quantity_scale == supported.quantity_scale
+    });
+    if !supported_product
+        || !matches!(
+            interval,
+            ChartInterval::Minute1
+                | ChartInterval::Minute5
+                | ChartInterval::Minute15
+                | ChartInterval::Hour1
+        )
     {
         return Err(
-            "this migration slice supports Coinbase BTC-USD one-minute history and realtime only"
-                .to_string(),
+            "this migration slice supports BTC-USD/ETH-USD at 1m, 5m, 15m, and 1h".to_string(),
         );
     }
     Ok(SeriesKey {
         provider: "coinbase".to_string(),
         instrument_id: product.instrument_id.clone(),
-        interval_seconds: 60,
+        interval_seconds: match interval {
+            ChartInterval::Minute1 => 60,
+            ChartInterval::Minute5 => 300,
+            ChartInterval::Minute15 => 900,
+            ChartInterval::Hour1 => 3_600,
+            _ => unreachable!("supported intervals were validated above"),
+        },
         definition_revision: 1,
     })
 }
 
-fn btc_product() -> CoinbaseSpotProduct {
-    CoinbaseSpotProduct {
-        product_id: "BTC-USD".to_string(),
-        instrument_id: "instrument:coinbase:btc:usd".to_string(),
-        display_symbol: "BTC/USD".to_string(),
-        base_currency: "BTC".to_string(),
-        quote_currency: "USD".to_string(),
-        price_scale: 2,
-        quantity_scale: 8,
-    }
+fn coinbase_products() -> Vec<CoinbaseSpotProduct> {
+    [("BTC", "btc"), ("ETH", "eth")]
+        .into_iter()
+        .map(|(base, canonical)| CoinbaseSpotProduct {
+            product_id: format!("{base}-USD"),
+            instrument_id: format!("instrument:coinbase:{canonical}:usd"),
+            display_symbol: format!("{base}/USD"),
+            base_currency: base.to_string(),
+            quote_currency: "USD".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+        })
+        .collect()
 }
 
 fn empty_model() -> MarketBarClientModel {
@@ -549,7 +575,13 @@ mod tests {
         let snapshot = replay_snapshot(&SeriesSnapshot {
             consumer_id: 1,
             generation: 1,
-            series: Some(series_key(&btc_product(), ChartInterval::Minute1).expect("series")),
+            series: Some(
+                series_key(
+                    coinbase_products().first().expect("BTC product"),
+                    ChartInterval::Minute1,
+                )
+                .expect("series"),
+            ),
             provider_generation: 7,
             price_scale: 2,
             quantity_scale: 8,
@@ -593,5 +625,23 @@ mod tests {
                 message,
             }] if message.contains("retained history")
         ));
+    }
+
+    #[test]
+    fn phase_four_series_keys_cover_required_symbols_and_intervals() {
+        let products = coinbase_products();
+        assert_eq!(products.len(), 2);
+        for product in &products {
+            for (interval, seconds) in [
+                (ChartInterval::Minute1, 60),
+                (ChartInterval::Minute5, 300),
+                (ChartInterval::Minute15, 900),
+                (ChartInterval::Hour1, 3_600),
+            ] {
+                let series = series_key(product, interval).expect("phase-four series validates");
+                assert_eq!(series.interval_seconds, seconds);
+                assert_eq!(series.instrument_id, product.instrument_id);
+            }
+        }
     }
 }

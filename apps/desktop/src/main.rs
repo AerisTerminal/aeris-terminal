@@ -135,19 +135,9 @@ actions!(
 
 static COINBASE_INTERVALS: &[ChartInterval] = &[
     ChartInterval::Minute1,
-    ChartInterval::Minute3,
     ChartInterval::Minute5,
     ChartInterval::Minute15,
-    ChartInterval::Minute30,
     ChartInterval::Hour1,
-    ChartInterval::Hour2,
-    ChartInterval::Hour4,
-    ChartInterval::Hour8,
-    ChartInterval::Hour12,
-    ChartInterval::Day1,
-    ChartInterval::Day3,
-    ChartInterval::Week1,
-    ChartInterval::Month1,
 ];
 
 fn generation_status(

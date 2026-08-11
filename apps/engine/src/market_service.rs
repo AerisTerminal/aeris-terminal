@@ -3,7 +3,7 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -59,13 +59,7 @@ enum Command {
     Remove(ClientId, ConsumerId, Reply<()>),
     Viewport(ClientId, ConsumerId, GenerationId, Viewport, Reply<()>),
     Visibility(ClientId, ConsumerId, bool, Reply<()>),
-    Demand(
-        ClientId,
-        ConsumerId,
-        GenerationId,
-        BarSeriesKey,
-        Reply<Vec<envelope::Payload>>,
-    ),
+    Demand(ClientId, ConsumerId, GenerationId, BarSeriesKey, Reply<()>),
     Poll(ClientId, ConsumerId, Reply<Option<envelope::Payload>>),
     HistoryCompleted(
         BarSeriesKey,
@@ -88,7 +82,6 @@ struct HistorySnapshot {
 struct DemandWaiter {
     consumer_id: ConsumerId,
     generation: GenerationId,
-    reply: Reply<Vec<envelope::Payload>>,
 }
 
 enum RealtimeControl {
@@ -108,6 +101,7 @@ struct ConsumerEvents {
     provider: Option<envelope::Payload>,
     snapshot: Option<envelope::Payload>,
     series_state: Option<envelope::Payload>,
+    demand_error: Option<envelope::Payload>,
 }
 
 impl ConsumerEvents {
@@ -116,11 +110,11 @@ impl ConsumerEvents {
             .take()
             .or_else(|| self.snapshot.take())
             .or_else(|| self.series_state.take())
+            .or_else(|| self.demand_error.take())
     }
 }
 
 struct LiveHandoff {
-    series: BarSeriesKey,
     generation: ProviderGeneration,
     aggregator: CoinbaseBarAggregator,
     buffered: VecDeque<CanonicalTrade>,
@@ -130,11 +124,11 @@ struct LiveHandoff {
 }
 
 impl LiveHandoff {
-    fn try_new(series: BarSeriesKey, generation: ProviderGeneration) -> Result<Self, String> {
+    fn try_new(series: &BarSeriesKey, generation: ProviderGeneration) -> Result<Self, String> {
+        let profile = coinbase_series_profile(series)?;
         Ok(Self {
-            series,
             generation,
-            aggregator: coinbase_aggregator()?,
+            aggregator: coinbase_aggregator(profile)?,
             buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
             connected: false,
             history_ready: false,
@@ -142,14 +136,13 @@ impl LiveHandoff {
         })
     }
 
-    fn reset(&mut self, generation: ProviderGeneration) -> Result<(), String> {
+    fn reset(&mut self, generation: ProviderGeneration) {
         self.generation = generation;
-        self.aggregator = coinbase_aggregator()?;
+        self.aggregator.reset();
         self.buffered.clear();
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
-        Ok(())
     }
 }
 
@@ -205,11 +198,19 @@ struct FixtureRealtimeHarness {
 
 #[cfg(test)]
 impl HistorySource for FixtureHistory {
-    fn fetch(&mut self, _series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
+    fn fetch(&mut self, series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
+        let profile = coinbase_series_profile(series)?;
+        let mut bars = self.bars.clone();
+        for (index, bar) in bars.iter_mut().enumerate() {
+            bar.exchange_timestamp_seconds = i64::try_from(index + 1)
+                .ok()
+                .and_then(|value| value.checked_mul(i64::from(profile.interval_seconds)))
+                .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
+        }
         Ok(HistorySnapshot {
-            price_scale: 2,
-            quantity_scale: 8,
-            bars: self.bars.clone(),
+            price_scale: profile.price_scale,
+            quantity_scale: profile.quantity_scale,
+            bars,
         })
     }
 }
@@ -261,28 +262,21 @@ impl LiveCoinbaseHistory {
 
 impl HistorySource for LiveCoinbaseHistory {
     fn fetch(&mut self, series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
-        if series.provider_id != "coinbase"
-            || series.instrument_id != "instrument:coinbase:btc:usd"
-            || series.period != BarPeriod::time(60).map_err(|error| error.to_string())?
-            || series.definition_version != 1
-        {
-            return Err(
-                "the first engine migration slice supports BTC-USD one-minute bars only"
-                    .to_string(),
-            );
-        }
+        let profile = coinbase_series_profile(series)?;
+        let interval_seconds = u64::from(profile.interval_seconds);
         let now_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "system clock is unavailable".to_string())?
             .as_secs();
-        let end_seconds = now_seconds - now_seconds % 60;
+        let end_seconds = now_seconds - now_seconds % interval_seconds;
         let end_unix_nanos = i64::try_from(end_seconds)
             .ok()
             .and_then(|seconds| seconds.checked_mul(1_000_000_000))
             .ok_or_else(|| "Coinbase history end time overflowed".to_string())?;
         let span_nanos = i64::try_from(HISTORY_BARS_PER_SERIES)
             .ok()
-            .and_then(|count| count.checked_mul(60_000_000_000))
+            .and_then(|count| count.checked_mul(i64::from(profile.interval_seconds)))
+            .and_then(|seconds| seconds.checked_mul(1_000_000_000))
             .ok_or_else(|| "Coinbase history span overflowed".to_string())?;
         let request = HistoryPageRequest {
             provider_id: "coinbase".to_string(),
@@ -290,7 +284,7 @@ impl HistorySource for LiveCoinbaseHistory {
             entitlement_revision: ENTITLEMENT_CLASS.to_string(),
             instrument_id: series.instrument_id.clone(),
             data_class: DataClass::Bars,
-            resolution: "1m".to_string(),
+            resolution: profile.resolution.to_string(),
             range: HistoryRange {
                 start_unix_nanos: end_unix_nanos.saturating_sub(span_nanos),
                 end_unix_nanos,
@@ -299,7 +293,7 @@ impl HistorySource for LiveCoinbaseHistory {
             continuation: None,
         };
         let batch = self.adapter.fetch_paginated(&request)?;
-        let bars = batch
+        let mut bars = batch
             .items
             .iter()
             .map(decode_history_bar)
@@ -307,9 +301,15 @@ impl HistorySource for LiveCoinbaseHistory {
         if bars.is_empty() {
             return Err("Coinbase returned no completed historical bars".to_string());
         }
+        for (index, bar) in bars.iter_mut().enumerate() {
+            bar.source_sequence = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| "Coinbase history sequence overflowed".to_string())?;
+        }
         Ok(HistorySnapshot {
-            price_scale: 2,
-            quantity_scale: 8,
+            price_scale: profile.price_scale,
+            quantity_scale: profile.quantity_scale,
             bars,
         })
     }
@@ -317,7 +317,7 @@ impl HistorySource for LiveCoinbaseHistory {
 
 impl LiveCoinbaseRealtime {
     fn try_new() -> Result<Self, String> {
-        CoinbaseConfig::try_new(vec!["BTC-USD".to_string()])
+        CoinbaseConfig::try_new(vec!["BTC-USD".to_string(), "ETH-USD".to_string()])
             .map(|config| Self {
                 config: config.with_level2(false),
             })
@@ -557,17 +557,17 @@ impl MarketService {
         })
     }
 
-    /// Resolves a covering snapshot for one generation-fenced series demand.
+    /// Accepts one generation-fenced series demand without waiting for provider I/O.
     ///
     /// # Errors
-    /// Returns an error for invalid demand, unavailable coordinator, or failed reply delivery.
+    /// Returns an error for invalid demand or an unavailable coordinator.
     pub fn set_demand(
         &self,
         client_id: u64,
         consumer_id: u64,
         generation: u64,
         series: &SeriesKey,
-    ) -> Result<Vec<envelope::Payload>, String> {
+    ) -> Result<(), String> {
         self.request(|reply| {
             Ok(Command::Demand(
                 ClientId(id(client_id)?),
@@ -706,8 +706,9 @@ fn run_coordinator(
         pending: BTreeMap::new(),
         history_inflight: BTreeSet::new(),
         events: BTreeMap::new(),
-        live: None,
+        live: BTreeMap::new(),
         realtime_started: false,
+        realtime_connected: false,
     };
     loop {
         for _ in 0..REALTIME_DRAIN_BUDGET {
@@ -737,8 +738,9 @@ struct Coordinator<'a> {
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     events: BTreeMap<ConsumerId, ConsumerEvents>,
-    live: Option<LiveHandoff>,
+    live: BTreeMap<BarSeriesKey, LiveHandoff>,
     realtime_started: bool,
+    realtime_connected: bool,
 }
 
 impl Coordinator<'_> {
@@ -756,6 +758,7 @@ impl Coordinator<'_> {
                 self.attached.remove(&client_id);
                 self.remove_client_events(client_id);
                 self.engine.detach_client(client_id);
+                self.prune_unused_live_series();
                 self.stop_realtime_if_idle();
                 let _ = reply.send(Ok(()));
             }
@@ -778,6 +781,7 @@ impl Coordinator<'_> {
                     self.events.remove(&consumer_id);
                     self.remove_waiter(consumer_id);
                     self.engine.remove_consumer(consumer_id);
+                    self.prune_unused_live_series();
                     self.stop_realtime_if_idle();
                 });
                 let _ = reply.send(result);
@@ -808,8 +812,8 @@ impl Coordinator<'_> {
                     DemandWaiter {
                         consumer_id,
                         generation,
-                        reply,
                     },
+                    &reply,
                 );
             }
             Command::Poll(client_id, consumer_id, reply) => {
@@ -826,55 +830,96 @@ impl Coordinator<'_> {
         }
     }
 
-    fn handle_demand(&mut self, client_id: ClientId, series: &BarSeriesKey, waiter: DemandWaiter) {
+    fn handle_demand(
+        &mut self,
+        client_id: ClientId,
+        series: &BarSeriesKey,
+        waiter: DemandWaiter,
+        reply: &Reply<()>,
+    ) {
         let demand =
             authorize_consumer(&self.engine, client_id, waiter.consumer_id).and_then(|()| {
                 self.engine
                     .set_series_demand(waiter.consumer_id, waiter.generation, series)
                     .map_err(|error| error.to_string())
             });
+        if demand.is_ok() {
+            self.remove_waiter(waiter.consumer_id);
+            self.prune_unused_live_series();
+        }
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             events.snapshot = None;
             events.series_state = None;
+            events.demand_error = None;
         }
+        let publication = match demand {
+            Ok(publication) => publication,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
         if let Err(error) = self.ensure_realtime(series) {
-            let _ = waiter.reply.send(Err(error));
+            let _ = reply.send(Err(error));
             return;
         }
-        match demand {
-            Ok(Some(publication)) => {
-                let _ = waiter.reply.send(Ok(ready_messages(&publication)));
+        if let Some(publication) = publication {
+            let seeded = self.live.get_mut(series).is_none_or(|live| {
+                if live.history_ready {
+                    return true;
+                }
+                live.aggregator.reset();
+                let result = if publication.snapshot.forming {
+                    live.aggregator
+                        .seed_canonical_backfill(&publication.snapshot.bars)
+                } else {
+                    live.aggregator
+                        .seed_canonical_history(&publication.snapshot.bars)
+                };
+                if result.is_ok() {
+                    live.history_ready = true;
+                }
+                result.is_ok()
+            });
+            if !seeded {
+                let _ = reply.send(Err(
+                    "Coinbase cached history/live handoff failed".to_string()
+                ));
+                return;
             }
-            Ok(None) => {
-                let first = !self.pending.contains_key(series);
-                self.pending.entry(series.clone()).or_default().push(waiter);
-                if first {
-                    let generation = self.current_provider_generation();
-                    if let Err(detail) = self.enqueue_history(series, generation)
-                        && let Some(waiters) = self.pending.remove(series)
-                    {
-                        fail_waiters(waiters, detail);
-                    }
+            if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
+                publish_ready(events, &publication);
+            }
+            self.series_live_if_ready(series);
+        } else {
+            let first = !self.pending.contains_key(series);
+            if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
+                events.series_state = Some(series_state(
+                    waiter.consumer_id,
+                    waiter.generation,
+                    ipc_series(series),
+                    SeriesLoadState::Resolving,
+                    None,
+                ));
+            }
+            self.pending.entry(series.clone()).or_default().push(waiter);
+            if first {
+                let generation = self.current_provider_generation();
+                if let Err(detail) = self.enqueue_history(series, generation)
+                    && let Some(waiters) = self.pending.remove(series)
+                {
+                    fail_waiters(&mut self.events, waiters, detail);
                 }
             }
-            Err(error) => {
-                let _ = waiter.reply.send(Err(error));
-            }
         }
+        let _ = reply.send(Ok(()));
     }
 
     fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
-        match &self.live {
-            Some(live) if live.series != *series => {
-                return Err("the current engine realtime slice supports one series".to_string());
-            }
-            Some(_) => {}
-            None => {
-                self.live = Some(LiveHandoff::try_new(
-                    series.clone(),
-                    self.current_provider_generation(),
-                )?);
-            }
+        if !self.live.contains_key(series) {
+            let mut handoff = LiveHandoff::try_new(series, self.current_provider_generation())?;
+            handoff.connected = self.realtime_connected;
+            self.live.insert(series.clone(), handoff);
         }
         if !self.realtime_started {
             self.realtime_stop.store(false, Ordering::Release);
@@ -920,12 +965,18 @@ impl Coordinator<'_> {
         self.history_inflight.remove(&(series.clone(), generation));
         if generation != self.current_provider_generation() {
             let current = self.current_provider_generation();
-            let _ = self.enqueue_history(series, current);
+            if self.live.contains_key(series) {
+                let _ = self.enqueue_history(series, current);
+            }
             return;
         }
         let Ok(snapshot) = result else {
             if let Some(waiters) = self.pending.remove(series) {
-                fail_waiters(waiters, "Coinbase historical bars are unavailable");
+                fail_waiters(
+                    &mut self.events,
+                    waiters,
+                    "Coinbase historical bars are unavailable",
+                );
             }
             self.broadcast_provider(
                 ProviderConnectionState::Recovering,
@@ -935,16 +986,6 @@ impl Coordinator<'_> {
             return;
         };
         let bars = snapshot.bars;
-        let waiting = self
-            .pending
-            .get(series)
-            .map(|waiters| {
-                waiters
-                    .iter()
-                    .map(|waiter| waiter.consumer_id)
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
         let installed = self.engine.install_history(
             generation,
             series,
@@ -956,28 +997,20 @@ impl Coordinator<'_> {
             Ok(publications) => publications,
             Err(error) => {
                 if let Some(waiters) = self.pending.remove(series) {
-                    fail_waiters(waiters, &error.to_string());
+                    fail_waiters(&mut self.events, waiters, &error.to_string());
                 }
                 return;
             }
         };
         for publication in publications {
-            if !waiting.contains(&publication.consumer_id)
-                && let Some(events) = self.events.get_mut(&publication.consumer_id)
-            {
-                events.snapshot = Some(snapshot_message(&publication));
+            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                publish_ready(events, &publication);
             }
         }
-        if let Some(live) = self.live.as_mut().filter(|live| live.series == *series) {
+        if let Some(live) = self.live.get_mut(series) {
             let connected = live.connected;
             let buffered = std::mem::take(&mut live.buffered);
-            live.aggregator = match coinbase_aggregator() {
-                Ok(aggregator) => aggregator,
-                Err(error) => {
-                    self.realtime_interrupted(&error);
-                    return;
-                }
-            };
+            live.aggregator.reset();
             if live.aggregator.seed_canonical_history(&bars).is_err()
                 || buffered
                     .iter()
@@ -990,19 +1023,15 @@ impl Coordinator<'_> {
             live.history_ready = true;
             live.dirty = live.aggregator.in_flight().is_some();
         }
-        if let Some(waiters) = self.pending.remove(series) {
-            complete_waiters(&self.engine, waiters);
-        }
-        if self.live.as_ref().is_some_and(|live| live.connected) {
-            self.provider_online();
-        }
+        self.pending.remove(series);
+        self.series_live_if_ready(series);
     }
 
     fn handle_realtime(&mut self, event: RealtimeEvent) {
         match event {
             RealtimeEvent::Connecting(generation) => self.realtime_connecting(generation),
             RealtimeEvent::Connected(generation) => self.realtime_connected(generation),
-            RealtimeEvent::Trade(generation, trade) => self.realtime_trade(generation, trade),
+            RealtimeEvent::Trade(generation, trade) => self.realtime_trade(generation, &trade),
             RealtimeEvent::Heartbeat(generation) => self.realtime_heartbeat(generation),
             RealtimeEvent::Disconnected(generation) => {
                 if generation == self.current_provider_generation() {
@@ -1025,10 +1054,8 @@ impl Coordinator<'_> {
             {
                 return;
             }
-            if let Some(live) = self.live.as_mut()
-                && live.reset(generation).is_err()
-            {
-                return;
+            for live in self.live.values_mut() {
+                live.reset(generation);
             }
         } else {
             let _ =
@@ -1040,6 +1067,7 @@ impl Coordinator<'_> {
         } else {
             ProviderConnectionState::Recovering
         };
+        self.realtime_connected = false;
         self.broadcast_provider(state, generation, None);
     }
 
@@ -1047,49 +1075,57 @@ impl Coordinator<'_> {
         if generation != self.current_provider_generation() {
             return;
         }
-        let Some(live) = self.live.as_mut() else {
-            return;
-        };
-        live.connected = true;
-        let series = live.series.clone();
-        if live.history_ready {
-            self.provider_online();
-        } else {
+        self.realtime_connected = true;
+        let mut missing = Vec::new();
+        for (series, live) in &mut self.live {
+            live.connected = true;
+            if !live.history_ready {
+                missing.push(series.clone());
+            }
+        }
+        for series in missing {
             let _ = self.enqueue_history(&series, generation);
         }
+        self.provider_online_if_all_series_ready();
     }
 
-    fn realtime_trade(&mut self, generation: ProviderGeneration, trade: CanonicalTrade) {
-        let Some(live) = self
-            .live
-            .as_mut()
-            .filter(|live| live.generation == generation && live.connected)
-        else {
-            return;
-        };
-        if live.history_ready {
-            if live.aggregator.apply_trade(&trade).is_err() {
-                self.realtime_interrupted("Coinbase realtime aggregation failed");
-            } else {
+    fn realtime_trade(&mut self, generation: ProviderGeneration, trade: &CanonicalTrade) {
+        let mut interrupted = None;
+        for live in self.live.values_mut().filter(|live| {
+            live.generation == generation
+                && live.connected
+                && live.aggregator.product_id() == trade.product_id
+        }) {
+            if live.history_ready {
+                if live.aggregator.apply_trade(trade).is_err() {
+                    interrupted = Some("Coinbase realtime aggregation failed");
+                    break;
+                }
                 live.dirty = true;
+            } else if live.buffered.len() == LIVE_BUFFER_CAPACITY {
+                interrupted = Some("Coinbase history/live buffer overflowed");
+                break;
+            } else {
+                live.buffered.push_back(trade.clone());
             }
-        } else if live.buffered.len() == LIVE_BUFFER_CAPACITY {
-            self.realtime_interrupted("Coinbase history/live buffer overflowed");
-        } else {
-            live.buffered.push_back(trade);
+        }
+        if let Some(detail) = interrupted {
+            self.realtime_interrupted(detail);
         }
     }
 
     fn realtime_heartbeat(&mut self, generation: ProviderGeneration) {
-        let Some(live) = self
+        let missing = self
             .live
-            .as_ref()
-            .filter(|live| live.generation == generation && live.connected && !live.history_ready)
-        else {
-            return;
-        };
-        let series = live.series.clone();
-        let _ = self.enqueue_history(&series, generation);
+            .iter()
+            .filter(|(_, live)| {
+                live.generation == generation && live.connected && !live.history_ready
+            })
+            .map(|(series, _)| series.clone())
+            .collect::<Vec<_>>();
+        for series in missing {
+            let _ = self.enqueue_history(&series, generation);
+        }
     }
 
     fn realtime_interrupted(&mut self, detail: &str) {
@@ -1097,7 +1133,8 @@ impl Coordinator<'_> {
         let _ = self
             .engine
             .set_provider_health("coinbase", generation, ProviderHealth::Recovering);
-        if let Some(live) = self.live.as_mut() {
+        self.realtime_connected = false;
+        for live in self.live.values_mut() {
             live.connected = false;
             live.history_ready = false;
             live.dirty = false;
@@ -1110,7 +1147,13 @@ impl Coordinator<'_> {
         );
     }
 
-    fn provider_online(&mut self) {
+    fn provider_online_if_all_series_ready(&mut self) {
+        if !self.realtime_connected
+            || self.live.is_empty()
+            || self.live.values().any(|live| !live.history_ready)
+        {
+            return;
+        }
         let generation = self.current_provider_generation();
         let _ = self
             .engine
@@ -1119,35 +1162,62 @@ impl Coordinator<'_> {
         self.broadcast_series_state(SeriesLoadState::Live);
     }
 
-    fn publish_live(&mut self) {
-        let Some(live) = self
+    fn series_live_if_ready(&mut self, series: &BarSeriesKey) {
+        if !self
             .live
-            .as_mut()
-            .filter(|live| live.connected && live.history_ready && live.dirty)
-        else {
-            return;
-        };
-        let Some(active) = live.aggregator.in_flight() else {
-            live.dirty = false;
-            return;
-        };
-        let mut bars = live.aggregator.history();
-        bars.push(active);
-        let series = live.series.clone();
-        let generation = live.generation;
-        live.dirty = false;
-        match self
-            .engine
-            .install_realtime(generation, &series, 2, 8, bars, true)
+            .get(series)
+            .is_some_and(|live| live.connected && live.history_ready)
         {
-            Ok(publications) => {
+            return;
+        }
+        if self
+            .engine
+            .provider_status("coinbase")
+            .is_some_and(|status| status.health == ProviderHealth::Online)
+        {
+            self.broadcast_series_state_for(series, SeriesLoadState::Live);
+        } else {
+            self.provider_online_if_all_series_ready();
+        }
+    }
+
+    fn publish_live(&mut self) {
+        let ready = self
+            .live
+            .iter_mut()
+            .filter(|(_, live)| live.connected && live.history_ready && live.dirty)
+            .filter_map(|(series, live)| {
+                let active = live.aggregator.in_flight()?;
+                let mut bars = live.aggregator.history();
+                bars.push(active);
+                live.dirty = false;
+                Some((
+                    series.clone(),
+                    live.generation,
+                    live.aggregator.price_scale(),
+                    live.aggregator.quantity_scale(),
+                    bars,
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (series, generation, price_scale, quantity_scale, bars) in ready {
+            if let Ok(publications) = self.engine.install_realtime(
+                generation,
+                &series,
+                price_scale,
+                quantity_scale,
+                bars,
+                true,
+            ) {
                 for publication in publications {
                     if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                         events.snapshot = Some(snapshot_message(&publication));
                     }
                 }
+            } else {
+                self.realtime_interrupted("Coinbase live publication failed");
+                return;
             }
-            Err(_) => self.realtime_interrupted("Coinbase live publication failed"),
         }
     }
 
@@ -1187,6 +1257,27 @@ impl Coordinator<'_> {
         }
     }
 
+    fn broadcast_series_state_for(&mut self, selected: &BarSeriesKey, state: SeriesLoadState) {
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            if series == selected {
+                events.series_state = Some(series_state(
+                    *consumer_id,
+                    generation,
+                    ipc_series(series),
+                    state,
+                    None,
+                ));
+            }
+        }
+    }
+
     fn current_provider_generation(&self) -> ProviderGeneration {
         self.engine
             .provider_status("coinbase")
@@ -1218,18 +1309,27 @@ impl Coordinator<'_> {
         self.pending.retain(|_, waiters| !waiters.is_empty());
     }
 
+    fn prune_unused_live_series(&mut self) {
+        let demanded = self
+            .events
+            .keys()
+            .filter_map(|consumer_id| {
+                self.engine
+                    .current_demand(*consumer_id)
+                    .and_then(|demand| demand.series.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        self.live.retain(|series, _| demanded.contains(series));
+    }
+
     fn stop_realtime_if_idle(&mut self) {
         if !self.events.is_empty() || !self.realtime_started {
             return;
         }
         self.realtime_stop.store(true, Ordering::Release);
         self.realtime_started = false;
-        if let Some(live) = self.live.as_mut() {
-            live.connected = false;
-            live.history_ready = false;
-            live.dirty = false;
-            live.buffered.clear();
-        }
+        self.realtime_connected = false;
+        self.live.clear();
     }
 }
 
@@ -1282,50 +1382,44 @@ fn configured_engine() -> Result<MarketEngine, String> {
     Ok(engine)
 }
 
-fn complete_waiters(engine: &MarketEngine, waiters: Vec<DemandWaiter>) {
+fn fail_waiters(
+    events: &mut BTreeMap<ConsumerId, ConsumerEvents>,
+    waiters: Vec<DemandWaiter>,
+    detail: &str,
+) {
     for waiter in waiters {
-        let response = engine
-            .latest_publication(waiter.consumer_id)
-            .filter(|publication| publication.generation == waiter.generation)
-            .map_or_else(
-                || Ok(superseded_messages(waiter.consumer_id, waiter.generation)),
-                |publication| Ok(ready_messages(publication)),
-            );
-        let _ = waiter.reply.send(response);
+        if let Some(events) = events.get_mut(&waiter.consumer_id) {
+            events.series_state = Some(series_state(
+                waiter.consumer_id,
+                waiter.generation,
+                SeriesKey::default(),
+                SeriesLoadState::Failed,
+                Some(detail.to_string()),
+            ));
+            events.demand_error = Some(envelope::Payload::DemandError(DemandError {
+                consumer_id: waiter.consumer_id.0.get(),
+                generation: waiter.generation.0.get(),
+                code: EngineFaultCode::Retryable as i32,
+                stage: "provider_history".to_string(),
+                detail: detail.to_string(),
+            }));
+        }
     }
 }
 
-fn fail_waiters(waiters: Vec<DemandWaiter>, detail: &str) {
-    for waiter in waiters {
-        let _ = waiter.reply.send(Ok(failed_messages(
-            waiter.consumer_id,
-            waiter.generation,
-            detail,
-        )));
-    }
-}
-
-fn ready_messages(
+fn publish_ready(
+    events: &mut ConsumerEvents,
     publication: &axiusflow_market_engine::ConsumerPublication,
-) -> Vec<envelope::Payload> {
+) {
     let series = ipc_series(&publication.snapshot.series);
-    vec![
-        series_state(
-            publication.consumer_id,
-            publication.generation,
-            series.clone(),
-            SeriesLoadState::Resolving,
-            None,
-        ),
-        snapshot_message(publication),
-        series_state(
-            publication.consumer_id,
-            publication.generation,
-            series,
-            SeriesLoadState::Ready,
-            None,
-        ),
-    ]
+    events.snapshot = Some(snapshot_message(publication));
+    events.series_state = Some(series_state(
+        publication.consumer_id,
+        publication.generation,
+        series,
+        SeriesLoadState::Ready,
+        None,
+    ));
 }
 
 fn snapshot_message(
@@ -1350,42 +1444,6 @@ fn snapshot_message(
     })
 }
 
-fn superseded_messages(
-    consumer_id: ConsumerId,
-    generation: GenerationId,
-) -> Vec<envelope::Payload> {
-    vec![series_state(
-        consumer_id,
-        generation,
-        SeriesKey::default(),
-        SeriesLoadState::Superseded,
-        Some("a newer consumer generation replaced this demand".to_string()),
-    )]
-}
-
-fn failed_messages(
-    consumer_id: ConsumerId,
-    generation: GenerationId,
-    detail: &str,
-) -> Vec<envelope::Payload> {
-    vec![
-        series_state(
-            consumer_id,
-            generation,
-            SeriesKey::default(),
-            SeriesLoadState::Failed,
-            Some(detail.to_string()),
-        ),
-        envelope::Payload::DemandError(DemandError {
-            consumer_id: consumer_id.0.get(),
-            generation: generation.0.get(),
-            code: EngineFaultCode::Retryable as i32,
-            stage: "provider_history".to_string(),
-            detail: detail.to_string(),
-        }),
-    ]
-}
-
 fn series_state(
     consumer_id: ConsumerId,
     generation: GenerationId,
@@ -1407,15 +1465,56 @@ fn id(value: u64) -> Result<NonZeroU64, String> {
     NonZeroU64::new(value).ok_or_else(|| "market identity must be non-zero".to_string())
 }
 
-fn coinbase_aggregator() -> Result<CoinbaseBarAggregator, String> {
-    CoinbaseBarAggregatorConfig::try_new(
-        "BTC-USD",
-        2,
-        8,
+fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggregator, String> {
+    CoinbaseBarAggregatorConfig::try_new_interval(
+        profile.product_id,
+        profile.price_scale,
+        profile.quantity_scale,
+        NonZeroU32::new(profile.interval_seconds).unwrap_or(NonZeroU32::MIN),
         NonZeroUsize::new(HISTORY_BARS_PER_SERIES).unwrap_or(NonZeroUsize::MIN),
     )
     .map(CoinbaseBarAggregator::new)
     .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Copy)]
+struct CoinbaseSeriesProfile {
+    product_id: &'static str,
+    resolution: &'static str,
+    interval_seconds: u32,
+    price_scale: u8,
+    quantity_scale: u8,
+}
+
+fn coinbase_series_profile(series: &BarSeriesKey) -> Result<CoinbaseSeriesProfile, String> {
+    if series.provider_id != "coinbase" || series.definition_version != 1 {
+        return Err("unsupported Coinbase engine series identity".to_string());
+    }
+    let (product_id, price_scale, quantity_scale) = match series.instrument_id.as_str() {
+        "instrument:coinbase:btc:usd" => ("BTC-USD", 2, 8),
+        "instrument:coinbase:eth:usd" => ("ETH-USD", 2, 8),
+        _ => return Err("unsupported Coinbase engine instrument".to_string()),
+    };
+    let interval_seconds = match series.period {
+        BarPeriod::Time { seconds } => seconds,
+        BarPeriod::Tick { .. } | BarPeriod::Daily => {
+            return Err("unsupported Coinbase engine interval".to_string());
+        }
+    };
+    let resolution = match interval_seconds {
+        60 => "1m",
+        300 => "5m",
+        900 => "15m",
+        3_600 => "1h",
+        _ => return Err("unsupported Coinbase engine interval".to_string()),
+    };
+    Ok(CoinbaseSeriesProfile {
+        product_id,
+        resolution,
+        interval_seconds,
+        price_scale,
+        quantity_scale,
+    })
 }
 
 fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
@@ -1474,6 +1573,11 @@ mod tests {
         release: Receiver<()>,
     }
 
+    struct SwitchingHistory {
+        requested: SyncSender<BarSeriesKey>,
+        release: Receiver<()>,
+    }
+
     impl HistorySource for ControlledHistory {
         fn fetch(&mut self, _series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
             self.fetches.fetch_add(1, Ordering::AcqRel);
@@ -1496,11 +1600,45 @@ mod tests {
         }
     }
 
+    impl HistorySource for SwitchingHistory {
+        fn fetch(&mut self, series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
+            self.requested
+                .send(series.clone())
+                .map_err(|_| "switch history observer disconnected".to_string())?;
+            self.release
+                .recv()
+                .map_err(|_| "switch history release disconnected".to_string())?;
+            let profile = coinbase_series_profile(series)?;
+            Ok(HistorySnapshot {
+                price_scale: profile.price_scale,
+                quantity_scale: profile.quantity_scale,
+                bars: vec![MarketBar {
+                    source_sequence: 1,
+                    exchange_timestamp_seconds: 0,
+                    open: i64::from(profile.interval_seconds),
+                    high: i64::from(profile.interval_seconds),
+                    low: i64::from(profile.interval_seconds),
+                    close: i64::from(profile.interval_seconds),
+                    volume: 1,
+                }],
+            })
+        }
+    }
+
     fn btc() -> SeriesKey {
         SeriesKey {
             provider: "coinbase".to_string(),
             instrument_id: "instrument:coinbase:btc:usd".to_string(),
             interval_seconds: 60,
+            definition_revision: 1,
+        }
+    }
+
+    fn selected_series(instrument_id: &str, interval_seconds: u32) -> SeriesKey {
+        SeriesKey {
+            provider: "coinbase".to_string(),
+            instrument_id: instrument_id.to_string(),
+            interval_seconds,
             definition_revision: 1,
         }
     }
@@ -1518,8 +1656,17 @@ mod tests {
     }
 
     fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {
+        trade_for("BTC-USD", minute, price, provider_sequence)
+    }
+
+    fn trade_for(
+        product_id: &str,
+        minute: i64,
+        price: &str,
+        provider_sequence: u64,
+    ) -> CanonicalTrade {
         CanonicalTrade {
-            product_id: "BTC-USD".to_string(),
+            product_id: product_id.to_string(),
             trade_id: format!("fixture-{provider_sequence}"),
             price: FixedPointValue::parse(price).expect("price parses"),
             size: FixedPointValue::parse("0.00000001").expect("size parses"),
@@ -1558,13 +1705,18 @@ mod tests {
                 .service
                 .register_consumer(client, 1, client)
                 .expect("consumer registers");
-            let messages = harness
+            harness
                 .service
                 .set_demand(client, client, 1, &btc())
-                .expect("history demand resolves");
-            assert!(messages.iter().any(|message| {
-                matches!(message, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.provider_generation == 1 && !snapshot.forming)
-            }));
+                .expect("history demand is accepted");
+            let snapshot = poll_until(&harness.service, client, client, |event| {
+                matches!(event, envelope::Payload::SeriesSnapshot(_))
+            });
+            assert!(matches!(
+                snapshot,
+                envelope::Payload::SeriesSnapshot(snapshot)
+                    if snapshot.provider_generation == 1 && !snapshot.forming
+            ));
         }
     }
 
@@ -1593,27 +1745,35 @@ mod tests {
                 .expect_err("another client's consumer is rejected"),
             "consumer is not owned by the attached client"
         );
-        let first = service.clone();
-        let first_request = thread::spawn(move || first.set_demand(1, 1, 1, &btc()));
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("first demand is accepted without provider completion");
         while fetches.load(Ordering::Acquire) == 0 {
             thread::yield_now();
         }
-        release_tx.send(()).expect("history released");
-        let first_messages = first_request
-            .join()
-            .expect("request thread joins")
-            .expect("first demand succeeds");
-        let second_messages = service
+        service
             .set_demand(2, 2, 1, &btc())
-            .expect("cache hit succeeds");
-        for messages in [first_messages, second_messages] {
-            assert!(messages.iter().any(|message| {
-                matches!(message, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.bars.len() == 1)
-            }));
+            .expect("matching demand joins the in-flight history request");
+        release_tx.send(()).expect("history released");
+        for (client, consumer) in [(1, 1), (2, 2)] {
+            assert!(matches!(
+                poll_until(&service, client, consumer, |event| matches!(
+                    event,
+                    envelope::Payload::SeriesSnapshot(_)
+                )),
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.bars.len() == 1
+            ));
         }
         service
             .set_demand(1, 1, 2, &btc())
             .expect("newer selection reuses cache");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+        ));
         service
             .set_viewport(1, 1, 1, 60, 120)
             .expect("retired viewport is a fenced no-op");
@@ -1641,6 +1801,71 @@ mod tests {
             ),
             Err("Coinbase history capacity is temporarily exhausted")
         );
+    }
+
+    #[test]
+    fn rapid_switch_churn_publishes_only_the_latest_generation() {
+        let (requested_tx, requested_rx) = mpsc::sync_channel(8);
+        let (release_tx, release_rx) = mpsc::sync_channel(8);
+        let service = MarketService::start_with_source(SwitchingHistory {
+            requested: requested_tx,
+            release: release_rx,
+        })
+        .expect("switching service starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        let required = [
+            selected_series("instrument:coinbase:btc:usd", 60),
+            selected_series("instrument:coinbase:btc:usd", 300),
+            selected_series("instrument:coinbase:btc:usd", 900),
+            selected_series("instrument:coinbase:btc:usd", 3_600),
+            selected_series("instrument:coinbase:btc:usd", 60),
+            selected_series("instrument:coinbase:eth:usd", 60),
+            selected_series("instrument:coinbase:btc:usd", 60),
+        ];
+        for (index, series) in required.iter().enumerate() {
+            service
+                .set_demand(1, 1, u64::try_from(index + 1).expect("generation"), series)
+                .expect("rapid demand is accepted");
+        }
+        let first = requested_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first history request starts");
+        assert_eq!(first, internal_series(&required[0]).expect("first series"));
+        release_tx.send(()).expect("first history completes");
+        let latest = poll_until(
+            &service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 7),
+        );
+        assert!(matches!(
+            latest,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == 7
+                    && snapshot.series.as_ref().is_some_and(|series| {
+                        series.instrument_id == "instrument:coinbase:btc:usd"
+                            && series.interval_seconds == 60
+                    })
+        ));
+
+        let mut completed = 1;
+        while completed < 5 {
+            requested_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("queued obsolete history starts");
+            release_tx.send(()).expect("obsolete history completes");
+            completed += 1;
+        }
+        thread::sleep(Duration::from_millis(20));
+        while let Some(event) = service.poll_event(1, 1).expect("final consumer polls") {
+            assert!(
+                !matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation != 7),
+                "obsolete history reached the active consumer"
+            );
+        }
     }
 
     #[test]
@@ -1744,6 +1969,87 @@ mod tests {
                 .get(),
             2
         );
+    }
+
+    #[test]
+    fn symbol_and_interval_switch_reuses_the_shared_realtime_session() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        harness.service.attach(1).expect("client attaches");
+        harness
+            .service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        harness
+            .service
+            .set_demand(1, 1, 1, &btc())
+            .expect("BTC demand is accepted");
+        poll_until(
+            &harness.service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1),
+        );
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("shared realtime starts")
+                .0
+                .get(),
+            1
+        );
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("realtime connects");
+
+        let eth_five = selected_series("instrument:coinbase:eth:usd", 300);
+        harness
+            .service
+            .set_demand(1, 1, 2, &eth_five)
+            .expect("ETH five-minute demand is accepted");
+        let history = poll_until(
+            &harness.service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2 && !snapshot.forming),
+        );
+        assert!(matches!(
+            history,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.series.as_ref().is_some_and(|series| {
+                    series.instrument_id == "instrument:coinbase:eth:usd"
+                        && series.interval_seconds == 300
+                })
+        ));
+        assert!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "switching reuses the existing provider session"
+        );
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade_for(
+                "ETH-USD", 10, "2000.00", 1,
+            )))
+            .expect("ETH live trade");
+        let live = poll_until(
+            &harness.service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2 && snapshot.forming),
+        );
+        assert!(matches!(
+            live,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.bars.last().is_some_and(|bar| {
+                    bar.exchange_timestamp_seconds == 600 && bar.close == 200_000
+                })
+        ));
+        harness.service.detach(1).expect("client detaches");
     }
 
     #[test]
