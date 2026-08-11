@@ -27,7 +27,6 @@ use axiusflow_rithmic_protocol_adapter::{
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
-    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -1127,50 +1126,6 @@ impl MarketDataWorker {
                 coinbase_sequence: None,
             },
         ))
-    }
-
-    /// Starts the live Coinbase coordinator.
-    ///
-    /// # Errors
-    /// Returns an error if provider configuration, storage, or worker startup fails.
-    pub fn start_coinbase(
-        product_id: String,
-        history_root: PathBuf,
-        ui_thread: thread::ThreadId,
-        detailed_diagnostics: bool,
-        fetch_catalog: bool,
-    ) -> Result<(MarketWorkerStartup, Self), String> {
-        crate::live_market_worker::start(
-            product_id,
-            history_root,
-            ui_thread,
-            detailed_diagnostics,
-            fetch_catalog,
-        )
-    }
-
-    /// Starts Coinbase from an exact validated catalog product.
-    ///
-    /// # Errors
-    /// Returns an error if product metadata, storage, or worker startup fails.
-    pub fn start_coinbase_product(
-        product: CoinbaseSpotProduct,
-        interval: ChartInterval,
-        history_root: PathBuf,
-        ui_thread: thread::ThreadId,
-        detailed_diagnostics: bool,
-        fetch_catalog: bool,
-        include_level2: bool,
-    ) -> Result<(MarketWorkerStartup, Self), String> {
-        crate::live_market_worker::start_product(
-            product,
-            interval,
-            history_root,
-            ui_thread,
-            detailed_diagnostics,
-            fetch_catalog,
-            include_level2,
-        )
     }
 
     #[must_use]

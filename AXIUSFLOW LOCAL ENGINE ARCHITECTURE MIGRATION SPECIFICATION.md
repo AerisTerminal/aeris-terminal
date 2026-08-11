@@ -1429,7 +1429,9 @@ Do not hide already-valid data behind a spinner.
 
 # 30. MEMORY / DISK / PROVIDER LOOKUP ORDER
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): the implemented Coinbase demand path checks an exact `SeriesStore` hit, a compatible hot one-minute source, an encrypted retained derived segment, an encrypted retained native segment, and finally the provider. Each earlier usable result publishes before later repair work and the desktop receives only the resulting state/snapshot events, not the lookup mechanism. Deterministic tests cover exact memory reuse, compatible-memory derivation, derived-before-native retained lookup, disk-before-provider publication, and provider fallback.
 
 A normal series query should conceptually use:
 
@@ -1451,7 +1453,9 @@ The chart does not know.
 
 # 31. TIMEFRAME SWITCHING
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): when BTC or ETH one-minute history is hot, a 5m, 15m, or 1h demand aggregates locally, publishes a partial covering snapshot, caches the result, and starts native provider repair without restarting the shared realtime session. Repeating the same coarser demand is an exact memory hit and performs no additional history fetch. The Phase 4 native switch proof and deterministic shared-session tests continue to cover provider-session stability.
 
 Timeframe switching must not recreate the provider session merely because the interval changed.
 
@@ -1515,7 +1519,9 @@ If the requested timeframe requires data that is unavailable locally, fetch miss
 
 # 33. DERIVED SERIES CACHE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): derived Coinbase bars retain the full canonical `BarSeriesKey` identity and are bounded by the existing engine series/bar limits. They persist separately as `DataKind::Derived` under the account/entitlement/instrument/interval/source/schema/calendar/adjustment/correction dimensions, are searched before native retained bars, and remain bounded by the encrypted catalog limit. Tests prove derived data wins the retained lookup after restart and repeated timeframe demand reuses the hot derived series without another provider fetch.
 
 Maintain a bounded derived series cache.
 
@@ -3716,7 +3722,7 @@ This proves the core architecture is genuinely multi-chart rather than another s
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): the production Coinbase path now has one bounded resident-engine local-history worker using the existing authenticated SQLite catalog, encrypted immutable segments, and native-vault keys under the engine data root. Hot memory is checked first; retained disk bars publish as `Partial/Durable` before provider repair, provider bars publish as `Ready/Pending` before persistence is queued, and persistence success/failure becomes independent `Durable`/`Degraded` state. Deterministic tests prove encrypted restart reads, disk-before-provider ordering, retained-data survival when provider repair fails, memory-before-persistence ordering, and usable provider history under total storage failure. An isolated Windows release run created encrypted segments, then crash-restarted the same root with both processes responsive, retained all prior segments, added the refreshed range, and quarantined nothing. This phase remains unchecked because the general derived-series cache and direct Rithmic/legacy-smoke desktop storage callers are intentionally removed only with their later migration slices.
+Progress evidence (2026-08-11): the production Coinbase path now has one bounded resident-engine local-history worker using the existing authenticated SQLite catalog, encrypted immutable segments, and native-vault keys under the engine data root. Hot memory is checked first; retained disk bars publish as `Partial/Durable` before provider repair, provider bars publish as `Ready/Pending` before persistence is queued, and persistence success/failure becomes independent `Durable`/`Degraded` state. Deterministic tests prove encrypted restart reads, disk-before-provider ordering, retained-data survival when provider repair fails, memory-before-persistence ordering, usable provider history under total storage failure, and bounded derived-series reuse. An isolated Windows release run created encrypted segments, then crash-restarted the same root with both processes responsive, retained all prior segments, added the refreshed range, and quarantined nothing. The obsolete direct Coinbase desktop coordinator/storage/smoke path has been deleted. This phase remains unchecked because compatible-source disk derivation and the direct Rithmic desktop storage caller remain for their later slices.
 
 Move storage/history behind engine.
 

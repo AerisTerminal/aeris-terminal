@@ -29,6 +29,11 @@ pub(crate) struct LocalHistoryStore {
     segment_key: SegmentEncryptionKey,
 }
 
+pub(crate) struct StoredHistory {
+    pub(crate) bars: Vec<MarketBar>,
+    pub(crate) derived: bool,
+}
+
 impl LocalHistoryStore {
     pub(crate) fn open(root: &Path) -> Result<Self, String> {
         let parent = root
@@ -69,37 +74,48 @@ impl LocalHistoryStore {
     pub(crate) fn read_latest(
         &mut self,
         series: &BarSeriesKey,
-    ) -> Result<Option<Vec<MarketBar>>, String> {
+    ) -> Result<Option<StoredHistory>, String> {
         let scope = history_scope();
         let resolution = resolution(series)?;
-        let identity = self
-            .store
-            .latest_identity(series_identity(&scope, series, &resolution), now_seconds())
-            .map_err(redacted)?;
-        let Some(identity) = identity else {
-            return Ok(None);
-        };
-        match self
-            .store
-            .read(
-                &identity,
-                &self.segment_key,
-                now_seconds(),
-                RecoveryAction::ProviderRefetch,
-            )
-            .map_err(redacted)?
-        {
-            HistoryRead::Hit(payload) => decode_history_segment(&payload)
-                .map(|values| Some(values.into_iter().map(|value| value.value).collect()))
-                .map_err(redacted),
-            HistoryRead::Unavailable { .. } => Ok(None),
+        for data_kind in [DataKind::Derived, DataKind::Bars] {
+            let identity = self
+                .store
+                .latest_identity(
+                    series_identity(&scope, series, &resolution, data_kind),
+                    now_seconds(),
+                )
+                .map_err(redacted)?;
+            let Some(identity) = identity else {
+                continue;
+            };
+            if let HistoryRead::Hit(payload) = self
+                .store
+                .read(
+                    &identity,
+                    &self.segment_key,
+                    now_seconds(),
+                    RecoveryAction::ProviderRefetch,
+                )
+                .map_err(redacted)?
+            {
+                return decode_history_segment(&payload)
+                    .map(|values| {
+                        Some(StoredHistory {
+                            bars: values.into_iter().map(|value| value.value).collect(),
+                            derived: data_kind == DataKind::Derived,
+                        })
+                    })
+                    .map_err(redacted);
+            }
         }
+        Ok(None)
     }
 
     pub(crate) fn persist(
         &mut self,
         series: &BarSeriesKey,
         bars: &[MarketBar],
+        derived: bool,
     ) -> Result<(), String> {
         let first = bars
             .first()
@@ -120,7 +136,11 @@ impl LocalHistoryStore {
         let identity = SegmentIdentity {
             scope: history_scope(),
             instrument_id: series.instrument_id.clone(),
-            data_kind: DataKind::Bars,
+            data_kind: if derived {
+                DataKind::Derived
+            } else {
+                DataKind::Bars
+            },
             resolution: resolution(series)?,
             range_start_unix_nanos: start,
             range_end_unix_nanos: end,
@@ -166,11 +186,12 @@ fn series_identity<'a>(
     scope: &'a HistoryScope,
     series: &'a BarSeriesKey,
     resolution: &'a str,
+    data_kind: DataKind,
 ) -> HistorySeriesIdentity<'a> {
     HistorySeriesIdentity {
         scope,
         instrument_id: &series.instrument_id,
-        data_kind: DataKind::Bars,
+        data_kind,
         resolution,
         source_revision: 1,
         schema_revision: 1,
@@ -267,13 +288,22 @@ mod tests {
         {
             let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
                 .expect("fixture store opens");
-            storage.persist(&series, &bars).expect("history persists");
+            storage
+                .persist(&series, &bars, false)
+                .expect("history persists");
+            let mut derived = bars.clone();
+            derived[0].close = 106;
+            storage
+                .persist(&series, &derived, true)
+                .expect("derived history persists");
         }
         let mut reopened = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
             .expect("fixture store reopens");
-        assert_eq!(
-            reopened.read_latest(&series).expect("history reads"),
-            Some(bars)
-        );
+        let retained = reopened
+            .read_latest(&series)
+            .expect("history reads")
+            .expect("history exists");
+        assert_eq!(retained.bars[0].close, 106);
+        assert!(retained.derived);
     }
 }

@@ -18,8 +18,8 @@ use std::sync::atomic::AtomicUsize;
 
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
-    CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseSession, ENTITLEMENT_CLASS,
-    decode_history_bar,
+    CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseInterval, CoinbaseSession,
+    ENTITLEMENT_CLASS, aggregate_coinbase_bars, decode_history_bar,
 };
 use axiusflow_local_engine_protocol::{
     DemandError, EngineFaultCode, MarketBar as IpcMarketBar, PersistenceState,
@@ -34,7 +34,7 @@ use axiusflow_market_engine::{
 };
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 
-use crate::local_history::LocalHistoryStore;
+use crate::local_history::{LocalHistoryStore, StoredHistory};
 
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
@@ -75,7 +75,7 @@ enum Command {
     LocalHistoryCompleted(
         BarSeriesKey,
         ProviderGeneration,
-        Result<Option<Vec<MarketBar>>, String>,
+        Result<Option<StoredHistory>, String>,
     ),
     PersistenceCompleted(BarSeriesKey, ProviderGeneration, Result<(), String>),
 }
@@ -87,7 +87,7 @@ struct HistoryRequest {
 
 enum StorageRequest {
     Read(BarSeriesKey, ProviderGeneration),
-    Persist(BarSeriesKey, ProviderGeneration, Vec<MarketBar>),
+    Persist(BarSeriesKey, ProviderGeneration, Vec<MarketBar>, bool),
 }
 
 struct HistorySnapshot {
@@ -700,9 +700,9 @@ fn run_storage_worker(
                 };
                 Command::LocalHistoryCompleted(series, generation, result)
             }
-            StorageRequest::Persist(series, generation, bars) => {
+            StorageRequest::Persist(series, generation, bars, derived) => {
                 let result = match storage.as_mut() {
-                    Some(Ok(storage)) => storage.persist(&series, &bars),
+                    Some(Ok(storage)) => storage.persist(&series, &bars, derived),
                     Some(Err(error)) => Err(error.clone()),
                     None => Ok(()),
                 };
@@ -1004,7 +1004,14 @@ impl Coordinator<'_> {
             self.pending.entry(series.clone()).or_default().push(waiter);
             if first {
                 let generation = self.current_provider_generation();
-                if self.enqueue_local_history(series, generation).is_err()
+                let derived = self.derive_compatible_history(series, generation);
+                if matches!(derived, Ok(true)) {
+                    if let Err(detail) = self.enqueue_history(series, generation)
+                        && let Some(waiters) = self.pending.remove(series)
+                    {
+                        fail_waiters(&mut self.events, waiters, detail);
+                    }
+                } else if self.enqueue_local_history(series, generation).is_err()
                     && let Err(detail) = self.enqueue_history(series, generation)
                     && let Some(waiters) = self.pending.remove(series)
                 {
@@ -1013,6 +1020,75 @@ impl Coordinator<'_> {
             }
         }
         let _ = reply.send(Ok(()));
+    }
+
+    fn derive_compatible_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> Result<bool, String> {
+        let target_seconds = match series.period {
+            BarPeriod::Time { seconds } if seconds > 60 && seconds % 60 == 0 => seconds,
+            BarPeriod::Time { .. } | BarPeriod::Tick { .. } | BarPeriod::Daily => return Ok(false),
+        };
+        let source_series = BarSeriesKey {
+            period: BarPeriod::time(60).map_err(|error| error.to_string())?,
+            ..series.clone()
+        };
+        let Some(source) = self.engine.series_snapshot(&source_series) else {
+            return Ok(false);
+        };
+        if source.provider_generation != generation {
+            return Ok(false);
+        }
+        let mut source_bars = source.bars.to_vec();
+        if source.forming {
+            source_bars.pop();
+        }
+        let interval = coinbase_interval(target_seconds)?;
+        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval)?;
+        if bars.is_empty() {
+            return Ok(false);
+        }
+        let publications = self
+            .engine
+            .install_history(
+                generation,
+                series,
+                source.price_scale,
+                source.quantity_scale,
+                bars.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.local_loaded.insert((series.clone(), generation));
+        for publication in publications {
+            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                publish_state(
+                    events,
+                    &publication,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Pending,
+                    Some("Showing compatible in-memory history while provider repair runs"),
+                );
+            }
+        }
+        if self
+            .storage
+            .try_send(StorageRequest::Persist(
+                series.clone(),
+                generation,
+                bars,
+                true,
+            ))
+            .is_err()
+        {
+            self.broadcast_persistence_for(
+                series,
+                PersistenceState::Degraded,
+                Some("Derived history persistence is unavailable"),
+            );
+        }
+        Ok(true)
     }
 
     fn enqueue_local_history(
@@ -1034,13 +1110,13 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        result: Result<Option<Vec<MarketBar>>, String>,
+        result: Result<Option<StoredHistory>, String>,
     ) {
         if generation != self.current_provider_generation() {
             return;
         }
         match result {
-            Ok(Some(bars)) if !bars.is_empty() => {
+            Ok(Some(stored)) if !stored.bars.is_empty() => {
                 let Ok(profile) = coinbase_series_profile(series) else {
                     return;
                 };
@@ -1049,7 +1125,7 @@ impl Coordinator<'_> {
                     series,
                     profile.price_scale,
                     profile.quantity_scale,
-                    bars,
+                    stored.bars,
                 ) {
                     self.local_loaded.insert((series.clone(), generation));
                     for publication in publications {
@@ -1059,7 +1135,11 @@ impl Coordinator<'_> {
                                 &publication,
                                 SeriesLoadState::Partial,
                                 PersistenceState::Durable,
-                                Some("Showing retained local history while provider repair runs"),
+                                Some(if stored.derived {
+                                    "Showing retained derived history while provider repair runs"
+                                } else {
+                                    "Showing retained local history while provider repair runs"
+                                }),
                             );
                         }
                     }
@@ -1194,6 +1274,7 @@ impl Coordinator<'_> {
             series.clone(),
             generation,
             bars.clone(),
+            false,
         )) {
             Ok(()) => {}
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
@@ -1250,19 +1331,10 @@ impl Coordinator<'_> {
         persistence: PersistenceState,
         detail: Option<&str>,
     ) {
-        let load_state = |consumer_id, series: &BarSeriesKey| {
-            if self
-                .live
-                .get(series)
-                .is_some_and(|live| live.connected && live.history_ready)
-            {
-                SeriesLoadState::Live
-            } else if self.engine.latest_publication(consumer_id).is_some() {
-                SeriesLoadState::Ready
-            } else {
-                SeriesLoadState::Resolving
-            }
-        };
+        let current_provider_generation = self.current_provider_generation();
+        let local_loaded = &self.local_loaded;
+        let live = &self.live;
+        let engine = &self.engine;
         for (consumer_id, events) in &mut self.events {
             let Some(demand) = self.engine.current_demand(*consumer_id) else {
                 continue;
@@ -1272,7 +1344,19 @@ impl Coordinator<'_> {
                 continue;
             };
             if series == selected {
-                let state = load_state(*consumer_id, series);
+                let state = if local_loaded.contains(&(series.clone(), current_provider_generation))
+                {
+                    SeriesLoadState::Partial
+                } else if live
+                    .get(series)
+                    .is_some_and(|live| live.connected && live.history_ready)
+                {
+                    SeriesLoadState::Live
+                } else if engine.latest_publication(*consumer_id).is_some() {
+                    SeriesLoadState::Ready
+                } else {
+                    SeriesLoadState::Resolving
+                };
                 events.series_state = Some(series_state_with_persistence(
                     *consumer_id,
                     generation,
@@ -1838,6 +1922,16 @@ fn coinbase_series_profile(series: &BarSeriesKey) -> Result<CoinbaseSeriesProfil
     })
 }
 
+fn coinbase_interval(seconds: u32) -> Result<CoinbaseInterval, String> {
+    match seconds {
+        60 => Ok(CoinbaseInterval::Minute1),
+        300 => Ok(CoinbaseInterval::Minute5),
+        900 => Ok(CoinbaseInterval::Minute15),
+        3_600 => Ok(CoinbaseInterval::Hour1),
+        _ => Err("unsupported Coinbase engine derivation interval".to_string()),
+    }
+}
+
 fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
     if series.provider.trim().is_empty()
         || series.instrument_id.trim().is_empty()
@@ -1900,17 +1994,18 @@ mod tests {
     }
 
     impl HistorySource for ControlledHistory {
-        fn fetch(&mut self, _series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
+        fn fetch(&mut self, series: &BarSeriesKey) -> Result<HistorySnapshot, String> {
             self.fetches.fetch_add(1, Ordering::AcqRel);
             self.release
                 .recv()
                 .map_err(|_| "test history release disconnected".to_string())?;
+            let profile = coinbase_series_profile(series)?;
             Ok(HistorySnapshot {
-                price_scale: 2,
-                quantity_scale: 8,
+                price_scale: profile.price_scale,
+                quantity_scale: profile.quantity_scale,
                 bars: vec![MarketBar {
                     source_sequence: 1,
-                    exchange_timestamp_seconds: 60,
+                    exchange_timestamp_seconds: i64::from(profile.interval_seconds),
                     open: 100,
                     high: 110,
                     low: 90,
@@ -2270,7 +2365,14 @@ mod tests {
             close: 99,
             ..history_bar()
         };
-        coordinator.local_history_completed(&series, generation, Ok(Some(vec![local])));
+        coordinator.local_history_completed(
+            &series,
+            generation,
+            Ok(Some(StoredHistory {
+                bars: vec![local],
+                derived: false,
+            })),
+        );
         assert!(matches!(
             coordinator.events[&consumer_id].series_state,
             Some(envelope::Payload::SeriesState(ref state))
@@ -2306,7 +2408,7 @@ mod tests {
         ));
         assert!(matches!(
             storage_rx.try_recv(),
-            Ok(StorageRequest::Persist(ref persisted, current, ref bars))
+            Ok(StorageRequest::Persist(ref persisted, current, ref bars, false))
                 if persisted == &series && current == generation && bars == &[history_bar()]
         ));
     }
@@ -2369,6 +2471,70 @@ mod tests {
             .set_viewport(1, 1, 1, 60, 120)
             .expect("retired viewport is a fenced no-op");
         assert_eq!(fetches.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn compatible_minute_history_publishes_and_caches_a_coarser_series() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = mpsc::sync_channel(2);
+        let service = MarketService::start_with_source(ControlledHistory {
+            fetches: Arc::clone(&fetches),
+            release: release_rx,
+        })
+        .expect("test service starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("minute demand starts");
+        while fetches.load(Ordering::Acquire) == 0 {
+            thread::yield_now();
+        }
+        release_tx.send(()).expect("minute history released");
+        poll_until(
+            &service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1),
+        );
+
+        let five_minute = selected_series("instrument:coinbase:btc:usd", 300);
+        service
+            .set_demand(1, 1, 2, &five_minute)
+            .expect("coarser demand starts");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.series.as_ref() == Some(&five_minute)
+                    && snapshot.bars.len() == 1
+                    && snapshot.bars[0].exchange_timestamp_seconds == 0
+        ));
+        while fetches.load(Ordering::Acquire) < 2 {
+            thread::yield_now();
+        }
+        release_tx.send(()).expect("provider repair released");
+        poll_until(&service, 1, 1, |event| {
+            matches!(event, envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == 2
+                    && snapshot.bars[0].exchange_timestamp_seconds == 300)
+        });
+
+        service
+            .set_demand(1, 1, 3, &five_minute)
+            .expect("repeated demand hits cache");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 3
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 3
+        ));
+        assert_eq!(fetches.load(Ordering::Acquire), 2);
     }
 
     #[test]

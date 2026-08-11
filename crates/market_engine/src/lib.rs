@@ -399,6 +399,12 @@ impl MarketEngine {
         self.publications.latest(consumer_id)
     }
 
+    /// Returns one immutable cached series for compatible in-memory derivation.
+    #[must_use]
+    pub fn series_snapshot(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
+        self.series.get(series)
+    }
+
     pub fn remove_consumer(&mut self, consumer_id: ConsumerId) -> bool {
         self.publications.remove(consumer_id);
         self.demands.remove(consumer_id)

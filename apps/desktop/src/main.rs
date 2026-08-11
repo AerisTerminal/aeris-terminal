@@ -4000,20 +4000,6 @@ fn configured_market_workers()
 -> Result<Option<Vec<(MarketWorkerStartup, MarketDataWorker)>>, String> {
     let mut arguments = std::env::args_os().skip(1);
     let worker = if let Some(argument) = arguments.next() {
-        if argument == "--coinbase-live-smoke" {
-            let usage =
-                "usage: axiusflow_desktop --coinbase-live-smoke <BTC-USD|ETH-USD> <history-root>";
-            let product = arguments.next().ok_or_else(|| usage.to_string())?;
-            let history_root = arguments.next().ok_or_else(|| usage.to_string())?;
-            if arguments.next().is_some() {
-                return Err(usage.to_string());
-            }
-            resident_market_worker::run_coinbase_live_smoke(
-                &product.to_string_lossy(),
-                std::path::PathBuf::from(history_root),
-            )?;
-            return Ok(None);
-        }
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
             let report_path = arguments
