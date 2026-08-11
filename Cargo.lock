@@ -735,7 +735,6 @@ dependencies = [
 name = "axiusflow_desktop_provider_runtime"
 version = "0.1.0"
 dependencies = [
- "axiusflow_application",
  "axiusflow_market_data",
  "axiusflow_observability",
  "axiusflow_platform_runtime",

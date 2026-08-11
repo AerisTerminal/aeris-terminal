@@ -3217,7 +3217,7 @@ mod tests {
             MemoryVault(encoded.as_bytes().to_vec()),
             driver,
             RITHMIC_TEST_VAULT_KEY,
-            DesktopProviderConfig::new(nonzero(16), nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
+            DesktopProviderConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
                 .with_diagnostics(RithmicProviderConfig::environment(), None)
                 .expect("diagnostics identity validates"),
         )

@@ -884,7 +884,7 @@ fn open_runtime_with_instruments(
         vault,
         driver,
         RITHMIC_TEST_VAULT_KEY,
-        DesktopProviderConfig::new(nonzero(32), nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES)),
+        DesktopProviderConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES)),
     )
     .map_err(|_| "Rithmic live runtime is unavailable".to_string())?;
     Ok((runtime, events))

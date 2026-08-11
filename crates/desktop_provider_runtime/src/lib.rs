@@ -1,11 +1,9 @@
-//! Worker-owned desktop provider session lifecycle and publication fencing.
+//! Worker-owned provider session lifecycle and generation fencing.
 //!
 //! The runtime loads opaque credentials from the operating-system vault for each
-//! connection attempt, bounds all semantic output, fences callbacks by a local
-//! generation, and exposes only shared immutable market publications. It has no
-//! cloud client or payload-upload boundary.
+//! connection attempt and fences callbacks by a local generation. It has no cloud
+//! client or payload-upload boundary.
 
-use axiusflow_application::MarketStreamPublication;
 use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::{
     DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
@@ -15,13 +13,11 @@ pub use axiusflow_platform_runtime::NetworkEvent;
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use core::fmt;
 use std::{
-    collections::VecDeque,
     error::Error,
     marker::PhantomData,
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
     rc::Rc,
-    sync::Arc,
     thread::{self, ThreadId},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -115,93 +111,18 @@ pub enum DesktopProviderState {
     Stopped,
 }
 
-/// Bounded semantic output for the desktop application worker.
-#[derive(Clone, Eq, PartialEq)]
-pub enum DesktopProviderEvent {
-    SessionStarting {
-        generation: SessionGeneration,
-        trigger: ConnectTrigger,
-    },
-    SessionEstablished {
-        generation: SessionGeneration,
-    },
-    Publication {
-        generation: SessionGeneration,
-        publication: Arc<MarketStreamPublication>,
-    },
-    RecoveryRequired {
-        generation: Option<SessionGeneration>,
-        reason: RecoveryReason,
-    },
-    StopUnconfirmed {
-        generation: SessionGeneration,
-    },
-    Suspended,
-    NetworkUnavailable,
-    Stopped,
-}
-
-impl fmt::Debug for DesktopProviderEvent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SessionStarting {
-                generation,
-                trigger,
-            } => formatter
-                .debug_struct("SessionStarting")
-                .field("generation", generation)
-                .field("trigger", trigger)
-                .finish(),
-            Self::SessionEstablished { generation } => formatter
-                .debug_struct("SessionEstablished")
-                .field("generation", generation)
-                .finish(),
-            Self::Publication { generation, .. } => formatter
-                .debug_struct("Publication")
-                .field("generation", generation)
-                .field("publication", &"[REDACTED]")
-                .finish(),
-            Self::RecoveryRequired { generation, reason } => formatter
-                .debug_struct("RecoveryRequired")
-                .field("generation", generation)
-                .field("reason", reason)
-                .finish(),
-            Self::StopUnconfirmed { generation } => formatter
-                .debug_struct("StopUnconfirmed")
-                .field("generation", generation)
-                .finish(),
-            Self::Suspended => formatter.write_str("Suspended"),
-            Self::NetworkUnavailable => formatter.write_str("NetworkUnavailable"),
-            Self::Stopped => formatter.write_str("Stopped"),
-        }
-    }
-}
-
-/// Redacted, bounded runtime counters.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct DesktopProviderMetrics {
-    pub connection_attempts: u64,
-    pub established_sessions: u64,
-    pub publications: u64,
-    pub stale_callbacks: u64,
-    pub dropped_events: u64,
-    pub provider_stop_failures: u64,
-}
-
 /// Explicit memory limits for one provider lifecycle owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopProviderConfig {
-    event_capacity: NonZeroUsize,
     maximum_credential_bytes: NonZeroUsize,
     diagnostics: Option<DesktopProviderDiagnosticsConfig>,
 }
 
 impl DesktopProviderConfig {
-    /// Creates bounded semantic-event and credential limits.
+    /// Creates a bounded credential limit.
     #[must_use]
-    pub const fn new(event_capacity: NonZeroUsize, maximum_credential_bytes: NonZeroUsize) -> Self {
+    pub const fn new(maximum_credential_bytes: NonZeroUsize) -> Self {
         Self {
-            event_capacity,
             maximum_credential_bytes,
             diagnostics: None,
         }
@@ -295,7 +216,6 @@ pub enum DesktopProviderError {
     CredentialTooLarge { requested: usize, maximum: usize },
     ProviderUnavailable,
     StaleGeneration,
-    EventQueueFull { maximum: usize },
     DiagnosticsUnavailable,
     SystemClockUnavailable,
 }
@@ -317,9 +237,6 @@ pub struct DesktopProviderRuntime<V, D: ProviderSessionDriver> {
     config: DesktopProviderConfig,
     state: DesktopProviderState,
     last_generation: u64,
-    events: VecDeque<DesktopProviderEvent>,
-    current_publication: Option<Arc<MarketStreamPublication>>,
-    metrics: DesktopProviderMetrics,
     connection_desired: bool,
     suspended: bool,
     network_available: bool,
@@ -343,13 +260,6 @@ impl<V, D: ProviderSessionDriver> fmt::Debug for DesktopProviderRuntime<V, D> {
         formatter
             .debug_struct("DesktopProviderRuntime")
             .field("state", &self.state)
-            .field("event_capacity", &self.config.event_capacity)
-            .field("queued_events", &self.events.len())
-            .field(
-                "has_current_publication",
-                &self.current_publication.is_some(),
-            )
-            .field("metrics", &self.metrics)
             .finish_non_exhaustive()
     }
 }
@@ -392,7 +302,6 @@ where
                 .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
             })
             .transpose()?;
-        let event_capacity = config.event_capacity;
         Ok(Self {
             owner_thread: thread::current().id(),
             vault,
@@ -401,9 +310,6 @@ where
             config,
             state: DesktopProviderState::Disconnected,
             last_generation: 0,
-            events: VecDeque::with_capacity(event_capacity.get()),
-            current_publication: None,
-            metrics: DesktopProviderMetrics::default(),
             connection_desired: false,
             suspended: false,
             network_available: true,
@@ -420,28 +326,6 @@ where
     pub fn state(&self) -> Result<DesktopProviderState, DesktopProviderError> {
         self.ensure_owner()?;
         Ok(self.state)
-    }
-
-    /// Returns redacted bounded counters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when called outside the owning worker thread.
-    pub fn metrics(&self) -> Result<DesktopProviderMetrics, DesktopProviderError> {
-        self.ensure_owner()?;
-        Ok(self.metrics)
-    }
-
-    /// Returns the last accepted immutable publication.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when called outside the owning worker thread.
-    pub fn current_publication(
-        &self,
-    ) -> Result<Option<Arc<MarketStreamPublication>>, DesktopProviderError> {
-        self.ensure_owner()?;
-        Ok(self.current_publication.clone())
     }
 
     /// Publishes the current production diagnostics snapshot when its cadence allows.
@@ -623,7 +507,7 @@ where
     /// # Errors
     ///
     /// Returns a redacted vault, credential, provider, transition, generation,
-    /// ownership, or queue-bound failure.
+    /// or ownership failure.
     pub fn connect(
         &mut self,
         trigger: ConnectTrigger,
@@ -666,17 +550,12 @@ where
                         reason: RecoveryReason::CredentialUnavailable,
                     };
                     self.diagnostics_require_recovery(RecoveryReason::CredentialUnavailable)?;
-                    self.record_event(DesktopProviderEvent::RecoveryRequired {
-                        generation: None,
-                        reason: RecoveryReason::CredentialUnavailable,
-                    })?;
                     return Err(error);
                 }
             },
             ProviderCredentialRequirement::Public => CredentialBytes(Vec::new()),
         };
         self.last_generation = generation_value;
-        self.metrics.connection_attempts = self.metrics.connection_attempts.saturating_add(1);
         self.state = DesktopProviderState::Connecting {
             generation,
             trigger,
@@ -692,18 +571,7 @@ where
                 reason: RecoveryReason::ProviderFailure,
             };
             self.diagnostics_require_recovery(RecoveryReason::ProviderFailure)?;
-            self.record_event(DesktopProviderEvent::RecoveryRequired {
-                generation: Some(generation),
-                reason: RecoveryReason::ProviderFailure,
-            })?;
             return Err(DesktopProviderError::ProviderUnavailable);
-        }
-        if let Err(error) = self.record_event(DesktopProviderEvent::SessionStarting {
-            generation,
-            trigger,
-        }) {
-            self.latch_queue_overflow(generation, true);
-            return Err(error);
         }
         Ok(generation)
     }
@@ -717,7 +585,7 @@ where
     /// # Errors
     ///
     /// Returns an error for wrong-thread use, a stopped or already-active
-    /// runtime, or a provider/vault/queue failure while starting immediately.
+    /// runtime, or a provider/vault failure while starting immediately.
     pub fn request_connection(
         &mut self,
     ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
@@ -749,8 +617,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error for a stale callback, invalid transition, wrong thread,
-    /// or full semantic queue.
+    /// Returns an error for a stale callback, invalid transition, or wrong thread.
     pub fn session_established(
         &mut self,
         generation: SessionGeneration,
@@ -763,53 +630,9 @@ where
             _ if self.active_generation() != Some(generation) => return self.reject_stale(),
             _ => return Err(DesktopProviderError::InvalidTransition),
         }
-        if let Err(error) =
-            self.record_event(DesktopProviderEvent::SessionEstablished { generation })
-        {
-            self.latch_queue_overflow(generation, true);
-            return Err(error);
-        }
         self.state = DesktopProviderState::Streaming { generation };
         self.diagnostics_mark_streaming(generation)?;
-        self.metrics.established_sessions = self.metrics.established_sessions.saturating_add(1);
         Ok(())
-    }
-
-    /// Publishes one immutable model generation only for the active session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for stale callbacks, invalid lifecycle state, wrong
-    /// thread, or a full semantic queue. Queue overflow preserves the prior
-    /// immutable publication and latches recovery.
-    pub fn publish(
-        &mut self,
-        generation: SessionGeneration,
-        publication: MarketStreamPublication,
-    ) -> Result<Arc<MarketStreamPublication>, DesktopProviderError> {
-        self.ensure_owner()?;
-        match self.state {
-            DesktopProviderState::Streaming { generation: active } if active == generation => {}
-            _ if self.active_generation() != Some(generation) => return self.reject_stale(),
-            _ => return Err(DesktopProviderError::InvalidTransition),
-        }
-        if self.events.len() >= self.config.event_capacity.get() {
-            self.metrics.dropped_events = self.metrics.dropped_events.saturating_add(1);
-            self.latch_queue_overflow(generation, false);
-            return Err(DesktopProviderError::EventQueueFull {
-                maximum: self.config.event_capacity.get(),
-            });
-        }
-        let publication = Arc::new(publication);
-        self.events.push_back(DesktopProviderEvent::Publication {
-            generation,
-            publication: publication.clone(),
-        });
-        self.current_publication = Some(publication.clone());
-        self.metrics.publications = self.metrics.publications.saturating_add(1);
-        self.diagnostics_record_publication(generation)?;
-        self.diagnostics_observe_event_queue()?;
-        Ok(publication)
     }
 
     /// Invalidates the active provider stream and requires a fresh generation.
@@ -817,7 +640,7 @@ where
     /// # Errors
     ///
     /// Returns an error for a stale callback, invalid lifecycle state, wrong
-    /// thread, provider stop failure, or a full semantic queue.
+    /// thread, or provider stop failure.
     pub fn session_invalid(
         &mut self,
         generation: SessionGeneration,
@@ -831,7 +654,7 @@ where
     /// # Errors
     ///
     /// Returns an error for a stale callback, invalid lifecycle state, wrong
-    /// thread, provider stop failure, or a full semantic queue.
+    /// thread, or provider stop failure.
     pub fn session_invalid_for_provider(
         &mut self,
         generation: SessionGeneration,
@@ -845,7 +668,7 @@ where
     /// # Errors
     ///
     /// Returns an error for a stale callback, invalid lifecycle state, wrong
-    /// thread, provider stop failure, or a full semantic queue.
+    /// thread, or provider stop failure.
     pub fn session_callback_queue_overflow(
         &mut self,
         generation: SessionGeneration,
@@ -874,21 +697,14 @@ where
         }
         let stop_failed = self.driver.stop_session(generation).is_err();
         if stop_failed {
-            self.metrics.provider_stop_failures =
-                self.metrics.provider_stop_failures.saturating_add(1);
             self.state = DesktopProviderState::StopUnconfirmed {
                 generation,
                 recovery: Some(reason),
             };
         }
         if stop_failed {
-            self.record_event(DesktopProviderEvent::StopUnconfirmed { generation })?;
             return Err(DesktopProviderError::ProviderUnavailable);
         }
-        self.record_event(DesktopProviderEvent::RecoveryRequired {
-            generation: Some(generation),
-            reason,
-        })?;
         Ok(())
     }
 
@@ -898,7 +714,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a redacted lifecycle, provider, vault, ownership, or queue error.
+    /// Returns a redacted lifecycle, provider, vault, or ownership error.
     pub fn handle_power_event(
         &mut self,
         event: PowerEvent,
@@ -916,7 +732,6 @@ where
                 let fence_result = self.fence_into(DesktopProviderState::Suspended, None);
                 self.diagnostics_mark_disconnected()?;
                 fence_result?;
-                self.record_event(DesktopProviderEvent::Suspended)?;
                 Ok(None)
             }
             PowerEvent::Resumed => {
@@ -951,7 +766,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a redacted lifecycle, provider, vault, ownership, or queue error.
+    /// Returns a redacted lifecycle, provider, vault, or ownership error.
     pub fn handle_network_event(
         &mut self,
         event: NetworkEvent,
@@ -969,7 +784,6 @@ where
                 let fence_result = self.fence_into(DesktopProviderState::NetworkUnavailable, None);
                 self.diagnostics_mark_disconnected()?;
                 fence_result?;
-                self.record_event(DesktopProviderEvent::NetworkUnavailable)?;
                 Ok(None)
             }
             NetworkEvent::Available => {
@@ -1005,8 +819,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error for wrong-thread use, an invalid state, another provider
-    /// stop failure, or a full semantic queue.
+    /// Returns an error for wrong-thread use, an invalid state, or another provider
+    /// stop failure.
     pub fn retry_unconfirmed_stop(
         &mut self,
     ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
@@ -1019,26 +833,21 @@ where
             return Err(DesktopProviderError::InvalidTransition);
         };
         if self.driver.stop_session(generation).is_err() {
-            self.metrics.provider_stop_failures =
-                self.metrics.provider_stop_failures.saturating_add(1);
             return Err(DesktopProviderError::ProviderUnavailable);
         }
         if !self.connection_desired {
             self.state = DesktopProviderState::Stopped;
             self.diagnostics_mark_stopped()?;
-            self.record_event(DesktopProviderEvent::Stopped)?;
             return Ok(None);
         }
         if self.suspended {
             self.state = DesktopProviderState::Suspended;
             self.diagnostics_mark_disconnected()?;
-            self.record_event(DesktopProviderEvent::Suspended)?;
             return Ok(None);
         }
         if !self.network_available {
             self.state = DesktopProviderState::NetworkUnavailable;
             self.diagnostics_mark_disconnected()?;
-            self.record_event(DesktopProviderEvent::NetworkUnavailable)?;
             return Ok(None);
         }
         let reason = recovery.unwrap_or(RecoveryReason::ProviderFailure);
@@ -1049,24 +858,12 @@ where
         self.connect(ConnectTrigger::Retry).map(Some)
     }
 
-    /// Receives at most one ready semantic event without blocking.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when called outside the owning worker thread.
-    pub fn try_recv_event(&mut self) -> Result<Option<DesktopProviderEvent>, DesktopProviderError> {
-        self.ensure_owner()?;
-        let event = self.events.pop_front();
-        self.diagnostics_observe_event_queue()?;
-        Ok(event)
-    }
-
     /// Fences the active generation and permanently stops this runtime.
     ///
     /// # Errors
     ///
-    /// Returns an error for wrong-thread use, repeated shutdown, provider stop
-    /// failure, or a full semantic queue.
+    /// Returns an error for wrong-thread use, repeated shutdown, or provider stop
+    /// failure.
     pub fn stop(&mut self) -> Result<(), DesktopProviderError> {
         self.ensure_owner()?;
         if self.state == DesktopProviderState::Stopped {
@@ -1078,8 +875,7 @@ where
         }
         let fence_result = self.fence_into(DesktopProviderState::Stopped, None);
         self.diagnostics_mark_stopped()?;
-        fence_result?;
-        self.record_event(DesktopProviderEvent::Stopped)
+        fence_result
     }
 
     fn load_credentials(&self) -> Result<CredentialBytes, DesktopProviderError> {
@@ -1171,18 +967,6 @@ where
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 
-    fn diagnostics_require_recorded_queue_recovery(&mut self) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
-            return Ok(());
-        };
-        self.diagnostics
-            .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
-            .feed
-            .require_runtime_recovery_after_recorded_overflow(timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
-    }
-
     fn diagnostics_mark_disconnected(&mut self) -> Result<(), DesktopProviderError> {
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(());
@@ -1207,21 +991,6 @@ where
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 
-    fn diagnostics_record_publication(
-        &mut self,
-        generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
-            return Ok(());
-        };
-        self.diagnostics
-            .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
-            .feed
-            .record_publication(generation, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
-    }
-
     fn diagnostics_record_stale_callback(&mut self) {
         let Some(timestamp) = self.diagnostics_now() else {
             return;
@@ -1231,45 +1000,14 @@ where
         }
     }
 
-    fn diagnostics_record_semantic_queue_overflow(&mut self) {
-        let Some(timestamp) = self.diagnostics_now() else {
-            return;
-        };
-        if let Some(diagnostics) = &mut self.diagnostics {
-            let _ = diagnostics.feed.record_semantic_queue_overflow(timestamp);
-        }
-    }
-
-    fn diagnostics_observe_event_queue(&mut self) -> Result<(), DesktopProviderError> {
-        let Some(diagnostics) = &mut self.diagnostics else {
-            return Ok(());
-        };
-        let item_bytes = size_of::<DesktopProviderEvent>();
-        diagnostics
-            .feed
-            .observe_queue(
-                DiagnosticsQueue::SemanticEvent,
-                self.events.len(),
-                self.config.event_capacity.get(),
-                self.events.len().saturating_mul(item_bytes),
-                self.config.event_capacity.get().saturating_mul(item_bytes),
-            )
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
-    }
-
     fn diagnostics_observe_runtime_memory(&mut self) -> Result<(), DesktopProviderError> {
         let Some(diagnostics) = &mut self.diagnostics else {
             return Ok(());
         };
         let fixed_bytes = size_of::<Self>();
-        let event_bytes = size_of::<DesktopProviderEvent>();
-        let current_bytes =
-            fixed_bytes.saturating_add(self.events.len().saturating_mul(event_bytes));
-        let bound_bytes = fixed_bytes
-            .saturating_add(self.config.event_capacity.get().saturating_mul(event_bytes));
         diagnostics
             .feed
-            .observe_runtime_memory(current_bytes, bound_bytes)
+            .observe_runtime_memory(fixed_bytes, fixed_bytes)
             .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
     }
 
@@ -1296,8 +1034,6 @@ where
         if let Some(generation) = generation
             && self.driver.stop_session(generation).is_err()
         {
-            self.metrics.provider_stop_failures =
-                self.metrics.provider_stop_failures.saturating_add(1);
             self.state = DesktopProviderState::StopUnconfirmed {
                 generation,
                 recovery,
@@ -1307,45 +1043,7 @@ where
         Ok(())
     }
 
-    fn record_event(&mut self, event: DesktopProviderEvent) -> Result<(), DesktopProviderError> {
-        if self.events.len() >= self.config.event_capacity.get() {
-            self.metrics.dropped_events = self.metrics.dropped_events.saturating_add(1);
-            self.diagnostics_record_semantic_queue_overflow();
-            return Err(DesktopProviderError::EventQueueFull {
-                maximum: self.config.event_capacity.get(),
-            });
-        }
-        self.events.push_back(event);
-        self.diagnostics_observe_event_queue()?;
-        Ok(())
-    }
-
-    fn latch_queue_overflow(
-        &mut self,
-        generation: SessionGeneration,
-        overflow_already_recorded: bool,
-    ) {
-        self.state = DesktopProviderState::RecoveryRequired {
-            generation: Some(generation),
-            reason: RecoveryReason::SemanticQueueOverflow,
-        };
-        if overflow_already_recorded {
-            let _ = self.diagnostics_require_recorded_queue_recovery();
-        } else {
-            let _ = self.diagnostics_require_recovery(RecoveryReason::SemanticQueueOverflow);
-        }
-        if self.driver.stop_session(generation).is_err() {
-            self.metrics.provider_stop_failures =
-                self.metrics.provider_stop_failures.saturating_add(1);
-            self.state = DesktopProviderState::StopUnconfirmed {
-                generation,
-                recovery: Some(RecoveryReason::SemanticQueueOverflow),
-            };
-        }
-    }
-
     fn reject_stale<T>(&mut self) -> Result<T, DesktopProviderError> {
-        self.metrics.stale_callbacks = self.metrics.stale_callbacks.saturating_add(1);
         self.diagnostics_record_stale_callback();
         Err(DesktopProviderError::StaleGeneration)
     }
@@ -1391,14 +1089,10 @@ impl<V, D: ProviderSessionDriver> Drop for DesktopProviderRuntime<V, D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderEvent,
-        DesktopProviderRuntime, DesktopProviderState, MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
-        NetworkEvent, ProviderContractError, ProviderEnvironment, ProviderInvalidationReason,
+        ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderRuntime,
+        DesktopProviderState, MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES, NetworkEvent,
+        ProviderContractError, ProviderEnvironment, ProviderInvalidationReason,
         ProviderSessionDriver, RecoveryReason, SessionGeneration,
-    };
-    use axiusflow_application::{
-        EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
-        MarketStreamPublication, ReplayStreamUpdate,
     };
     use axiusflow_observability::{
         DiagnosticsQueue, FeedConnectionState, FeedRecoveryReason, LatencyBoundary,
@@ -1467,9 +1161,8 @@ mod tests {
         }
     }
 
-    fn config(event_capacity: usize, maximum_credential_bytes: usize) -> DesktopProviderConfig {
+    fn config(maximum_credential_bytes: usize) -> DesktopProviderConfig {
         DesktopProviderConfig::new(
-            NonZeroUsize::new(event_capacity).expect("test event capacity is nonzero"),
             NonZeroUsize::new(maximum_credential_bytes)
                 .expect("test credential capacity is nonzero"),
         )
@@ -1483,9 +1176,7 @@ mod tests {
         }
     }
 
-    fn runtime(
-        event_capacity: usize,
-    ) -> (
+    fn runtime() -> (
         DesktopProviderRuntime<MemoryVault, RecordingDriver>,
         Arc<Mutex<DriverState>>,
     ) {
@@ -1498,33 +1189,14 @@ mod tests {
             },
             driver,
             "provider-session",
-            config(event_capacity, 64),
+            config(64),
         )
         .expect("valid runtime starts disconnected");
         (runtime, state)
     }
 
-    fn publication() -> MarketStreamPublication {
-        let source = EmbeddedReplaySource;
-        let snapshot = source
-            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
-            .expect("embedded snapshot is valid");
-        let update = ReplayStreamUpdate::Snapshot(snapshot);
-        let mut model = MarketBarClientModel::new(
-            NonZeroUsize::new(8).expect("test model capacity is nonzero"),
-        );
-        let MarketBarModelOutcome::Published(generation) = model
-            .apply_update(update.clone())
-            .expect("snapshot publishes")
-        else {
-            panic!("snapshot must publish");
-        };
-        MarketStreamPublication::try_new("direct-provider".to_string(), update, generation)
-            .expect("publication evidence agrees")
-    }
-
     #[test]
-    fn production_runtime_owns_lifecycle_publication_and_queue_diagnostics() {
+    fn production_runtime_owns_lifecycle_and_feed_diagnostics() {
         let driver = RecordingDriver::default();
         let mut runtime = DesktopProviderRuntime::try_new(
             MemoryVault {
@@ -1533,7 +1205,7 @@ mod tests {
             },
             driver,
             "provider-session",
-            config(8, 64)
+            config(64)
                 .with_diagnostics(diagnostics_environment(), None)
                 .expect("diagnostics environment validates"),
         )
@@ -1545,9 +1217,6 @@ mod tests {
             .session_established(generation)
             .expect("session streams");
         runtime
-            .publish(generation, publication())
-            .expect("publication records");
-        runtime
             .record_trade_diagnostics(generation, Some(1_800_000_001_000_000_000))
             .expect("live trade records");
 
@@ -1558,11 +1227,11 @@ mod tests {
         assert_eq!(snapshot.connection_state, FeedConnectionState::Streaming);
         assert_eq!(snapshot.session_generation.map(NonZeroU64::get), Some(1));
         assert_eq!(snapshot.counters.trades, 1);
-        assert_eq!(snapshot.counters.publications, 1);
+        assert_eq!(snapshot.counters.publications, 0);
         assert!(snapshot.last_message_age_nanos.is_some());
         assert_eq!(
             snapshot.queues[DiagnosticsQueue::SemanticEvent as usize].current_items,
-            3
+            0
         );
     }
 
@@ -1575,7 +1244,7 @@ mod tests {
             },
             RecordingDriver::default(),
             "provider-session",
-            config(8, 64)
+            config(64)
                 .with_diagnostics(
                     diagnostics_environment(),
                     Some(NonZeroU64::new(100).unwrap_or(NonZeroU64::MIN)),
@@ -1651,7 +1320,7 @@ mod tests {
             },
             RecordingDriver::default(),
             "provider-session",
-            config(4, 64)
+            config(64)
                 .with_diagnostics(diagnostics_environment(), None)
                 .expect("diagnostics environment validates"),
         )
@@ -1681,7 +1350,7 @@ mod tests {
             },
             RecordingDriver::default(),
             "provider-session",
-            config(4, 64)
+            config(64)
                 .with_diagnostics(diagnostics_environment(), None)
                 .expect("diagnostics environment validates"),
         )
@@ -1717,7 +1386,7 @@ mod tests {
             },
             driver,
             "provider-session",
-            config(8, 64)
+            config(64)
                 .with_diagnostics(diagnostics_environment(), None)
                 .expect("diagnostics environment validates"),
         )
@@ -1752,36 +1421,6 @@ mod tests {
     }
 
     #[test]
-    fn rejected_semantic_enqueue_records_one_diagnostics_overflow() {
-        let mut runtime = DesktopProviderRuntime::try_new(
-            MemoryVault {
-                secret: Some(b"device-only-provider-token".to_vec()),
-                fail_load: false,
-            },
-            RecordingDriver::default(),
-            "provider-session",
-            config(1, 64)
-                .with_diagnostics(diagnostics_environment(), None)
-                .expect("diagnostics environment validates"),
-        )
-        .expect("diagnostics runtime opens");
-        let generation = runtime
-            .connect(ConnectTrigger::Initial)
-            .expect("session-starting event fills the queue");
-
-        assert_eq!(
-            runtime.session_established(generation),
-            Err(DesktopProviderError::EventQueueFull { maximum: 1 })
-        );
-        let snapshot = runtime
-            .try_diagnostics_snapshot()
-            .expect("snapshot succeeds")
-            .expect("first snapshot publishes");
-        assert_eq!(snapshot.connection_state, FeedConnectionState::Recovering);
-        assert_eq!(snapshot.counters.overflows, 1);
-    }
-
-    #[test]
     fn diagnostics_identity_is_tighter_than_general_provider_discovery() {
         let oversized = ProviderEnvironment {
             provider_id: "x".repeat(MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES + 1),
@@ -1792,7 +1431,7 @@ mod tests {
             .validate()
             .expect("general discovery accepts a 129-byte identity");
         assert_eq!(
-            config(4, 64).with_diagnostics(oversized, None),
+            config(64).with_diagnostics(oversized, None),
             Err(ProviderContractError::FieldTooLong {
                 field: "provider_id",
                 maximum: MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
@@ -1808,17 +1447,9 @@ mod tests {
             .validate()
             .expect("general discovery preserves provider-native identity text");
         assert_eq!(
-            config(4, 64).with_diagnostics(control, None),
+            config(64).with_diagnostics(control, None),
             Err(ProviderContractError::ControlCharacter("provider_id"))
         );
-    }
-
-    fn drain(runtime: &mut DesktopProviderRuntime<MemoryVault, RecordingDriver>) {
-        while runtime
-            .try_recv_event()
-            .expect("event receive remains available")
-            .is_some()
-        {}
     }
 
     #[test]
@@ -1831,7 +1462,7 @@ mod tests {
             },
             driver.clone(),
             "provider-session",
-            config(4, 8),
+            config(8),
         )
         .expect("runtime configuration is valid");
         assert_eq!(
@@ -1846,7 +1477,7 @@ mod tests {
             },
             driver,
             "provider-session",
-            config(4, 8),
+            config(8),
         )
         .expect("runtime configuration is valid");
         assert_eq!(
@@ -1863,7 +1494,7 @@ mod tests {
 
     #[test]
     fn network_and_power_recovery_create_fresh_fenced_generations() {
-        let (mut runtime, driver) = runtime(16);
+        let (mut runtime, driver) = runtime();
         let first = runtime
             .connect(ConnectTrigger::Initial)
             .expect("initial provider session starts");
@@ -1879,7 +1510,7 @@ mod tests {
             .expect("restoration returns a generation");
         assert!(second > first);
         assert_eq!(
-            runtime.publish(first, publication()),
+            runtime.session_established(first),
             Err(DesktopProviderError::StaleGeneration)
         );
         runtime
@@ -1901,18 +1532,11 @@ mod tests {
             driver.lock().expect("driver state lock is available").stops,
             vec![first, second]
         );
-        assert_eq!(
-            runtime
-                .metrics()
-                .expect("metrics are available")
-                .stale_callbacks,
-            2
-        );
     }
 
     #[test]
     fn environmental_cycles_do_not_connect_an_idle_runtime() {
-        let (mut runtime, driver) = runtime(8);
+        let (mut runtime, driver) = runtime();
         assert_eq!(
             runtime
                 .handle_power_event(PowerEvent::Suspending)
@@ -1952,7 +1576,7 @@ mod tests {
 
     #[test]
     fn public_connect_cannot_bypass_environmental_fences() {
-        let (mut runtime, driver) = runtime(8);
+        let (mut runtime, driver) = runtime();
         runtime
             .handle_power_event(PowerEvent::Suspending)
             .expect("idle suspend is recorded");
@@ -1981,7 +1605,7 @@ mod tests {
 
     #[test]
     fn requested_connection_waits_for_native_environmental_restoration() {
-        let (mut runtime, driver) = runtime(8);
+        let (mut runtime, driver) = runtime();
         runtime
             .handle_network_event(NetworkEvent::Unavailable)
             .expect("idle network loss is recorded");
@@ -2012,38 +1636,32 @@ mod tests {
 
     #[test]
     fn unconfirmed_stop_blocks_replacement_until_cleanup_succeeds() {
-        let (mut runtime, driver) = runtime(1);
+        let (mut runtime, driver) = runtime();
         let generation = runtime
             .connect(ConnectTrigger::Initial)
             .expect("session starts");
-        drain(&mut runtime);
         runtime
             .session_established(generation)
             .expect("session establishes");
-        drain(&mut runtime);
-        runtime
-            .publish(generation, publication())
-            .expect("first publication fills the queue");
         driver
             .lock()
             .expect("driver state lock is available")
             .fail_stop = true;
         assert_eq!(
-            runtime.publish(generation, publication()),
-            Err(DesktopProviderError::EventQueueFull { maximum: 1 })
+            runtime.session_invalid(generation),
+            Err(DesktopProviderError::ProviderUnavailable)
         );
         assert_eq!(
             runtime.state().expect("state is available"),
             DesktopProviderState::StopUnconfirmed {
                 generation,
-                recovery: Some(RecoveryReason::SemanticQueueOverflow),
+                recovery: Some(RecoveryReason::TransportInvalid),
             }
         );
         assert_eq!(
             runtime.connect(ConnectTrigger::Retry),
             Err(DesktopProviderError::InvalidTransition)
         );
-        drain(&mut runtime);
         driver
             .lock()
             .expect("driver state lock is available")
@@ -2073,7 +1691,7 @@ mod tests {
             },
             driver,
             "provider-session",
-            config(8, 64)
+            config(64)
                 .with_diagnostics(diagnostics_environment(), None)
                 .expect("diagnostics environment validates"),
         )
@@ -2112,7 +1730,7 @@ mod tests {
 
     #[test]
     fn interleaved_power_and_network_events_reconnect_in_either_order() {
-        let (mut runtime, _) = runtime(16);
+        let (mut runtime, _) = runtime();
         let first = runtime
             .connect(ConnectTrigger::Initial)
             .expect("initial session starts");
@@ -2160,7 +1778,7 @@ mod tests {
 
     #[test]
     fn restoration_during_unconfirmed_cleanup_is_not_lost() {
-        let (mut runtime, driver) = runtime(16);
+        let (mut runtime, driver) = runtime();
         let first = runtime
             .connect(ConnectTrigger::Initial)
             .expect("initial session starts");
@@ -2193,51 +1811,8 @@ mod tests {
     }
 
     #[test]
-    fn publication_queue_overflow_preserves_last_immutable_state() {
-        let (mut runtime, driver) = runtime(1);
-        let generation = runtime
-            .connect(ConnectTrigger::Initial)
-            .expect("session starts");
-        drain(&mut runtime);
-        runtime
-            .session_established(generation)
-            .expect("session establishes");
-        drain(&mut runtime);
-        let accepted = runtime
-            .publish(generation, publication())
-            .expect("first publication fits");
-        assert_eq!(
-            runtime.publish(generation, publication()),
-            Err(DesktopProviderError::EventQueueFull { maximum: 1 })
-        );
-        let retained = runtime
-            .current_publication()
-            .expect("publication lookup succeeds")
-            .expect("accepted publication remains");
-        assert!(Arc::ptr_eq(&accepted, &retained));
-        assert_eq!(
-            runtime.state().expect("state is available"),
-            DesktopProviderState::RecoveryRequired {
-                generation: Some(generation),
-                reason: RecoveryReason::SemanticQueueOverflow,
-            }
-        );
-        assert_eq!(
-            runtime
-                .metrics()
-                .expect("metrics are available")
-                .dropped_events,
-            1
-        );
-        assert_eq!(
-            driver.lock().expect("driver state lock is available").stops,
-            vec![generation]
-        );
-    }
-
-    #[test]
     fn provider_failure_exposes_only_a_coarse_recovery_class() {
-        let (mut runtime, driver) = runtime(4);
+        let (mut runtime, driver) = runtime();
         driver
             .lock()
             .expect("driver state lock is available")
@@ -2246,18 +1821,18 @@ mod tests {
             runtime.connect(ConnectTrigger::Initial),
             Err(DesktopProviderError::ProviderUnavailable)
         );
-        assert!(matches!(
-            runtime.try_recv_event().expect("event queue is available"),
-            Some(DesktopProviderEvent::RecoveryRequired {
+        assert_eq!(
+            runtime.state().expect("state is available"),
+            DesktopProviderState::RecoveryRequired {
+                generation: Some(SessionGeneration::new(NonZeroU64::MIN)),
                 reason: RecoveryReason::ProviderFailure,
-                ..
-            })
-        ));
+            }
+        );
     }
 
     #[test]
     fn drop_attempts_to_stop_an_active_generation() {
-        let (mut runtime, driver) = runtime(4);
+        let (mut runtime, driver) = runtime();
         let generation = runtime
             .connect(ConnectTrigger::Initial)
             .expect("session starts");
@@ -2266,29 +1841,5 @@ mod tests {
             driver.lock().expect("driver state lock is available").stops,
             vec![generation]
         );
-    }
-
-    #[test]
-    fn publication_event_debug_redacts_market_payload_and_subscription() {
-        let (mut runtime, _) = runtime(4);
-        let generation = runtime
-            .connect(ConnectTrigger::Initial)
-            .expect("session starts");
-        drain(&mut runtime);
-        runtime
-            .session_established(generation)
-            .expect("session establishes");
-        drain(&mut runtime);
-        runtime
-            .publish(generation, publication())
-            .expect("publication fits");
-        let event = runtime
-            .try_recv_event()
-            .expect("event receive succeeds")
-            .expect("publication event exists");
-        let debug = format!("{event:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("direct-provider"));
-        assert!(!debug.contains("EmbeddedFixture"));
     }
 }

@@ -5,7 +5,6 @@ mod errors;
 mod generation;
 mod provenance;
 mod replay_snapshot;
-mod stream_runtime;
 
 pub use axiusflow_protocols::{
     MarketEventProvenance, Provenanced, SequenceDecision, SnapshotEvidence, StreamDelta,
@@ -20,4 +19,3 @@ pub use provenance::{
     ProvenancedMarketBar, ReplayProvenance, RequestContext, validate_provenanced_market_bar,
 };
 pub use replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate};
-pub use stream_runtime::{MarketStreamPublication, MarketStreamPublicationError};

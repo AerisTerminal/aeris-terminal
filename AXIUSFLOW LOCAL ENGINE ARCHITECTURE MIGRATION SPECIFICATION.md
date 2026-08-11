@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 20 of 180 tasks complete.**
+**Verified progress: 21 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -416,7 +416,6 @@ The current repository still contains:
 - `desktop_history`
 - `desktop_storage`
 - `local_engine_protocol`
-- `application::stream_runtime`
 
 These require deliberate migration.
 
@@ -548,7 +547,9 @@ Do not keep it simply because code already exists.
 
 # 10. `application` CRATE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): every source file, public export, dependency, and workspace caller was audited. `application` contains only provider-neutral generation/provenance validation, replay snapshot and delta models, client-model state transitions, and embedded deterministic replay input. It has no threads, sockets, network worker, provider session, Tokio runtime, persistent storage, queue, or market-data worker lifetime. The misleading `stream_runtime.rs` name described only an immutable publication validator; its sole remaining consumer was an unconsumed desktop event/publication queue inside the transitional provider runtime. Both were deleted, and `desktop_provider_runtime` no longer depends on `application`.
 
 `application` should remain intentionally boring.
 
@@ -3804,7 +3805,7 @@ It must not hide cold-start failures.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): `desktop_market_runtime` is deleted after its engine-owned execution paths disappeared and its final desktop-only presentation mailbox and fixture moved beside their sole consumer. The dead Coinbase desktop provider driver/fixture and the uncalled `desktop_provider_runtime::DesktopMarketWorker` provider/history composition are also deleted. The remaining Rithmic lifecycle/diagnostics surface in `desktop_provider_runtime`, old stream-runtime logic, and remaining dead bridge review are still open, so this phase remains unchecked.
+Progress evidence (2026-08-11): `desktop_market_runtime` is deleted after its engine-owned execution paths disappeared and its final desktop-only presentation mailbox and fixture moved beside their sole consumer. The dead Coinbase desktop provider driver/fixture, the uncalled `desktop_provider_runtime::DesktopMarketWorker` provider/history composition, the old `application::stream_runtime` wrapper, and the provider runtime's unconsumed desktop event/publication queue are also deleted. The remaining Rithmic lifecycle/diagnostics surface in `desktop_provider_runtime`, duplicate IPC review, and remaining dead bridge review are still open, so this phase remains unchecked.
 
 After Coinbase and Rithmic use the new engine:
 
