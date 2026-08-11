@@ -1,12 +1,18 @@
 //! Native suspend and resume notification boundary.
 
 use crate::CapabilityAvailability;
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 #[cfg(target_os = "windows")]
 use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::AtomicU8,
     mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
 
@@ -52,28 +58,39 @@ impl PowerEventPublisher {
 #[cfg(target_os = "windows")]
 struct PowerEventInbox {
     pending: Arc<AtomicU8>,
+    cancelled: Arc<AtomicBool>,
     wake: Receiver<()>,
 }
 
 #[cfg(target_os = "windows")]
 impl PowerEventInbox {
-    fn channel() -> (Arc<PowerEventPublisher>, Self) {
+    fn channel() -> (
+        Arc<PowerEventPublisher>,
+        Self,
+        NativePowerMonitorCancellation,
+    ) {
         let pending = Arc::new(AtomicU8::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
         let (wake, receiver) = sync_channel(1);
         (
             Arc::new(PowerEventPublisher {
                 pending: Arc::clone(&pending),
-                wake,
+                wake: wake.clone(),
             }),
             Self {
                 pending,
+                cancelled: Arc::clone(&cancelled),
                 wake: receiver,
             },
+            NativePowerMonitorCancellation { cancelled, wake },
         )
     }
 
     fn recv(&self) -> Result<PowerEvent, PowerNotificationError> {
         loop {
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err(PowerNotificationError::Cancelled);
+            }
             if let Some(event) = self.take_next() {
                 return Ok(event);
             }
@@ -138,8 +155,11 @@ mod windows {
     }
 
     impl Registration {
-        pub(super) fn connect() -> Result<(Self, PowerEventInbox), PowerNotificationError> {
-            let (publisher, events) = PowerEventInbox::channel();
+        pub(super) fn connect() -> Result<
+            (Self, PowerEventInbox, super::NativePowerMonitorCancellation),
+            PowerNotificationError,
+        > {
+            let (publisher, events, cancellation) = PowerEventInbox::channel();
             let context = publisher;
             let mut parameters = Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
                 Callback: Some(power_callback),
@@ -168,6 +188,7 @@ mod windows {
                     context: Some(context),
                 },
                 events,
+                cancellation,
             ))
         }
     }
@@ -262,12 +283,38 @@ impl PowerEvent {
 /// Callers must run [`Self::next_event`] outside async executors and UI threads
 /// because it blocks until a transition arrives.
 pub struct NativePowerMonitor {
+    cancellation: NativePowerMonitorCancellation,
     #[cfg(target_os = "linux")]
     messages: MessageIterator,
     #[cfg(target_os = "windows")]
     events: PowerEventInbox,
     #[cfg(target_os = "windows")]
     _registration: windows::Registration,
+}
+
+/// Handle that unblocks a [`NativePowerMonitor`] waiting for its next event.
+#[derive(Clone)]
+pub struct NativePowerMonitorCancellation {
+    cancelled: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    connection: Connection,
+    #[cfg(target_os = "windows")]
+    wake: SyncSender<()>,
+}
+
+impl NativePowerMonitorCancellation {
+    /// Cancels the matching monitor's blocking wait.
+    pub fn cancel(self) {
+        self.cancelled.store(true, Ordering::Release);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = self.connection.close();
+        }
+        #[cfg(target_os = "windows")]
+        match self.wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
+        }
+    }
 }
 
 impl NativePowerMonitor {
@@ -305,13 +352,21 @@ impl NativePowerMonitor {
             let messages =
                 MessageIterator::for_match_rule(rule, &connection, Some(MAX_QUEUED_POWER_EVENTS))
                     .map_err(PowerNotificationError::Platform)?;
-            Ok(Self { messages })
+            let cancelled = Arc::new(AtomicBool::new(false));
+            Ok(Self {
+                cancellation: NativePowerMonitorCancellation {
+                    cancelled,
+                    connection: connection.clone(),
+                },
+                messages,
+            })
         }
 
         #[cfg(target_os = "windows")]
         {
-            let (registration, events) = windows::Registration::connect()?;
+            let (registration, events, cancellation) = windows::Registration::connect()?;
             Ok(Self {
+                cancellation,
                 events,
                 _registration: registration,
             })
@@ -319,6 +374,12 @@ impl NativePowerMonitor {
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Err(PowerNotificationError::UnsupportedPlatform)
+    }
+
+    /// Returns a handle that can unblock [`Self::next_event`] from another thread.
+    #[must_use]
+    pub fn cancellation(&self) -> NativePowerMonitorCancellation {
+        self.cancellation.clone()
     }
 
     /// Blocks until the next suspend or resume transition.
@@ -330,9 +391,14 @@ impl NativePowerMonitor {
     pub fn next_event(&mut self) -> Result<PowerEvent, PowerNotificationError> {
         #[cfg(target_os = "linux")]
         {
-            let message = self
-                .messages
-                .next()
+            if self.cancellation.cancelled.load(Ordering::Acquire) {
+                return Err(PowerNotificationError::Cancelled);
+            }
+            let message = self.messages.next();
+            if self.cancellation.cancelled.load(Ordering::Acquire) {
+                return Err(PowerNotificationError::Cancelled);
+            }
+            let message = message
                 .ok_or(PowerNotificationError::StreamClosed)?
                 .map_err(PowerNotificationError::Platform)?;
             let preparing = message
@@ -371,6 +437,7 @@ pub enum PowerNotificationError {
         operation: &'static str,
         code: u32,
     },
+    Cancelled,
     StreamClosed,
     UnsupportedPlatform,
 }
@@ -385,6 +452,7 @@ impl fmt::Display for PowerNotificationError {
                 formatter,
                 "native power notification operation {operation} failed with Windows error {code}"
             ),
+            Self::Cancelled => formatter.write_str("native power notification wait cancelled"),
             Self::StreamClosed => formatter.write_str("native power notification stream closed"),
             Self::UnsupportedPlatform => {
                 formatter.write_str("native power notifications are unavailable on this platform")
@@ -440,7 +508,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_mailbox_preserves_suspend_before_a_coalesced_resume() {
-        let (publisher, events) = PowerEventInbox::channel();
+        let (publisher, events, _cancellation) = PowerEventInbox::channel();
         for _ in 0..64 {
             publisher.publish(PowerEvent::Suspending);
             publisher.publish(PowerEvent::Resumed);
@@ -483,5 +551,18 @@ mod tests {
     fn windows_power_monitor_registers_and_unregisters() {
         let monitor = NativePowerMonitor::connect().expect("Windows power callback registers");
         drop(monitor);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_power_monitor_cancellation_unblocks_a_waiter() {
+        let mut monitor = NativePowerMonitor::connect().expect("Windows power callback registers");
+        let cancellation = monitor.cancellation();
+        let waiter = std::thread::spawn(move || monitor.next_event());
+        cancellation.cancel();
+        assert!(matches!(
+            waiter.join().expect("join power monitor waiter"),
+            Err(super::PowerNotificationError::Cancelled)
+        ));
     }
 }

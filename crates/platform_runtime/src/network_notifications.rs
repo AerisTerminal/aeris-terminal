@@ -1,12 +1,18 @@
 //! Native network-availability notification boundary.
 
 use crate::CapabilityAvailability;
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 #[cfg(target_os = "windows")]
 use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::AtomicU8,
     mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
 };
 
@@ -60,28 +66,39 @@ impl NetworkEventPublisher {
 #[cfg(target_os = "windows")]
 struct NetworkEventInbox {
     latest: Arc<AtomicU8>,
+    cancelled: Arc<AtomicBool>,
     wake: Receiver<()>,
 }
 
 #[cfg(target_os = "windows")]
 impl NetworkEventInbox {
-    fn channel() -> (Arc<NetworkEventPublisher>, Self) {
+    fn channel() -> (
+        Arc<NetworkEventPublisher>,
+        Self,
+        NativeNetworkMonitorCancellation,
+    ) {
         let latest = Arc::new(AtomicU8::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
         let (wake, receiver) = sync_channel(1);
         (
             Arc::new(NetworkEventPublisher {
                 latest: Arc::clone(&latest),
-                wake,
+                wake: wake.clone(),
             }),
             Self {
                 latest,
+                cancelled: Arc::clone(&cancelled),
                 wake: receiver,
             },
+            NativeNetworkMonitorCancellation { cancelled, wake },
         )
     }
 
     fn recv(&self) -> Result<NetworkEvent, NetworkNotificationError> {
         loop {
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err(NetworkNotificationError::Cancelled);
+            }
             if let Some(event) = self.take_latest() {
                 return Ok(event);
             }
@@ -155,9 +172,16 @@ mod windows {
     }
 
     impl Registration {
-        pub(super) fn connect()
-        -> Result<(Self, NetworkEventInbox, NetworkEvent), NetworkNotificationError> {
-            let (publisher, events) = NetworkEventInbox::channel();
+        pub(super) fn connect() -> Result<
+            (
+                Self,
+                NetworkEventInbox,
+                NetworkEvent,
+                super::NativeNetworkMonitorCancellation,
+            ),
+            NetworkNotificationError,
+        > {
+            let (publisher, events, cancellation) = NetworkEventInbox::channel();
             let context = publisher;
             let mut handle: HANDLE = std::ptr::null_mut();
             // SAFETY: the Arc allocation remains valid for the notification
@@ -181,7 +205,7 @@ mod windows {
                 context: Some(context),
             };
             let current = events.recv_timeout(INITIAL_NOTIFICATION_TIMEOUT)?;
-            Ok((registration, events, current))
+            Ok((registration, events, current, cancellation))
         }
     }
 
@@ -294,6 +318,7 @@ impl NetworkEvent {
 /// because it blocks until availability changes.
 pub struct NativeNetworkMonitor {
     transitions: NetworkTransitionFilter,
+    cancellation: NativeNetworkMonitorCancellation,
     #[cfg(target_os = "linux")]
     messages: MessageIterator,
     #[cfg(target_os = "linux")]
@@ -306,6 +331,34 @@ pub struct NativeNetworkMonitor {
     events: NetworkEventInbox,
     #[cfg(target_os = "windows")]
     _registration: windows::Registration,
+}
+
+/// Handle that unblocks a [`NativeNetworkMonitor`] waiting for its next event.
+#[derive(Clone)]
+pub struct NativeNetworkMonitorCancellation {
+    cancelled: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    messages: Connection,
+    #[cfg(target_os = "linux")]
+    query_connection: Connection,
+    #[cfg(target_os = "windows")]
+    wake: SyncSender<()>,
+}
+
+impl NativeNetworkMonitorCancellation {
+    /// Cancels the matching monitor's blocking wait.
+    pub fn cancel(self) {
+        self.cancelled.store(true, Ordering::Release);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = self.messages.close();
+            let _ = self.query_connection.close();
+        }
+        #[cfg(target_os = "windows")]
+        match self.wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -412,8 +465,14 @@ impl NativeNetworkMonitor {
             let query_connection =
                 Connection::system().map_err(NetworkNotificationError::Platform)?;
             let current = read_network_event(&query_connection)?;
+            let cancelled = Arc::new(AtomicBool::new(false));
             Ok(Self {
                 transitions: NetworkTransitionFilter::new(current),
+                cancellation: NativeNetworkMonitorCancellation {
+                    cancelled,
+                    messages: Connection::from(&messages),
+                    query_connection: query_connection.clone(),
+                },
                 messages,
                 query_connection,
                 state_rule,
@@ -423,9 +482,10 @@ impl NativeNetworkMonitor {
 
         #[cfg(target_os = "windows")]
         {
-            let (registration, events, current) = windows::Registration::connect()?;
+            let (registration, events, current, cancellation) = windows::Registration::connect()?;
             Ok(Self {
                 transitions: NetworkTransitionFilter::new(current),
+                cancellation,
                 events,
                 _registration: registration,
             })
@@ -441,6 +501,12 @@ impl NativeNetworkMonitor {
         self.transitions.current
     }
 
+    /// Returns a handle that can unblock [`Self::next_event`] from another thread.
+    #[must_use]
+    pub fn cancellation(&self) -> NativeNetworkMonitorCancellation {
+        self.cancellation.clone()
+    }
+
     /// Blocks until provider-relevant availability changes.
     ///
     /// On Linux each matching signal triggers a fresh owner/property read. Both
@@ -453,9 +519,14 @@ impl NativeNetworkMonitor {
     pub fn next_event(&mut self) -> Result<NetworkEvent, NetworkNotificationError> {
         #[cfg(target_os = "linux")]
         loop {
-            let message = self
-                .messages
-                .next()
+            if self.cancellation.cancelled.load(Ordering::Acquire) {
+                return Err(NetworkNotificationError::Cancelled);
+            }
+            let message = self.messages.next();
+            if self.cancellation.cancelled.load(Ordering::Acquire) {
+                return Err(NetworkNotificationError::Cancelled);
+            }
+            let message = message
                 .ok_or(NetworkNotificationError::StreamClosed)?
                 .map_err(NetworkNotificationError::Platform)?;
             if !self
@@ -470,6 +541,9 @@ impl NativeNetworkMonitor {
                 continue;
             }
             let current = read_network_event(&self.query_connection)?;
+            if self.cancellation.cancelled.load(Ordering::Acquire) {
+                return Err(NetworkNotificationError::Cancelled);
+            }
             if let Some(event) = self.transitions.accept(current) {
                 return Ok(event);
             }
@@ -511,6 +585,7 @@ pub enum NetworkNotificationError {
     #[cfg(target_os = "windows")]
     InitialNotificationTimedOut,
     OwnerChangedRepeatedly,
+    Cancelled,
     StreamClosed,
     UnsupportedPlatform,
 }
@@ -533,6 +608,7 @@ impl fmt::Display for NetworkNotificationError {
             ),
             Self::OwnerChangedRepeatedly => formatter
                 .write_str("native network notification owner changed repeatedly during sampling"),
+            Self::Cancelled => formatter.write_str("native network notification wait cancelled"),
             Self::StreamClosed => formatter.write_str("native network notification stream closed"),
             Self::UnsupportedPlatform => {
                 formatter.write_str("native network notifications are unavailable on this platform")
@@ -616,7 +692,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_mailbox_retains_the_latest_state_under_callback_bursts() {
-        let (publisher, events) = NetworkEventInbox::channel();
+        let (publisher, events, _cancellation) = NetworkEventInbox::channel();
         for _ in 0..64 {
             publisher.publish(NetworkEvent::Available);
             publisher.publish(NetworkEvent::Unavailable);
@@ -665,6 +741,20 @@ mod tests {
         assert!(matches!(
             monitor.current(),
             NetworkEvent::Available | NetworkEvent::Unavailable
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_network_monitor_cancellation_unblocks_a_waiter() {
+        let mut monitor = NativeNetworkMonitor::connect()
+            .expect("Windows network callback provides its initial state");
+        let cancellation = monitor.cancellation();
+        let waiter = std::thread::spawn(move || monitor.next_event());
+        cancellation.cancel();
+        assert!(matches!(
+            waiter.join().expect("join network monitor waiter"),
+            Err(super::NetworkNotificationError::Cancelled)
         ));
     }
 }

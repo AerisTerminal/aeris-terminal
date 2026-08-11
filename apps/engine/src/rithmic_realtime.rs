@@ -15,7 +15,8 @@ use axiusflow_local_engine_protocol::{
 };
 use axiusflow_market_data::{DepthSnapshot, MarketEvent, MarketTrade};
 use axiusflow_platform_runtime::{
-    NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
+    NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
+    NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
@@ -79,6 +80,61 @@ struct EnvironmentState {
     suspended: bool,
 }
 
+struct EnvironmentMonitors {
+    events: Option<Receiver<EnvironmentMessage>>,
+    state: EnvironmentState,
+    network_cancellation: Option<NativeNetworkMonitorCancellation>,
+    power_cancellation: Option<NativePowerMonitorCancellation>,
+    network_worker: Option<thread::JoinHandle<()>>,
+    power_worker: Option<thread::JoinHandle<()>>,
+}
+
+impl EnvironmentMonitors {
+    fn parts(&mut self) -> (&Receiver<EnvironmentMessage>, &mut EnvironmentState) {
+        let Some(events) = self.events.as_ref() else {
+            unreachable!("environment receiver exists until monitor shutdown");
+        };
+        (events, &mut self.state)
+    }
+
+    fn shutdown(&mut self) -> Vec<&'static str> {
+        drop(self.events.take());
+        if let Some(cancellation) = self.network_cancellation.take() {
+            cancellation.cancel();
+        }
+        if let Some(cancellation) = self.power_cancellation.take() {
+            cancellation.cancel();
+        }
+        let mut panicked = Vec::new();
+        if self
+            .network_worker
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            panicked.push("axiusflow-engine-rithmic-network-monitor");
+        }
+        if self
+            .power_worker
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            panicked.push("axiusflow-engine-rithmic-power-monitor");
+        }
+        panicked
+    }
+}
+
+impl Drop for EnvironmentMonitors {
+    fn drop(&mut self) {
+        let panicked = self.shutdown();
+        assert!(
+            panicked.is_empty() || thread::panicking(),
+            "native environment monitor workers panicked: {}",
+            panicked.join(", ")
+        );
+    }
+}
+
 impl EnvironmentState {
     fn observe(&mut self, event: RithmicEnvironmentEvent) {
         match event {
@@ -93,7 +149,7 @@ pub(crate) fn run_catalog(
     controls: &Receiver<RithmicCatalogControl>,
     publications: &SyncSender<RithmicCatalogEvent>,
 ) {
-    let Ok((environment, mut environment_state)) = start_environment_monitors() else {
+    let Ok(mut environment) = start_environment_monitors() else {
         while let Ok(control) = controls.recv() {
             reject_catalog_control(publications, control, None);
         }
@@ -110,13 +166,14 @@ pub(crate) fn run_catalog(
             continue;
         };
         generation = next_generation(generation, generation);
+        let (environment_events, environment_state) = environment.parts();
         match run_catalog_session(
             runtime,
             &events,
             controls,
             publications,
-            &environment,
-            &mut environment_state,
+            environment_events,
+            environment_state,
             generation,
         ) {
             CatalogSessionExit::Retry(updated) => {
@@ -520,7 +577,7 @@ pub(crate) fn run(
     controls: &Receiver<RithmicRealtimeControl>,
     publications: &SyncSender<RithmicRealtimeEvent>,
 ) {
-    let Ok((environment, mut environment_state)) = start_environment_monitors() else {
+    let Ok(mut environment) = start_environment_monitors() else {
         while let Ok(RithmicRealtimeControl::Select(selected)) = controls.recv() {
             let _ = publications.send(RithmicRealtimeEvent::Disconnected(
                 selected.session_generation,
@@ -537,13 +594,14 @@ pub(crate) fn run(
             selected = newer;
         }
         let generation = next_generation(last_generation, selected.session_generation);
+        let (environment_events, environment_state) = environment.parts();
         match run_selection(
             &selected,
             generation,
             controls,
             publications,
-            &environment,
-            &mut environment_state,
+            environment_events,
+            environment_state,
         ) {
             SelectionExit::Replace {
                 selected: replacement,
@@ -770,16 +828,17 @@ fn apply_current_environment(
     Ok(())
 }
 
-fn start_environment_monitors() -> Result<(Receiver<EnvironmentMessage>, EnvironmentState), String>
-{
+fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
     let network = NativeNetworkMonitor::connect()
         .map_err(|_| "Rithmic native network monitor is unavailable".to_string())?;
     let initial_network = network.current();
+    let network_cancellation = network.cancellation();
     let power = NativePowerMonitor::connect()
         .map_err(|_| "Rithmic native power monitor is unavailable".to_string())?;
+    let power_cancellation = power.cancellation();
     let (sender, receiver) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
     let mut network = network;
-    spawn_environment_monitor(
+    let network_worker = spawn_environment_monitor(
         "axiusflow-engine-rithmic-network-monitor",
         sender.clone(),
         move || {
@@ -790,7 +849,7 @@ fn start_environment_monitors() -> Result<(Receiver<EnvironmentMessage>, Environ
         },
     )?;
     let mut power = power;
-    spawn_environment_monitor(
+    let power_worker = match spawn_environment_monitor(
         "axiusflow-engine-rithmic-power-monitor",
         sender,
         move || {
@@ -799,21 +858,34 @@ fn start_environment_monitors() -> Result<(Receiver<EnvironmentMessage>, Environ
                 .map(RithmicEnvironmentEvent::Power)
                 .map_err(|_| ())
         },
-    )?;
-    Ok((
-        receiver,
-        EnvironmentState {
+    ) {
+        Ok(worker) => worker,
+        Err(error) => {
+            drop(receiver);
+            network_cancellation.cancel();
+            power_cancellation.cancel();
+            let _ = network_worker.join();
+            return Err(error);
+        }
+    };
+    Ok(EnvironmentMonitors {
+        events: Some(receiver),
+        state: EnvironmentState {
             network: initial_network,
             suspended: false,
         },
-    ))
+        network_cancellation: Some(network_cancellation),
+        power_cancellation: Some(power_cancellation),
+        network_worker: Some(network_worker),
+        power_worker: Some(power_worker),
+    })
 }
 
 fn spawn_environment_monitor(
     name: &'static str,
     sender: SyncSender<EnvironmentMessage>,
     mut next: impl FnMut() -> Result<RithmicEnvironmentEvent, ()> + Send + 'static,
-) -> Result<(), String> {
+) -> Result<thread::JoinHandle<()>, String> {
     thread::Builder::new()
         .name(name.to_string())
         .spawn(move || {
@@ -828,7 +900,6 @@ fn spawn_environment_monitor(
                 }
             }
         })
-        .map(|_| ())
         .map_err(|_| "Rithmic native environment monitor could not start".to_string())
 }
 

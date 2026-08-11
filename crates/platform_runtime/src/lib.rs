@@ -17,5 +17,9 @@ pub use display_timing::{
 #[cfg(target_os = "windows")]
 pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
 pub use io_cancellation::cancel_tcp_stream_io;
-pub use network_notifications::{NativeNetworkMonitor, NetworkEvent, NetworkNotificationError};
-pub use power_notifications::{NativePowerMonitor, PowerEvent, PowerNotificationError};
+pub use network_notifications::{
+    NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,
+};
+pub use power_notifications::{
+    NativePowerMonitor, NativePowerMonitorCancellation, PowerEvent, PowerNotificationError,
+};
