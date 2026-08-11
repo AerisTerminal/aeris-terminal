@@ -228,6 +228,10 @@ impl HistorySource for FixtureHistory {
                 .ok()
                 .and_then(|value| value.checked_mul(i64::from(profile.interval_seconds)))
                 .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
+            bar.exchange_timestamp_unix_nanos = bar
+                .exchange_timestamp_seconds
+                .checked_mul(1_000_000_000)
+                .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
         }
         Ok(HistorySnapshot {
             price_scale: profile.price_scale,
@@ -2003,6 +2007,7 @@ const fn ipc_bar(bar: MarketBar) -> IpcMarketBar {
     IpcMarketBar {
         source_sequence: bar.source_sequence,
         exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+        exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -2086,6 +2091,8 @@ mod tests {
                 bars: vec![MarketBar {
                     source_sequence: 1,
                     exchange_timestamp_seconds: i64::from(profile.interval_seconds),
+                    exchange_timestamp_unix_nanos: i64::from(profile.interval_seconds)
+                        * 1_000_000_000,
                     open: 100,
                     high: 110,
                     low: 90,
@@ -2111,6 +2118,7 @@ mod tests {
                 bars: vec![MarketBar {
                     source_sequence: 1,
                     exchange_timestamp_seconds: 0,
+                    exchange_timestamp_unix_nanos: 0,
                     open: i64::from(profile.interval_seconds),
                     high: i64::from(profile.interval_seconds),
                     low: i64::from(profile.interval_seconds),
@@ -2147,6 +2155,7 @@ mod tests {
         MarketBar {
             source_sequence: 2,
             exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
             open: 100,
             high: 110,
             low: 90,

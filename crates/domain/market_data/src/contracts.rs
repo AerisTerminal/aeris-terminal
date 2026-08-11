@@ -651,6 +651,7 @@ mod tests {
         let bar = MarketBar {
             source_sequence: 9,
             exchange_timestamp_seconds: 1_700_000_000,
+            exchange_timestamp_unix_nanos: 1_700_000_000_000_000_000,
             open: 100,
             high: 102,
             low: 99,

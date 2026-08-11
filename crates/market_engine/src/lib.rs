@@ -474,6 +474,9 @@ mod tests {
                 source_sequence: u64::try_from(index + 1).expect("test sequence fits"),
                 exchange_timestamp_seconds: 1_700_000_000
                     + i64::try_from(index).expect("test time fits") * 60,
+                exchange_timestamp_unix_nanos: (1_700_000_000
+                    + i64::try_from(index).expect("test time fits") * 60)
+                    * 1_000_000_000,
                 open: 100,
                 high: 110,
                 low: 90,
@@ -579,6 +582,19 @@ mod tests {
         }
         assert_eq!(engine.metrics().stored_series, 1);
         assert_eq!(engine.metrics().stored_bars, 3);
+    }
+
+    #[test]
+    fn trade_count_bars_may_order_within_one_exchange_second() {
+        let mut engine = engine(1, 1, 4);
+        let mut tick_series = series("coinbase:spot:BTC-USD");
+        tick_series.period = BarPeriod::tick(100).expect("tick period validates");
+        let mut tick_bars = bars(2);
+        tick_bars[1].exchange_timestamp_seconds = tick_bars[0].exchange_timestamp_seconds;
+        tick_bars[1].exchange_timestamp_unix_nanos = tick_bars[0].exchange_timestamp_unix_nanos + 1;
+        engine
+            .install_history(provider_generation(1), &tick_series, 2, 0, tick_bars)
+            .expect("exact timestamps order same-second bars");
     }
 
     #[test]

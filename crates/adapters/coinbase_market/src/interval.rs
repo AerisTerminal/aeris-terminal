@@ -167,6 +167,7 @@ pub fn aggregate_coinbase_bars(
         output.push(MarketBar {
             source_sequence: 1,
             exchange_timestamp_seconds: bucket,
+            exchange_timestamp_unix_nanos: bucket * 1_000_000_000,
             open: bar.open,
             high: bar.high,
             low: bar.low,
@@ -242,6 +243,7 @@ mod tests {
         MarketBar {
             source_sequence: u64::try_from(timestamp / 60 + 1).expect("positive"),
             exchange_timestamp_seconds: timestamp,
+            exchange_timestamp_unix_nanos: timestamp * 1_000_000_000,
             open: price,
             high: price + 2,
             low: price - 2,

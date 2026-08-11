@@ -306,7 +306,7 @@ impl RithmicLiveChart {
         }
         Ok(RithmicLiveChartUpdate::CompleteAndStart {
             completed: self.forming,
-            forming: started_bar(self.forming, trade, bucket)?,
+            forming: started_bar(self.forming, trade, bucket * NANOS_PER_SECOND)?,
         })
     }
 
@@ -318,11 +318,7 @@ impl RithmicLiveChart {
         forming_trades: u32,
     ) -> Result<(RithmicLiveChartUpdate, i64, u32), RithmicLiveChartError> {
         if forming_trades >= trades_per_bar {
-            let forming = started_bar(
-                self.forming,
-                trade,
-                exchange_nanos.div_euclid(NANOS_PER_SECOND),
-            )?;
+            let forming = started_bar(self.forming, trade, exchange_nanos)?;
             return Ok((
                 RithmicLiveChartUpdate::CompleteAndStart {
                     completed: self.forming,
@@ -332,17 +328,12 @@ impl RithmicLiveChart {
                 1,
             ));
         }
-        let timestamp = self
-            .bars
-            .last()
-            .ok_or(RithmicLiveChartError::EmptyHistory)?
-            .provenance()
-            .exchange_timestamp_unix_nanos;
+        let mut forming = updated_forming(self.forming, trade)?;
+        forming.exchange_timestamp_seconds = exchange_nanos.div_euclid(NANOS_PER_SECOND);
+        forming.exchange_timestamp_unix_nanos = exchange_nanos;
         Ok((
-            RithmicLiveChartUpdate::ReplaceForming {
-                forming: updated_forming(self.forming, trade)?,
-            },
-            timestamp,
+            RithmicLiveChartUpdate::ReplaceForming { forming },
+            exchange_nanos,
             forming_trades.saturating_add(1),
         ))
     }
@@ -431,14 +422,15 @@ fn updated_forming(
 fn started_bar(
     completed: MarketBar,
     trade: &MarketTrade,
-    exchange_timestamp_seconds: i64,
+    exchange_timestamp_unix_nanos: i64,
 ) -> Result<MarketBar, RithmicLiveChartError> {
     Ok(MarketBar {
         source_sequence: completed
             .source_sequence
             .checked_add(1)
             .ok_or(RithmicLiveChartError::SequenceOverflow)?,
-        exchange_timestamp_seconds,
+        exchange_timestamp_seconds: exchange_timestamp_unix_nanos.div_euclid(NANOS_PER_SECOND),
+        exchange_timestamp_unix_nanos,
         open: trade.price,
         high: trade.price,
         low: trade.price,
@@ -481,6 +473,7 @@ mod tests {
             MarketBar {
                 source_sequence: 40,
                 exchange_timestamp_seconds: START - 60,
+                exchange_timestamp_unix_nanos: (START - 60) * NANOS_PER_SECOND,
                 open: 20_000,
                 high: 20_020,
                 low: 19_990,
@@ -490,6 +483,7 @@ mod tests {
             MarketBar {
                 source_sequence: 41,
                 exchange_timestamp_seconds: START,
+                exchange_timestamp_unix_nanos: START * NANOS_PER_SECOND,
                 open: 20_010,
                 high: 20_030,
                 low: 20_000,
@@ -500,7 +494,7 @@ mod tests {
         let provenanced = bars
             .into_iter()
             .map(|bar| {
-                let timestamp = bar.exchange_timestamp_seconds * NANOS_PER_SECOND;
+                let timestamp = bar.exchange_timestamp_unix_nanos;
                 axiusflow_application::Provenanced::new(
                     bar,
                     MarketEventProvenance {
@@ -615,20 +609,35 @@ mod tests {
                 .update,
             RithmicLiveChartUpdate::ReplaceForming { .. }
         ));
+        let third = chart.apply_trade(fence, &trades[2]).expect("third tick");
         assert!(matches!(
-            chart
-                .apply_trade(fence, &trades[2])
-                .expect("third tick")
-                .update,
+            third.update,
             RithmicLiveChartUpdate::ReplaceForming { .. }
         ));
+        assert_eq!(
+            third.update.forming().exchange_timestamp_unix_nanos,
+            trades[2]
+                .metadata
+                .timestamps
+                .exchange_unix_nanos
+                .expect("test trade has exchange time")
+        );
+        let next = chart.apply_trade(fence, &trades[3]).expect("next bar");
         assert!(matches!(
-            chart
-                .apply_trade(fence, &trades[3])
-                .expect("next bar")
-                .update,
+            next.update,
             RithmicLiveChartUpdate::CompleteAndStart { .. }
         ));
+        assert_eq!(
+            next.update
+                .completed()
+                .expect("completed tick bar")
+                .exchange_timestamp_unix_nanos,
+            trades[2]
+                .metadata
+                .timestamps
+                .exchange_unix_nanos
+                .expect("test trade has exchange time")
+        );
     }
 
     #[test]

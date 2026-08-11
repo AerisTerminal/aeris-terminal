@@ -558,13 +558,14 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
             let bar = MarketBar {
                 source_sequence: bar.source_sequence,
                 exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+                exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
                 open: bar.open,
                 high: bar.high,
                 low: bar.low,
                 close: bar.close,
                 volume: bar.volume,
             };
-            let exchange = bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
+            let exchange = bar.exchange_timestamp_unix_nanos;
             Provenanced::new(
                 bar,
                 MarketEventProvenance {
@@ -719,6 +720,7 @@ mod tests {
             bars: vec![IpcMarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_123_456_000,
                 open: 100,
                 high: 110,
                 low: 90,

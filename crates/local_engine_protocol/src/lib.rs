@@ -21,7 +21,7 @@ pub use messages::{
 };
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Maximum prost payload accepted in one frame (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1_048_576;

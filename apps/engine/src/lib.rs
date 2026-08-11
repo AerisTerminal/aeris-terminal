@@ -30,8 +30,8 @@ use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
-/// Stable per-user local socket name for protocol version five.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v5";
+/// Stable per-user local socket name for protocol version seven.
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v7";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 
@@ -1343,6 +1343,7 @@ mod tests {
         let market = MarketService::start_fixture(vec![MarketBar {
             source_sequence: 1,
             exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
             open: 100,
             high: 110,
             low: 90,

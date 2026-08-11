@@ -355,9 +355,10 @@ mod tests {
         let first = baseline.bars()[0].clone();
         let mut second_bar = *baseline.bars()[1].value();
         second_bar.exchange_timestamp_seconds = first.value().exchange_timestamp_seconds;
+        second_bar.exchange_timestamp_unix_nanos =
+            first.value().exchange_timestamp_unix_nanos + 500_000_000;
         let mut second_provenance = baseline.bars()[1].provenance().clone();
-        second_provenance.exchange_timestamp_unix_nanos =
-            first.provenance().exchange_timestamp_unix_nanos + 500_000_000;
+        second_provenance.exchange_timestamp_unix_nanos = second_bar.exchange_timestamp_unix_nanos;
         let second = Provenanced::new(second_bar, second_provenance);
 
         let snapshot = ReplaySnapshot::try_from_provenanced_values(

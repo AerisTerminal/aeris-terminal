@@ -16,10 +16,9 @@ use axiusflow_market_data::{
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
-    CanonicalRithmicHistoryBar, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicApplication, RithmicCredentialBytes, RithmicHistorySessionTransport,
-    RithmicProviderInstrument, RithmicSessionLimits, RithmicTestSession,
-    collect_rithmic_chart_history,
+    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
+    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSessionLimits,
+    RithmicTestSession, collect_rithmic_chart_history,
 };
 use std::{
     num::NonZeroUsize,
@@ -238,8 +237,6 @@ fn fetch_history(request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap,
     bootstrap_from_bars(request, visible_bars, unix_nanos_now()?)
 }
 
-type CanonicalHistoryBar = CanonicalRithmicHistoryBar;
-
 fn connect_history(
     stop: Arc<AtomicBool>,
 ) -> Result<axiusflow_rithmic_protocol_adapter::RithmicHistoryConnection, String> {
@@ -370,20 +367,20 @@ fn aggregate_replay_envelope(
     })
 }
 
-fn latest_visible_bars(mut bars: Vec<CanonicalHistoryBar>) -> Vec<CanonicalHistoryBar> {
+fn latest_visible_bars(mut bars: Vec<MarketBar>) -> Vec<MarketBar> {
     bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
     if bars.len() > MAXIMUM_VISIBLE_BARS {
         bars.drain(..bars.len() - MAXIMUM_VISIBLE_BARS);
     }
     for (index, bar) in bars.iter_mut().enumerate() {
-        bar.value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        bar.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
     }
     bars
 }
 
 fn bootstrap_from_bars(
     request: &HistoryFetchRequest,
-    bars: Vec<CanonicalHistoryBar>,
+    bars: Vec<MarketBar>,
     received_unix_nanos: i64,
 ) -> Result<MarketWorkerBootstrap, String> {
     if bars.is_empty() || bars.len() > MAXIMUM_VISIBLE_BARS {
@@ -420,11 +417,11 @@ fn bootstrap_from_bars(
         .map(|bar| {
             let provenance = history_provenance(
                 request,
-                &bar.value,
+                &bar,
                 bar.exchange_timestamp_unix_nanos,
                 received_unix_nanos,
             )?;
-            let item = Provenanced::new(bar.value, provenance);
+            let item = Provenanced::new(bar, provenance);
             validate_provenanced_market_bar(&item).map_err(|error| error.to_string())?;
             Ok(item)
         })
@@ -594,17 +591,15 @@ mod tests {
     fn latest_visible_bars_orders_and_caps_an_expanded_replay() {
         let bars = (1_i64..=400)
             .rev()
-            .map(|timestamp| CanonicalHistoryBar {
-                value: MarketBar {
-                    source_sequence: u64::try_from(timestamp).expect("timestamp fits"),
-                    exchange_timestamp_seconds: timestamp,
-                    open: timestamp,
-                    high: timestamp,
-                    low: timestamp,
-                    close: timestamp,
-                    volume: 1,
-                },
+            .map(|timestamp| MarketBar {
+                source_sequence: u64::try_from(timestamp).expect("timestamp fits"),
+                exchange_timestamp_seconds: timestamp,
                 exchange_timestamp_unix_nanos: timestamp * NANOS_PER_SECOND,
+                open: timestamp,
+                high: timestamp,
+                low: timestamp,
+                close: timestamp,
+                volume: 1,
             })
             .collect();
         let latest = latest_visible_bars(bars);
@@ -613,7 +608,6 @@ mod tests {
             latest
                 .first()
                 .expect("latest replay is nonempty")
-                .value
                 .exchange_timestamp_seconds,
             101
         );
@@ -621,12 +615,11 @@ mod tests {
             latest
                 .last()
                 .expect("latest replay is nonempty")
-                .value
                 .exchange_timestamp_seconds,
             400
         );
         assert!(latest.iter().enumerate().all(|(index, bar)| {
-            bar.value.source_sequence == u64::try_from(index).unwrap_or(u64::MAX) + 1
+            bar.source_sequence == u64::try_from(index).unwrap_or(u64::MAX) + 1
         }));
     }
 
@@ -656,17 +649,15 @@ mod tests {
         };
         let bootstrap = bootstrap_from_bars(
             &request,
-            vec![CanonicalHistoryBar {
-                value: MarketBar {
-                    source_sequence: 1,
-                    exchange_timestamp_seconds: START,
-                    open: 2_000_000,
-                    high: 2_000_100,
-                    low: 1_999_900,
-                    close: 2_000_025,
-                    volume: 10,
-                },
+            vec![MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: START,
                 exchange_timestamp_unix_nanos: START * NANOS_PER_SECOND,
+                open: 2_000_000,
+                high: 2_000_100,
+                low: 1_999_900,
+                close: 2_000_025,
+                volume: 10,
             }],
             (START + 1) * NANOS_PER_SECOND,
         )

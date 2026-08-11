@@ -52,11 +52,10 @@ pub use history::{
     HistorySource, Ohlc, ReplayKind, TickBarKey,
 };
 pub use history_adapter::{
-    CanonicalRithmicHistoryBar, CanonicalRithmicTickBar, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
-    RithmicBarContinuity, RithmicCoveringRecoveryEvidence, RithmicHistoryAdapterError,
-    RithmicHistoryCapabilityAdapter, RithmicHistoryLimits, RithmicHistorySessionTransport,
-    RithmicHistoryTransport, RithmicTimeBarResolution, canonical_rithmic_tick_bar,
-    canonical_rithmic_time_bar, collect_rithmic_chart_history,
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicBarContinuity, RithmicCoveringRecoveryEvidence,
+    RithmicHistoryAdapterError, RithmicHistoryCapabilityAdapter, RithmicHistoryLimits,
+    RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicTimeBarResolution,
+    canonical_rithmic_tick_bar, canonical_rithmic_time_bar, collect_rithmic_chart_history,
     collect_rithmic_covering_recovery_evidence, covering_snapshot_from_page,
     decode_rithmic_history_bar,
 };

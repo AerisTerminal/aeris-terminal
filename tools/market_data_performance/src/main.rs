@@ -188,7 +188,7 @@ fn persist_history(
             .iter()
             .map(|bar| HistoryItem {
                 sequence: bar.source_sequence,
-                event_time_unix_nanos: bar.exchange_timestamp_seconds * NANOS_PER_SECOND,
+                event_time_unix_nanos: bar.exchange_timestamp_unix_nanos,
                 payload: encode_history_bar(*bar),
             })
             .collect::<Vec<_>>();
@@ -339,6 +339,7 @@ fn generate_bars(count: usize) -> Result<Vec<MarketBar>, Box<dyn Error>> {
             Ok(MarketBar {
                 source_sequence: sequence,
                 exchange_timestamp_seconds: timestamp,
+                exchange_timestamp_unix_nanos: timestamp * 1_000_000_000,
                 open: price,
                 high: price.saturating_add(20),
                 low: price.saturating_sub(20),
@@ -360,7 +361,7 @@ fn identity_for_chunk(
         instrument_id: "coinbase:spot:BTC-USD".to_string(),
         data_kind: DataKind::Bars,
         resolution: "1m".to_string(),
-        range_start_unix_nanos: first.exchange_timestamp_seconds * NANOS_PER_SECOND,
+        range_start_unix_nanos: first.exchange_timestamp_unix_nanos,
         range_end_unix_nanos: last.exchange_timestamp_seconds.saturating_add(BAR_SECONDS)
             * NANOS_PER_SECOND,
         source_revision: 1,

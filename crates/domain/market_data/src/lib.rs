@@ -61,7 +61,11 @@ impl BarDefinition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MarketBar {
     pub source_sequence: u64,
+    /// Whole exchange second used for fixed-time bucket arithmetic.
     pub exchange_timestamp_seconds: i64,
+    /// Exact exchange ordering timestamp. Its whole second must match
+    /// `exchange_timestamp_seconds`.
+    pub exchange_timestamp_unix_nanos: i64,
     pub open: i64,
     pub high: i64,
     pub low: i64,
@@ -79,6 +83,13 @@ impl MarketBar {
     pub fn validate(self) -> Result<(), MarketDataValidationError> {
         if self.source_sequence == 0 {
             return Err(MarketDataValidationError::ZeroSourceSequence);
+        }
+        if self.exchange_timestamp_unix_nanos.div_euclid(1_000_000_000)
+            != self.exchange_timestamp_seconds
+        {
+            return Err(MarketDataValidationError::InvalidTimestamp(
+                "bar_exchange_timestamp",
+            ));
         }
         if self.high < self.open.max(self.close)
             || self.low > self.open.min(self.close)
@@ -216,6 +227,28 @@ mod tests {
         assert_eq!(
             definition(0, Some(0)).validate(),
             Err(MarketDataValidationError::InvalidBarCadence)
+        );
+    }
+
+    #[test]
+    fn market_bar_rejects_disagreeing_coarse_and_exact_exchange_time() {
+        let mut bar = MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: 10,
+            exchange_timestamp_unix_nanos: 10_123_456_000,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+        };
+        assert!(bar.validate().is_ok());
+        bar.exchange_timestamp_seconds = 11;
+        assert_eq!(
+            bar.validate(),
+            Err(MarketDataValidationError::InvalidTimestamp(
+                "bar_exchange_timestamp"
+            ))
         );
     }
 }

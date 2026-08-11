@@ -59,11 +59,7 @@ pub fn validate_provenanced_market_bar(
             provenance: provenance.source_sequence,
         });
     }
-    if provenance
-        .exchange_timestamp_unix_nanos
-        .div_euclid(1_000_000_000)
-        != bar.exchange_timestamp_seconds
-    {
+    if provenance.exchange_timestamp_unix_nanos != bar.exchange_timestamp_unix_nanos {
         return Err(ReplayValidationError::ProvenanceExchangeTimestampMismatch {
             source_sequence: bar.source_sequence,
             bar_seconds: bar.exchange_timestamp_seconds,
@@ -119,6 +115,7 @@ pub(crate) fn snapshot_checksum(
             MarketValueChecksumRef {
                 source_sequence: bar.source_sequence,
                 exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+                exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
                 open: bar.open,
                 high: bar.high,
                 low: bar.low,
@@ -131,8 +128,7 @@ pub(crate) fn snapshot_checksum(
 }
 
 pub(crate) fn embedded_event_provenance(bar: &MarketBar) -> MarketEventProvenance {
-    let exchange_timestamp_unix_nanos =
-        bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
+    let exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
     MarketEventProvenance {
         event_id: format!("embedded_market_bar_{}", bar.source_sequence),
         event_time_unix_nanos: exchange_timestamp_unix_nanos,
@@ -163,10 +159,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_bar_accepts_subsecond_provenance_within_its_exchange_second() {
+    fn canonical_bar_requires_exact_exchange_provenance() {
         let bar = MarketBar {
             source_sequence: 1,
             exchange_timestamp_seconds: 10,
+            exchange_timestamp_unix_nanos: 10_123_456_000,
             open: 100,
             high: 100,
             low: 100,
@@ -174,11 +171,10 @@ mod tests {
             volume: 1,
         };
         let mut provenance = embedded_event_provenance(&bar);
-        provenance.exchange_timestamp_unix_nanos += 123_456_000;
         let item = Provenanced::new(bar, provenance.clone());
         assert!(validate_provenanced_market_bar(&item).is_ok());
 
-        provenance.exchange_timestamp_unix_nanos = 11_000_000_000;
+        provenance.exchange_timestamp_unix_nanos += 1;
         let mismatched = Provenanced::new(bar, provenance);
         assert!(matches!(
             validate_provenanced_market_bar(&mismatched),

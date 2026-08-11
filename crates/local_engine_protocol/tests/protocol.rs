@@ -92,6 +92,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
     let bar = MarketBar {
         source_sequence: 1,
         exchange_timestamp_seconds: 1_700_000_000,
+        exchange_timestamp_unix_nanos: 1_700_000_000_123_456_000,
         open: 100,
         high: 110,
         low: 90,

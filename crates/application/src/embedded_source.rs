@@ -126,6 +126,9 @@ fn embedded_bars(count: usize) -> Vec<MarketBar> {
             source_sequence,
             exchange_timestamp_seconds: EMBEDDED_REPLAY_START_SECONDS
                 + index_i64 * EMBEDDED_REPLAY_INTERVAL_SECONDS,
+            exchange_timestamp_unix_nanos: (EMBEDDED_REPLAY_START_SECONDS
+                + index_i64 * EMBEDDED_REPLAY_INTERVAL_SECONDS)
+                * 1_000_000_000,
             open: previous_close,
             high: previous_close.max(close) + upper_wick,
             low: previous_close.min(close) - lower_wick,

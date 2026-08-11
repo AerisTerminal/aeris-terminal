@@ -438,6 +438,7 @@ impl CoinbaseBarAggregator {
         self.in_flight.as_ref().map(|bar| MarketBar {
             source_sequence: self.next_sequence,
             exchange_timestamp_seconds: bar.bucket_unix_seconds,
+            exchange_timestamp_unix_nanos: bar.bucket_unix_seconds * 1_000_000_000,
             open: bar.open,
             high: bar.high,
             low: bar.low,
@@ -466,6 +467,7 @@ impl CoinbaseBarAggregator {
         let completed = MarketBar {
             source_sequence: self.next_sequence,
             exchange_timestamp_seconds: bar.bucket_unix_seconds,
+            exchange_timestamp_unix_nanos: bar.bucket_unix_seconds * 1_000_000_000,
             open: bar.open,
             high: bar.high,
             low: bar.low,
@@ -586,6 +588,7 @@ mod tests {
         MarketBar {
             source_sequence: u64::try_from(minute + 1).expect("positive fixture sequence"),
             exchange_timestamp_seconds: minute * ONE_MINUTE_SECONDS,
+            exchange_timestamp_unix_nanos: minute * ONE_MINUTE_SECONDS * 1_000_000_000,
             open: price,
             high: price,
             low: price,

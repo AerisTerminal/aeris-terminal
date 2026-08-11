@@ -440,6 +440,9 @@ pub struct MarketBar {
     /// Fixed-point volume.
     #[prost(sint64, tag = "7")]
     pub volume: i64,
+    /// Exact exchange ordering timestamp in Unix nanoseconds.
+    #[prost(sint64, tag = "8")]
+    pub exchange_timestamp_unix_nanos: i64,
 }
 
 /// Immutable covering bar snapshot for one consumer generation.

@@ -58,7 +58,7 @@ struct MarketBarStreamContext {
     publication_generation: u64,
     schema_version: u32,
     last_sequence: u64,
-    last_exchange_timestamp_seconds: i64,
+    last_exchange_timestamp_unix_nanos: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -361,8 +361,8 @@ impl MarketBarStreamDecoder {
                         actual: decoded.delta.previous_sequence(),
                     });
                 }
-                if decoded.delta.item().value().exchange_timestamp_seconds
-                    <= context.last_exchange_timestamp_seconds
+                if decoded.delta.item().value().exchange_timestamp_unix_nanos
+                    <= context.last_exchange_timestamp_unix_nanos
                 {
                     return Err(ProtobufAdapterError::NonIncreasingTimestamp {
                         source_sequence: decoded.delta.sequence(),
@@ -373,8 +373,8 @@ impl MarketBarStreamDecoder {
                     return Err(ProtobufAdapterError::DeltaBeforeSnapshot);
                 };
                 next_context.last_sequence = decoded.delta.sequence();
-                next_context.last_exchange_timestamp_seconds =
-                    decoded.delta.item().value().exchange_timestamp_seconds;
+                next_context.last_exchange_timestamp_unix_nanos =
+                    decoded.delta.item().value().exchange_timestamp_unix_nanos;
                 Ok(Some(DecodedMarketBarStreamUpdate::Delta(decoded)))
             }
         }
@@ -427,7 +427,7 @@ impl MarketBarStreamDecoder {
             publication_generation: decoded.evidence.publication_generation,
             schema_version: decoded.evidence.schema_version,
             last_sequence: decoded.stream.last_sequence(),
-            last_exchange_timestamp_seconds: last_item.value().exchange_timestamp_seconds,
+            last_exchange_timestamp_unix_nanos: last_item.value().exchange_timestamp_unix_nanos,
         });
         Ok(())
     }

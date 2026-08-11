@@ -458,6 +458,7 @@ pub fn decode_history_bar(item: &HistoryItem) -> Result<MarketBar, String> {
     let bar = MarketBar {
         source_sequence: sequence,
         exchange_timestamp_seconds: timestamp,
+        exchange_timestamp_unix_nanos: item.event_time_unix_nanos,
         open: read_i64(&item.payload, &mut offset)?,
         high: read_i64(&item.payload, &mut offset)?,
         low: read_i64(&item.payload, &mut offset)?,
@@ -685,6 +686,7 @@ fn parse_candle(
     let bar = MarketBar {
         source_sequence: sequence,
         exchange_timestamp_seconds: timestamp,
+        exchange_timestamp_unix_nanos: timestamp * 1_000_000_000,
         open: fixed_at_scale(&candle.open, u32::from(price_scale))?,
         high: fixed_at_scale(&candle.high, u32::from(price_scale))?,
         low: fixed_at_scale(&candle.low, u32::from(price_scale))?,

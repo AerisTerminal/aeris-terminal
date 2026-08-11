@@ -210,6 +210,7 @@ pub fn try_decode_market_bar(
     let bar = MarketBar {
         source_sequence: header.source_sequence,
         exchange_timestamp_seconds: whole_seconds(header.exchange_timestamp_unix_nanos)?,
+        exchange_timestamp_unix_nanos: header.exchange_timestamp_unix_nanos,
         open: try_decode_decimal_i64(
             required(wire.open, "bar.open")?,
             price_scale,
@@ -348,12 +349,14 @@ pub fn try_decode_market_bar_snapshot(
                 actual: bar.source_sequence,
             });
         }
-        if previous_timestamp.is_some_and(|timestamp| bar.exchange_timestamp_seconds <= timestamp) {
+        if previous_timestamp
+            .is_some_and(|timestamp| bar.exchange_timestamp_unix_nanos <= timestamp)
+        {
             return Err(ProtobufAdapterError::NonIncreasingTimestamp {
                 source_sequence: bar.source_sequence,
             });
         }
-        previous_timestamp = Some(bar.exchange_timestamp_seconds);
+        previous_timestamp = Some(bar.exchange_timestamp_unix_nanos);
         bars.push(item);
     }
 
@@ -390,6 +393,7 @@ fn verify_market_snapshot_checksum(
             MarketValueChecksumRef {
                 source_sequence: bar.source_sequence,
                 exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+                exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
                 open: bar.open,
                 high: bar.high,
                 low: bar.low,

@@ -154,14 +154,10 @@ impl LocalHistoryStore {
             .last()
             .ok_or_else(|| "local history cannot persist an empty series".to_string())?;
         let interval_seconds = interval_seconds(series)?;
-        let start = first
-            .exchange_timestamp_seconds
-            .checked_mul(1_000_000_000)
-            .ok_or_else(|| "local history range overflowed".to_string())?;
+        let start = first.exchange_timestamp_unix_nanos;
         let end = last
-            .exchange_timestamp_seconds
-            .checked_add(i64::from(interval_seconds))
-            .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+            .exchange_timestamp_unix_nanos
+            .checked_add(i64::from(interval_seconds) * 1_000_000_000)
             .ok_or_else(|| "local history range overflowed".to_string())?;
         let identity = SegmentIdentity {
             scope: history_scope(),
@@ -185,7 +181,7 @@ impl LocalHistoryStore {
             .copied()
             .map(|bar| HistoryItem {
                 sequence: bar.source_sequence,
-                event_time_unix_nanos: bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000),
+                event_time_unix_nanos: bar.exchange_timestamp_unix_nanos,
                 payload: encode_history_bar(bar),
             })
             .collect::<Vec<_>>();
@@ -320,6 +316,7 @@ mod tests {
         let bars = vec![MarketBar {
             source_sequence: 1,
             exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
             open: 100,
             high: 110,
             low: 90,
@@ -363,6 +360,7 @@ mod tests {
             .map(|minute| MarketBar {
                 source_sequence: u64::try_from(minute + 1).expect("sequence"),
                 exchange_timestamp_seconds: minute * 60,
+                exchange_timestamp_unix_nanos: minute * 60 * 1_000_000_000,
                 open: 100 + minute,
                 high: 110 + minute,
                 low: 90 + minute,

@@ -257,7 +257,7 @@ fn validate_bars(bars: &[MarketBar]) -> Result<(), EngineError> {
                 received: pair[1].source_sequence,
             });
         }
-        if pair[1].exchange_timestamp_seconds <= pair[0].exchange_timestamp_seconds {
+        if pair[1].exchange_timestamp_unix_nanos <= pair[0].exchange_timestamp_unix_nanos {
             return Err(EngineError::NonIncreasingSeriesTime);
         }
     }

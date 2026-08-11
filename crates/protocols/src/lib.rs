@@ -106,6 +106,7 @@ pub struct MarketSnapshotIdentityRef<'identity> {
 pub struct MarketValueChecksumRef<'value> {
     pub source_sequence: u64,
     pub exchange_timestamp_seconds: i64,
+    pub exchange_timestamp_unix_nanos: i64,
     pub open: i64,
     pub high: i64,
     pub low: i64,
@@ -136,6 +137,7 @@ pub fn compute_market_snapshot_checksum<'value>(
     for value in values {
         digest.update(value.source_sequence.to_be_bytes());
         digest.update(value.exchange_timestamp_seconds.to_be_bytes());
+        digest.update(value.exchange_timestamp_unix_nanos.to_be_bytes());
         digest.update(value.open.to_be_bytes());
         digest.update(value.high.to_be_bytes());
         digest.update(value.low.to_be_bytes());
@@ -528,6 +530,7 @@ mod tests {
             [MarketValueChecksumRef {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 1,
+                exchange_timestamp_unix_nanos: 1_000_000_000,
                 open: 10,
                 high: 12,
                 low: 9,

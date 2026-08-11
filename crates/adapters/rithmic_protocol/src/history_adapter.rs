@@ -27,8 +27,10 @@ const MAXIMUM_CONTROL_MESSAGES: usize = 256;
 const MAXIMUM_REPLAY_TIMEOUT: Duration = Duration::from_mins(5);
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const NANOS_PER_SECOND_I64: i64 = 1_000_000_000;
-const HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXRHB1";
-const HISTORY_PAYLOAD_BYTES: usize = HISTORY_PAYLOAD_MAGIC.len() + 7 * 8;
+const HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXRHB2";
+const LEGACY_HISTORY_PAYLOAD_MAGIC: &[u8; 6] = b"AXRHB1";
+const HISTORY_PAYLOAD_BYTES: usize = HISTORY_PAYLOAD_MAGIC.len() + 8 * 8;
+const LEGACY_HISTORY_PAYLOAD_BYTES: usize = LEGACY_HISTORY_PAYLOAD_MAGIC.len() + 7 * 8;
 
 /// Non-secret account scope for Rithmic Test market-data history.
 pub const RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID: &str = "rithmic_test_market_data";
@@ -573,6 +575,7 @@ pub fn canonical_rithmic_time_bar(
     let market_bar = MarketBar {
         source_sequence: sequence.get(),
         exchange_timestamp_seconds: i64::from(bar.marker_seconds),
+        exchange_timestamp_unix_nanos: i64::from(bar.marker_seconds) * NANOS_PER_SECOND_I64,
         open: fixed_price(bar.ohlc.open, instrument.descriptor.price_scale)?,
         high: fixed_price(bar.ohlc.high, instrument.descriptor.price_scale)?,
         low: fixed_price(bar.ohlc.low, instrument.descriptor.price_scale)?,
@@ -592,20 +595,6 @@ pub fn canonical_rithmic_time_bar(
     })
 }
 
-/// One canonical trade-count bar with its subsecond exchange timestamp.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CanonicalRithmicTickBar {
-    pub value: MarketBar,
-    pub exchange_timestamp_unix_nanos: i64,
-}
-
-/// One canonical Rithmic chart-history bar with its exact ordering timestamp.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CanonicalRithmicHistoryBar {
-    pub value: MarketBar,
-    pub exchange_timestamp_unix_nanos: i64,
-}
-
 /// Collects one bounded canonical chart-history response for any supported Rithmic interval.
 ///
 /// # Errors
@@ -617,7 +606,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
     interval: ChartInterval,
     range: HistoryRange,
     maximum_bars: NonZeroUsize,
-) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
     if range.start_unix_nanos % NANOS_PER_SECOND_I64 != 0
         || range.end_unix_nanos % NANOS_PER_SECOND_I64 != 0
         || range.start_unix_nanos >= range.end_unix_nanos
@@ -681,7 +670,7 @@ fn collect_time_chart_history<T: RithmicHistoryTransport>(
     start_seconds: i32,
     finish_seconds: i32,
     maximum_bars: NonZeroUsize,
-) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
     let interval_seconds = i32::try_from(resolution.interval_seconds()?)
         .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
     let collection_start = start_seconds
@@ -714,11 +703,7 @@ fn collect_time_chart_history<T: RithmicHistoryTransport>(
             canonical_rithmic_time_bar(instrument, resolution, bar).map(|sequenced| {
                 let mut value = sequenced.value;
                 value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-                CanonicalRithmicHistoryBar {
-                    value,
-                    exchange_timestamp_unix_nanos: value.exchange_timestamp_seconds
-                        * NANOS_PER_SECOND_I64,
-                }
+                value
             })
         })
         .collect()
@@ -731,7 +716,7 @@ fn collect_tick_chart_history<T: RithmicHistoryTransport>(
     start_seconds: i32,
     finish_seconds: i32,
     maximum_bars: NonZeroUsize,
-) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
     let collected = transport
         .collect_history(HistoryCollectionRequest {
             symbol: instrument.descriptor.provider_symbol.clone(),
@@ -752,37 +737,31 @@ fn collect_tick_chart_history<T: RithmicHistoryTransport>(
             let sequence =
                 NonZeroU64::new(u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
                     .unwrap_or(NonZeroU64::MIN);
-            canonical_rithmic_tick_bar(instrument, trades_per_bar, sequence, bar).map(|bar| {
-                CanonicalRithmicHistoryBar {
-                    value: bar.value,
-                    exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
-                }
-            })
+            canonical_rithmic_tick_bar(instrument, trades_per_bar, sequence, bar)
         })
         .collect()
 }
 
 fn aggregate_daily_chart_history(
-    daily: Vec<CanonicalRithmicHistoryBar>,
+    daily: Vec<MarketBar>,
     period: RithmicDailyAggregation,
-) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
     let daily = daily
         .into_iter()
         .map(|bar| (bar.exchange_timestamp_unix_nanos, bar))
         .collect::<BTreeMap<_, _>>();
     let mut aggregated = Vec::new();
-    let mut active = None::<(i64, CanonicalRithmicHistoryBar)>;
+    let mut active = None::<(i64, MarketBar)>;
     for (_, daily_bar) in daily {
-        let bucket = daily_bucket(daily_bar.value.exchange_timestamp_seconds, period);
+        let bucket = daily_bucket(daily_bar.exchange_timestamp_seconds, period);
         match &mut active {
             Some((active_bucket, aggregate)) if *active_bucket == bucket => {
-                aggregate.value.high = aggregate.value.high.max(daily_bar.value.high);
-                aggregate.value.low = aggregate.value.low.min(daily_bar.value.low);
-                aggregate.value.close = daily_bar.value.close;
-                aggregate.value.volume = aggregate
-                    .value
+                aggregate.high = aggregate.high.max(daily_bar.high);
+                aggregate.low = aggregate.low.min(daily_bar.low);
+                aggregate.close = daily_bar.close;
+                aggregate.volume = aggregate
                     .volume
-                    .checked_add(daily_bar.value.volume)
+                    .checked_add(daily_bar.volume)
                     .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
             }
             _ => {
@@ -797,9 +776,8 @@ fn aggregate_daily_chart_history(
         aggregated.push(completed);
     }
     for (index, bar) in aggregated.iter_mut().enumerate() {
-        bar.value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-        bar.value
-            .validate()
+        bar.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        bar.validate()
             .map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
     }
     Ok(aggregated)
@@ -843,7 +821,7 @@ pub fn canonical_rithmic_tick_bar(
     trades_per_bar: u16,
     source_sequence: NonZeroU64,
     bar: &crate::DecodedTickBar,
-) -> Result<CanonicalRithmicTickBar, RithmicHistoryAdapterError> {
+) -> Result<MarketBar, RithmicHistoryAdapterError> {
     let last = bar
         .keys
         .last()
@@ -863,6 +841,7 @@ pub fn canonical_rithmic_tick_bar(
     let value = MarketBar {
         source_sequence: source_sequence.get(),
         exchange_timestamp_seconds: i64::from(last.seconds),
+        exchange_timestamp_unix_nanos,
         open: fixed_price(bar.ohlc.open, instrument.descriptor.price_scale)?,
         high: fixed_price(bar.ohlc.high, instrument.descriptor.price_scale)?,
         low: fixed_price(bar.ohlc.low, instrument.descriptor.price_scale)?,
@@ -876,10 +855,7 @@ pub fn canonical_rithmic_tick_bar(
     value
         .validate()
         .map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
-    Ok(CanonicalRithmicTickBar {
-        value,
-        exchange_timestamp_unix_nanos,
-    })
+    Ok(value)
 }
 
 /// Decodes one adapter-owned provider-history payload.
@@ -888,26 +864,36 @@ pub fn canonical_rithmic_tick_bar(
 ///
 /// Returns an error for a foreign schema or payload/item identity mismatch.
 pub fn decode_rithmic_history_bar(item: &HistoryItem) -> Result<MarketBar, String> {
-    if item.payload.len() != HISTORY_PAYLOAD_BYTES
-        || &item.payload[..HISTORY_PAYLOAD_MAGIC.len()] != HISTORY_PAYLOAD_MAGIC
-    {
+    let current = item.payload.len() == HISTORY_PAYLOAD_BYTES
+        && item.payload.starts_with(HISTORY_PAYLOAD_MAGIC);
+    let legacy = item.payload.len() == LEGACY_HISTORY_PAYLOAD_BYTES
+        && item.payload.starts_with(LEGACY_HISTORY_PAYLOAD_MAGIC);
+    if !current && !legacy {
         return Err(RithmicHistoryAdapterError::MalformedHistory.to_string());
     }
     let mut offset = HISTORY_PAYLOAD_MAGIC.len();
+    let source_sequence = read_u64(&item.payload, &mut offset)?;
+    let exchange_timestamp_seconds = read_i64(&item.payload, &mut offset)?;
+    let exchange_timestamp_unix_nanos = if current {
+        read_i64(&item.payload, &mut offset)?
+    } else {
+        exchange_timestamp_seconds
+            .checked_mul(NANOS_PER_SECOND_I64)
+            .ok_or_else(|| RithmicHistoryAdapterError::MalformedHistory.to_string())?
+    };
     let bar = MarketBar {
-        source_sequence: read_u64(&item.payload, &mut offset)?,
-        exchange_timestamp_seconds: read_i64(&item.payload, &mut offset)?,
+        source_sequence,
+        exchange_timestamp_seconds,
+        exchange_timestamp_unix_nanos,
         open: read_i64(&item.payload, &mut offset)?,
         high: read_i64(&item.payload, &mut offset)?,
         low: read_i64(&item.payload, &mut offset)?,
         close: read_i64(&item.payload, &mut offset)?,
         volume: read_i64(&item.payload, &mut offset)?,
     };
-    let event_time = bar
-        .exchange_timestamp_seconds
-        .checked_mul(NANOS_PER_SECOND_I64)
-        .ok_or_else(|| RithmicHistoryAdapterError::MalformedHistory.to_string())?;
-    if bar.source_sequence != item.sequence || event_time != item.event_time_unix_nanos {
+    if bar.source_sequence != item.sequence
+        || bar.exchange_timestamp_unix_nanos != item.event_time_unix_nanos
+    {
         return Err(RithmicHistoryAdapterError::MalformedHistory.to_string());
     }
     bar.validate()
@@ -949,6 +935,7 @@ fn encode_history_bar(bar: MarketBar) -> Vec<u8> {
     payload.extend_from_slice(HISTORY_PAYLOAD_MAGIC);
     payload.extend_from_slice(&bar.source_sequence.to_le_bytes());
     payload.extend_from_slice(&bar.exchange_timestamp_seconds.to_le_bytes());
+    payload.extend_from_slice(&bar.exchange_timestamp_unix_nanos.to_le_bytes());
     for value in [bar.open, bar.high, bar.low, bar.close, bar.volume] {
         payload.extend_from_slice(&value.to_le_bytes());
     }
@@ -1142,6 +1129,7 @@ pub fn collect_rithmic_covering_recovery_evidence()
                 let bar = MarketBar {
                     source_sequence: sequence,
                     exchange_timestamp_seconds: timestamp,
+                    exchange_timestamp_unix_nanos: timestamp * NANOS_PER_SECOND_I64,
                     open: 100,
                     high: 100,
                     low: 100,
@@ -1170,6 +1158,7 @@ pub fn collect_rithmic_covering_recovery_evidence()
         value: MarketBar {
             source_sequence: 4,
             exchange_timestamp_seconds: 4,
+            exchange_timestamp_unix_nanos: 4 * NANOS_PER_SECOND_I64,
             open: 100,
             high: 100,
             low: 100,
@@ -1376,12 +1365,54 @@ mod tests {
             &decoded,
         )
         .expect("tick bar converts");
-        assert_eq!(canonical.value.source_sequence, 7);
-        assert_eq!(canonical.value.open, 510_025);
-        assert_eq!(canonical.value.volume, 42);
+        assert_eq!(canonical.source_sequence, 7);
+        assert_eq!(canonical.open, 510_025);
+        assert_eq!(canonical.volume, 42);
         assert_eq!(
             canonical.exchange_timestamp_unix_nanos,
             1_800_000_000_123_456_000
+        );
+    }
+
+    #[test]
+    fn rithmic_payload_binds_exact_time_and_reads_legacy_whole_seconds() {
+        let bar = MarketBar {
+            source_sequence: 7,
+            exchange_timestamp_seconds: 1_800_000_000,
+            exchange_timestamp_unix_nanos: 1_800_000_000_123_456_000,
+            open: 510_025,
+            high: 510_100,
+            low: 510_000,
+            close: 510_075,
+            volume: 42,
+        };
+        let current = HistoryItem {
+            sequence: bar.source_sequence,
+            event_time_unix_nanos: bar.exchange_timestamp_unix_nanos,
+            payload: encode_history_bar(bar),
+        };
+        assert_eq!(decode_rithmic_history_bar(&current), Ok(bar));
+        let mut mismatched = current.clone();
+        mismatched.event_time_unix_nanos += 1;
+        assert!(decode_rithmic_history_bar(&mismatched).is_err());
+
+        let mut payload = Vec::with_capacity(LEGACY_HISTORY_PAYLOAD_BYTES);
+        payload.extend_from_slice(LEGACY_HISTORY_PAYLOAD_MAGIC);
+        payload.extend_from_slice(&bar.source_sequence.to_le_bytes());
+        payload.extend_from_slice(&bar.exchange_timestamp_seconds.to_le_bytes());
+        for value in [bar.open, bar.high, bar.low, bar.close, bar.volume] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        let legacy = HistoryItem {
+            sequence: bar.source_sequence,
+            event_time_unix_nanos: bar.exchange_timestamp_seconds * NANOS_PER_SECOND_I64,
+            payload,
+        };
+        assert_eq!(
+            decode_rithmic_history_bar(&legacy)
+                .expect("legacy payload decodes")
+                .exchange_timestamp_unix_nanos,
+            legacy.event_time_unix_nanos
         );
     }
 
@@ -1400,22 +1431,20 @@ mod tests {
             )
             .expect("chart interval collects");
             assert_eq!(bars.len(), 1, "{} response", interval.label());
-            assert_eq!(bars[0].value.source_sequence, 1);
+            assert_eq!(bars[0].source_sequence, 1);
         }
     }
 
-    fn daily_bar(timestamp: i64, ohlc: [i64; 4], volume: i64) -> CanonicalRithmicHistoryBar {
-        CanonicalRithmicHistoryBar {
-            value: MarketBar {
-                source_sequence: 99,
-                exchange_timestamp_seconds: timestamp,
-                open: ohlc[0],
-                high: ohlc[1],
-                low: ohlc[2],
-                close: ohlc[3],
-                volume,
-            },
+    fn daily_bar(timestamp: i64, ohlc: [i64; 4], volume: i64) -> MarketBar {
+        MarketBar {
+            source_sequence: 99,
+            exchange_timestamp_seconds: timestamp,
             exchange_timestamp_unix_nanos: timestamp * NANOS_PER_SECOND_I64,
+            open: ohlc[0],
+            high: ohlc[1],
+            low: ohlc[2],
+            close: ohlc[3],
+            volume,
         }
     }
 
@@ -1433,18 +1462,18 @@ mod tests {
         )
         .expect("weekly aggregation validates");
         assert_eq!(weekly.len(), 2);
-        assert_eq!(weekly[0].value.source_sequence, 1);
-        assert_eq!(weekly[0].value.exchange_timestamp_seconds, monday);
+        assert_eq!(weekly[0].source_sequence, 1);
+        assert_eq!(weekly[0].exchange_timestamp_seconds, monday);
         assert_eq!(
             [
-                weekly[0].value.open,
-                weekly[0].value.high,
-                weekly[0].value.low,
-                weekly[0].value.close,
+                weekly[0].open,
+                weekly[0].high,
+                weekly[0].low,
+                weekly[0].close,
             ],
             [100, 120, 90, 118]
         );
-        assert_eq!(weekly[0].value.volume, 60);
+        assert_eq!(weekly[0].volume, 60);
 
         let february_1 = 1_706_745_600;
         let march_1 = 1_709_251_200;
@@ -1459,9 +1488,9 @@ mod tests {
         )
         .expect("monthly aggregation validates");
         assert_eq!(monthly.len(), 3);
-        assert_eq!(monthly[1].value.exchange_timestamp_seconds, february_1);
-        assert_eq!(monthly[1].value.volume, 30);
-        assert_eq!(monthly[2].value.exchange_timestamp_seconds, march_1);
+        assert_eq!(monthly[1].exchange_timestamp_seconds, february_1);
+        assert_eq!(monthly[1].volume, 30);
+        assert_eq!(monthly[2].exchange_timestamp_seconds, march_1);
     }
 
     fn limits() -> RithmicHistoryLimits {
@@ -1685,6 +1714,7 @@ mod tests {
         let live_next = MarketBar {
             source_sequence: next_sequence.get(),
             exchange_timestamp_seconds: i64::from(start_seconds + 180),
+            exchange_timestamp_unix_nanos: i64::from(start_seconds + 180) * NANOS_PER_SECOND_I64,
             open: 510_300,
             high: 510_300,
             low: 510_300,
@@ -1722,6 +1752,8 @@ mod tests {
                 value: MarketBar {
                     source_sequence: next_sequence.get() + 2,
                     exchange_timestamp_seconds: i64::from(start_seconds + 300),
+                    exchange_timestamp_unix_nanos: i64::from(start_seconds + 300)
+                        * NANOS_PER_SECOND_I64,
                     open: 1,
                     high: 1,
                     low: 1,

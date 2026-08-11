@@ -1132,6 +1132,7 @@ mod tests {
             value: MarketBar {
                 source_sequence: sequence,
                 exchange_timestamp_seconds: second,
+                exchange_timestamp_unix_nanos: second * 1_000_000_000,
                 open: price,
                 high: price,
                 low: price,
@@ -1764,6 +1765,7 @@ mod tests {
             .seed_completed_history(&[MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 1_700_000_040,
+                exchange_timestamp_unix_nanos: 1_700_000_040_000_000_000,
                 open: 3_700_000,
                 high: 3_700_000,
                 low: 3_700_000,

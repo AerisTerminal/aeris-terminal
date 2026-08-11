@@ -167,6 +167,7 @@ fn bar_update(series: BarSeriesKey, generation: u64, sequence: u64, completed: b
     let bar = MarketBar {
         source_sequence: sequence,
         exchange_timestamp_seconds: 1_800_000_000,
+        exchange_timestamp_unix_nanos: 1_800_000_000_000_000_000,
         open: 3_700_000,
         high: 3_701_000,
         low: 3_699_000,
@@ -206,6 +207,7 @@ fn next_bar_update(series: BarSeriesKey, generation: u64, sequence: u64) -> BarU
         unreachable!("requested a forming fixture bar");
     };
     bar.exchange_timestamp_seconds += 60;
+    bar.exchange_timestamp_unix_nanos += 60_000_000_000;
     metadata.timestamps.exchange_unix_nanos = Some(1_800_000_060_000_000_000);
     metadata.timestamps.provider_unix_nanos = Some(1_800_000_061_000_000_000);
     metadata.timestamps.received_unix_nanos = 1_800_000_062_000_000_000;
