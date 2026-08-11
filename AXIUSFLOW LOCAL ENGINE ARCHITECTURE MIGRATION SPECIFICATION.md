@@ -3428,7 +3428,9 @@ Separate network latency from local engine latency.
 
 # 103. WARM ATTACH PERFORMANCE TARGET
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): an ignored release verifier primes a 350-bar Coinbase series in the resident `MarketService`, then measures generation-fenced demand through the actual authenticated local socket and blocking desktop `EngineClient` until the decoded usable covering snapshot arrives. It uses 32 warm-ups and 128 measured samples, rejects snapshots with the wrong generation, consumer, or bar count, and fails closed above the target p50/p95 budgets. On the 24-logical-CPU Intel Windows development host, the post-refactor release run measured `0.0877 ms` p50, `0.1216 ms` p95, and `0.1477 ms` p99. Direct coordinator demand-to-snapshot measured `0.0038/0.0041/0.0054 ms` p50/p95/p99, separating local engine work from framing and IPC. The repeatable command is `cargo test --release -p axiusflow_engine release_cached_demand_ipc_and_multi_consumer_performance -- --ignored --nocapture`; results are machine-specific engineering evidence, not universal guarantees.
 
 When engine is already running and requested series is in memory:
 
@@ -3823,7 +3825,9 @@ Do not leave compatibility paths.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): the Phase 0 diagnostics verifier defect is repaired without weakening its 5% p99 or 10% p99.9 budgets. Evidence schema 2 now measures paired, alternating disabled/enabled arms around the same deterministic shipping workload: an 8,192-trade Coinbase batch is decoded, canonicalized, applied to the production fixed-point bar aggregator, and passed through the feed counters and seven local timestamp-chain intervals. Optimizer barriers make the input and accumulator observable, 256 warm-up plus 2,048 measured samples avoid sub-nanosecond quantization, and a deterministic test verifies the fixture's declared unique-trade count. A Windows x86_64 release run on the 24-logical-CPU Intel development host measured disabled/detailed p99 of `738/746 ns` (109 basis points) and p99.9 of `805/818 ns` (162 basis points), with zero gaps, overflows, or recoveries. Three preceding release repetitions also passed both budgets. This closes the invalid-baseline defect only; the startup, warm-attach, demand, switching, IPC, frame, memory, queue, reconnect, and multi-consumer measurements below remain open, so Phase 10 remains unchecked.
+Progress evidence (2026-08-11): the Phase 0 diagnostics verifier defect is repaired without weakening its 5% p99 or 10% p99.9 budgets. Evidence schema 2 now measures paired, alternating disabled/enabled arms around the same deterministic shipping workload: an 8,192-trade Coinbase batch is decoded, canonicalized, applied to the production fixed-point bar aggregator, and passed through the feed counters and seven local timestamp-chain intervals. Optimizer barriers make the input and accumulator observable, 256 warm-up plus 2,048 measured samples avoid sub-nanosecond quantization, and a deterministic test verifies the fixture's declared unique-trade count. A Windows x86_64 release run on the 24-logical-CPU Intel development host measured disabled/detailed p99 of `738/746 ns` (109 basis points) and p99.9 of `805/818 ns` (162 basis points), with zero gaps, overflows, or recoveries. Three preceding release repetitions also passed both budgets. This closes the invalid-baseline defect; the subsequent evidence below records the completed local demand/IPC slice and the remaining Phase 10 gaps.
+
+Progress evidence (2026-08-11): the release-only resident-engine verifier now measures cached direct demand-to-snapshot, authenticated IPC demand-to-decoded-snapshot, connect/authenticate/attach/restore, and one shared 350-bar series demanded by 20 independent consumers. The post-refactor run measured direct demand at `0.0038/0.0041/0.0054 ms`, IPC demand at `0.0877/0.1216/0.1477 ms`, attach/restore at `0.1022/0.1714/0.1860 ms`, and the complete 20-consumer IPC batch at `1.9414/2.3279/2.4852 ms` p50/p95/p99 (`0.09707 ms` p50 per consumer). The verifier exercises the shipping coordinator, generation fences, protobuf framing, authenticated local socket, and desktop client rather than a benchmark-only transport. This closes the local demand, IPC snapshot, and deterministic multi-consumer latency gaps and verifies the Section 103 target. Full desktop-process warm reopen through first rendered frame, startup, symbol/timeframe/tab switching, provider-to-engine latency, foreground input, memory, queue occupancy, and reconnect measurement remain open, so Phase 10 remains unchecked.
 
 Only after correctness:
 
@@ -4191,7 +4195,9 @@ Do not put secrets in forensic logs.
 
 # 136. BENCHMARKS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): the deterministic release suite now covers every minimum local boundary without provider-network variance. `axiusflow_market_data_performance` measures encrypted cold publication, warm catalog/read/decode, first recent segment, cold interval derivation, and repeated immutable derived-cache lookup through production storage and aggregation. The desktop `--windowed-benchmark` measures real GPUI/Origin startup, covering snapshot installation, replay-to-frame, timeframe replacement, callback cadence, and native compositor progress. The ignored engine verifier measures cached direct demand-to-snapshot, authenticated IPC demand-to-decoded-snapshot, connect/authenticate/attach/restore, and a complete 20-consumer shared-series batch; it also enforces the Section 103 p50/p95 budgets. Provider connection, authentication, history, and realtime startup remain explicitly separate credentialed evidence.
 
 Maintain deterministic local benchmarks.
 

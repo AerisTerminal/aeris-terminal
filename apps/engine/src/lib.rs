@@ -959,13 +959,21 @@ mod tests {
 
     use interprocess::local_socket::traits::Listener as _;
 
+    use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
     use axiusflow_local_engine_client::EngineClient;
-    use axiusflow_local_engine_protocol::{InstallProviderInstrument, SeriesKey, envelope};
+    use axiusflow_local_engine_protocol::{
+        InstallProviderInstrument, SeriesCadence, SeriesKey, envelope,
+    };
     use axiusflow_market_data::MarketBar;
 
     use super::{EngineState, MarketService, bind_listener, serve_client_with_market};
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+    const WARMUP_SAMPLES: usize = 32;
+    const MEASURED_SAMPLES: usize = 128;
+    const MULTI_CONSUMERS: u64 = 20;
+    const MULTI_WARMUP_SAMPLES: usize = 8;
+    const MULTI_MEASURED_SAMPLES: usize = 32;
 
     fn socket_name(label: &str) -> String {
         format!(
@@ -973,6 +981,255 @@ mod tests {
             std::process::id(),
             NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    #[derive(Clone, Copy)]
+    struct Percentiles {
+        p50: u128,
+        p95: u128,
+        p99: u128,
+    }
+
+    fn percentiles(mut samples: Vec<u128>) -> Percentiles {
+        assert!(!samples.is_empty(), "performance sample set is not empty");
+        samples.sort_unstable();
+        let at = |percentile: usize| {
+            let rank = samples.len().saturating_mul(percentile).div_ceil(100);
+            samples[rank.saturating_sub(1)]
+        };
+        Percentiles {
+            p50: at(50),
+            p95: at(95),
+            p99: at(99),
+        }
+    }
+
+    fn measure(warmups: usize, measured: usize, mut operation: impl FnMut(usize)) -> Percentiles {
+        let mut timings = Vec::with_capacity(measured);
+        for sample in 0..warmups + measured {
+            let started = Instant::now();
+            operation(sample);
+            if sample >= warmups {
+                timings.push(started.elapsed().as_nanos());
+            }
+        }
+        percentiles(timings)
+    }
+
+    #[cfg(debug_assertions)]
+    fn require_release_profile() {
+        panic!("run this verifier with cargo test --release");
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn require_release_profile() {}
+
+    fn cached_series() -> SeriesKey {
+        SeriesKey {
+            provider: "coinbase".to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            cadence_value: 60,
+            definition_revision: 1,
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
+        }
+    }
+
+    fn fixture_history() -> Vec<MarketBar> {
+        (1_u64..=350)
+            .map(|source_sequence| MarketBar {
+                source_sequence,
+                exchange_timestamp_seconds: 0,
+                exchange_timestamp_unix_nanos: 0,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            })
+            .collect()
+    }
+
+    fn poll_direct_snapshot(
+        market: &MarketService,
+        client_id: u64,
+        consumer_id: u64,
+        generation: u64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = market
+                .poll_event(client_id, consumer_id)
+                .expect("direct market poll succeeds")
+                && snapshot.generation == generation
+            {
+                assert_eq!(snapshot.consumer_id, consumer_id);
+                assert_eq!(snapshot.bars.len(), 350);
+                return;
+            }
+            assert!(Instant::now() < deadline, "direct snapshot timed out");
+            thread::yield_now();
+        }
+    }
+
+    fn poll_ipc_snapshot(client: &mut EngineClient, consumer_id: u64, generation: u64) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = client
+                .poll_market_event(consumer_id)
+                .expect("IPC market poll succeeds")
+                && snapshot.generation == generation
+            {
+                assert_eq!(snapshot.consumer_id, consumer_id);
+                assert_eq!(snapshot.bars.len(), 350);
+                return;
+            }
+            assert!(Instant::now() < deadline, "IPC snapshot timed out");
+            thread::yield_now();
+        }
+    }
+
+    fn measure_direct_demand(market: &MarketService, series: &SeriesKey) -> Percentiles {
+        market.attach(1).expect("direct client attaches");
+        market
+            .register_consumer(1, 1, 1)
+            .expect("direct consumer registers");
+        market
+            .set_demand(1, 1, 1, series)
+            .expect("initial direct demand succeeds");
+        poll_direct_snapshot(market, 1, 1, 1);
+        measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
+            let generation = u64::try_from(sample).expect("sample fits") + 2;
+            market
+                .set_demand(1, 1, generation, series)
+                .expect("cached direct demand succeeds");
+            poll_direct_snapshot(market, 1, 1, generation);
+        })
+    }
+
+    fn measure_ipc_demand(
+        market: &MarketService,
+        series: &SeriesKey,
+    ) -> (Percentiles, Percentiles) {
+        let performance_socket_name = socket_name("performance");
+        let listener = bind_listener(&performance_socket_name).expect("bind performance endpoint");
+        let token = [11_u8; 32];
+        let server_market = market.clone();
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept performance client");
+            serve_client_with_market(stream, &token, 1, &EngineState::default(), &server_market)
+                .expect("serve performance client");
+        });
+        let mut client = EngineClient::connect(&performance_socket_name, &token)
+            .expect("connect performance client");
+        client.attach_client(2).expect("IPC client attaches");
+        client
+            .register_consumer(2, 1, 2)
+            .expect("IPC consumer registers");
+        client.restore_workspace().expect("IPC registration fence");
+        let ipc = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
+            let generation = u64::try_from(sample).expect("sample fits") + 1;
+            client
+                .set_series_demand(2, generation, series.clone())
+                .expect("cached IPC demand succeeds");
+            poll_ipc_snapshot(&mut client, 2, generation);
+        });
+
+        for consumer_id in 100..100 + MULTI_CONSUMERS {
+            client
+                .register_consumer(2, 1, consumer_id)
+                .expect("multi-consumer registration succeeds");
+        }
+        client
+            .restore_workspace()
+            .expect("multi-consumer registration fence");
+        let multi = measure(MULTI_WARMUP_SAMPLES, MULTI_MEASURED_SAMPLES, |sample| {
+            let generation = u64::try_from(sample).expect("sample fits") + 1;
+            for consumer_id in 100..100 + MULTI_CONSUMERS {
+                client
+                    .set_series_demand(consumer_id, generation, series.clone())
+                    .expect("multi-consumer demand succeeds");
+            }
+            for consumer_id in 100..100 + MULTI_CONSUMERS {
+                poll_ipc_snapshot(&mut client, consumer_id, generation);
+            }
+        });
+        drop(client);
+        server.join().expect("join performance server");
+        (ipc, multi)
+    }
+
+    fn measure_ipc_attach(market: &MarketService) -> Percentiles {
+        let attach_socket_name = socket_name("attach-performance");
+        let attach_listener =
+            bind_listener(&attach_socket_name).expect("bind attach performance endpoint");
+        let token = [11_u8; 32];
+        let attach_market = market.clone();
+        let attach_samples = WARMUP_SAMPLES + MEASURED_SAMPLES;
+        let attach_server = thread::spawn(move || {
+            let state = EngineState::default();
+            for _ in 0..attach_samples {
+                let stream = attach_listener.accept().expect("accept attach client");
+                serve_client_with_market(stream, &token, 1, &state, &attach_market)
+                    .expect("serve attach client");
+            }
+        });
+        let attach = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
+            let mut attached =
+                EngineClient::connect(&attach_socket_name, &token).expect("connect attach client");
+            attached
+                .attach_client(u64::try_from(sample).expect("sample fits") + 10_000)
+                .expect("attach command succeeds");
+            attached
+                .restore_workspace()
+                .expect("attach synchronization fence");
+            drop(attached);
+        });
+        attach_server.join().expect("join attach server");
+        attach
+    }
+
+    #[test]
+    #[ignore = "release-only local engine performance evidence"]
+    fn release_cached_demand_ipc_and_multi_consumer_performance() {
+        require_release_profile();
+        let market =
+            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let series = cached_series();
+        let direct = measure_direct_demand(&market, &series);
+        let (ipc, multi) = measure_ipc_demand(&market, &series);
+        let attach = measure_ipc_attach(&market);
+
+        println!(
+            "AXIUSFLOW_ENGINE_PERFORMANCE schema=1 samples={} warmups={} bars=350 direct_demand_snapshot_p50_ns={} direct_demand_snapshot_p95_ns={} direct_demand_snapshot_p99_ns={} ipc_demand_snapshot_p50_ns={} ipc_demand_snapshot_p95_ns={} ipc_demand_snapshot_p99_ns={} ipc_attach_restore_p50_ns={} ipc_attach_restore_p95_ns={} ipc_attach_restore_p99_ns={} multi_consumers={} multi_samples={} ipc_multi_batch_p50_ns={} ipc_multi_batch_p95_ns={} ipc_multi_batch_p99_ns={} ipc_multi_per_consumer_p50_ns={}",
+            MEASURED_SAMPLES,
+            WARMUP_SAMPLES,
+            direct.p50,
+            direct.p95,
+            direct.p99,
+            ipc.p50,
+            ipc.p95,
+            ipc.p99,
+            attach.p50,
+            attach.p95,
+            attach.p99,
+            MULTI_CONSUMERS,
+            MULTI_MEASURED_SAMPLES,
+            multi.p50,
+            multi.p95,
+            multi.p99,
+            multi.p50 / u128::from(MULTI_CONSUMERS)
+        );
+        assert!(
+            ipc.p50 < 20_000_000,
+            "cached IPC demand-to-snapshot p50 exceeded 20 ms: {} ns",
+            ipc.p50
+        );
+        assert!(
+            ipc.p95 < 50_000_000,
+            "cached IPC demand-to-snapshot p95 exceeded 50 ms: {} ns",
+            ipc.p95
+        );
     }
 
     #[test]
