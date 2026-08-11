@@ -389,6 +389,58 @@ pub struct SetEngineResourceMode {
     pub resource_mode: i32,
 }
 
+/// Installs one provider-neutral instrument resolved by an authenticated adapter session.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct InstallProviderInstrument {
+    /// Provider identifier.
+    #[prost(string, tag = "1")]
+    pub provider: String,
+    /// Provider session generation that resolved the instrument.
+    #[prost(uint64, tag = "2")]
+    pub session_generation: u64,
+    /// Monotonic user selection generation within the provider session.
+    #[prost(uint64, tag = "3")]
+    pub selection_generation: u64,
+    /// Stable canonical instrument identifier.
+    #[prost(string, tag = "4")]
+    pub instrument_id: String,
+    /// Provider routing symbol. This remains outside hot market publications.
+    #[prost(string, tag = "5")]
+    pub provider_symbol: String,
+    /// Human-readable symbol for presentation metadata.
+    #[prost(string, tag = "6")]
+    pub display_symbol: String,
+    /// Provider venue or exchange identity.
+    #[prost(string, tag = "7")]
+    pub venue_id: String,
+    /// Decimal price scale.
+    #[prost(uint32, tag = "8")]
+    pub price_scale: u32,
+    /// Decimal quantity scale.
+    #[prost(uint32, tag = "9")]
+    pub quantity_scale: u32,
+    /// Exact entitlement revision used for subsequent demand.
+    #[prost(string, tag = "10")]
+    pub entitlement_id: String,
+}
+
+/// Confirms that the engine accepted one generation-fenced instrument install.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderInstrumentInstalled {
+    /// Provider identifier.
+    #[prost(string, tag = "1")]
+    pub provider: String,
+    /// Accepted provider session generation.
+    #[prost(uint64, tag = "2")]
+    pub session_generation: u64,
+    /// Accepted selection generation.
+    #[prost(uint64, tag = "3")]
+    pub selection_generation: u64,
+    /// Accepted canonical instrument identifier.
+    #[prost(string, tag = "4")]
+    pub instrument_id: String,
+}
+
 /// Requests complete resident-engine shutdown.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct ShutdownEngine {}
@@ -572,7 +624,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -660,5 +712,11 @@ pub mod envelope {
         /// No market event was pending. Tag 40.
         #[prost(message, tag = "40")]
         MarketEventIdle(super::MarketEventIdle),
+        /// Provider-neutral instrument install. Tag 41.
+        #[prost(message, tag = "41")]
+        InstallProviderInstrument(super::InstallProviderInstrument),
+        /// Accepted provider-neutral instrument install. Tag 42.
+        #[prost(message, tag = "42")]
+        ProviderInstrumentInstalled(super::ProviderInstrumentInstalled),
     }
 }

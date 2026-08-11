@@ -21,17 +21,17 @@ use std::{
 
 use axiusflow_local_engine_protocol::{
     AttachClient, ClientHello, ClientKind, DetachClient, EngineFaultCode, EngineReady, Envelope,
-    EnvelopeDecoder, Fault, Goodbye, HotSeries, MarketEventIdle, PROTOCOL_VERSION, PollMarketEvent,
-    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey,
-    SetSelection, SetViewport, SetWatchlist, ViewportDemand, WorkspaceState, encode_envelope,
-    envelope,
+    EnvelopeDecoder, Fault, Goodbye, HotSeries, InstallProviderInstrument, MarketEventIdle,
+    PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled, RegisterConsumer,
+    RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey, SetSelection,
+    SetViewport, SetWatchlist, ViewportDemand, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
-/// Stable per-user local socket name for protocol version seven.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v7";
+/// Stable per-user local socket name for protocol version eight.
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v8";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 
@@ -720,6 +720,23 @@ impl EngineClient {
             }))
     }
 
+    /// Installs one adapter-resolved provider instrument in the resident engine catalog.
+    ///
+    /// # Errors
+    /// Returns an error when the install is stale, invalid, or cannot cross the local IPC boundary.
+    pub fn install_provider_instrument(
+        &mut self,
+        instrument: InstallProviderInstrument,
+    ) -> Result<ProviderInstrumentInstalled, String> {
+        self.connection
+            .send(envelope::Payload::InstallProviderInstrument(instrument))?;
+        match self.connection.receive()? {
+            envelope::Payload::ProviderInstrumentInstalled(installed) => Ok(installed),
+            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+            _ => Err("engine returned an unexpected instrument install reply".to_string()),
+        }
+    }
+
     /// Updates the visible range for the exact current consumer generation.
     ///
     /// # Errors
@@ -1073,6 +1090,20 @@ fn serve_authenticated_messages(
             envelope::Payload::SetViewport(viewport) => {
                 apply_viewport(state, viewport, connection)?;
             }
+            envelope::Payload::InstallProviderInstrument(instrument) => {
+                let market = require_market(market)?;
+                match market.install_provider_instrument(&instrument) {
+                    Ok(()) => connection.send(envelope::Payload::ProviderInstrumentInstalled(
+                        ProviderInstrumentInstalled {
+                            provider: instrument.provider,
+                            session_generation: instrument.session_generation,
+                            selection_generation: instrument.selection_generation,
+                            instrument_id: instrument.instrument_id,
+                        },
+                    )),
+                    Err(error) => send_market_fault(connection, error),
+                }?;
+            }
             envelope::Payload::Goodbye(_) => {
                 connection.send(envelope::Payload::Goodbye(Goodbye {
                     reason: "client session closed".to_string(),
@@ -1317,7 +1348,7 @@ mod tests {
 
     use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 
-    use axiusflow_local_engine_protocol::{SeriesKey, envelope};
+    use axiusflow_local_engine_protocol::{InstallProviderInstrument, SeriesKey, envelope};
     use axiusflow_market_data::MarketBar;
 
     use super::{
@@ -1358,6 +1389,23 @@ mod tests {
         });
         let mut client =
             EngineClient::connect(&socket_name, &token).expect("connect market client");
+        let installed = client
+            .install_provider_instrument(InstallProviderInstrument {
+                provider: "rithmic".to_string(),
+                session_generation: 7,
+                selection_generation: 9,
+                instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+                provider_symbol: "MNQU6".to_string(),
+                display_symbol: "MNQU6".to_string(),
+                venue_id: "CME".to_string(),
+                price_scale: 2,
+                quantity_scale: 0,
+                entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            })
+            .expect("install provider instrument");
+        assert_eq!(installed.session_generation, 7);
+        assert_eq!(installed.selection_generation, 9);
+        assert_eq!(installed.instrument_id, "instrument:rithmic:CME:MNQU6");
         client.attach_client(1).expect("attach client");
         client
             .register_consumer(1, 1, 1)

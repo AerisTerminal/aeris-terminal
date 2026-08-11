@@ -22,9 +22,9 @@ use axiusflow_coinbase_market_adapter::{
     ENTITLEMENT_CLASS, aggregate_coinbase_bars, decode_history_bar,
 };
 use axiusflow_local_engine_protocol::{
-    DemandError, EngineFaultCode, MarketBar as IpcMarketBar, PersistenceState,
-    ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey, SeriesLoadState,
-    SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
+    DemandError, EngineFaultCode, InstallProviderInstrument, MarketBar as IpcMarketBar,
+    PersistenceState, ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey,
+    SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
 };
 use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar};
 use axiusflow_market_engine::{
@@ -48,6 +48,8 @@ const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
 const HISTORY_BARS_PER_SERIES: usize = 350;
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
+const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
+const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const COINBASE_PROVIDER_GENERATION: u64 = 1;
 
 type Reply<T> = SyncSender<Result<T, String>>;
@@ -66,6 +68,7 @@ enum Command {
     Viewport(ClientId, ConsumerId, GenerationId, Viewport, Reply<()>),
     Visibility(ClientId, ConsumerId, bool, Reply<()>),
     Demand(ClientId, ConsumerId, GenerationId, BarSeriesKey, Reply<()>),
+    InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
     Poll(ClientId, ConsumerId, Reply<Option<envelope::Payload>>),
     HistoryCompleted(
         BarSeriesKey,
@@ -636,6 +639,23 @@ impl MarketService {
         })
     }
 
+    /// Installs one bounded adapter-resolved instrument in the engine-owned catalog.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, stale generations, capacity, or coordinator failure.
+    pub fn install_provider_instrument(
+        &self,
+        instrument: &InstallProviderInstrument,
+    ) -> Result<(), String> {
+        validate_provider_instrument(instrument)?;
+        self.request(|reply| {
+            Ok(Command::InstallProviderInstrument(
+                instrument.clone(),
+                reply,
+            ))
+        })
+    }
+
     /// Drains at most one bounded market publication for an owned consumer.
     ///
     /// # Errors
@@ -802,6 +822,9 @@ fn run_coordinator(
         local_loaded: BTreeSet::new(),
         events: BTreeMap::new(),
         live: BTreeMap::new(),
+        catalog: BTreeMap::new(),
+        catalog_sessions: BTreeMap::new(),
+        catalog_selections: BTreeMap::new(),
         realtime_started: false,
         realtime_connected: false,
     };
@@ -836,6 +859,9 @@ struct Coordinator<'a> {
     local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
+    catalog: BTreeMap<(String, String), InstallProviderInstrument>,
+    catalog_sessions: BTreeMap<String, u64>,
+    catalog_selections: BTreeMap<String, u64>,
     realtime_started: bool,
     realtime_connected: bool,
 }
@@ -913,6 +939,10 @@ impl Coordinator<'_> {
                     &reply,
                 );
             }
+            Command::InstallProviderInstrument(instrument, reply) => {
+                let result = self.install_provider_instrument(instrument);
+                let _ = reply.send(result);
+            }
             Command::Poll(client_id, consumer_id, reply) => {
                 let result = authorize_consumer(&self.engine, client_id, consumer_id).map(|()| {
                     self.events
@@ -931,6 +961,45 @@ impl Coordinator<'_> {
                 self.persistence_completed(&series, generation, &result);
             }
         }
+    }
+
+    fn install_provider_instrument(
+        &mut self,
+        instrument: InstallProviderInstrument,
+    ) -> Result<(), String> {
+        validate_provider_instrument(&instrument)?;
+        let provider = instrument.provider.clone();
+        let session = self.catalog_sessions.get(&provider).copied();
+        if session.is_some_and(|current| instrument.session_generation < current) {
+            return Err("provider instrument session is stale".to_string());
+        }
+        if session.is_none_or(|current| instrument.session_generation > current) {
+            self.catalog
+                .retain(|(installed_provider, _), _| installed_provider != &provider);
+            self.catalog_sessions
+                .insert(provider.clone(), instrument.session_generation);
+            self.catalog_selections.remove(&provider);
+        }
+        let selection = self.catalog_selections.get(&provider).copied();
+        if selection.is_some_and(|current| instrument.selection_generation < current) {
+            return Err("provider instrument selection is stale".to_string());
+        }
+        let key = (provider.clone(), instrument.instrument_id.clone());
+        if selection == Some(instrument.selection_generation) {
+            return self
+                .catalog
+                .get(&key)
+                .filter(|installed| *installed == &instrument)
+                .map(|_| ())
+                .ok_or_else(|| "provider instrument selection conflicts".to_string());
+        }
+        if !self.catalog.contains_key(&key) && self.catalog.len() >= MAXIMUM_CATALOG_INSTRUMENTS {
+            return Err("provider instrument catalog capacity is exhausted".to_string());
+        }
+        self.catalog_selections
+            .insert(provider, instrument.selection_generation);
+        self.catalog.insert(key, instrument);
+        Ok(())
     }
 
     fn handle_demand(
@@ -1885,6 +1954,31 @@ fn id(value: u64) -> Result<NonZeroU64, String> {
     NonZeroU64::new(value).ok_or_else(|| "market identity must be non-zero".to_string())
 }
 
+fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Result<(), String> {
+    if instrument.session_generation == 0 || instrument.selection_generation == 0 {
+        return Err("provider instrument generation must be non-zero".to_string());
+    }
+    for value in [
+        &instrument.provider,
+        &instrument.instrument_id,
+        &instrument.provider_symbol,
+        &instrument.display_symbol,
+        &instrument.venue_id,
+        &instrument.entitlement_id,
+    ] {
+        if value.trim().is_empty()
+            || value.len() > MAXIMUM_CATALOG_FIELD_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err("provider instrument identity is invalid".to_string());
+        }
+    }
+    if instrument.price_scale > 18 || instrument.quantity_scale > 18 {
+        return Err("provider instrument precision is invalid".to_string());
+    }
+    Ok(())
+}
+
 fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggregator, String> {
     CoinbaseBarAggregatorConfig::try_new_interval(
         profile.product_id,
@@ -2035,6 +2129,85 @@ mod tests {
     struct SwitchingHistory {
         requested: SyncSender<BarSeriesKey>,
         release: Receiver<()>,
+    }
+
+    fn retained_history_coordinator<'a>(
+        engine: MarketEngine,
+        history: &'a SyncSender<HistoryRequest>,
+        storage: &'a SyncSender<StorageRequest>,
+        realtime: &'a SyncSender<RealtimeControl>,
+        realtime_stop: &'a Arc<AtomicBool>,
+        consumer_id: ConsumerId,
+        series: &BarSeriesKey,
+    ) -> Coordinator<'a> {
+        Coordinator {
+            engine,
+            history,
+            storage,
+            realtime_control: realtime,
+            realtime_stop,
+            attached: BTreeSet::new(),
+            pending: BTreeMap::from([(
+                series.clone(),
+                vec![DemandWaiter {
+                    consumer_id,
+                    generation: GenerationId(id(1).expect("generation")),
+                }],
+            )]),
+            history_inflight: BTreeSet::new(),
+            local_loaded: BTreeSet::new(),
+            events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
+            live: BTreeMap::new(),
+            catalog: BTreeMap::new(),
+            catalog_sessions: BTreeMap::new(),
+            catalog_selections: BTreeMap::new(),
+            realtime_started: false,
+            realtime_connected: false,
+        }
+    }
+
+    fn provider_instrument(
+        session_generation: u64,
+        selection_generation: u64,
+    ) -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: "rithmic".to_string(),
+            session_generation,
+            selection_generation,
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            provider_symbol: "MNQU6".to_string(),
+            display_symbol: "MNQU6".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+        }
+    }
+
+    #[test]
+    fn provider_instrument_catalog_rejects_stale_and_conflicting_installs() {
+        let service = MarketService::start_fixture(vec![history_bar()]).expect("market service");
+        let installed = provider_instrument(2, 3);
+        service
+            .install_provider_instrument(&installed)
+            .expect("install current instrument");
+        service
+            .install_provider_instrument(&installed)
+            .expect("repeat idempotent install");
+
+        assert!(
+            service
+                .install_provider_instrument(&provider_instrument(1, 4))
+                .is_err()
+        );
+        assert!(
+            service
+                .install_provider_instrument(&provider_instrument(2, 2))
+                .is_err()
+        );
+        let mut conflicting = installed;
+        conflicting.provider_symbol = "NQU6".to_string();
+        assert!(service.install_provider_instrument(&conflicting).is_err());
     }
 
     #[test]
@@ -2429,31 +2602,17 @@ mod tests {
                 &internal_series(&btc()).expect("series"),
             )
             .expect("demand installs");
-        let mut events = BTreeMap::new();
-        events.insert(consumer_id, ConsumerEvents::default());
         let series = internal_series(&btc()).expect("series");
         let generation = ProviderGeneration(NonZeroU64::MIN);
-        let mut coordinator = Coordinator {
+        let mut coordinator = retained_history_coordinator(
             engine,
-            history: &history_tx,
-            storage: &storage_tx,
-            realtime_control: &realtime_tx,
-            realtime_stop: &realtime_stop,
-            attached: BTreeSet::new(),
-            pending: BTreeMap::from([(
-                series.clone(),
-                vec![DemandWaiter {
-                    consumer_id,
-                    generation: GenerationId(id(1).expect("generation")),
-                }],
-            )]),
-            history_inflight: BTreeSet::new(),
-            local_loaded: BTreeSet::new(),
-            events,
-            live: BTreeMap::new(),
-            realtime_started: false,
-            realtime_connected: false,
-        };
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
         let local = MarketBar {
             close: 99,
             ..history_bar()
