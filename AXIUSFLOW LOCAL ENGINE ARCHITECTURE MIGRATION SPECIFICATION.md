@@ -3823,6 +3823,8 @@ Do not leave compatibility paths.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): the Phase 0 diagnostics verifier defect is repaired without weakening its 5% p99 or 10% p99.9 budgets. Evidence schema 2 now measures paired, alternating disabled/enabled arms around the same deterministic shipping workload: an 8,192-trade Coinbase batch is decoded, canonicalized, applied to the production fixed-point bar aggregator, and passed through the feed counters and seven local timestamp-chain intervals. Optimizer barriers make the input and accumulator observable, 256 warm-up plus 2,048 measured samples avoid sub-nanosecond quantization, and a deterministic test verifies the fixture's declared unique-trade count. A Windows x86_64 release run on the 24-logical-CPU Intel development host measured disabled/detailed p99 of `738/746 ns` (109 basis points) and p99.9 of `805/818 ns` (162 basis points), with zero gaps, overflows, or recoveries. Three preceding release repetitions also passed both budgets. This closes the invalid-baseline defect only; the startup, warm-attach, demand, switching, IPC, frame, memory, queue, reconnect, and multi-consumer measurements below remain open, so Phase 10 remains unchecked.
+
 Only after correctness:
 
 Measure:

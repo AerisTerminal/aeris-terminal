@@ -746,6 +746,7 @@ dependencies = [
 name = "axiusflow_diagnostics_overhead"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_coinbase_market_adapter",
  "axiusflow_observability",
 ]
 
