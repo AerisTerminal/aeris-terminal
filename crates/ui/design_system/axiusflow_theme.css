@@ -11,7 +11,9 @@
   --popover: var(--surface_secondary);
   --popover_foreground: var(--foreground);
   --primary: #3e63dd;
-  --primary_foreground: #ffffff;
+  --primary_hover: #4269ea;
+  --primary_active: #3a5dd0;
+  --primary_foreground: #e3e3e3;
   --secondary: var(--surface_secondary);
   --secondary_foreground: var(--foreground);
   --muted: var(--surface_secondary);
@@ -33,7 +35,7 @@
   --ring: #000000;
   --interactive_neutral_hover_bg: rgb(239 239 239 / 35%);
   --interactive_neutral_hover_fg: var(--icon_active);
-  --interactive_neutral_active_bg: rgb(239 239 239 / 75%);
+  --interactive_neutral_active_bg: rgb(239 239 239 / 45%);
   --interactive_neutral_active_fg: var(--icon_active);
   --chart_1: oklch(0.87 0 0);
   --chart_2: oklch(0.556 0 0);
@@ -54,6 +56,7 @@
   --radius_sm: 4px;
   --radius_default: 6px;
   --radius_full: 999px;
+  color-scheme: light;
 }
 
 :focus-visible {
@@ -67,9 +70,9 @@
   --surface_secondary: #1b1b1b;
   --muted_foreground: #a2a2a2;
   --text_secondary: #a2a2a2;
-  --text_muted: #4c4c4c;
-  --text_placeholder: #4c4c4c;
-  --text_unavailable: #4c4c4c;
+  --text_muted: #424242;
+  --text_placeholder: #424242;
+  --text_unavailable: #424242;
   --icon_color: #a3a3a3;
   --icon_active: #e5e5e5;
   --destructive: oklch(0.704 0.191 22.216);
@@ -77,12 +80,97 @@
   --border_secondary: #242424;
   --ring: #ffffff;
   --interactive_neutral_hover_bg: rgb(97 97 97 / 20%);
-  --interactive_neutral_active_bg: rgb(97 97 97 / 30%);
+  --interactive_neutral_active_bg: rgb(97 97 97 / 26%);
   --chart_volume_up: oklch(from var(--profit) l c h / 32%);
   --chart_volume_down: oklch(from var(--loss) l c h / 28%);
   --chart_crosshair: #2e2e2e;
+  color-scheme: dark;
 }
 
 .dark :focus-visible {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 14%, transparent);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+button,
+[role="button"] {
+  color: var(--foreground);
+}
+
+button svg,
+[role="button"] svg {
+  color: inherit;
+}
+
+:focus {
+  outline: none;
+}
+
+.ui-interactive {
+  color: var(--foreground);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.ui-interactive:hover:not(:disabled) {
+  background: var(--interactive_neutral_hover_bg);
+}
+
+.ui-interactive:active:not(:disabled),
+.ui-interactive[data-active="true"] {
+  background: var(--interactive_neutral_active_bg);
+}
+
+.ui-interactive:disabled {
+  color: var(--text_muted);
+  cursor: not-allowed;
+}
+
+.ui-icon,
+.ui-interactive svg {
+  color: var(--icon_color);
+  transition: color 150ms ease;
+}
+
+.ui-interactive:hover:not(:disabled) .ui-icon,
+.ui-interactive:active:not(:disabled) .ui-icon,
+.ui-interactive[data-active="true"] .ui-icon,
+.ui-interactive:hover:not(:disabled) svg,
+.ui-interactive:active:not(:disabled) svg,
+.ui-interactive[data-active="true"] svg {
+  color: var(--icon_active);
+}
+
+.ui-interactive:disabled .ui-icon,
+.ui-interactive:disabled svg {
+  color: var(--text_muted);
+}
+
+.ui-primary {
+  background: var(--primary);
+  color: var(--primary_foreground);
+  cursor: pointer;
+  transition: opacity 150ms ease, filter 150ms ease;
+}
+
+.ui-primary svg {
+  color: var(--primary_foreground);
+}
+
+.ui-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.ui-primary:active:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.ui-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

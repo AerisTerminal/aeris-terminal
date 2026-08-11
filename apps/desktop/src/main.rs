@@ -37,7 +37,7 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
-    button::{Button, ButtonVariants},
+    button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
@@ -2246,7 +2246,7 @@ fn chrome_overlay_layer(
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_1()
                     .border_color(gpui_color(theme.colors.border))
-                    .bg(gpui_color(theme.colors.popover))
+                    .bg(gpui_color(theme.colors.surface_primary))
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(panel),
@@ -2841,7 +2841,6 @@ fn drawing_toolbar_button(
     };
     let button = Button::new(id)
         .icon(icon)
-        .ghost()
         .compact()
         .with_size(px(icon_size / 0.75))
         .w(px(32.0))
@@ -2884,8 +2883,10 @@ fn side_panel_header(
             button_activation(
                 Button::new("close_side_panel")
                     .icon(header_icon(HugeIcon::CancelIcon01))
-                    .ghost()
                     .compact()
+                    .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+                    .size(px(chart_chrome::CHART_CONTROL_SIZE))
+                    .border_0()
                     .cursor_pointer(),
                 true,
                 move |_, cx| {
@@ -3014,6 +3015,10 @@ fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCom
     None
 }
 
+const fn window_controls_visible(is_fullscreen: bool) -> bool {
+    !is_fullscreen
+}
+
 fn terminal_header(
     window: &mut Window,
     cx: &mut Context<TerminalApp>,
@@ -3022,6 +3027,10 @@ fn terminal_header(
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
     let controls = header_controls(cx, app, state);
+
+    #[cfg(target_os = "windows")]
+    let window_controls = window_controls_visible(window.is_fullscreen())
+        .then(|| windows_window_controls(window, &theme));
 
     #[cfg(target_os = "windows")]
     return div()
@@ -3058,7 +3067,7 @@ fn terminal_header(
                         .window_control_area(WindowControlArea::Drag),
                 ),
         )
-        .child(windows_window_controls(window, &theme));
+        .children(window_controls);
 
     #[cfg(not(target_os = "windows"))]
     TitleBar::new()
@@ -3317,12 +3326,12 @@ fn instrument_selector(
         .icon(header_icon(HugeIcon::ExchangeIcon01))
         .label(state.label.clone())
         .dropdown_caret(true)
-        .ghost()
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .border_1()
         .border_color(gpui_color(theme.colors.border))
-        .bg(gpui_color(theme.colors.surface_secondary))
+        .bg(gpui_color(theme.colors.muted))
         .text_color(gpui_color(theme.colors.foreground))
-        .h(px(28.0))
+        .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .px_3()
         .rounded(px(f32::from(
             chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
@@ -3373,11 +3382,11 @@ fn indicator_selector(
     _input: Entity<InputState>,
     _message: Option<String>,
     enabled: bool,
-    _theme: &AxiusflowTheme,
+    theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("indicator_selector")
         .icon(header_icon(HugeIcon::ChartLineDataIcon02))
-        .ghost()
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .rounded(px(f32::from(
@@ -3389,11 +3398,15 @@ fn indicator_selector(
     chrome_tooltip(
         "indicator_selector",
         "Indicators",
-        button_activation(trigger, enabled, move |window, cx| {
-            app.update(cx, |app, app_cx| {
-                app.open_chrome_overlay(ChromeOverlay::Indicator, window, app_cx);
-            });
-        }),
+        button_activation(
+            chrome_button_style(trigger, theme, false, true, enabled),
+            enabled,
+            move |window, cx| {
+                app.update(cx, |app, app_cx| {
+                    app.open_chrome_overlay(ChromeOverlay::Indicator, window, app_cx);
+                });
+            },
+        ),
     )
 }
 
@@ -3464,7 +3477,7 @@ fn indicator_dialog_content(
                 .child(button_activation(
                     Button::new(("add_indicator", index))
                         .icon(header_icon(HugeIcon::AddIcon01))
-                        .outline()
+                        .border_0()
                         .compact()
                         .cursor_pointer()
                         .tab_stop(false),
@@ -3723,6 +3736,7 @@ fn panel_toggle(
     let button = Button::new(state.id)
         .icon(header_icon(state.icon))
         .label(state.label)
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .disabled(!state.enabled)
         .when(state.enabled, Button::cursor_pointer)
         .when(!state.enabled, Button::cursor_not_allowed);
@@ -3744,6 +3758,8 @@ fn theme_toggle(app: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoEl
     };
     let button = Button::new("theme_toggle")
         .icon(header_icon(icon))
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+        .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .cursor_pointer();
     let button = button_activation(button, true, move |window, cx| {
         app.update(cx, |app, cx| app.toggle_theme(window, cx));
@@ -3832,7 +3848,8 @@ fn chrome_button_style(
     };
     button
         .selected(selected)
-        .ghost()
+        .h(px(chart_chrome::CHART_CONTROL_SIZE))
+        .border_0()
         .text_color(gpui_color(idle))
         .when(selected, |button| {
             button
@@ -3936,18 +3953,18 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
     component.popover = gpui_color(colors.popover);
     component.popover_foreground = gpui_color(colors.popover_foreground);
 
-    component.button = gpui_color(colors.secondary);
+    component.button = gpui_color(colors.background.with_alpha(0.0));
     component.button_foreground = gpui_color(colors.secondary_foreground);
     component.button_hover = gpui_color(colors.interactive_neutral_hover_bg);
     component.button_active = gpui_color(colors.interactive_neutral_active_bg);
     component.primary = gpui_color(colors.primary);
     component.primary_foreground = gpui_color(colors.primary_foreground);
-    component.primary_hover = gpui_color(colors.primary);
-    component.primary_active = gpui_color(colors.primary);
+    component.primary_hover = gpui_color(colors.primary_hover);
+    component.primary_active = gpui_color(colors.primary_active);
     component.button_primary = gpui_color(colors.primary);
     component.button_primary_foreground = gpui_color(colors.primary_foreground);
-    component.button_primary_hover = gpui_color(colors.primary);
-    component.button_primary_active = gpui_color(colors.primary);
+    component.button_primary_hover = gpui_color(colors.primary_hover);
+    component.button_primary_active = gpui_color(colors.primary_active);
     component.secondary = gpui_color(colors.secondary);
     component.secondary_foreground = gpui_color(colors.secondary_foreground);
     component.secondary_hover = gpui_color(colors.interactive_neutral_hover_bg);
@@ -4326,7 +4343,7 @@ mod tests {
         default_rithmic_contract_index, finish_desktop_shutdown, fullscreen_escape_command,
         gpui_color, instrument_selector_label, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop, split_lifetime_mode,
+        should_apply_rithmic_worker_stop, split_lifetime_mode, window_controls_visible,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -4405,6 +4422,12 @@ mod tests {
         );
         assert_eq!(fullscreen_escape_command("escape", false), None);
         assert_eq!(fullscreen_escape_command("enter", true), None);
+    }
+
+    #[test]
+    fn fullscreen_hides_native_window_controls() {
+        assert!(!window_controls_visible(true));
+        assert!(window_controls_visible(false));
     }
 
     #[test]

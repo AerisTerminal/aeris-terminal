@@ -199,6 +199,8 @@ pub struct ThemeColors {
     pub popover: ThemeColor,
     pub popover_foreground: ThemeColor,
     pub primary: ThemeColor,
+    pub primary_hover: ThemeColor,
+    pub primary_active: ThemeColor,
     pub primary_foreground: ThemeColor,
     pub secondary: ThemeColor,
     pub secondary_foreground: ThemeColor,
@@ -308,7 +310,7 @@ impl AxiusflowTheme {
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn color_tokens(self) -> [ColorToken; 51] {
+    pub fn color_tokens(self) -> [ColorToken; 53] {
         let colors = self.colors;
         let dark = self.mode == ThemeMode::Dark;
         [
@@ -359,7 +361,9 @@ impl AxiusflowTheme {
                 colors.popover_foreground,
             ),
             ColorToken::new("primary", "#3e63dd", colors.primary),
-            ColorToken::new("primary_foreground", "#ffffff", colors.primary_foreground),
+            ColorToken::new("primary_hover", "#4269ea", colors.primary_hover),
+            ColorToken::new("primary_active", "#3a5dd0", colors.primary_active),
+            ColorToken::new("primary_foreground", "#e3e3e3", colors.primary_foreground),
             ColorToken::new("secondary", "var(--surface_secondary)", colors.secondary),
             ColorToken::new(
                 "secondary_foreground",
@@ -379,17 +383,17 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "text_muted",
-                mode_source(dark, "#dedede", "#4c4c4c"),
+                mode_source(dark, "#dedede", "#424242"),
                 colors.text_muted,
             ),
             ColorToken::new(
                 "text_placeholder",
-                mode_source(dark, "#dedede", "#4c4c4c"),
+                mode_source(dark, "#dedede", "#424242"),
                 colors.text_placeholder,
             ),
             ColorToken::new(
                 "text_unavailable",
-                mode_source(dark, "#dedede", "#4c4c4c"),
+                mode_source(dark, "#dedede", "#424242"),
                 colors.text_unavailable,
             ),
             ColorToken::new(
@@ -451,7 +455,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "interactive_neutral_active_bg",
-                mode_source(dark, "rgb(239 239 239 / 75%)", "rgb(97 97 97 / 30%)"),
+                mode_source(dark, "rgb(239 239 239 / 45%)", "rgb(97 97 97 / 26%)"),
                 colors.interactive_neutral_active_bg,
             ),
             ColorToken::new(
@@ -540,7 +544,7 @@ fn dark_colors() -> ThemeColors {
         ThemeColor::from_rgb8(227, 227, 227),
         ThemeColor::from_rgb8(27, 27, 27),
         ThemeColor::from_rgb8(162, 162, 162),
-        ThemeColor::from_rgb8(76, 76, 76),
+        ThemeColor::from_rgb8(66, 66, 66),
         ThemeColor::from_rgb8(163, 163, 163),
         ThemeColor::from_rgb8(229, 229, 229),
         ThemeColor::from_oklch(0.704, 0.191, 22.216),
@@ -564,7 +568,9 @@ fn foundational_colors(
     border_secondary: ThemeColor,
 ) -> ThemeColors {
     let primary = ThemeColor::from_rgb8(62, 99, 221);
-    let primary_foreground = ThemeColor::from_rgb8(255, 255, 255);
+    let primary_hover = ThemeColor::from_rgb8(66, 105, 234);
+    let primary_active = ThemeColor::from_rgb8(58, 93, 208);
+    let primary_foreground = ThemeColor::from_rgb8(227, 227, 227);
     let destructive_foreground = ThemeColor::from_oklch(0.985, 0.0, 0.0);
     let profit = ThemeColor::from_oklch(0.683, 0.151, 160.997);
     let loss = ThemeColor::from_oklch(0.674, 0.215, 18.124);
@@ -575,11 +581,11 @@ fn foundational_colors(
     let (interactive_neutral_hover_bg, interactive_neutral_active_bg) = match mode {
         ThemeMode::Light => (
             ThemeColor::from_rgb8(239, 239, 239).with_alpha(0.35),
-            ThemeColor::from_rgb8(239, 239, 239).with_alpha(0.75),
+            ThemeColor::from_rgb8(239, 239, 239).with_alpha(0.45),
         ),
         ThemeMode::Dark => (
             ThemeColor::from_rgb8(97, 97, 97).with_alpha(0.20),
-            ThemeColor::from_rgb8(97, 97, 97).with_alpha(0.30),
+            ThemeColor::from_rgb8(97, 97, 97).with_alpha(0.26),
         ),
     };
 
@@ -595,6 +601,8 @@ fn foundational_colors(
         popover: surface_secondary,
         popover_foreground: foreground,
         primary,
+        primary_hover,
+        primary_active,
         primary_foreground,
         secondary: surface_secondary,
         secondary_foreground: foreground,
@@ -718,9 +726,9 @@ mod tests {
         assert_eq!(dark.input, dark.border_secondary);
         assert_eq!(dark.foreground, ThemeColor::from_rgb8(227, 227, 227));
         assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(162, 162, 162));
-        assert_eq!(dark.text_muted, ThemeColor::from_rgb8(76, 76, 76));
-        assert_eq!(dark.text_placeholder, ThemeColor::from_rgb8(76, 76, 76));
-        assert_eq!(dark.text_unavailable, ThemeColor::from_rgb8(76, 76, 76));
+        assert_eq!(dark.text_muted, ThemeColor::from_rgb8(66, 66, 66));
+        assert_eq!(dark.text_placeholder, ThemeColor::from_rgb8(66, 66, 66));
+        assert_eq!(dark.text_unavailable, ThemeColor::from_rgb8(66, 66, 66));
         assert_eq!(dark.muted, ThemeColor::from_rgb8(27, 27, 27));
         assert_eq!(dark.accent, ThemeColor::from_rgb8(27, 27, 27));
         assert_eq!(dark.icon_color, ThemeColor::from_rgb8(163, 163, 163));
@@ -730,6 +738,14 @@ mod tests {
         assert_eq!(dark.chart_crosshair, ThemeColor::from_rgb8(46, 46, 46));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
+        assert_eq!(dark.primary_hover, ThemeColor::from_rgb8(66, 105, 234));
+        assert_eq!(dark.primary_active, ThemeColor::from_rgb8(58, 93, 208));
+        assert_eq!(
+            dark.primary_foreground,
+            ThemeColor::from_rgb8(227, 227, 227)
+        );
+        assert!((light.interactive_neutral_active_bg.alpha() - 0.45).abs() < f32::EPSILON);
+        assert!((dark.interactive_neutral_active_bg.alpha() - 0.26).abs() < f32::EPSILON);
         assert_eq!(light.ring, ThemeColor::from_rgb8(0, 0, 0));
         assert_eq!(dark.ring, ThemeColor::from_rgb8(255, 255, 255));
         assert_eq!(dark.profit, ThemeColor::from_oklch(0.683, 0.151, 160.997));
@@ -754,12 +770,15 @@ mod tests {
             "var(--surface_secondary)"
         );
         assert_eq!(token_source(&dark_tokens, "foreground"), "#e3e3e3");
-        assert_eq!(token_source(&dark_tokens, "text_muted"), "#4c4c4c");
+        assert_eq!(token_source(&dark_tokens, "text_muted"), "#424242");
         assert_eq!(
             token_source(&dark_tokens, "muted"),
             "var(--surface_secondary)"
         );
         assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
+        assert_eq!(token_source(&dark_tokens, "primary_hover"), "#4269ea");
+        assert_eq!(token_source(&dark_tokens, "primary_active"), "#3a5dd0");
+        assert_eq!(token_source(&dark_tokens, "primary_foreground"), "#e3e3e3");
         assert_eq!(token_source(&light_tokens, "ring"), "#000000");
         assert_eq!(token_source(&dark_tokens, "ring"), "#ffffff");
         assert_eq!(
