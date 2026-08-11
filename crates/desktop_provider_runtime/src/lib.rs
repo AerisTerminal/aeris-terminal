@@ -27,14 +27,9 @@ use std::{
 };
 use zeroize::Zeroize;
 
-mod market_worker;
 mod provider_diagnostics;
 mod session_contract;
 
-pub use market_worker::{
-    DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopMarketWorkerError,
-    HistoryCompletionBinding, HistoryCompletionInstall,
-};
 pub use provider_diagnostics::{ProviderFeedDiagnostics, ProviderFeedDiagnosticsError};
 pub use session_contract::{
     AuthenticationState, InstrumentDescriptor, MAXIMUM_DISCOVERY_FIELD_BYTES,

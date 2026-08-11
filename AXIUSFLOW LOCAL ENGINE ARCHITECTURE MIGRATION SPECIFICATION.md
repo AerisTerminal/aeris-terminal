@@ -514,10 +514,11 @@ Current:
 
 ```text
 desktop_provider_runtime/
-    market_worker.rs
     provider_diagnostics.rs
     session_contract.rs
 ```
+
+Progress evidence (2026-08-11): Coinbase no longer depends on this crate. Its obsolete desktop session driver, event bridge, deterministic session fixture, and dead feature flag were deleted after the caller trace confirmed that production Coinbase history and realtime use the resident engine workers. The uncalled `DesktopMarketWorker` provider/history composition and its integration harness were also deleted, removing the crate's dependencies on `desktop_history`, `desktop_storage`, and `provider_history`. Rithmic callback-source and generation-state errors now belong to the Rithmic adapter. The remaining crate surface is the generation-fenced provider lifecycle, session contract, and diagnostics still called by the engine-owned Rithmic catalog/realtime workers, so the crate cannot yet be deleted and this section remains unchecked.
 
 This crate must be reviewed extremely critically.
 
@@ -3803,7 +3804,7 @@ It must not hide cold-start failures.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): `desktop_market_runtime` is deleted after its engine-owned execution paths disappeared and its final desktop-only presentation mailbox and fixture moved beside their sole consumer. `desktop_provider_runtime`, old stream-runtime logic, and remaining dead bridge review are still open, so this phase remains unchecked.
+Progress evidence (2026-08-11): `desktop_market_runtime` is deleted after its engine-owned execution paths disappeared and its final desktop-only presentation mailbox and fixture moved beside their sole consumer. The dead Coinbase desktop provider driver/fixture and the uncalled `desktop_provider_runtime::DesktopMarketWorker` provider/history composition are also deleted. The remaining Rithmic lifecycle/diagnostics surface in `desktop_provider_runtime`, old stream-runtime logic, and remaining dead bridge review are still open, so this phase remains unchecked.
 
 After Coinbase and Rithmic use the new engine:
 

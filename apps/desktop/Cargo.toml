@@ -32,8 +32,5 @@ gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 
-[dev-dependencies]
-axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market", features = ["deterministic-fixtures"] }
-
 [lints]
 workspace = true

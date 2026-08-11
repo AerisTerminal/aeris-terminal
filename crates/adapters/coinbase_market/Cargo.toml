@@ -6,11 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-deterministic-fixtures = []
-
 [dependencies]
-axiusflow_desktop_provider_runtime = { path = "../../desktop_provider_runtime" }
 axiusflow_desktop_storage = { path = "../../desktop_storage" }
 axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_platform_runtime = { path = "../../platform_runtime" }

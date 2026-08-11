@@ -10,10 +10,10 @@ use crate::{
     SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
 };
 use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, ConnectTrigger, DesktopMarketWorkerError, DesktopProviderError,
-    DesktopProviderRuntime, DesktopProviderState, InstrumentDescriptor, NetworkEvent,
-    ProviderEnvironment, ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
-    RecoveryReason, SessionGeneration,
+    AuthenticationState, ConnectTrigger, DesktopProviderError, DesktopProviderRuntime,
+    DesktopProviderState, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
+    ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent, RecoveryReason,
+    SessionGeneration,
 };
 use axiusflow_market_data::{
     AggressorSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
@@ -1446,15 +1446,12 @@ impl RithmicRetryScheduler {
         &mut self,
         worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
         now: Instant,
-    ) -> Result<Option<SessionGeneration>, DesktopMarketWorkerError> {
+    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
         let state = worker.state()?;
         if !self.take_due(state, now) {
             return Ok(None);
         }
-        worker
-            .connect(ConnectTrigger::Retry)
-            .map(Some)
-            .map_err(Into::into)
+        worker.connect(ConnectTrigger::Retry).map(Some)
     }
 
     fn take_due(&mut self, state: DesktopProviderState, now: Instant) -> bool {
@@ -1499,7 +1496,7 @@ pub fn apply_rithmic_environment_event<V: CredentialVault>(
     event: RithmicEnvironmentEvent,
 ) -> Result<Option<SessionGeneration>, RithmicDesktopEventError> {
     if !worker.driver_matches(|driver| driver.owns_events(events))? {
-        return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
+        return Err(RithmicDesktopEventError::CallbackSourceMismatch);
     }
     retries.clear();
     let discard = || {
@@ -1543,7 +1540,10 @@ pub enum AppliedRithmicEvent {
 /// Redacted failures while applying Rithmic callbacks to the shared runtime.
 #[derive(Debug)]
 pub enum RithmicDesktopEventError {
-    Runtime(DesktopMarketWorkerError),
+    Runtime(DesktopProviderError),
+    CallbackSourceMismatch,
+    GenerationMismatch,
+    ProviderNotStreaming,
     MissingRetryDisposition,
 }
 
@@ -1551,6 +1551,15 @@ impl fmt::Display for RithmicDesktopEventError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Runtime(error) => write!(formatter, "Rithmic callback failed: {error}"),
+            Self::CallbackSourceMismatch => {
+                formatter.write_str("Rithmic callback source mismatched")
+            }
+            Self::GenerationMismatch => {
+                formatter.write_str("Rithmic callback belongs to a stale provider generation")
+            }
+            Self::ProviderNotStreaming => {
+                formatter.write_str("Rithmic provider session is not streaming")
+            }
             Self::MissingRetryDisposition => {
                 formatter.write_str("Rithmic invalidation omitted retry classification")
             }
@@ -1562,20 +1571,17 @@ impl Error for RithmicDesktopEventError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Runtime(error) => Some(error),
-            Self::MissingRetryDisposition => None,
+            Self::CallbackSourceMismatch
+            | Self::GenerationMismatch
+            | Self::ProviderNotStreaming
+            | Self::MissingRetryDisposition => None,
         }
-    }
-}
-
-impl From<DesktopMarketWorkerError> for RithmicDesktopEventError {
-    fn from(error: DesktopMarketWorkerError) -> Self {
-        Self::Runtime(error)
     }
 }
 
 impl From<DesktopProviderError> for RithmicDesktopEventError {
     fn from(error: DesktopProviderError) -> Self {
-        Self::Runtime(error.into())
+        Self::Runtime(error)
     }
 }
 
@@ -1591,7 +1597,7 @@ pub fn try_recv_rithmic_event<V: CredentialVault>(
     now: Instant,
 ) -> Result<Option<AppliedRithmicEvent>, RithmicDesktopEventError> {
     if !worker.driver_matches(|driver| driver.owns_events(events))? {
-        return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
+        return Err(RithmicDesktopEventError::CallbackSourceMismatch);
     }
     let Some(callback) = events.try_recv() else {
         return Ok(None);
@@ -1601,9 +1607,9 @@ pub fn try_recv_rithmic_event<V: CredentialVault>(
         | DesktopProviderState::Streaming { generation }
             if generation == callback.generation => {}
         DesktopProviderState::Connecting { .. } | DesktopProviderState::Streaming { .. } => {
-            return Err(DesktopMarketWorkerError::HandoffGenerationMismatch.into());
+            return Err(RithmicDesktopEventError::GenerationMismatch);
         }
-        _ => return Err(DesktopMarketWorkerError::ProviderNotStreaming.into()),
+        _ => return Err(RithmicDesktopEventError::ProviderNotStreaming),
     }
     match &callback.event {
         ProviderSessionEvent::InstrumentsDiscovered { generation, .. } => {
@@ -1664,10 +1670,8 @@ fn ensure_streaming_generation<V: CredentialVault>(
 ) -> Result<(), RithmicDesktopEventError> {
     match worker.state()? {
         DesktopProviderState::Streaming { generation: active } if active == generation => Ok(()),
-        DesktopProviderState::Streaming { .. } => {
-            Err(DesktopMarketWorkerError::HandoffGenerationMismatch.into())
-        }
-        _ => Err(DesktopMarketWorkerError::ProviderNotStreaming.into()),
+        DesktopProviderState::Streaming { .. } => Err(RithmicDesktopEventError::GenerationMismatch),
+        _ => Err(RithmicDesktopEventError::ProviderNotStreaming),
     }
 }
 
@@ -4226,9 +4230,7 @@ mod tests {
             RithmicProviderDriver::with_task(config(), callback_limits(2, 4_096), runtime_task());
         assert!(matches!(
             try_recv_rithmic_event(&mut worker, &foreign_events, &mut retries, ticket.due_at,),
-            Err(RithmicDesktopEventError::Runtime(
-                DesktopMarketWorkerError::CallbackSourceMismatch
-            ))
+            Err(RithmicDesktopEventError::CallbackSourceMismatch)
         ));
         drop(foreign_driver);
 

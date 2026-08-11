@@ -8,16 +8,10 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_application = { path = "../application" }
-axiusflow_desktop_history = { path = "../desktop_history" }
-axiusflow_desktop_storage = { path = "../desktop_storage" }
 axiusflow_market_data = { path = "../domain/market_data" }
 axiusflow_observability = { path = "../observability" }
 axiusflow_platform_runtime = { path = "../platform_runtime" }
-axiusflow_provider_history = { path = "../provider_history" }
 zeroize.workspace = true
-
-[dev-dependencies]
-axiusflow_coinbase_market_adapter = { path = "../adapters/coinbase_market" }
 
 [lints]
 workspace = true

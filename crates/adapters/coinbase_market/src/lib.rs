@@ -10,10 +10,8 @@ mod aggregation;
 mod catalog;
 mod config;
 mod decoder;
-mod desktop_driver;
 mod errors;
 mod fixed_point;
-mod fixture;
 mod history;
 mod interval;
 mod level2;
@@ -31,17 +29,8 @@ pub use catalog::{
 };
 pub use config::{CoinbaseConfig, MAXIMUM_PRODUCTS};
 pub use decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
-#[cfg(feature = "deterministic-fixtures")]
-pub use desktop_driver::CoinbaseProviderFixtureControl;
-pub use desktop_driver::{
-    CoinbaseDesktopEventError, CoinbaseDesktopMarketEvent, CoinbaseProviderDriver,
-    CoinbaseProviderDriverError, CoinbaseProviderEvent, CoinbaseProviderEvents,
-    CoinbaseProviderInvalidReason, seed_coinbase_bar_history, try_recv_coinbase_aggregated_bar,
-    try_recv_coinbase_bar, try_recv_coinbase_market_event, try_recv_coinbase_trade,
-};
 pub use errors::CoinbaseError;
 pub use fixed_point::FixedPointValue;
-pub use fixture::{CoinbaseFixtureSession, deterministic_fixture_session};
 pub(crate) use history::PublicRequestGate;
 pub use history::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryBatch, CoinbaseHistoryCapabilityAdapter,
