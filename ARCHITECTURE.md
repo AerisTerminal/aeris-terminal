@@ -70,7 +70,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 - `crates/desktop_storage`: SQLite metadata, encrypted local segments, and storage lifecycle.
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
-- `crates/local_engine_protocol`: authentication, activation, restore, workspace mutation, acknowledgment, and lifecycle framing only; it contains no chart, DOM, provider, catalog, or market-stream messages.
+- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 3 defines the target client/consumer/generation boundary, but the current engine service does not handle those market messages yet and the shipping desktop market path remains in-process.
 - `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
 - `crates/transport`: small transport framing primitives.
 
@@ -240,5 +240,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo build --workspace --all-targets --all-features
 cargo test --workspace --all-features
 ```
+
+The first migration preparation slice is protocol-only. It does not create a second provider runtime: market demand and series publication messages exist for the forthcoming engine owner, while all live provider execution still follows the desktop-owned path described above.
 
 Focused conformance and release-mode performance checks supplement this gate for provider, persistence, IPC, UI, and latency changes. A passing compile is not proof of runtime correctness.

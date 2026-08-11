@@ -1,14 +1,23 @@
 use std::num::NonZeroUsize;
 
 use axiusflow_local_engine_protocol::{
-    ActivateExistingUi, ClientHello, ClientKind, EngineFaultCode, EngineReady, Envelope,
-    EnvelopeDecoder, Fault, Goodbye, HotSeries, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError,
-    ResourceMode, RestoreWorkspace, SetSelection, SetViewport, SetWatchlist, WorkspaceState,
-    encode_envelope, envelope,
+    ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
+    EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
+    MAX_FRAME_BYTES, MarketBar, PROTOCOL_VERSION, PersistenceState, ProtocolError,
+    ProviderConnectionState, ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode,
+    RestoreWorkspace, SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState,
+    SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, ShutdownEngine,
+    ViewportDemand, VisibilityDemand, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
 fn payloads() -> Vec<envelope::Payload> {
+    let mut payloads = workspace_payloads();
+    payloads.extend(market_payloads());
+    payloads
+}
+
+fn workspace_payloads() -> Vec<envelope::Payload> {
     vec![
         envelope::Payload::ClientHello(ClientHello {
             protocol_version: PROTOCOL_VERSION,
@@ -66,6 +75,91 @@ fn payloads() -> Vec<envelope::Payload> {
             start_unix_nanos: 1,
             end_unix_nanos: 2,
             selection_generation: 4,
+        }),
+    ]
+}
+
+fn market_payloads() -> Vec<envelope::Payload> {
+    let series = SeriesKey {
+        provider: "coinbase".into(),
+        instrument_id: "coinbase:spot:BTC-USD".into(),
+        interval_seconds: 60,
+        definition_revision: 1,
+    };
+    let bar = MarketBar {
+        source_sequence: 1,
+        exchange_timestamp_seconds: 1_700_000_000,
+        open: 100,
+        high: 110,
+        low: 90,
+        close: 105,
+        volume: 7,
+    };
+    vec![
+        envelope::Payload::AttachClient(AttachClient { client_id: 11 }),
+        envelope::Payload::DetachClient(DetachClient { client_id: 11 }),
+        envelope::Payload::RegisterConsumer(RegisterConsumer {
+            client_id: 11,
+            workspace_id: 12,
+            consumer_id: 13,
+        }),
+        envelope::Payload::SeriesDemand(SeriesDemand {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series.clone()),
+        }),
+        envelope::Payload::ViewportDemand(ViewportDemand {
+            consumer_id: 13,
+            generation: 14,
+            start_unix_nanos: 1,
+            end_unix_nanos: 2,
+        }),
+        envelope::Payload::VisibilityDemand(VisibilityDemand {
+            consumer_id: 13,
+            visible: true,
+        }),
+        envelope::Payload::RemoveConsumer(RemoveConsumer { consumer_id: 13 }),
+        envelope::Payload::SetEngineResourceMode(SetEngineResourceMode {
+            resource_mode: ResourceMode::Warm as i32,
+        }),
+        envelope::Payload::ShutdownEngine(ShutdownEngine {}),
+        envelope::Payload::SeriesState(SeriesState {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series.clone()),
+            state: SeriesLoadState::Ready as i32,
+            persistence: PersistenceState::Degraded as i32,
+            detail: Some("cache write unavailable".into()),
+        }),
+        envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series.clone()),
+            provider_generation: 2,
+            price_scale: 2,
+            quantity_scale: 8,
+            bars: vec![bar],
+        }),
+        envelope::Payload::SeriesUpdate(SeriesUpdate {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series),
+            provider_generation: 2,
+            bar: Some(bar),
+            forming: true,
+        }),
+        envelope::Payload::ProviderState(ProviderState {
+            provider: "coinbase".into(),
+            state: ProviderConnectionState::Online as i32,
+            generation: 2,
+            detail: None,
+        }),
+        envelope::Payload::DemandError(DemandError {
+            consumer_id: 13,
+            generation: 14,
+            code: EngineFaultCode::Retryable as i32,
+            stage: "provider_history".into(),
+            detail: "request timed out".into(),
         }),
     ]
 }

@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 0 of 180 tasks complete.**
+**Verified progress: 3 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -3536,7 +3536,19 @@ Each phase must:
 
 # 108. PHASE 0 — FORENSIC BASELINE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11, baseline commit `a3c5334`, Windows 11 x86_64, Intel i7-13700K, 24 logical CPUs):
+
+- The retained forensic sequence is `fetch_started → fetch_completed → completed_received → persist_begin → install_failed → Loading`.
+- The exact current gating path is `live_market_worker/history.rs::install_repaired_snapshot → persist_history_repairs → install_merged_history`. Both persistence calls precede `install_history_snapshot` and `publish_update`; an error is converted to an unqualified string, then `fence_failed_history` clears retained bars and reports Recovering. This is why valid fetched bars can fail to reach the chart. The original external error string and candle-value print are not present in the current repository; repository search confirms the stage labels survive only in this specification, so stage identity must be restored by the new engine regression.
+- Release market-data baseline (`250,000` bars): cold publish `4,184 ms`; warm open `25 ms`; warm discovery `1 ms`; first usable `178 µs`; warm read `81 ms`; decode `8 ms`; peak resident memory `31,518,720` bytes. Uncached aggregation: `5m 2,771 µs`, `15m 2,357 µs`, `1h 1,569 µs`, `4h 1,537 µs`, `1D 1,521 µs`; repeated `5m` cache hit `0 µs`. Coverage was complete with zero gaps, duplicates, or missing ranges.
+- The diagnostics-overhead release verifier did not produce a valid baseline on this host: it failed with `ZeroBaseline("p99")` because the baseline quantized to zero. This verifier defect is preserved rather than misreported as a performance result.
+- Cargo normal dependency graph: `1,307` rendered lines, `665` unique rendered lines, SHA-256 `ce91d7fbfb157a8f8b86c7ab2d85914dda79059936920bfb85567cede73ee6c5`. Commit `a3c5334` is the reconstructable graph source.
+- Rust baseline: `70,935` lines across `142` files. Largest responsibility areas were `rithmic_protocol 13,516`, `desktop_market_runtime 12,160`, `apps/desktop 7,112`, `coinbase_market 6,183`, `desktop_provider_runtime 5,447`, `desktop_storage 4,667`, and `desktop_history 2,480` lines.
+- Startup baseline: desktop constructs the Coinbase or Rithmic worker before entering GPUI; engine startup opens workspace/hot-set state, binds authenticated local IPC, and serves workspace requests without provider work. The authenticated engine handshake/restore suite passed `11/11`.
+- Coinbase production public history status: release `--coinbase-live-smoke BTC-USD` passed with a covering live-provider snapshot and clean bounded shutdown; no local-cache snapshot was observed in the clean temporary root.
+- Rithmic status: adapter protocol/conformance tests passed `73/73`; credentialed/entitled live runtime was not executed and remains explicitly unverified.
 
 Before migration:
 
@@ -3557,7 +3569,9 @@ Create baseline evidence.
 
 # 109. PHASE 1 — ENGINE PROTOCOL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): `local_engine_protocol` version 3 defines authenticated attach/detach, stable client/workspace/consumer identities, per-consumer series generations, viewport and visibility demand, consumer removal, explicit series and persistence states, fixed-point snapshots/updates, provider state, stage-specific demand errors, resource mode, and complete shutdown. Removed tags `8..=14` and `19..=24` remain unused. Every payload passed fragmented/coalesced round-trip, malformed/version/frame-bound tests, and strict package Clippy.
 
 Expand/replace `local_engine_protocol` into final `engine_protocol`.
 
@@ -5641,7 +5655,52 @@ becomes an unstructured dumping ground, organize it internally before inventing 
 
 # 179. REQUIRED RESPONSE BEFORE ARCHITECTURAL CODE CHANGES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): the following implementation-grounded map was completed before protocol v3 was edited.
+
+## A. Current ownership
+
+- Desktop entry: `apps/desktop/src/main.rs::{main, configured_market_worker, TerminalApp}`.
+- Engine entry and IPC server: `apps/engine/src/main.rs::run` and `apps/engine/src/lib.rs::{bind_listener, serve_client_with_state, serve_authenticated_session}`.
+- IPC client: `apps/engine/src/lib.rs::EngineClient`.
+- Coinbase session: `coinbase_market/src/desktop_driver.rs::CoinbaseProviderDriver`; desktop orchestration is `desktop_market_runtime/live_market_worker.rs::{start_with_profile, run_worker, run_session}`.
+- Rithmic session: `rithmic_protocol/src/desktop_driver.rs::RithmicProviderDriver` with `session.rs::{RithmicTickerConnection, RithmicHistoryConnection}`; product orchestration is `desktop_market_runtime/rithmic_market_worker.rs`.
+- Shared provider lifecycle: `desktop_provider_runtime::{DesktopMarketWorker, ProviderSessionDriver}`.
+- Coinbase history request and handoff: `live_market_worker.rs::{maybe_start_history, history_command_loop, fetch_history_repairs}` plus `live_market_worker/history.rs::{fetch_history_range_with_adapter_cancelled, install_repaired_snapshot, install_merged_history}` and `desktop_history::HistoryWorker`.
+- Persistence: `desktop_storage::HistoryStore`, synchronously called by desktop market/history workers.
+- Chart publication: `live_market_worker/publication.rs::publish_update → MarketWorkerSender → TerminalApp message drain → OriginChartView`.
+- Selection generation and demand: `TerminalApp::{select_interval, select_instrument} → MarketDataWorker::try_select_coinbase`; viewport demand uses `try_set_chart_viewport`.
+- Loading state: `desktop_market_runtime::ChartState::Loading` plus `TerminalApp::{chart_state, coinbase_switch}`.
+
+## B. Current runtime spine and unique ownership
+
+- Coinbase: GPUI `TerminalApp → resident_market_worker → desktop_market_runtime → desktop_provider_runtime → CoinbaseProviderDriver → Coinbase socket/history adapter`.
+- Rithmic: GPUI `TerminalApp → resident_market_worker → desktop_market_runtime::rithmic_market_worker → RithmicProviderDriver → Rithmic session connections`.
+- `application::stream_runtime` uniquely validates immutable transport-neutral publications and owns no execution.
+- `desktop_market_runtime` owns desktop composition, hydration, handoff, publication, and UI mailbox.
+- `desktop_provider_runtime` owns shared provider session commands and generations.
+- Adapter desktop drivers own provider-specific protocol execution.
+
+## C. Target file mapping
+
+- KEEP domain crates, provider adapters, provider-history algorithms, pure application generation/provenance, chart integration, observability, platform runtime, and transport.
+- MOVE/MERGE generic execution ownership from `desktop_market_runtime` and `desktop_provider_runtime` into `market_engine`; move history/storage ownership behind the engine.
+- RENAME `local_engine_protocol`, `desktop_history`, and `desktop_storage` only after their callers cut over.
+- DELETE the two desktop runtime crates, Rithmic desktop product-runtime duplication, and obsolete execution bridges after the new owner replaces them.
+- KEEP only GPUI presentation, bounded engine client behavior, UI-side generation defense, and Origin integration in desktop.
+
+## D. First vertical slice
+
+Touch only the workspace manifest, engine protocol, a small `market_engine` crate, engine service, desktop engine-client bridge, existing Coinbase history adapter, existing chart bridge, and the two architecture documents. Prove BTC-USD historical bars through `Desktop → IPC → Engine → Coinbase → canonical bars → engine memory → IPC snapshot → Origin`. Exclude Rithmic, realtime, shared memory, storage migration, and warm-daemon policy.
+
+## E. Risks
+
+Guard against duplicate Coinbase sessions, simultaneous legacy/new UI feeds, protocol mismatch, stale generation overwrite, persistence gating, shutdown deadlock, disconnected-client demand leaks, split ownership, and tests that accidentally prove the fixture or legacy feed.
+
+## F. Verification
+
+Use protocol round-trip/frame tests, headless market-engine demand/snapshot/storage-failure tests, authenticated engine IPC integration, desktop bridge regression, cold BTC-USD visible-history smoke, stale-generation and disconnect cleanup scenarios, release demand/first-snapshot measurements, then the complete repository Cargo gate.
 
 Before making the migration, the agent must first provide an implementation-grounded migration map.
 
