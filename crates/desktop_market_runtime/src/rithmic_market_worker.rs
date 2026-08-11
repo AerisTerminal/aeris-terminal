@@ -859,6 +859,7 @@ fn install_catalog_selection(
     state.history_trade_overflow = false;
     state.selection_installed = true;
     state.installed_instrument = Some(InstalledRithmicInstrument {
+        session_generation: session_generation.get(),
         selection_generation,
         descriptor: instrument.clone(),
         entitlement_id: entitlement_id.to_string(),

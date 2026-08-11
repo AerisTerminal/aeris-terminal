@@ -2,7 +2,6 @@
 
 mod assets;
 mod chart_chrome;
-mod engine_client;
 mod engine_market_worker;
 mod frame_poll_gate;
 #[cfg(any(test, feature = "diagnostics"))]
@@ -20,7 +19,6 @@ use axiusflow_chart_integration::{
 };
 use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
-use axiusflow_local_engine_protocol::InstallProviderInstrument;
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_rithmic_protocol_adapter::{
@@ -226,7 +224,6 @@ struct TerminalApp {
     subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
-    engine_catalog: Option<engine_client::EngineCatalogClient>,
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
@@ -745,13 +742,6 @@ impl TerminalApp {
         indicator_input: Entity<InputState>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
-        let engine_catalog = matches!(&startup, MarketWorkerStartup::Shell(_))
-            .then(engine_client::EngineCatalogClient::start)
-            .transpose()
-            .unwrap_or_else(|error| {
-                eprintln!("{error}");
-                None
-            });
         let TerminalStartupState {
             chart,
             chart_state,
@@ -787,7 +777,6 @@ impl TerminalApp {
             subscription_id,
             bridge_label,
             market_worker,
-            engine_catalog,
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
@@ -1756,35 +1745,15 @@ impl TerminalApp {
 
     fn apply_rithmic_selection(&mut self, event: RithmicCatalogEvent, cx: &mut Context<Self>) {
         let RithmicCatalogEvent::SelectionInstalled {
-            session_generation,
             selection_generation,
             instrument,
-            entitlement_id,
+            ..
         } = event
         else {
             unreachable!("selection handler receives only installed selections");
         };
         if !self.symbol_browser.confirm_selection(selection_generation) {
             return;
-        }
-        if let Some(engine_catalog) = &self.engine_catalog
-            && engine_catalog
-                .try_install(InstallProviderInstrument {
-                    provider: "rithmic".to_string(),
-                    session_generation: session_generation.get(),
-                    selection_generation: u64::try_from(selection_generation.get())
-                        .unwrap_or(u64::MAX),
-                    instrument_id: instrument.instrument_id.clone(),
-                    provider_symbol: instrument.provider_symbol.clone(),
-                    display_symbol: instrument.display_symbol.clone(),
-                    venue_id: instrument.venue_id.clone(),
-                    price_scale: u32::from(instrument.price_scale),
-                    quantity_scale: u32::from(instrument.quantity_scale),
-                    entitlement_id,
-                })
-                .is_err()
-        {
-            eprintln!("resident engine catalog queue rejected an instrument");
         }
         self.symbol_selection_pending = false;
         let recovered_series = self

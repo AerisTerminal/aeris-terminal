@@ -2,6 +2,7 @@
 
 mod local_history;
 mod market_service;
+mod rithmic_history;
 
 pub use market_service::MarketService;
 
@@ -985,13 +986,12 @@ mod tests {
                 1,
                 1,
                 SeriesKey {
-                    provider: "coinbase".to_string(),
-                    instrument_id: "instrument:coinbase:btc:usd".to_string(),
-                    cadence_value: 60,
+                    provider: "rithmic".to_string(),
+                    instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+                    cadence_value: 100,
                     definition_revision: 1,
-                    entitlement_id: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS
-                        .to_string(),
-                    cadence: axiusflow_local_engine_protocol::SeriesCadence::FixedSeconds as i32,
+                    entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+                    cadence: axiusflow_local_engine_protocol::SeriesCadence::Trades as i32,
                 },
             )
             .expect("send demand");
@@ -1003,8 +1003,9 @@ mod tests {
                 match event {
                     envelope::Payload::SeriesSnapshot(snapshot) => {
                         snapshot_received = snapshot.bars.len() == 1
+                            && snapshot.provider_generation == 7
                             && snapshot.price_scale == 2
-                            && snapshot.quantity_scale == 8;
+                            && snapshot.quantity_scale == 0;
                     }
                     envelope::Payload::SeriesState(state) => {
                         ready_received = state.generation == 1
