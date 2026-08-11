@@ -13,8 +13,8 @@ use std::{
 };
 
 use axiusflow_engine::{
-    ENGINE_SOCKET_NAME, EngineState, bind_listener, default_engine_state_root,
-    native_installation_token, serve_client_with_state,
+    ENGINE_SOCKET_NAME, EngineState, MarketService, bind_listener, default_engine_state_root,
+    native_installation_token, serve_client_with_market,
 };
 use interprocess::local_socket::traits::Listener as _;
 
@@ -39,6 +39,7 @@ fn run() -> Result<(), String> {
     getrandom::fill(&mut epoch_bytes).map_err(|error| error.to_string())?;
     let engine_epoch = u64::from_le_bytes(epoch_bytes).max(1);
     let state = EngineState::open(default_engine_state_root()?)?;
+    let market = MarketService::start()?;
     let active_clients = Arc::new(AtomicUsize::new(0));
 
     loop {
@@ -54,13 +55,18 @@ fn run() -> Result<(), String> {
         }
         let token = Arc::clone(&token);
         let state = state.clone();
+        let market = market.clone();
         let active_clients = Arc::clone(&active_clients);
         thread::Builder::new()
             .name("axiusflow-engine-client".to_string())
             .spawn(move || {
-                if let Err(error) =
-                    serve_client_with_state(stream, token.as_slice(), engine_epoch, &state)
-                {
+                if let Err(error) = serve_client_with_market(
+                    stream,
+                    token.as_slice(),
+                    engine_epoch,
+                    &state,
+                    &market,
+                ) {
                     eprintln!("Axiusflow engine rejected a local client: {error}");
                 }
                 active_clients.fetch_sub(1, Ordering::AcqRel);

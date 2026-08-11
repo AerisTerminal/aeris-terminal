@@ -99,6 +99,7 @@ pub enum EngineError {
         received: GenerationId,
     },
     InvalidViewport,
+    InvalidSeriesPrecision,
     EmptySeries,
     DiscontinuousSeries {
         expected: u64,
@@ -156,6 +157,9 @@ impl fmt::Display for EngineError {
                 formatter.write_str("consumer generation is stale")
             }
             Self::InvalidViewport => formatter.write_str("viewport start must precede end"),
+            Self::InvalidSeriesPrecision => {
+                formatter.write_str("series decimal precision exceeds 18 places")
+            }
             Self::EmptySeries => formatter.write_str("series snapshot must contain bars"),
             Self::DiscontinuousSeries { expected, received } => write!(
                 formatter,
@@ -284,10 +288,11 @@ impl MarketEngine {
         if changed {
             self.publications.remove(consumer_id);
         }
-        Ok(self
-            .series
-            .get(series)
-            .map(|snapshot| self.publications.publish(consumer_id, generation, snapshot)))
+        self.series.get(series).map_or(Ok(None), |snapshot| {
+            self.publications
+                .publish(consumer_id, generation, snapshot)
+                .map(Some)
+        })
     }
 
     /// Updates viewport demand only for the current consumer generation.
@@ -325,22 +330,27 @@ impl MarketEngine {
         &mut self,
         provider_generation: ProviderGeneration,
         series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
         bars: Vec<MarketBar>,
     ) -> Result<Vec<ConsumerPublication>, EngineError> {
         self.providers
             .verify_generation(&series.provider_id, provider_generation)?;
-        let snapshot = self
-            .series
-            .install(series.clone(), provider_generation, bars)?;
-        Ok(self
-            .demands
+        let snapshot = self.series.install(
+            series.clone(),
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+        )?;
+        self.demands
             .matching(series)
             .into_iter()
             .map(|(consumer_id, generation)| {
                 self.publications
                     .publish(consumer_id, generation, Arc::clone(&snapshot))
             })
-            .collect())
+            .collect()
     }
 
     #[must_use]
@@ -489,13 +499,13 @@ mod tests {
         );
         assert!(
             engine
-                .install_history(provider_generation(1), &btc, bars(2))
+                .install_history(provider_generation(1), &btc, 2, 8, bars(2))
                 .expect("late BTC remains cacheable")
                 .is_empty()
         );
         assert!(engine.latest_publication(id(1)).is_none());
         let publication = engine
-            .install_history(provider_generation(1), &eth, bars(2))
+            .install_history(provider_generation(1), &eth, 2, 8, bars(2))
             .expect("current ETH publishes")
             .pop()
             .expect("one current consumer");
@@ -516,7 +526,7 @@ mod tests {
             );
         }
         let publications = engine
-            .install_history(provider_generation(1), &btc, bars(3))
+            .install_history(provider_generation(1), &btc, 2, 8, bars(3))
             .expect("history installs once");
         assert_eq!(publications.len(), 20);
         for publication in &publications[1..] {
@@ -546,12 +556,14 @@ mod tests {
         ));
         let btc = series("coinbase:spot:BTC-USD");
         engine
-            .install_history(provider_generation(1), &btc, bars(2))
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("bounded series installs");
         assert!(matches!(
             engine.install_history(
                 provider_generation(1),
                 &series("coinbase:spot:ETH-USD"),
+                2,
+                8,
                 bars(1)
             ),
             Err(EngineError::SeriesLimitExceeded { .. })
@@ -579,7 +591,7 @@ mod tests {
             Err(EngineError::StaleConsumerGeneration { .. })
         ));
         assert!(matches!(
-            engine.install_history(provider_generation(2), &btc, bars(1)),
+            engine.install_history(provider_generation(2), &btc, 2, 8, bars(1)),
             Err(EngineError::StaleProviderGeneration { .. })
         ));
         assert!(matches!(
@@ -599,5 +611,25 @@ mod tests {
         assert!(engine.current_demand(id(2)).is_none());
         assert!(engine.current_demand(id(3)).is_some());
         assert_eq!(engine.metrics().active_consumers, 1);
+    }
+
+    #[test]
+    fn decimal_precision_is_part_of_one_provider_generation() {
+        let mut engine = engine(1, 1, 2);
+        let btc = series("coinbase:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(1))
+            .expect("first precision installs");
+        assert!(matches!(
+            engine.install_history(provider_generation(1), &btc, 3, 8, bars(1)),
+            Err(EngineError::ConflictingSeriesGeneration(_))
+        ));
+        register(&mut engine, 1, 1);
+        let snapshot = engine
+            .set_series_demand(id(1), generation(1), &btc)
+            .expect("cached demand resolves")
+            .expect("snapshot is cached");
+        assert_eq!(snapshot.snapshot.price_scale, 2);
+        assert_eq!(snapshot.snapshot.quantity_scale, 8);
     }
 }

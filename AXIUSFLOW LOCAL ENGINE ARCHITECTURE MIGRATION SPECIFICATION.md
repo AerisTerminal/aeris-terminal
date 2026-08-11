@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 4 of 180 tasks complete.**
+**Verified progress: 6 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -3618,7 +3618,9 @@ Write deterministic tests.
 
 # 111. PHASE 3 — COINBASE FIRST END-TO-END ENGINE PATH
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): the default desktop Coinbase startup attaches a bounded `EngineClient` to protocol-v3 IPC; `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, and desktop precision/provenance conversion. A clean Windows release run started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered visible BTC-USD one-minute candles in Origin. Coinbase realtime remains separately unchecked under the hard gate in section 154.
 
 Move Coinbase execution into `axiusflow_engine`.
 
@@ -4718,7 +4720,9 @@ This is a hard migration gate.
 
 # 155. FIRST VERTICAL SLICE REMAINS EXTREMELY SMALL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): code scope is limited to protocol publication metadata, the existing `market_engine`, the resident engine service, one desktop engine-client bridge, and the existing Coinbase history/application/Origin boundaries. Rithmic, realtime, order book, footprint, shared memory, storage migration, and advanced warm policy were not added. Authenticated IPC and desktop conversion tests pass, and the clean Windows release run visibly rendered cold BTC-USD provider history through the spawned engine and Origin.
 
 The first new engine path must not contain every eventual feature.
 

@@ -3,18 +3,12 @@ use std::{path::PathBuf, thread, time::Duration};
 
 pub(super) use axiusflow_desktop_market_runtime::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup, PendingUiDiagnostics,
-    UiDiagnosticsFeedback,
+    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
+    MarketWorkerStartup, PendingUiDiagnostics, UiDiagnosticsFeedback, market_worker_channel,
 };
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    MarketDataWorker::start_coinbase(
-        "BTC-USD".to_string(),
-        history_root("coinbase"),
-        thread::current().id(),
-        cfg!(feature = "diagnostics"),
-        true,
-    )
+    crate::engine_market_worker::start()
 }
 
 pub(super) fn start_rithmic() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {

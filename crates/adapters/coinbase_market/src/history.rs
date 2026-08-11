@@ -193,7 +193,7 @@ fn sleep_cancellable(duration: Duration, stop: Option<&AtomicBool>) -> Result<()
     }
 }
 
-/// Direct Coinbase public candle-history adapter for desktop background workers.
+/// Direct Coinbase public candle-history adapter for bounded background workers.
 pub struct CoinbaseHistoryCapabilityAdapter<T = CoinbaseHttpsHistoryTransport> {
     capabilities: HistoryCapabilities,
     transport: T,

@@ -139,6 +139,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
             price_scale: 2,
             quantity_scale: 8,
             bars: vec![bar],
+            publication_generation: 1,
         }),
         envelope::Payload::SeriesUpdate(SeriesUpdate {
             consumer_id: 13,
@@ -147,6 +148,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
             provider_generation: 2,
             bar: Some(bar),
             forming: true,
+            publication_generation: 2,
         }),
         envelope::Payload::ProviderState(ProviderState {
             provider: "coinbase".into(),

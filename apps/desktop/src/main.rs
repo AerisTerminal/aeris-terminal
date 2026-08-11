@@ -2,6 +2,7 @@
 
 mod assets;
 mod chart_chrome;
+mod engine_market_worker;
 mod frame_poll_gate;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
@@ -1154,7 +1155,7 @@ impl TerminalApp {
                     |product| format!("{} · Coinbase spot", product.product_id),
                 );
                 self.connection_state = Some(FeedConnectionState::Streaming);
-                self.connection_message = Some("Coinbase public market stream is live".to_string());
+                self.connection_message = Some("Coinbase market data is current".to_string());
             }
         } else {
             self.set_chart_state(

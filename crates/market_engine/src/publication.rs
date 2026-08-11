@@ -1,5 +1,5 @@
 use crate::series_store::SeriesSnapshot;
-use crate::{ConsumerId, GenerationId};
+use crate::{ConsumerId, EngineError, GenerationId};
 use axiusflow_market_data::BarSeriesKey;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct ConsumerPublication {
     pub consumer_id: ConsumerId,
     pub generation: GenerationId,
+    pub publication_generation: u64,
     pub snapshot: Arc<SeriesSnapshot>,
 }
 
@@ -26,14 +27,22 @@ impl PublicationManager {
         consumer_id: ConsumerId,
         generation: GenerationId,
         snapshot: Arc<SeriesSnapshot>,
-    ) -> ConsumerPublication {
+    ) -> Result<ConsumerPublication, EngineError> {
+        let publication_generation = match self.latest.get(&consumer_id) {
+            Some(publication) => publication
+                .publication_generation
+                .checked_add(1)
+                .ok_or(EngineError::CapacityOverflow)?,
+            None => 1,
+        };
         let publication = ConsumerPublication {
             consumer_id,
             generation,
+            publication_generation,
             snapshot,
         };
         self.latest.insert(consumer_id, publication.clone());
-        publication
+        Ok(publication)
     }
 
     pub(crate) fn latest(&self, consumer_id: ConsumerId) -> Option<&ConsumerPublication> {

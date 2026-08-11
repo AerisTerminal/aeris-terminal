@@ -1,5 +1,9 @@
 //! Resident engine process boundary and authenticated local sessions.
 
+mod market_service;
+
+pub use market_service::MarketService;
+
 use std::{
     collections::{BTreeSet, VecDeque},
     fs::{self, OpenOptions},
@@ -15,16 +19,17 @@ use std::{
 };
 
 use axiusflow_local_engine_protocol::{
-    ClientHello, ClientKind, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault,
-    Goodbye, HotSeries, PROTOCOL_VERSION, ResourceMode, RestoreWorkspace, SetSelection,
-    SetViewport, SetWatchlist, WorkspaceState, encode_envelope, envelope,
+    AttachClient, ClientHello, ClientKind, DetachClient, EngineFaultCode, EngineReady, Envelope,
+    EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION, RegisterConsumer, RemoveConsumer,
+    ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey, SetSelection, SetViewport,
+    SetWatchlist, ViewportDemand, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
-/// Stable per-user local socket name for protocol version one.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v1";
+/// Stable per-user local socket name for protocol version three.
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v3";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 
@@ -667,6 +672,99 @@ impl EngineClient {
             _ => Err("engine returned an unexpected workspace reply".to_string()),
         }
     }
+
+    /// Attaches one stable desktop lifetime to engine-owned market state.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn attach_client(&mut self, client_id: u64) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::AttachClient(AttachClient { client_id }))
+    }
+
+    /// Registers one independently generated chart consumer.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn register_consumer(
+        &mut self,
+        client_id: u64,
+        workspace_id: u64,
+        consumer_id: u64,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::RegisterConsumer(RegisterConsumer {
+                client_id,
+                workspace_id,
+                consumer_id,
+            }))
+    }
+
+    /// Replaces one consumer's authoritative bar-series demand.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn set_series_demand(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        series: SeriesKey,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::SeriesDemand(SeriesDemand {
+                consumer_id,
+                generation,
+                series: Some(series),
+            }))
+    }
+
+    /// Updates the visible range for the exact current consumer generation.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn set_market_viewport(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::ViewportDemand(ViewportDemand {
+                consumer_id,
+                generation,
+                start_unix_nanos,
+                end_unix_nanos,
+            }))
+    }
+
+    /// Receives the next market response from the authenticated engine session.
+    ///
+    /// # Errors
+    /// Returns an error for connection, framing, protocol-version, or payload failure.
+    pub fn receive_market_event(&mut self) -> Result<envelope::Payload, String> {
+        self.connection.receive()
+    }
+
+    /// Removes one consumer without affecting shared engine state.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn remove_market_consumer(&mut self, consumer_id: u64) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::RemoveConsumer(RemoveConsumer {
+                consumer_id,
+            }))
+    }
+
+    /// Releases all market demand owned by one desktop lifetime.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn detach_client(&mut self, client_id: u64) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::DetachClient(DetachClient { client_id }))
+    }
 }
 
 fn reached_failure(detail: String) -> EngineConnectionFailure {
@@ -859,6 +957,36 @@ pub fn serve_client_with_state(
     engine_epoch: u64,
     state: &EngineState,
 ) -> Result<(), String> {
+    serve_client_with_services(stream, installation_token, engine_epoch, state, None)
+}
+
+/// Serves one authenticated client with workspace and resident market ownership.
+///
+/// # Errors
+/// Returns an error for I/O, framing, authentication setup, or malformed requests.
+pub fn serve_client_with_market(
+    stream: LocalSocketStream,
+    installation_token: &[u8],
+    engine_epoch: u64,
+    state: &EngineState,
+    market: &MarketService,
+) -> Result<(), String> {
+    serve_client_with_services(
+        stream,
+        installation_token,
+        engine_epoch,
+        state,
+        Some(market),
+    )
+}
+
+fn serve_client_with_services(
+    stream: LocalSocketStream,
+    installation_token: &[u8],
+    engine_epoch: u64,
+    state: &EngineState,
+    market: Option<&MarketService>,
+) -> Result<(), String> {
     if installation_token.len() != INSTALLATION_TOKEN_BYTES {
         return Err("installation credential has an invalid length".to_string());
     }
@@ -881,12 +1009,27 @@ pub fn serve_client_with_state(
         engine_epoch,
         workspace_revision: state.workspace().workspace_revision,
     }))?;
-    serve_authenticated_session(&mut connection, state)
+    serve_authenticated_session(&mut connection, state, market)
 }
 
 fn serve_authenticated_session(
     connection: &mut FramedConnection,
     state: &EngineState,
+    market: Option<&MarketService>,
+) -> Result<(), String> {
+    let mut attached_client = None;
+    let result = serve_authenticated_messages(connection, state, market, &mut attached_client);
+    if let (Some(market), Some(client_id)) = (market, attached_client) {
+        let _ = market.detach(client_id);
+    }
+    result
+}
+
+fn serve_authenticated_messages(
+    connection: &mut FramedConnection,
+    state: &EngineState,
+    market: Option<&MarketService>,
+    attached_client: &mut Option<u64>,
 ) -> Result<(), String> {
     loop {
         let payload = match connection.receive() {
@@ -913,12 +1056,147 @@ fn serve_authenticated_session(
                 }))?;
                 return Ok(());
             }
-            _ => connection.send(envelope::Payload::Fault(Fault {
-                code: EngineFaultCode::MalformedMessage as i32,
-                redacted_detail: "message is invalid in the current engine state".to_string(),
-            }))?,
+            payload => {
+                if !handle_market_message(connection, market, attached_client, payload)? {
+                    connection.send(envelope::Payload::Fault(Fault {
+                        code: EngineFaultCode::MalformedMessage as i32,
+                        redacted_detail: "message is invalid in the current engine state"
+                            .to_string(),
+                    }))?;
+                }
+            }
         }
     }
+}
+
+fn handle_market_message(
+    connection: &mut FramedConnection,
+    market: Option<&MarketService>,
+    attached_client: &mut Option<u64>,
+    payload: envelope::Payload,
+) -> Result<bool, String> {
+    let market = match payload {
+        envelope::Payload::AttachClient(attachment) => {
+            let market = require_market(market)?;
+            if attached_client.is_some() {
+                send_market_fault(connection, "client is already attached")?;
+            } else if let Err(error) = market.attach(attachment.client_id) {
+                send_market_fault(connection, error)?;
+            } else {
+                *attached_client = Some(attachment.client_id);
+            }
+            return Ok(true);
+        }
+        envelope::Payload::DetachClient(detachment) => {
+            let market = require_market(market)?;
+            if *attached_client != Some(detachment.client_id) {
+                send_market_fault(connection, "client attachment does not match")?;
+            } else if let Err(error) = market.detach(detachment.client_id) {
+                send_market_fault(connection, error)?;
+            } else {
+                *attached_client = None;
+            }
+            return Ok(true);
+        }
+        payload @ (envelope::Payload::RegisterConsumer(_)
+        | envelope::Payload::SeriesDemand(_)
+        | envelope::Payload::ViewportDemand(_)
+        | envelope::Payload::VisibilityDemand(_)
+        | envelope::Payload::RemoveConsumer(_)) => (require_market(market)?, payload),
+        _ => return Ok(false),
+    };
+    dispatch_market_command(connection, market.0, *attached_client, market.1)?;
+    Ok(true)
+}
+
+fn dispatch_market_command(
+    connection: &mut FramedConnection,
+    market: &MarketService,
+    attached_client: Option<u64>,
+    payload: envelope::Payload,
+) -> Result<(), String> {
+    match payload {
+        envelope::Payload::RegisterConsumer(registration) => {
+            if attached_client != Some(registration.client_id) {
+                send_market_fault(connection, "consumer owner is not attached")?;
+            } else if let Err(error) = market.register_consumer(
+                registration.client_id,
+                registration.workspace_id,
+                registration.consumer_id,
+            ) {
+                send_market_fault(connection, error)?;
+            }
+        }
+        envelope::Payload::SeriesDemand(demand) => {
+            let Some(client_id) = attached_client else {
+                send_market_fault(connection, "client must attach before setting demand")?;
+                return Ok(());
+            };
+            let Some(series) = demand.series else {
+                send_market_fault(connection, "series demand has no identity")?;
+                return Ok(());
+            };
+            match market.set_demand(client_id, demand.consumer_id, demand.generation, &series) {
+                Ok(messages) => {
+                    for message in messages {
+                        connection.send(message)?;
+                    }
+                }
+                Err(error) => send_market_fault(connection, error)?,
+            }
+        }
+        envelope::Payload::ViewportDemand(viewport) => {
+            let Some(client_id) = attached_client else {
+                send_market_fault(connection, "client must attach before setting viewport")?;
+                return Ok(());
+            };
+            if let Err(error) = market.set_viewport(
+                client_id,
+                viewport.consumer_id,
+                viewport.generation,
+                viewport.start_unix_nanos,
+                viewport.end_unix_nanos,
+            ) {
+                send_market_fault(connection, error)?;
+            }
+        }
+        envelope::Payload::VisibilityDemand(visibility) => {
+            let Some(client_id) = attached_client else {
+                send_market_fault(connection, "client must attach before setting visibility")?;
+                return Ok(());
+            };
+            if let Err(error) =
+                market.set_visibility(client_id, visibility.consumer_id, visibility.visible)
+            {
+                send_market_fault(connection, error)?;
+            }
+        }
+        envelope::Payload::RemoveConsumer(removal) => {
+            let Some(client_id) = attached_client else {
+                send_market_fault(connection, "client must attach before removing a consumer")?;
+                return Ok(());
+            };
+            if let Err(error) = market.remove_consumer(client_id, removal.consumer_id) {
+                send_market_fault(connection, error)?;
+            }
+        }
+        _ => unreachable!("market payloads were filtered above"),
+    }
+    Ok(())
+}
+
+fn require_market(market: Option<&MarketService>) -> Result<&MarketService, String> {
+    market.ok_or_else(|| "market service is unavailable in this engine session".to_string())
+}
+
+fn send_market_fault(
+    connection: &mut FramedConnection,
+    detail: impl Into<String>,
+) -> Result<(), String> {
+    connection.send(envelope::Payload::Fault(Fault {
+        code: EngineFaultCode::Cancelled as i32,
+        redacted_detail: detail.into(),
+    }))
 }
 
 fn apply_selection(
@@ -1000,17 +1278,84 @@ mod tests {
 
     use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 
-    use super::{bind_listener, connect_or_start_engine_named};
+    use axiusflow_local_engine_protocol::{SeriesKey, envelope};
+    use axiusflow_market_data::MarketBar;
+
+    use super::{
+        EngineClient, EngineState, MarketService, bind_listener, connect_or_start_engine_named,
+        serve_client_with_market,
+    };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
-    #[test]
-    fn reached_endpoint_is_retried_without_spawning_another_engine() {
-        let socket_name = format!(
-            "axiusflow-engine-reached-test-{}-{}",
+    fn socket_name(label: &str) -> String {
+        format!(
+            "axiusflow-engine-{label}-test-{}-{}",
             std::process::id(),
             NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
-        );
+        )
+    }
+
+    #[test]
+    fn authenticated_market_demand_crosses_ipc_and_returns_engine_snapshot() {
+        let socket_name = socket_name("market");
+        let listener = bind_listener(&socket_name).expect("bind market endpoint");
+        let token = [7_u8; 32];
+        let market = MarketService::start_fixture(vec![MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: 60,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        }])
+        .expect("fixture market starts");
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept market client");
+            serve_client_with_market(stream, &token, 9, &EngineState::default(), &market)
+                .expect("serve market client");
+        });
+        let mut client =
+            EngineClient::connect(&socket_name, &token).expect("connect market client");
+        client.attach_client(1).expect("attach client");
+        client
+            .register_consumer(1, 1, 1)
+            .expect("register consumer");
+        client
+            .set_series_demand(
+                1,
+                1,
+                SeriesKey {
+                    provider: "coinbase".to_string(),
+                    instrument_id: "instrument:coinbase:btc:usd".to_string(),
+                    interval_seconds: 60,
+                    definition_revision: 1,
+                },
+            )
+            .expect("send demand");
+        assert!(matches!(
+            client.receive_market_event().expect("resolving state"),
+            envelope::Payload::SeriesState(state) if state.generation == 1
+        ));
+        assert!(matches!(
+            client.receive_market_event().expect("covering snapshot"),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.bars.len() == 1
+                    && snapshot.price_scale == 2
+                    && snapshot.quantity_scale == 8
+        ));
+        assert!(matches!(
+            client.receive_market_event().expect("ready state"),
+            envelope::Payload::SeriesState(state) if state.generation == 1
+        ));
+        drop(client);
+        server.join().expect("join market server");
+    }
+
+    #[test]
+    fn reached_endpoint_is_retried_without_spawning_another_engine() {
+        let socket_name = socket_name("reached");
         let listener = bind_listener(&socket_name).expect("bind occupied endpoint");
         let accepting = Arc::new(AtomicBool::new(true));
         let server_accepting = Arc::clone(&accepting);

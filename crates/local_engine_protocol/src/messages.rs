@@ -426,6 +426,9 @@ pub struct SeriesSnapshot {
     /// Ordered covering values.
     #[prost(message, repeated, tag = "7")]
     pub bars: Vec<MarketBar>,
+    /// Monotonic publication generation within the provider session.
+    #[prost(uint64, tag = "8")]
+    pub publication_generation: u64,
 }
 
 /// Incremental bar publication after a covering snapshot.
@@ -449,6 +452,9 @@ pub struct SeriesUpdate {
     /// True while the current interval is still forming.
     #[prost(bool, tag = "6")]
     pub forming: bool,
+    /// Monotonic publication generation within the provider session.
+    #[prost(uint64, tag = "7")]
+    pub publication_generation: u64,
 }
 
 /// Engine-owned provider health publication.

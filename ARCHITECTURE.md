@@ -22,22 +22,24 @@ This document describes the current architectural direction. Source code, tests,
 
 Axiusflow ships two local application processes:
 
-- `axiusflow_desktop` owns the GPUI window, terminal interaction, the active provider worker, local chart history, presentation state, and chart integration.
-- `axiusflow_engine` is a per-user resident local process retained only for authenticated workspace, watchlist, viewport, hot-set, resource-mode, and activation persistence. It owns no provider session or market publication path.
+- `axiusflow_desktop` owns the GPUI window, terminal interaction, presentation state, chart integration, and a bounded authenticated engine client. The default Coinbase path owns no Coinbase provider or history adapter. The temporary `--rithmic-test` path and explicit legacy Coinbase smoke command still use direct desktop workers until their later migration phases.
+- `axiusflow_engine` is the per-user resident local process. It owns authenticated workspace/watchlist/viewport/hot-set persistence and the first production market slice: one bounded market coordinator, one Coinbase public-history worker, canonical in-memory BTC-USD one-minute bars, and per-consumer IPC snapshots. Coinbase realtime, durable market history, Rithmic, and complete warm lifecycle policy are not engine-owned yet.
 
-The shipping desktop starts its active Coinbase or Rithmic runtime directly on a bounded background worker. Local segments or provider snapshots are published into the desktop mailbox without a protobuf round trip, then applied to the chart bridge on GPUI. The separately authenticated engine persists workspace intent only; selection and viewport messages update durable state and never start provider work.
+The default shipping desktop starts a background `EngineClient`, attaches random process-lifetime client and consumer identities, and sends generation-fenced BTC-USD one-minute demand over protocol v3. The engine resolves a memory hit or schedules the single Coinbase history adapter away from its coordinator, validates and stores fixed-point bars once, and returns an immutable snapshot. The desktop validates the IPC snapshot into the existing application model, publishes through the bounded UI mailbox, and hands the covering snapshot to Origin on GPUI.
 
 ```text
-Provider sockets
-    -> provider adapters
-    -> provider runtime and coordinator
-    -> canonical market/history models
-    -> bounded in-process desktop mailbox
-    -> desktop presentation model and next-frame timing feedback
+GPUI demand
+    -> bounded desktop EngineClient worker
+    -> authenticated protocol-v3 local IPC
+    -> resident MarketEngine coordinator
+    -> single Coinbase public-history worker
+    -> canonical fixed-point bars and bounded SeriesStore
+    -> immutable per-consumer IPC snapshot
+    -> desktop application model and bounded UI mailbox
     -> terminal UI and Origin chart renderer
 
-Resident engine
-    -> authenticated local workspace/watchlist/hot-set persistence
+Temporary direct path
+    -> Rithmic test runtime or explicit Coinbase legacy smoke only
 ```
 
 ## Workspace boundaries
@@ -52,7 +54,7 @@ Resident engine
 - `crates/domain/instruments`: provider-neutral instrument identity.
 - `crates/domain/market_data`: canonical bars, intervals, order-book state, and related market semantics.
 - `crates/application`: generation-aware client models, provenance validation, replay snapshots, and stream publication behavior.
-- `crates/market_engine`: headless target engine core with one explicitly owned demand registry, provider-session registry, bounded canonical series store, and immutable per-consumer publications. It currently has no provider adapter, storage, IPC, GPUI, thread, or production desktop path attached; that cutover begins with the Coinbase engine slice.
+- `crates/market_engine`: headless engine core with one explicitly owned demand registry, provider-session registry, bounded canonical series store, and immutable per-consumer publications. `apps/engine` owns and drives it on one coordinator thread; the core itself remains free of provider adapters, storage, IPC, GPUI, threads, and globals.
 
 These crates must not depend on UI or a particular provider.
 
@@ -71,7 +73,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 - `crates/desktop_storage`: SQLite metadata, encrypted local segments, and storage lifecycle.
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
-- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 3 defines the target client/consumer/generation boundary, but the current engine service does not handle those market messages yet and the shipping desktop market path remains in-process.
+- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 3 is active for the default Coinbase historical path and carries consumer generation, provider session generation, publication generation, decimal precision, and canonical bars.
 - `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
 - `crates/transport`: small transport framing primitives.
 
@@ -79,23 +81,26 @@ Persistent writes use revisioned or transactional publication so a crash cannot 
 
 ## Local market-data execution
 
-The implemented local path is:
+The default implemented Coinbase path is:
 
 ```text
-Coinbase or Rithmic socket
-    -> provider-specific decode and continuity validation
-    -> ProviderSessionDriver generation fencing
-    -> canonical MarketEvent / MarketBar values
-    -> provider-history scheduling and coverage repair
-    -> encrypted immutable local segments plus SQLite metadata
-    -> worker-owned decoded cache and history/live handoff
-    -> bounded desktop mailbox
+GPUI demand
+    -> desktop EngineClient worker
+    -> authenticated local IPC
+    -> engine MarketEngine coordinator
+    -> CoinbaseHistoryCapabilityAdapter worker
+    -> canonical MarketBar values
+    -> bounded shared SeriesStore
+    -> fixed-point IPC snapshot
+    -> desktop validation and bounded mailbox
     -> chart bridge and Origin Charts
 ```
 
+This first production slice is deliberately BTC-USD one-minute completed history only. It does not claim Coinbase realtime, history/live handoff, engine-owned persistence, multi-timeframe or multi-symbol UI behavior, Rithmic migration, or a completed warm-engine product. The Rithmic test path and legacy Coinbase smoke path still use the direct runtime described below, and must not run as a second default Coinbase feed.
+
 `ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
 
-`desktop_market_runtime` is the only owner of visible-range hydration, coverage repair, history/live handoff, provider-neutral aggregation policy, stale-work cancellation, mailbox backpressure, chart/DOM publication, and overflow/gap/reconnect recovery. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, and paging. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second hydration owner.
+`desktop_market_runtime` temporarily remains the shared UI mailbox/model contract and owns the direct Rithmic test runtime plus explicit legacy Coinbase smoke behavior. It no longer owns the default Coinbase history request. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, and paging. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second market-state owner.
 
 The path is local by construction. Provider credentials stay on the user's machine, provider traffic terminates in a local worker, and durable history is stored under the user's local data root. No remote Axiusflow service, licensing gateway, or network chart service exists in the product architecture.
 
@@ -117,8 +122,11 @@ The durable identity includes resolution and source revision, so native and deri
 
 ## Concurrency model
 
-- Provider sessions own their sockets and callback generations.
-- The in-process desktop market worker owns active provider orchestration, history scheduling, storage access, aggregation, and history/live handoff.
+- The resident market coordinator is the single mutable owner of default Coinbase demand, provider generation, cached series, and consumer publications.
+- Each market command is authorized against the authenticated session's attached client identity; one desktop client cannot mutate another client's consumers.
+- One bounded engine history worker owns the Coinbase history adapter; provider I/O never blocks GPUI or the market coordinator.
+- The bounded desktop engine-client worker owns IPC reads and application-model conversion, never provider execution or canonical market state.
+- Direct Rithmic test and explicit Coinbase smoke workers retain their legacy provider-session ownership until their named migration phases.
 - Blocking history and storage work stays off GPUI and communicates through bounded channels.
 - Selection generations make obsolete symbol and timeframe results stale; stale work cannot overwrite the new selection.
 - The desktop command boundary coalesces selection changes to the newest state until the bounded provider-worker mailbox accepts it; queue pressure must never silently discard the active selection.
@@ -242,8 +250,10 @@ cargo build --workspace --all-targets --all-features
 cargo test --workspace --all-features
 ```
 
-The first migration preparation slice is protocol-only. It does not create a second provider runtime: market demand and series publication messages exist for the forthcoming engine owner, while all live provider execution still follows the desktop-owned path described above.
+The first migration preparation slice was protocol-only and created no second provider runtime.
 
-The second preparation slice adds the headless `market_engine` state owner. It is deterministic library code rather than a parallel runtime: no provider socket is started and no desktop message is routed through it yet. Its bounded store shares one immutable bar snapshot across matching consumers, consumer generations fence stale presentation, provider generations fence stale sessions, and client detach removes only that client's demand.
+The second preparation slice added the headless `market_engine` state owner. Its bounded store shares one immutable bar snapshot across matching consumers, consumer generations fence stale presentation, provider generations fence stale sessions, and client detach removes only that client's demand.
+
+The current third slice connects default BTC-USD one-minute historical demand through authenticated IPC. An engine-owned coordinator and one Coinbase history worker populate `MarketEngine`; the desktop bridge validates precision and provenance and reuses the existing bounded application/UI publication boundary. Deterministic tests cover service cache sharing, authenticated IPC snapshot delivery, fixed-point desktop conversion, stale generations, and disconnect cleanup. A clean Windows release run with no pre-existing engine spawned the sibling process and rendered visible Origin candles while remaining responsive. Realtime, switching, engine-owned persistence, and Rithmic remain later gates.
 
 Focused conformance and release-mode performance checks supplement this gate for provider, persistence, IPC, UI, and latency changes. A passing compile is not proof of runtime correctness.

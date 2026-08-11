@@ -7,6 +7,8 @@ pub struct SeriesSnapshot {
     pub series: BarSeriesKey,
     pub provider_generation: ProviderGeneration,
     pub publication_generation: u64,
+    pub price_scale: u8,
+    pub quantity_scale: u8,
     pub bars: Arc<[MarketBar]>,
 }
 
@@ -31,9 +33,14 @@ impl SeriesStore {
         &mut self,
         series: BarSeriesKey,
         provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
         bars: Vec<MarketBar>,
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
         series.validate()?;
+        if price_scale > 18 || quantity_scale > 18 {
+            return Err(EngineError::InvalidSeriesPrecision);
+        }
         validate_bars(&bars)?;
         let current = self.series.get(&series);
         if let Some(current) = current {
@@ -44,7 +51,10 @@ impl SeriesStore {
                 });
             }
             if provider_generation == current.provider_generation {
-                if current.bars.as_ref() == bars {
+                if current.bars.as_ref() == bars
+                    && current.price_scale == price_scale
+                    && current.quantity_scale == quantity_scale
+                {
                     return Ok(Arc::clone(current));
                 }
                 if bars.last().map(|bar| bar.source_sequence)
@@ -83,6 +93,8 @@ impl SeriesStore {
             series: series.clone(),
             provider_generation,
             publication_generation,
+            price_scale,
+            quantity_scale,
             bars: bars.into(),
         });
         self.total_bars = projected;
