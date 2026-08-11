@@ -2,18 +2,17 @@
 
 use crate::frame_poll_gate::FramePollGate;
 
-use axiusflow_application::ReplaySnapshot;
+use axiusflow_application::{
+    MarketBarClientModel, MarketBarModelOutcome, ReplaySnapshot, ReplayStreamUpdate,
+};
 use axiusflow_desktop_market_runtime::market_worker::{
     FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
     market_worker_channel,
 };
-use axiusflow_desktop_market_runtime::rithmic_live_chart::{
-    RithmicChartGeneration, RithmicLiveChart, RithmicLiveChartError,
-};
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{
-    AggressorSide, BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
-    MarketTrade, OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
+    BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
+    OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
 use axiusflow_provider_history::{
     HandoffCoordinator, HandoffState, SequencedHistory, VerifiedHistorySnapshot,
@@ -64,7 +63,7 @@ struct DesktopBurstEvidence {
 
 #[derive(Serialize)]
 struct DesktopGapRecoveryEvidence {
-    trade_ordering_fault_rejected: bool,
+    chart_ordering_fault_rejected: bool,
     history: HistoryGapRecoveryEvidence,
     depth: DepthGapRecoveryEvidence,
     generation_fencing: GenerationFencingEvidence,
@@ -91,7 +90,7 @@ struct GenerationFencingEvidence {
 
 #[derive(Serialize)]
 struct ChartGenerationFencingEvidence {
-    stale_chart_trade_rejected_without_mutation: bool,
+    stale_chart_snapshot_rejected_without_mutation: bool,
 }
 
 #[derive(Serialize)]
@@ -236,7 +235,7 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let gap_recovery = collect_gap_recovery_evidence()?;
 
     Ok(DesktopBurstEvidence {
-        schema_version: 3,
+        schema_version: 4,
         evidence_scope: "deterministic_desktop_burst_and_frame_conflation",
         burst_updates: BURST_UPDATES,
         mailbox_capacity,
@@ -260,12 +259,12 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
 
 fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn Error>> {
     let evidence = DesktopGapRecoveryEvidence {
-        trade_ordering_fault_rejected: collect_trade_gap_evidence()?,
+        chart_ordering_fault_rejected: collect_chart_ordering_evidence()?,
         history: collect_history_gap_evidence()?,
         depth: collect_depth_gap_evidence()?,
         generation_fencing: collect_generation_fencing_evidence()?,
     };
-    if !evidence.trade_ordering_fault_rejected
+    if !evidence.chart_ordering_fault_rejected
         || !evidence.history.history_gap_requires_snapshot
         || !evidence.history.history_covering_snapshot_recovers
         || !evidence.depth.depth_gap_clears_book
@@ -273,7 +272,7 @@ fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn
         || !evidence
             .generation_fencing
             .chart
-            .stale_chart_trade_rejected_without_mutation
+            .stale_chart_snapshot_rejected_without_mutation
         || !evidence
             .generation_fencing
             .history
@@ -296,61 +295,36 @@ fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn
     Ok(evidence)
 }
 
-fn collect_trade_gap_evidence() -> Result<bool, Box<dyn Error>> {
+fn collect_chart_ordering_evidence() -> Result<bool, Box<dyn Error>> {
     let mut fixture = FixtureMarketWorker::try_new()?;
     let snapshot = fixture.publish_snapshot(2)?.snapshot;
-    let generation = RithmicChartGeneration {
-        selection: NonZeroUsize::MIN,
-        series: NonZeroUsize::MIN,
-    };
-    let seed = snapshot
-        .bars()
-        .last()
-        .ok_or("fixture snapshot did not contain a chart seed")?;
-    let first_trade_timestamp = seed
-        .provenance()
-        .exchange_timestamp_unix_nanos
-        .checked_add(1)
-        .ok_or("fixture timestamp overflowed")?;
-    let trade = readiness_trade(&snapshot, 100, first_trade_timestamp)?;
-    let mut chart = RithmicLiveChart::from_history(generation, &snapshot)?;
-    chart.apply_trade(generation, &trade)?;
-    Ok(matches!(
-        chart.apply_trade(generation, &trade),
-        Err(RithmicLiveChartError::OutOfOrderTrade)
-    ))
+    let mut model = MarketBarClientModel::new(NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN));
+    model.apply_update(ReplayStreamUpdate::Snapshot(snapshot.clone()))?;
+    let before = model.current_generation().cloned();
+    Ok(model
+        .apply_update(ReplayStreamUpdate::Snapshot(snapshot))
+        .is_err()
+        && model.current_generation() == before.as_ref())
 }
 
 fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Box<dyn Error>> {
     let mut fixture = FixtureMarketWorker::try_new()?;
-    let snapshot = fixture.publish_snapshot(2)?.snapshot;
-    let current_generation = RithmicChartGeneration {
-        selection: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
-        series: NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN),
-    };
-    let stale_generation = RithmicChartGeneration {
-        selection: NonZeroUsize::MIN,
-        series: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
-    };
-    let timestamp = snapshot
-        .bars()
-        .last()
-        .ok_or("fixture snapshot did not contain a chart seed")?
-        .provenance()
-        .exchange_timestamp_unix_nanos
-        .checked_add(1)
-        .ok_or("fixture timestamp overflowed")?;
-    let trade = readiness_trade(&snapshot, 101, timestamp)?;
-    let mut chart = RithmicLiveChart::from_history(current_generation, &snapshot)?;
-    let stale_chart_trade_rejected = matches!(
-        chart.apply_trade(stale_generation, &trade),
-        Err(RithmicLiveChartError::StaleGeneration)
-    );
-    let stale_chart_trade_rejected_without_mutation = stale_chart_trade_rejected
-        && matches!(
-            chart.apply_trade(current_generation, &trade),
-            Ok(publication) if publication.generation == current_generation
-        );
+    let stale_snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let current_snapshot = fixture.publish_snapshot(2)?.snapshot;
+    let mut model = MarketBarClientModel::new(NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN));
+    let installed = model.apply_update(ReplayStreamUpdate::Snapshot(stale_snapshot.clone()))?;
+    if !matches!(installed, MarketBarModelOutcome::Published(_)) {
+        return Err("initial chart snapshot was not published".into());
+    }
+    let advanced = model.apply_update(ReplayStreamUpdate::Snapshot(current_snapshot))?;
+    if !matches!(advanced, MarketBarModelOutcome::Published(_)) {
+        return Err("newer chart snapshot was not published".into());
+    }
+    let before = model.current_generation().cloned();
+    let stale_chart_snapshot_rejected_without_mutation = model
+        .apply_update(ReplayStreamUpdate::Snapshot(stale_snapshot))
+        .is_err()
+        && model.current_generation() == before.as_ref();
 
     let mut history = HandoffCoordinator::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
     history.install_snapshot(history_snapshot(1, 2)?)?;
@@ -399,7 +373,7 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
 
     Ok(GenerationFencingEvidence {
         chart: ChartGenerationFencingEvidence {
-            stale_chart_trade_rejected_without_mutation,
+            stale_chart_snapshot_rejected_without_mutation,
         },
         history: HistoryGenerationFencingEvidence {
             stale_history_snapshot_rejected,
@@ -409,35 +383,6 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
             retired_dom_selection_ignored_without_mutation,
             current_dom_selection_recovers,
         },
-    })
-}
-
-fn readiness_trade(
-    snapshot: &ReplaySnapshot,
-    source_sequence: u64,
-    timestamp: i64,
-) -> Result<MarketTrade, Box<dyn Error>> {
-    let seed = snapshot
-        .bars()
-        .last()
-        .ok_or("fixture snapshot did not contain a chart seed")?;
-    Ok(MarketTrade {
-        metadata: EventMetadata {
-            provider_id: seed.provenance().source_id.clone(),
-            instrument_id: snapshot.instrument().instrument_id.as_str().to_string(),
-            entitlement_id: seed.provenance().entitlement_revision.clone(),
-            source_sequence,
-            session_generation: 7,
-            timestamps: QualifiedTimestamp {
-                exchange_unix_nanos: Some(timestamp),
-                provider_unix_nanos: Some(timestamp),
-                received_unix_nanos: timestamp,
-            },
-        },
-        trade_id: format!("readiness-trade-{source_sequence}"),
-        price: seed.value().close,
-        quantity: 1,
-        aggressor: AggressorSide::Unknown,
     })
 }
 
@@ -952,7 +897,7 @@ mod tests {
         assert!(evidence.bounded_latest_state_conflation);
         assert!(evidence.single_frame_drain_gate);
         assert!(evidence.working_set_within_bound);
-        assert!(evidence.gap_recovery.trade_ordering_fault_rejected);
+        assert!(evidence.gap_recovery.chart_ordering_fault_rejected);
         assert!(
             evidence
                 .gap_recovery
@@ -965,7 +910,7 @@ mod tests {
                 .gap_recovery
                 .generation_fencing
                 .chart
-                .stale_chart_trade_rejected_without_mutation
+                .stale_chart_snapshot_rejected_without_mutation
         );
         assert!(
             evidence
@@ -979,7 +924,7 @@ mod tests {
     #[test]
     fn gaps_fail_closed_and_covering_snapshots_recover() {
         let evidence = collect_gap_recovery_evidence().expect("gap recovery evidence passes");
-        assert!(evidence.trade_ordering_fault_rejected);
+        assert!(evidence.chart_ordering_fault_rejected);
         assert!(evidence.history.history_gap_requires_snapshot);
         assert!(evidence.history.history_covering_snapshot_recovers);
         assert!(evidence.depth.depth_gap_clears_book);
@@ -988,7 +933,7 @@ mod tests {
             evidence
                 .generation_fencing
                 .chart
-                .stale_chart_trade_rejected_without_mutation
+                .stale_chart_snapshot_rejected_without_mutation
         );
         assert!(
             evidence
@@ -1020,7 +965,11 @@ mod tests {
     fn stale_generations_never_mutate_current_models() {
         let evidence =
             collect_generation_fencing_evidence().expect("generation fencing evidence passes");
-        assert!(evidence.chart.stale_chart_trade_rejected_without_mutation);
+        assert!(
+            evidence
+                .chart
+                .stale_chart_snapshot_rejected_without_mutation
+        );
         assert!(evidence.history.stale_history_snapshot_rejected);
         assert!(evidence.history.newer_history_snapshot_recovers);
         assert!(evidence.dom.retired_dom_selection_ignored_without_mutation);

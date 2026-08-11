@@ -735,6 +735,8 @@ fn handle_market_message(
         | envelope::Payload::ViewportDemand(_)
         | envelope::Payload::VisibilityDemand(_)
         | envelope::Payload::RemoveConsumer(_)
+        | envelope::Payload::SearchProviderInstruments(_)
+        | envelope::Payload::SelectProviderInstrument(_)
         | envelope::Payload::PollMarketEvent(_)) => (require_market(market)?, payload),
         _ => return Ok(false),
     };
@@ -748,6 +750,13 @@ fn dispatch_market_command(
     attached_client: Option<u64>,
     payload: envelope::Payload,
 ) -> Result<(), String> {
+    if matches!(
+        &payload,
+        envelope::Payload::SearchProviderInstruments(_)
+            | envelope::Payload::SelectProviderInstrument(_)
+    ) {
+        return dispatch_provider_catalog_command(connection, market, attached_client, payload);
+    }
     match payload {
         envelope::Payload::RegisterConsumer(registration) => {
             if attached_client != Some(registration.client_id) {
@@ -829,6 +838,34 @@ fn dispatch_market_command(
             }
         }
         _ => unreachable!("market payloads were filtered above"),
+    }
+    Ok(())
+}
+
+fn dispatch_provider_catalog_command(
+    connection: &mut FramedConnection,
+    market: &MarketService,
+    attached_client: Option<u64>,
+    payload: envelope::Payload,
+) -> Result<(), String> {
+    let Some(client_id) = attached_client else {
+        send_market_fault(
+            connection,
+            "client must attach before using the provider catalog",
+        )?;
+        return Ok(());
+    };
+    let result = match payload {
+        envelope::Payload::SearchProviderInstruments(search) => {
+            market.search_provider_instruments(client_id, search)
+        }
+        envelope::Payload::SelectProviderInstrument(selection) => {
+            market.select_provider_instrument(client_id, selection)
+        }
+        _ => unreachable!("provider catalog payloads were filtered above"),
+    };
+    if let Err(error) = result {
+        send_market_fault(connection, error)?;
     }
     Ok(())
 }

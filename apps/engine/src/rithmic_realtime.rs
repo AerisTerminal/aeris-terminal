@@ -1,6 +1,7 @@
 //! Engine-owned Rithmic trade-session lifecycle.
 
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError},
     thread,
@@ -8,29 +9,53 @@ use std::{
 };
 
 use axiusflow_desktop_provider_runtime::{
-    DesktopProviderConfig, DesktopProviderRuntime, InstrumentDescriptor, ProviderSessionEvent,
+    DesktopProviderConfig, DesktopProviderRuntime, DesktopProviderState, InstrumentDescriptor,
+    ProviderSessionEvent, SessionGeneration,
 };
-use axiusflow_local_engine_protocol::InstallProviderInstrument;
+use axiusflow_local_engine_protocol::{
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument,
+};
 use axiusflow_market_data::{DepthSnapshot, MarketEvent, MarketTrade};
 use axiusflow_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
 };
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicEnvironmentEvent,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent,
+    RithmicCatalogRejection, RithmicEnvironmentEvent, RithmicInstrumentSelection,
     RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
-    RithmicRetryScheduler, RithmicSessionLimits, apply_rithmic_environment_event,
-    try_recv_rithmic_event,
+    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
+    SearchPattern, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 
 const CALLBACK_CAPACITY: usize = 256;
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_WAIT: Duration = Duration::from_millis(16);
+const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const ENVIRONMENT_CAPACITY: usize = 8;
 
 pub(crate) enum RithmicRealtimeControl {
     Select(InstallProviderInstrument),
+}
+
+pub(crate) enum RithmicCatalogControl {
+    Search(SearchProviderInstruments),
+    Select(SelectProviderInstrument),
+}
+
+pub(crate) enum RithmicCatalogEvent {
+    SearchCompleted(ProviderInstrumentSearchResult),
+    SelectionResolved {
+        consumer_id: u64,
+        instrument: InstallProviderInstrument,
+    },
+    Rejected {
+        rejection: ProviderCatalogRejected,
+        selection: bool,
+    },
 }
 
 pub(crate) enum RithmicRealtimeEvent {
@@ -64,6 +89,433 @@ impl EnvironmentState {
             RithmicEnvironmentEvent::Power(PowerEvent::Resumed) => self.suspended = false,
         }
     }
+}
+
+pub(crate) fn run_catalog(
+    controls: &Receiver<RithmicCatalogControl>,
+    publications: &SyncSender<RithmicCatalogEvent>,
+) {
+    let Ok((environment, mut environment_state)) = start_environment_monitors() else {
+        while let Ok(control) = controls.recv() {
+            reject_catalog_control(publications, control, None);
+        }
+        return;
+    };
+    let mut generation = 0_u64;
+    loop {
+        let Ok((runtime, events)) = open_catalog_runtime() else {
+            match controls.recv_timeout(RECONNECT_DELAY) {
+                Ok(control) => reject_catalog_control(publications, control, None),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        };
+        generation = next_generation(generation, generation);
+        match run_catalog_session(
+            runtime,
+            &events,
+            controls,
+            publications,
+            &environment,
+            &mut environment_state,
+            generation,
+        ) {
+            CatalogSessionExit::Retry(updated) => {
+                generation = updated;
+                thread::park_timeout(RECONNECT_DELAY);
+            }
+            CatalogSessionExit::Closed => return,
+        }
+    }
+}
+
+enum CatalogSessionExit {
+    Retry(u64),
+    Closed,
+}
+
+fn run_catalog_session(
+    mut runtime: Runtime,
+    events: &RithmicProviderEvents,
+    controls: &Receiver<RithmicCatalogControl>,
+    publications: &SyncSender<RithmicCatalogEvent>,
+    environment: &Receiver<EnvironmentMessage>,
+    environment_state: &mut EnvironmentState,
+    mut generation: u64,
+) -> CatalogSessionExit {
+    let mut retries = RithmicRetryScheduler::default();
+    let mut searches = BTreeMap::new();
+    let mut selections = BTreeMap::new();
+    if apply_current_environment(&mut runtime, events, &mut retries, *environment_state).is_err() {
+        return CatalogSessionExit::Retry(generation);
+    }
+    loop {
+        match poll_catalog_environment(
+            environment,
+            environment_state,
+            &mut runtime,
+            events,
+            &mut retries,
+        ) {
+            Ok(true) => {
+                generation = next_generation(generation, generation);
+                searches.clear();
+                selections.clear();
+            }
+            Ok(false) => {}
+            Err(()) => {
+                let _ = runtime.stop();
+                return CatalogSessionExit::Closed;
+            }
+        }
+        loop {
+            match controls.try_recv() {
+                Ok(control) => dispatch_catalog_control(
+                    &runtime,
+                    events,
+                    publications,
+                    generation,
+                    &mut searches,
+                    &mut selections,
+                    control,
+                ),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    let _ = runtime.stop();
+                    return CatalogSessionExit::Closed;
+                }
+            }
+        }
+        while let Some(callback) = events.try_recv_catalog() {
+            if active_generation(&runtime) != Some(callback.generation) {
+                continue;
+            }
+            publish_catalog_callback(
+                publications,
+                generation,
+                callback.event,
+                &mut searches,
+                &mut selections,
+            );
+        }
+        while events.has_ready() {
+            match try_recv_rithmic_event(&mut runtime, events, &mut retries, Instant::now()) {
+                Ok(Some(AppliedRithmicEvent::RetryScheduled(_)) | None) => break,
+                Ok(Some(AppliedRithmicEvent::TerminalFailure { .. })) | Err(_) => {
+                    let _ = runtime.stop();
+                    return CatalogSessionExit::Retry(generation);
+                }
+                Ok(Some(AppliedRithmicEvent::Semantic(_))) => {}
+            }
+        }
+        if retries
+            .retry_due(&mut runtime, Instant::now())
+            .is_ok_and(|started| started.is_some())
+        {
+            generation = next_generation(generation, generation);
+            searches.clear();
+            selections.clear();
+        }
+        thread::sleep(EVENT_WAIT);
+    }
+}
+
+fn poll_catalog_environment(
+    environment: &Receiver<EnvironmentMessage>,
+    state: &mut EnvironmentState,
+    runtime: &mut Runtime,
+    events: &RithmicProviderEvents,
+    retries: &mut RithmicRetryScheduler,
+) -> Result<bool, ()> {
+    let event = match environment.try_recv() {
+        Ok(EnvironmentMessage::Event(event)) => event,
+        Ok(EnvironmentMessage::Failed) | Err(TryRecvError::Disconnected) => return Err(()),
+        Err(TryRecvError::Empty) => return Ok(false),
+    };
+    state.observe(event);
+    apply_rithmic_environment_event(runtime, events, retries, event)
+        .map(|started| started.is_some())
+        .map_err(|_| ())
+}
+
+fn dispatch_catalog_control(
+    runtime: &Runtime,
+    events: &RithmicProviderEvents,
+    publications: &SyncSender<RithmicCatalogEvent>,
+    provider_generation: u64,
+    searches: &mut BTreeMap<usize, u64>,
+    selections: &mut BTreeMap<usize, u64>,
+    control: RithmicCatalogControl,
+) {
+    let Some(session_generation) = active_generation(runtime) else {
+        reject_catalog_control(publications, control, Some(provider_generation));
+        return;
+    };
+    match control {
+        RithmicCatalogControl::Search(search) => {
+            let Some(generation) = usize_generation(search.search_generation) else {
+                reject_catalog_control(
+                    publications,
+                    RithmicCatalogControl::Search(search),
+                    Some(provider_generation),
+                );
+                return;
+            };
+            let maximum_results = usize::try_from(search.maximum_results)
+                .ok()
+                .and_then(NonZeroUsize::new);
+            let request = maximum_results.and_then(|maximum_results| {
+                RithmicSymbolSearch::try_new(
+                    generation,
+                    search.query,
+                    None,
+                    None,
+                    None,
+                    SearchPattern::Equals,
+                    maximum_results,
+                )
+                .ok()
+            });
+            if request
+                .is_some_and(|request| events.search_symbols(session_generation, request).is_ok())
+            {
+                searches.insert(generation.get(), search.consumer_id);
+            } else {
+                reject_catalog_generation(
+                    publications,
+                    search.consumer_id,
+                    Some(provider_generation),
+                    search.search_generation,
+                    false,
+                );
+            }
+        }
+        RithmicCatalogControl::Select(selection) => {
+            let generation = usize_generation(selection.selection_generation);
+            let search_generation = usize_generation(selection.search_generation);
+            let subscription = RithmicReadOnlySubscription::try_new(false, true, false).ok();
+            let request = generation
+                .zip(search_generation)
+                .zip(subscription)
+                .and_then(|((generation, search_generation), subscription)| {
+                    RithmicInstrumentSelection::try_new(
+                        generation,
+                        search_generation,
+                        selection.symbol,
+                        selection.exchange,
+                        selection.entitlement_id,
+                        subscription,
+                    )
+                    .ok()
+                });
+            if request.is_some_and(|request| {
+                events
+                    .select_instrument(session_generation, request)
+                    .is_ok()
+            }) {
+                selections.insert(
+                    usize::try_from(selection.selection_generation).unwrap_or(usize::MAX),
+                    selection.consumer_id,
+                );
+            } else {
+                reject_catalog_generation(
+                    publications,
+                    selection.consumer_id,
+                    Some(provider_generation),
+                    selection.selection_generation,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+fn publish_catalog_callback(
+    publications: &SyncSender<RithmicCatalogEvent>,
+    provider_generation: u64,
+    event: AdapterCatalogEvent,
+    searches: &mut BTreeMap<usize, u64>,
+    selections: &mut BTreeMap<usize, u64>,
+) {
+    match event {
+        AdapterCatalogEvent::SearchCompleted {
+            search_generation,
+            symbols,
+            ..
+        } => {
+            let Some(consumer_id) = searches.remove(&search_generation.get()) else {
+                return;
+            };
+            let instruments = symbols
+                .results
+                .into_iter()
+                .map(|result| ProviderInstrumentSummary {
+                    symbol: result.symbol,
+                    exchange: result.exchange,
+                    name: result.name,
+                    product_code: result.product_code,
+                    instrument_type: result.instrument_type,
+                    expiration_date: result.expiration_date,
+                })
+                .collect();
+            let _ = publications.send(RithmicCatalogEvent::SearchCompleted(
+                ProviderInstrumentSearchResult {
+                    consumer_id,
+                    provider: "rithmic".to_string(),
+                    provider_generation,
+                    search_generation: u64::try_from(search_generation.get()).unwrap_or(u64::MAX),
+                    instruments,
+                },
+            ));
+        }
+        AdapterCatalogEvent::SelectionInstalled {
+            selection_generation,
+            instrument,
+            entitlement_id,
+            ..
+        } => {
+            let Some(consumer_id) = selections.remove(&selection_generation.get()) else {
+                return;
+            };
+            let _ = publications.send(RithmicCatalogEvent::SelectionResolved {
+                consumer_id,
+                instrument: protocol_instrument(
+                    provider_generation,
+                    selection_generation,
+                    instrument,
+                    entitlement_id,
+                ),
+            });
+        }
+        AdapterCatalogEvent::CommandRejected {
+            command_generation,
+            reason,
+            ..
+        } => {
+            let selection = matches!(
+                reason,
+                RithmicCatalogRejection::InstrumentUnavailable
+                    | RithmicCatalogRejection::SubscriptionRejected
+                    | RithmicCatalogRejection::SelectionDispatchUnavailable
+            );
+            let consumer_id = if selection {
+                selections.remove(&command_generation.get())
+            } else {
+                searches.remove(&command_generation.get())
+            };
+            let Some(consumer_id) = consumer_id else {
+                return;
+            };
+            let _ = publications.send(RithmicCatalogEvent::Rejected {
+                rejection: ProviderCatalogRejected {
+                    consumer_id,
+                    provider: "rithmic".to_string(),
+                    provider_generation: Some(provider_generation),
+                    command_generation: u64::try_from(command_generation.get()).unwrap_or(u64::MAX),
+                    reason: protocol_rejection(reason) as i32,
+                },
+                selection,
+            });
+        }
+    }
+}
+
+fn protocol_instrument(
+    provider_generation: u64,
+    selection_generation: NonZeroUsize,
+    instrument: InstrumentDescriptor,
+    entitlement_id: String,
+) -> InstallProviderInstrument {
+    InstallProviderInstrument {
+        provider: "rithmic".to_string(),
+        session_generation: provider_generation,
+        selection_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
+        instrument_id: instrument.instrument_id,
+        provider_symbol: instrument.provider_symbol,
+        display_symbol: instrument.display_symbol,
+        venue_id: instrument.venue_id,
+        price_scale: u32::from(instrument.price_scale),
+        quantity_scale: u32::from(instrument.quantity_scale),
+        entitlement_id,
+    }
+}
+
+fn reject_catalog_control(
+    publications: &SyncSender<RithmicCatalogEvent>,
+    control: RithmicCatalogControl,
+    provider_generation: Option<u64>,
+) {
+    let (consumer_id, command_generation, selection) = match control {
+        RithmicCatalogControl::Search(search) => {
+            (search.consumer_id, search.search_generation, false)
+        }
+        RithmicCatalogControl::Select(selection) => {
+            (selection.consumer_id, selection.selection_generation, true)
+        }
+    };
+    reject_catalog_generation(
+        publications,
+        consumer_id,
+        provider_generation,
+        command_generation,
+        selection,
+    );
+}
+
+fn reject_catalog_generation(
+    publications: &SyncSender<RithmicCatalogEvent>,
+    consumer_id: u64,
+    provider_generation: Option<u64>,
+    command_generation: u64,
+    selection: bool,
+) {
+    let _ = publications.send(RithmicCatalogEvent::Rejected {
+        rejection: ProviderCatalogRejected {
+            consumer_id,
+            provider: "rithmic".to_string(),
+            provider_generation,
+            command_generation,
+            reason: ProviderCatalogRejectionReason::DispatchUnavailable as i32,
+        },
+        selection,
+    });
+}
+
+const fn protocol_rejection(reason: RithmicCatalogRejection) -> ProviderCatalogRejectionReason {
+    match reason {
+        RithmicCatalogRejection::SearchRejected => ProviderCatalogRejectionReason::SearchRejected,
+        RithmicCatalogRejection::SupersededSearch => {
+            ProviderCatalogRejectionReason::SupersededSearch
+        }
+        RithmicCatalogRejection::InstrumentUnavailable => {
+            ProviderCatalogRejectionReason::InstrumentUnavailable
+        }
+        RithmicCatalogRejection::SubscriptionRejected => {
+            ProviderCatalogRejectionReason::SubscriptionRejected
+        }
+        RithmicCatalogRejection::SearchDispatchUnavailable
+        | RithmicCatalogRejection::SelectionDispatchUnavailable => {
+            ProviderCatalogRejectionReason::DispatchUnavailable
+        }
+    }
+}
+
+fn active_generation(runtime: &Runtime) -> Option<SessionGeneration> {
+    match runtime.state().ok()? {
+        DesktopProviderState::Connecting { generation, .. }
+        | DesktopProviderState::Streaming { generation } => Some(generation),
+        DesktopProviderState::RecoveryRequired { generation, .. } => generation,
+        DesktopProviderState::Disconnected
+        | DesktopProviderState::StopUnconfirmed { .. }
+        | DesktopProviderState::Suspended
+        | DesktopProviderState::NetworkUnavailable
+        | DesktopProviderState::Stopped => None,
+    }
+}
+
+fn usize_generation(generation: u64) -> Option<NonZeroUsize> {
+    usize::try_from(generation).ok().and_then(NonZeroUsize::new)
 }
 
 pub(crate) fn run(
@@ -395,18 +847,28 @@ fn open_runtime(
         quantity_scale: u8::try_from(selected.quantity_scale)
             .map_err(|_| "Rithmic live quantity scale is invalid".to_string())?,
     };
+    open_runtime_with_instruments(vec![RithmicProviderInstrument {
+        descriptor,
+        entitlement_id: selected.entitlement_id.clone(),
+        trades: true,
+        quotes: false,
+        order_book: true,
+    }])
+}
+
+fn open_catalog_runtime() -> Result<(Runtime, RithmicProviderEvents), String> {
+    open_runtime_with_instruments(Vec::new())
+}
+
+fn open_runtime_with_instruments(
+    instruments: Vec<RithmicProviderInstrument>,
+) -> Result<(Runtime, RithmicProviderEvents), String> {
     let provider = RithmicProviderConfig::try_new(
         "Axiusflow",
         env!("CARGO_PKG_VERSION"),
         RithmicSessionLimits::default(),
         MESSAGE_SILENCE,
-        vec![RithmicProviderInstrument {
-            descriptor,
-            entitlement_id: selected.entitlement_id.clone(),
-            trades: true,
-            quotes: false,
-            order_book: true,
-        }],
+        instruments,
     )
     .map_err(|_| "Rithmic live provider configuration is invalid".to_string())?;
     let limits = RithmicCallbackLimits::try_new(

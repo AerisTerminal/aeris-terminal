@@ -200,10 +200,6 @@ impl RithmicHistoryTask {
             stop.store(true, Ordering::Release);
         }
     }
-
-    pub(crate) const fn has_active_request(&self) -> bool {
-        self.active.is_some()
-    }
 }
 
 impl Drop for RithmicHistoryTask {

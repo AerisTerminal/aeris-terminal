@@ -24,9 +24,10 @@ use axiusflow_coinbase_market_adapter::{
 use axiusflow_local_engine_protocol::{
     DemandError, EngineFaultCode, InstallProviderInstrument, MarketBar as IpcMarketBar,
     OrderBookLevel as IpcOrderBookLevel, OrderBookSnapshot as IpcOrderBookSnapshot,
-    OrderBookState as IpcOrderBookState, PersistenceState, ProviderConnectionState, ProviderState,
-    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
-    envelope,
+    OrderBookState as IpcOrderBookState, PersistenceState, ProviderCatalogRejected,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSelection,
+    ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
+    SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
 };
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
@@ -40,7 +41,9 @@ use axiusflow_market_engine::{
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 
 use crate::local_history::{LocalHistoryStore, StoredHistory};
-use crate::rithmic_realtime::{RithmicRealtimeControl, RithmicRealtimeEvent};
+use crate::rithmic_realtime::{
+    RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, RithmicRealtimeEvent,
+};
 
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
@@ -75,6 +78,8 @@ enum Command {
     Viewport(ClientId, ConsumerId, GenerationId, Viewport, Reply<()>),
     Visibility(ClientId, ConsumerId, bool, Reply<()>),
     Demand(ClientId, ConsumerId, GenerationId, BarSeriesKey, Reply<()>),
+    SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
+    SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
     InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
     Poll(ClientId, ConsumerId, Reply<Option<envelope::Payload>>),
     HistoryCompleted(
@@ -132,6 +137,8 @@ struct ConsumerEvents {
     series_state: Option<envelope::Payload>,
     demand_error: Option<envelope::Payload>,
     order_book: Option<envelope::Payload>,
+    catalog_search: Option<envelope::Payload>,
+    catalog_selection: Option<envelope::Payload>,
 }
 
 impl ConsumerEvents {
@@ -142,6 +149,8 @@ impl ConsumerEvents {
             .or_else(|| self.series_state.take())
             .or_else(|| self.demand_error.take())
             .or_else(|| self.order_book.take())
+            .or_else(|| self.catalog_selection.take())
+            .or_else(|| self.catalog_search.take())
     }
 }
 
@@ -825,6 +834,9 @@ impl MarketService {
         let (realtime_control_tx, realtime_control_rx) = mpsc::sync_channel(1);
         let (rithmic_realtime_tx, rithmic_realtime_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (rithmic_realtime_control_tx, rithmic_realtime_control_rx) = mpsc::sync_channel(1);
+        let (rithmic_catalog_tx, rithmic_catalog_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (rithmic_catalog_control_tx, rithmic_catalog_control_rx) =
+            mpsc::sync_channel(COMMAND_CAPACITY);
         let realtime_overflow = Arc::new(AtomicBool::new(false));
         let realtime_stop = Arc::new(AtomicBool::new(true));
         let completion_tx = command_tx.clone();
@@ -864,17 +876,13 @@ impl MarketService {
                 })
                 .map_err(|error| error.to_string())?;
         }
-        if rithmic_realtime {
-            thread::Builder::new()
-                .name("axiusflow-rithmic-realtime".to_string())
-                .spawn(move || {
-                    crate::rithmic_realtime::run(
-                        &rithmic_realtime_control_rx,
-                        &rithmic_realtime_tx,
-                    );
-                })
-                .map_err(|error| error.to_string())?;
-        }
+        start_rithmic_workers(
+            rithmic_realtime,
+            rithmic_catalog_control_rx,
+            rithmic_catalog_tx,
+            rithmic_realtime_control_rx,
+            rithmic_realtime_tx,
+        )?;
         thread::Builder::new()
             .name("axiusflow-market-engine".to_string())
             .spawn(move || {
@@ -890,6 +898,9 @@ impl MarketService {
                         rithmic_realtime_control: rithmic_realtime
                             .then_some(&rithmic_realtime_control_tx),
                         rithmic_realtime: &rithmic_realtime_rx,
+                        rithmic_catalog_control: rithmic_realtime
+                            .then_some(&rithmic_catalog_control_tx),
+                        rithmic_catalog: &rithmic_catalog_rx,
                     },
                     &realtime_overflow,
                     &realtime_stop,
@@ -1019,6 +1030,44 @@ impl MarketService {
         })
     }
 
+    /// Schedules one bounded exact provider-instrument search for an owned consumer.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, unsupported input, ownership, or coordinator failure.
+    pub fn search_provider_instruments(
+        &self,
+        client_id: u64,
+        search: SearchProviderInstruments,
+    ) -> Result<(), String> {
+        validate_provider_search(&search)?;
+        self.request(|reply| {
+            Ok(Command::SearchProviderInstruments(
+                ClientId(id(client_id)?),
+                search,
+                reply,
+            ))
+        })
+    }
+
+    /// Schedules one exact provider-instrument selection for an owned consumer.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, unsupported input, ownership, or coordinator failure.
+    pub fn select_provider_instrument(
+        &self,
+        client_id: u64,
+        selection: SelectProviderInstrument,
+    ) -> Result<(), String> {
+        validate_provider_selection(&selection)?;
+        self.request(|reply| {
+            Ok(Command::SelectProviderInstrument(
+                ClientId(id(client_id)?),
+                selection,
+                reply,
+            ))
+        })
+    }
+
     /// Installs one bounded adapter-resolved instrument in the engine-owned catalog.
     ///
     /// # Errors
@@ -1067,6 +1116,27 @@ impl MarketService {
             .recv()
             .map_err(|_| "market engine coordinator stopped before replying".to_string())?
     }
+}
+
+fn start_rithmic_workers(
+    enabled: bool,
+    catalog_controls: Receiver<RithmicCatalogControl>,
+    catalog_events: SyncSender<RithmicCatalogEvent>,
+    realtime_controls: Receiver<RithmicRealtimeControl>,
+    realtime_events: SyncSender<RithmicRealtimeEvent>,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+    thread::Builder::new()
+        .name("axiusflow-rithmic-catalog".to_string())
+        .spawn(move || crate::rithmic_realtime::run_catalog(&catalog_controls, &catalog_events))
+        .map_err(|error| error.to_string())?;
+    thread::Builder::new()
+        .name("axiusflow-rithmic-realtime".to_string())
+        .spawn(move || crate::rithmic_realtime::run(&realtime_controls, &realtime_events))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn run_history_worker(
@@ -1185,6 +1255,8 @@ struct CoordinatorChannels<'a> {
     realtime: &'a Receiver<RealtimeEvent>,
     rithmic_realtime_control: Option<&'a SyncSender<RithmicRealtimeControl>>,
     rithmic_realtime: &'a Receiver<RithmicRealtimeEvent>,
+    rithmic_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
+    rithmic_catalog: &'a Receiver<RithmicCatalogEvent>,
 }
 
 fn run_coordinator(
@@ -1200,6 +1272,7 @@ fn run_coordinator(
         storage: channels.storage,
         realtime_control: channels.realtime_control,
         rithmic_realtime_control: channels.rithmic_realtime_control,
+        rithmic_catalog_control: channels.rithmic_catalog_control,
         realtime_stop,
         attached: BTreeSet::new(),
         pending: BTreeMap::new(),
@@ -1229,6 +1302,12 @@ fn run_coordinator(
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        for _ in 0..REALTIME_DRAIN_BUDGET {
+            match channels.rithmic_catalog.try_recv() {
+                Ok(event) => coordinator.handle_rithmic_catalog(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
         if realtime_overflow.swap(false, Ordering::AcqRel) {
             coordinator.realtime_interrupted("Coinbase realtime queue overflowed");
         }
@@ -1249,6 +1328,7 @@ struct Coordinator<'a> {
     storage: &'a SyncSender<StorageRequest>,
     realtime_control: &'a SyncSender<RealtimeControl>,
     rithmic_realtime_control: Option<&'a SyncSender<RithmicRealtimeControl>>,
+    rithmic_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
     realtime_stop: &'a Arc<AtomicBool>,
     attached: BTreeSet<ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -1270,12 +1350,7 @@ impl Coordinator<'_> {
     fn handle_command(&mut self, command: Command) {
         match command {
             Command::Attach(client_id, reply) => {
-                let result = self
-                    .attached
-                    .insert(client_id)
-                    .then_some(())
-                    .ok_or_else(|| "client identity is already attached".to_string());
-                let _ = reply.send(result);
+                self.handle_attach(client_id, &reply);
             }
             Command::Detach(client_id, reply) => {
                 self.attached.remove(&client_id);
@@ -1339,17 +1414,27 @@ impl Coordinator<'_> {
                     &reply,
                 );
             }
+            Command::SearchProviderInstruments(client_id, search, reply) => {
+                self.handle_catalog_command(
+                    client_id,
+                    search.consumer_id,
+                    RithmicCatalogControl::Search(search),
+                    &reply,
+                );
+            }
+            Command::SelectProviderInstrument(client_id, selection, reply) => {
+                self.handle_catalog_command(
+                    client_id,
+                    selection.consumer_id,
+                    RithmicCatalogControl::Select(selection),
+                    &reply,
+                );
+            }
             Command::InstallProviderInstrument(instrument, reply) => {
-                let result = self.install_provider_instrument(instrument);
-                let _ = reply.send(result);
+                let _ = reply.send(self.install_provider_instrument(instrument));
             }
             Command::Poll(client_id, consumer_id, reply) => {
-                let result = authorize_consumer(&self.engine, client_id, consumer_id).map(|()| {
-                    self.events
-                        .get_mut(&consumer_id)
-                        .and_then(ConsumerEvents::pop)
-                });
-                let _ = reply.send(result);
+                self.handle_poll(client_id, consumer_id, &reply);
             }
             Command::HistoryCompleted(series, generation, result) => {
                 self.history_completed(&series, generation, result);
@@ -1361,6 +1446,56 @@ impl Coordinator<'_> {
                 self.persistence_completed(&series, generation, &result);
             }
         }
+    }
+
+    fn handle_attach(&mut self, client_id: ClientId, reply: &Reply<()>) {
+        let result = self
+            .attached
+            .insert(client_id)
+            .then_some(())
+            .ok_or_else(|| "client identity is already attached".to_string());
+        let _ = reply.send(result);
+    }
+
+    fn handle_catalog_command(
+        &self,
+        client_id: ClientId,
+        consumer_id: u64,
+        control: RithmicCatalogControl,
+        reply: &Reply<()>,
+    ) {
+        let _ = reply.send(self.dispatch_catalog_control(client_id, consumer_id, control));
+    }
+
+    fn handle_poll(
+        &mut self,
+        client_id: ClientId,
+        consumer_id: ConsumerId,
+        reply: &Reply<Option<envelope::Payload>>,
+    ) {
+        let result = authorize_consumer(&self.engine, client_id, consumer_id).map(|()| {
+            self.events
+                .get_mut(&consumer_id)
+                .and_then(ConsumerEvents::pop)
+        });
+        let _ = reply.send(result);
+    }
+
+    fn dispatch_catalog_control(
+        &self,
+        client_id: ClientId,
+        consumer_id: u64,
+        control: RithmicCatalogControl,
+    ) -> Result<(), String> {
+        let consumer_id = ConsumerId(id(consumer_id)?);
+        authorize_consumer(&self.engine, client_id, consumer_id)?;
+        let sender = self
+            .rithmic_catalog_control
+            .ok_or_else(|| "Rithmic catalog worker is unavailable".to_string())?;
+        sender.try_send(control).map_err(|error| match error {
+            TrySendError::Full(_) => "Rithmic catalog command capacity is exhausted".to_string(),
+            TrySendError::Disconnected(_) => "Rithmic catalog worker is unavailable".to_string(),
+        })
     }
 
     fn install_provider_instrument(
@@ -2130,6 +2265,63 @@ impl Coordinator<'_> {
             RithmicRealtimeEvent::Recovering(generation)
             | RithmicRealtimeEvent::Disconnected(generation) => {
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
+            }
+        }
+    }
+
+    fn handle_rithmic_catalog(&mut self, event: RithmicCatalogEvent) {
+        match event {
+            RithmicCatalogEvent::SearchCompleted(result) => {
+                let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
+                    return;
+                };
+                if let Some(events) = self.events.get_mut(&consumer_id) {
+                    events.catalog_search =
+                        Some(envelope::Payload::ProviderInstrumentSearchResult(result));
+                }
+            }
+            RithmicCatalogEvent::SelectionResolved {
+                consumer_id,
+                instrument,
+            } => {
+                let Ok(id) = id(consumer_id).map(ConsumerId) else {
+                    return;
+                };
+                let command_generation = instrument.selection_generation;
+                let publication = match self.install_provider_instrument(instrument.clone()) {
+                    Ok(()) => envelope::Payload::ProviderInstrumentSelection(
+                        ProviderInstrumentSelection {
+                            consumer_id,
+                            instrument: Some(instrument),
+                        },
+                    ),
+                    Err(_) => envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
+                        consumer_id,
+                        provider: "rithmic".to_string(),
+                        provider_generation: Some(instrument.session_generation),
+                        command_generation,
+                        reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
+                    }),
+                };
+                if let Some(events) = self.events.get_mut(&id) {
+                    events.catalog_selection = Some(publication);
+                }
+            }
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection,
+            } => {
+                let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
+                    return;
+                };
+                if let Some(events) = self.events.get_mut(&consumer_id) {
+                    let slot = if selection {
+                        &mut events.catalog_selection
+                    } else {
+                        &mut events.catalog_search
+                    };
+                    *slot = Some(envelope::Payload::ProviderCatalogRejected(rejection));
+                }
             }
         }
     }
@@ -2986,6 +3178,44 @@ fn id(value: u64) -> Result<NonZeroU64, String> {
     NonZeroU64::new(value).ok_or_else(|| "market identity must be non-zero".to_string())
 }
 
+fn validate_provider_search(search: &SearchProviderInstruments) -> Result<(), String> {
+    id(search.consumer_id)?;
+    id(search.search_generation)?;
+    if search.provider != "rithmic"
+        || search.maximum_results == 0
+        || usize::try_from(search.maximum_results).unwrap_or(usize::MAX)
+            > MAXIMUM_CATALOG_INSTRUMENTS
+        || !valid_catalog_field(&search.query)
+    {
+        return Err("provider instrument search is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn validate_provider_selection(selection: &SelectProviderInstrument) -> Result<(), String> {
+    id(selection.consumer_id)?;
+    id(selection.selection_generation)?;
+    id(selection.search_generation)?;
+    if selection.provider != "rithmic"
+        || ![
+            &selection.symbol,
+            &selection.exchange,
+            &selection.entitlement_id,
+        ]
+        .into_iter()
+        .all(|value| valid_catalog_field(value))
+    {
+        return Err("provider instrument selection is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn valid_catalog_field(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAXIMUM_CATALOG_FIELD_BYTES
+        && !value.chars().any(char::is_control)
+}
+
 fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Result<(), String> {
     if instrument.session_generation == 0 || instrument.selection_generation == 0 {
         return Err("provider instrument generation must be non-zero".to_string());
@@ -2998,10 +3228,7 @@ fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Resul
         &instrument.venue_id,
         &instrument.entitlement_id,
     ] {
-        if value.trim().is_empty()
-            || value.len() > MAXIMUM_CATALOG_FIELD_BYTES
-            || value.chars().any(char::is_control)
-        {
+        if !valid_catalog_field(value) {
             return Err("provider instrument identity is invalid".to_string());
         }
     }
@@ -3185,6 +3412,7 @@ mod tests {
             storage,
             realtime_control: realtime,
             rithmic_realtime_control: None,
+            rithmic_catalog_control: None,
             realtime_stop,
             attached: BTreeSet::new(),
             pending: BTreeMap::from([(
@@ -3440,6 +3668,66 @@ mod tests {
         let mut conflicting = installed;
         conflicting.provider_symbol = "NQU6".to_string();
         assert!(service.install_provider_instrument(&conflicting).is_err());
+    }
+
+    #[test]
+    fn engine_catalog_selection_installs_identity_before_publication() {
+        let mut engine = configured_engine().expect("engine configures");
+        let client_id = ClientId(id(7).expect("client"));
+        let consumer_id = ConsumerId(id(9).expect("consumer"));
+        let series = BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            period: BarPeriod::tick(100).expect("tick period"),
+            definition_version: 1,
+        };
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id,
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &stop,
+            consumer_id,
+            &series,
+        );
+        let instrument = provider_instrument(7, 3);
+        coordinator.handle_rithmic_catalog(RithmicCatalogEvent::SelectionResolved {
+            consumer_id: consumer_id.0.get(),
+            instrument: instrument.clone(),
+        });
+
+        let envelope::Payload::ProviderInstrumentSelection(selection) = coordinator
+            .events
+            .get_mut(&consumer_id)
+            .and_then(ConsumerEvents::pop)
+            .expect("selection publishes")
+        else {
+            panic!("engine must publish the installed selection");
+        };
+        assert_eq!(selection.consumer_id, consumer_id.0.get());
+        assert_eq!(selection.instrument, Some(instrument.clone()));
+        assert_eq!(
+            coordinator.catalog.get(&(
+                instrument.provider.clone(),
+                instrument.instrument_id.clone()
+            )),
+            Some(&instrument)
+        );
     }
 
     #[test]

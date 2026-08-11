@@ -16,15 +16,9 @@ axiusflow_local_engine_protocol = { path = "../local_engine_protocol" }
 axiusflow_market_data = { path = "../domain/market_data" }
 axiusflow_market_protocol_adapter = { path = "../adapters/market_protocol" }
 axiusflow_observability = { path = "../observability" }
-axiusflow_platform_runtime = { path = "../platform_runtime" }
-axiusflow_provider_history = { path = "../provider_history" }
 axiusflow_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 axiusflow_terminal_ui = { path = "../ui/terminal_ui", default-features = false }
 getrandom.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-zeroize.workspace = true
 
 [dev-dependencies]
 axiusflow_coinbase_market_adapter = { path = "../adapters/coinbase_market", features = ["deterministic-fixtures"] }

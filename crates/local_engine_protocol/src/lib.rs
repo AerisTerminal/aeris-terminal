@@ -14,15 +14,17 @@ pub use messages::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
     EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, HotSeries, InstallProviderInstrument,
     MarketBar, MarketEventIdle, OrderBookLevel, OrderBookSnapshot, OrderBookState,
-    PersistenceState, PollMarketEvent, ProviderConnectionState, ProviderInstrumentInstalled,
-    ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesCadence,
-    SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate,
-    SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, ShutdownEngine, ViewportDemand,
-    VisibilityDemand, WorkspaceState, envelope,
+    PersistenceState, PollMarketEvent, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderConnectionState, ProviderInstrumentInstalled, ProviderInstrumentSearchResult,
+    ProviderInstrumentSelection, ProviderInstrumentSummary, ProviderState, RegisterConsumer,
+    RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
+    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport,
+    SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, envelope,
 };
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Maximum prost payload accepted in one frame (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1_048_576;

@@ -434,11 +434,9 @@ Current `desktop_market_runtime` contains files such as:
 market_worker.rs
 live_market_worker.rs
 rithmic_history.rs
-rithmic_live_chart.rs
 rithmic_market_worker.rs
 rithmic_series.rs
 rithmic_shell.rs
-rithmic_transition_capture.rs
 
 live_market_worker/
     composition.rs
@@ -499,11 +497,12 @@ and provider-specific protocol lifecycle is behind rithmic_protocol
 
 
 rithmic_series.rs
-rithmic_live_chart.rs
     ↓
 either generic market_engine series logic
 or rithmic_protocol if truly provider-specific
 ```
+
+Migration evidence (2026-08-11): `rithmic_live_chart.rs` and `rithmic_transition_capture.rs` were deleted after live aggregation and native provider lifecycle moved into the resident engine. The file still named `rithmic_market_worker.rs` is now an engine-client presentation bridge only; it contains no provider runtime, credential access, provider socket, native lifecycle monitor, retry scheduler, bar aggregation, or order-book reconstruction. Its remaining UI translation must be renamed or absorbed with `rithmic_shell.rs` before this section can be verified complete.
 
 There must not remain a second Rithmic product runtime inside the generic market engine.
 
@@ -1686,7 +1685,7 @@ consumer-specific publications
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): Rithmic's adapter-owned aggregate-book assembler validates venue update continuity and converts only completed covering images; a gap or unavailable book invalidates the provider session and enters bounded retry instead of publishing candidate depth. The engine-owned canonical `OrderBook` independently rejects stale generations, invalid/crossed images, and discontinuous deltas, clears invalid candidate levels, and exposes explicit awaiting-snapshot, sequence-gap, crossed-book, invalid-update, stale, or ready state through protocol v9. Existing deterministic adapter, domain, engine, IPC round-trip, and DOM projection tests prove fail-closed recovery and that the UI cannot retain a plausible silently corrupted book.
+Evidence (2026-08-11): Rithmic's adapter-owned aggregate-book assembler validates venue update continuity and converts only completed covering images; a gap or unavailable book invalidates the provider session and enters bounded retry instead of publishing candidate depth. The engine-owned canonical `OrderBook` independently rejects stale generations, invalid/crossed images, and discontinuous deltas, clears invalid candidate levels, and exposes explicit awaiting-snapshot, sequence-gap, crossed-book, invalid-update, stale, or ready state through protocol v10. Existing deterministic adapter, domain, engine, IPC round-trip, and DOM projection tests prove fail-closed recovery and that the UI cannot retain a plausible silently corrupted book.
 
 Depth events must preserve correctness.
 
@@ -2646,7 +2645,9 @@ Charts never touch SQLite/local segments.
 
 # 71. NO PROVIDER AUTH PER CHART
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): Coinbase uses one process-owned public realtime worker, while Rithmic authentication is loaded only by the resident engine's bounded catalog/quote, history, and realtime workers. Desktop charts attach as authenticated local-IPC consumers and never open or authenticate a provider connection. Symbol, timeframe, viewport, and chart-consumer changes reuse these role-scoped provider sessions; deterministic multi-consumer and session-stability tests verify that chart demand does not multiply provider authentication.
 
 Provider authentication belongs to ProviderManager.
 
@@ -3748,7 +3749,7 @@ Remove desktop access to storage.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): protocol v9 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, the complete Rithmic chart cadence catalog, exact nanosecond bar time, and bounded engine-owned order-book images. A completed selection crosses authenticated IPC as a provider-neutral install on the same background client that submits series demand. The resident engine validates identity/precision and session/selection generations, owns native-vault history credentials, replay planning, the authenticated history connection, cancellation, all 15 cadence collection, encrypted persistence, and snapshot publication. It also owns a separate native-vault Rithmic realtime session, bounded transport retry, native power/network transitions, provider-generation advancement, history/live buffering, live tick/fixed/session candle publication, the sole depth subscription, canonical top-20 order-book reconstruction, recovery state, and conflated depth IPC publication. Native environment state is retained across selection replacement, unavailable/suspended states fence connection startup, restored states start a newer engine provider generation, and monitor failure closes the worker rather than continuing without lifecycle evidence. The desktop catalog session requests quotes only, so there is exactly one chart-trade subscription and one depth subscription. Its authenticated IPC consumer stays attached after initial history and conflates subsequent engine series/book snapshots; reconnect snapshots may carry a newer engine generation than the catalog session without weakening the installed selection fence. Deterministic tests cover exact-time live handoff, completed-history immutability, forming-tail continuation, session-change rejection, generation monotonicity, native-state retention, continuous snapshot conversion, engine-owned depth reconstruction/projection, all-cadence encrypted restart, and provider-history isolation/cancellation. The old desktop provider-history socket, replay planner, history credential access, chart-trade subscription, depth subscription, order-book runtime, and separate catalog-control client were deleted. The transitional desktop Rithmic runtime still owns catalog search, the quote session and its separate credentials/native lifecycle, application snapshot construction, and DOM presentation; week/month live bars also remain history-driven pending exchange-calendar ownership. This phase therefore remains unchecked.
+Progress evidence (2026-08-11): protocol v10 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, the complete Rithmic chart cadence catalog, exact nanosecond bar time, bounded engine-owned order-book images, bounded exact catalog search, coarse catalog rejection, and complete selected-instrument metadata. Search and selection now cross authenticated IPC as consumer- and command-generation-fenced provider-neutral messages. The resident engine owns the native-vault catalog/quote session, converts adapter catalog results at the worker boundary, installs canonical identity and precision before publishing selection success, and then coordinates its separate native-vault history and realtime sessions. It owns replay planning, cancellation, all 15 cadence collection, encrypted persistence, snapshot publication, bounded transport retry, native power/network transitions, provider-generation advancement, history/live buffering, live tick/fixed/session candle publication, the sole depth subscription, canonical top-20 order-book reconstruction, recovery state, and conflated depth IPC publication. Native environment state is retained across recovery, unavailable/suspended states fence connection startup, restored states start newer generations, and monitor failure closes a provider worker rather than continuing without lifecycle evidence. The desktop creates no Rithmic socket, loads no provider credential, starts no native provider lifecycle monitor, and performs no provider retry or live aggregation; its bounded engine-client bridge translates UI catalog commands and projects engine chart/DOM snapshots. The direct desktop `rithmic_live_chart.rs` and `rithmic_transition_capture.rs` implementations were deleted, and the readiness proof now validates the application snapshot model instead of the removed direct aggregator. Deterministic tests cover protocol catalog round trips, catalog installation before publication, exact-time live handoff, completed-history immutability, forming-tail continuation, session-change rejection, generation monotonicity, native-state retention, continuous snapshot conversion, engine-owned depth reconstruction/projection, all-cadence encrypted restart, and provider-history isolation/cancellation. Credentialed native catalog smoke testing, removal/renaming of the remaining presentation bridge and shell modules, and exchange-calendar-owned live week/month bars remain open, so this phase remains unchecked.
 
 Move Rithmic provider ownership into ProviderManager.
 
@@ -4168,7 +4169,9 @@ Do not mix future order execution into chart publication queues.
 
 # 135. SECURITY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): every credentialed shipping application market path now runs inside `axiusflow_engine` and loads bounded opaque credential bytes from `NativeCredentialVault`; the desktop Rithmic bridge has no vault, credential, provider-runtime owner, or provider-network import. It temporarily imports only provider-neutral descriptor/session presentation types from `desktop_provider_runtime`. Provider-neutral protocol v10 catalog commands/results contain only bounded identity, generation, entitlement revision, precision, and presentation metadata, never credentials. The existing installation token and encrypted-history keys remain native-vault backed, secret bytes are zeroized at the provider-runtime boundary, and repository searches plus deterministic protocol tests confirm that credentials do not cross IPC or enter logs/persistence.
 
 Provider credentials remain local.
 

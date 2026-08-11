@@ -16,14 +16,15 @@ use std::{
 use axiusflow_local_engine_protocol::{
     AttachClient, ClientHello, ClientKind, DetachClient, EngineReady, Envelope, EnvelopeDecoder,
     InstallProviderInstrument, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
-    RegisterConsumer, RemoveConsumer, RestoreWorkspace, SeriesDemand, SeriesKey, SetSelection,
-    SetViewport, ViewportDemand, WorkspaceState, encode_envelope, envelope,
+    RegisterConsumer, RemoveConsumer, RestoreWorkspace, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesDemand, SeriesKey, SetSelection, SetViewport, ViewportDemand,
+    WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
-/// Stable per-user local socket name for protocol version eight.
+/// Stable per-user local socket endpoint generation.
 pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v8";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
@@ -279,6 +280,34 @@ impl EngineClient {
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected instrument install reply".to_string()),
         }
+    }
+
+    /// Schedules one bounded provider-neutral instrument search.
+    ///
+    /// Results are returned through [`Self::poll_market_event`].
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn search_provider_instruments(
+        &mut self,
+        request: SearchProviderInstruments,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::SearchProviderInstruments(request))
+    }
+
+    /// Schedules one exact provider-neutral instrument selection.
+    ///
+    /// Results are returned through [`Self::poll_market_event`].
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn select_provider_instrument(
+        &mut self,
+        request: SelectProviderInstrument,
+    ) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::SelectProviderInstrument(request))
     }
 
     /// Updates the visible range for the exact current consumer generation.

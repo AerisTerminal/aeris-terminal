@@ -3,9 +3,12 @@ use std::num::NonZeroUsize;
 use axiusflow_local_engine_protocol::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
     EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
-    MAX_FRAME_BYTES, MarketBar, MarketEventIdle, OrderBookLevel, OrderBookSnapshot, OrderBookState,
-    PROTOCOL_VERSION, PersistenceState, PollMarketEvent, ProtocolError, ProviderConnectionState,
-    ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesCadence,
+    InstallProviderInstrument, MAX_FRAME_BYTES, MarketBar, MarketEventIdle, OrderBookLevel,
+    OrderBookSnapshot, OrderBookState, PROTOCOL_VERSION, PersistenceState, PollMarketEvent,
+    ProtocolError, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderConnectionState, ProviderInstrumentSearchResult, ProviderInstrumentSelection,
+    ProviderInstrumentSummary, ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode,
+    RestoreWorkspace, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
     SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate,
     SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, ShutdownEngine, ViewportDemand,
     VisibilityDemand, WorkspaceState, encode_envelope, envelope,
@@ -172,7 +175,66 @@ fn market_payloads() -> Vec<envelope::Payload> {
         }),
     ];
     payloads.push(order_book_payload());
+    payloads.extend(catalog_payloads());
     payloads
+}
+
+fn catalog_payloads() -> Vec<envelope::Payload> {
+    let instrument = InstallProviderInstrument {
+        provider: "rithmic".into(),
+        session_generation: 2,
+        selection_generation: 3,
+        instrument_id: "rithmic:CME:MNQU6".into(),
+        provider_symbol: "MNQU6".into(),
+        venue_id: "CME".into(),
+        display_symbol: "MNQ Jun 2026".into(),
+        price_scale: 2,
+        quantity_scale: 0,
+        entitlement_id: "rithmic-test:CME:MNQU6".into(),
+    };
+    vec![
+        envelope::Payload::SearchProviderInstruments(SearchProviderInstruments {
+            consumer_id: 13,
+            search_generation: 21,
+            provider: "rithmic".into(),
+            query: "MNQU6".into(),
+            maximum_results: 16,
+        }),
+        envelope::Payload::SelectProviderInstrument(SelectProviderInstrument {
+            consumer_id: 13,
+            selection_generation: 22,
+            search_generation: 21,
+            provider: "rithmic".into(),
+            symbol: "MNQU6".into(),
+            exchange: "CME".into(),
+            entitlement_id: instrument.entitlement_id.clone(),
+        }),
+        envelope::Payload::ProviderInstrumentSearchResult(ProviderInstrumentSearchResult {
+            consumer_id: 13,
+            provider: "rithmic".into(),
+            provider_generation: 2,
+            search_generation: 21,
+            instruments: vec![ProviderInstrumentSummary {
+                symbol: "MNQU6".into(),
+                exchange: "CME".into(),
+                name: Some("Micro E-mini Nasdaq-100".into()),
+                product_code: Some("MNQ".into()),
+                instrument_type: Some("Future".into()),
+                expiration_date: Some("2026-06-19".into()),
+            }],
+        }),
+        envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
+            consumer_id: 13,
+            provider: "rithmic".into(),
+            provider_generation: Some(2),
+            command_generation: 21,
+            reason: ProviderCatalogRejectionReason::SearchRejected as i32,
+        }),
+        envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
+            consumer_id: 13,
+            instrument: Some(instrument),
+        }),
+    ]
 }
 
 fn order_book_payload() -> envelope::Payload {

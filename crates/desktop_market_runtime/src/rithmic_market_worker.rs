@@ -1,188 +1,73 @@
-use crate as axiusflow_desktop_market_runtime;
 use crate::{
+    market_worker::{
+        MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
+        market_worker_channel,
+    },
     rithmic_history::{
-        InstalledRithmicInstrument, RithmicHistoryResult, RithmicHistoryTask, RithmicSeriesRequest,
-        history_message,
+        InstalledRithmicInstrument, RithmicHistoryTask, RithmicSeriesRequest, history_message,
     },
-    rithmic_live_chart::{RithmicChartGeneration, RithmicLiveChart},
     rithmic_shell::RithmicShellState,
-    rithmic_transition_capture::{
-        AppliedEnvironmentEvidence, EvidenceFlag, NativeTransitionCapture,
-        RithmicRuntimeStateEvidence,
-    },
 };
-use axiusflow_desktop_market_runtime::market_worker::{
-    MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
-    market_worker_channel,
+use axiusflow_desktop_provider_runtime::{InstrumentDescriptor, SessionGeneration};
+use axiusflow_local_engine_client::{
+    EngineClient, connect_or_start_engine, sibling_engine_executable,
 };
-use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, DesktopProviderConfig, DesktopProviderRuntime, ProviderInvalidationReason,
-    ProviderSessionEvent,
+use axiusflow_local_engine_protocol::{
+    ProviderCatalogRejectionReason, ProviderInstrumentSearchResult, ProviderInstrumentSelection,
+    SearchProviderInstruments, SelectProviderInstrument, envelope,
 };
-use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::FeedConnectionState;
-use axiusflow_platform_runtime::{
-    NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
-};
 use axiusflow_rithmic_protocol_adapter::{
-    AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicCatalogEvent,
-    RithmicEnvironmentEvent, RithmicProviderConfig, RithmicProviderDriver, RithmicRetryScheduler,
-    RithmicSessionLimits, apply_rithmic_environment_event, try_recv_rithmic_event,
+    CollectedSymbols, RithmicCatalogEvent, RithmicCatalogRejection, RithmicInstrumentSelection,
+    RithmicSymbolSearch, SearchPattern, SymbolSearchResult,
 };
 use std::{
-    collections::VecDeque,
+    collections::BTreeSet,
     num::{NonZeroU64, NonZeroUsize},
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
-    },
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
-const ENVIRONMENT_CAPACITY: usize = 8;
-const ENVIRONMENT_BATCH: usize = 8;
-const CALLBACK_CAPACITY: usize = 256;
-const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
-const MAXIMUM_DEPTH: usize = 256;
-const IDLE_WAIT: Duration = Duration::from_millis(50);
-const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
-const MAXIMUM_BUFFERED_HISTORY_TRADES: usize = 4_096;
-const NETWORK_MONITOR_FAILED: u8 = 1;
-const POWER_MONITOR_FAILED: u8 = 2;
+const POLL_INTERVAL: Duration = Duration::from_millis(16);
+const ENGINE_WORKSPACE_ID: u64 = 1;
 
-type RithmicWorker = DesktopProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
-type RithmicEvents = axiusflow_rithmic_protocol_adapter::RithmicProviderEvents;
-
-#[derive(Clone, Copy)]
-struct ObservedEnvironmentEvent {
-    source_ordinal: u64,
-    event: RithmicEnvironmentEvent,
+struct WorkerState {
+    catalog: EngineCatalogSession,
+    history: RithmicHistoryTask,
+    installed: Option<InstalledRithmicInstrument>,
+    pending_history: Option<RithmicSeriesRequest>,
+    pending_searches: BTreeSet<u64>,
+    pending_selections: BTreeSet<u64>,
 }
 
-struct TransitionCaptureContext<'a> {
-    events: &'a Receiver<ObservedEnvironmentEvent>,
-    overflow: &'a AtomicU64,
-    monitor_failures: &'a AtomicU8,
-    capture: &'a mut Option<NativeTransitionCapture>,
-}
-
-#[derive(Clone, Copy)]
-enum CatalogDispatchDomain {
-    Search,
-    Selection,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EnvironmentMonitorFailure {
-    Network,
-    Power,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkerExitReason {
-    Shutdown,
-    EnvironmentMonitorFailed,
-}
-
-struct EnvironmentMonitorHandles {
-    initial_network: Option<NetworkEvent>,
-    overflow: Arc<AtomicU64>,
-    failures: Arc<AtomicU8>,
-}
-
-struct EnvironmentForwarding<'a> {
-    sender: &'a mpsc::SyncSender<ObservedEnvironmentEvent>,
-    source_ordinal: &'a AtomicU64,
-    overflow: &'a AtomicU64,
-    fail_capture_on_overflow: bool,
-    monitor_failures: &'a AtomicU8,
-    failure_flag: u8,
-}
-
-struct RithmicRuntimeState {
-    selection_installed: bool,
-    installed_instrument: Option<InstalledRithmicInstrument>,
-    history: Option<RithmicHistoryTask>,
-    live_chart: Option<RithmicLiveChart>,
-    pending_live_request: Option<RithmicSeriesRequest>,
-    buffered_history_trades: VecDeque<axiusflow_market_data::MarketTrade>,
-    history_trade_overflow: bool,
-}
-
-impl RithmicRuntimeState {
-    fn new() -> Self {
-        Self {
-            selection_installed: false,
-            installed_instrument: None,
-            history: RithmicHistoryTask::start().ok(),
-            live_chart: None,
-            pending_live_request: None,
-            buffered_history_trades: VecDeque::with_capacity(MAXIMUM_BUFFERED_HISTORY_TRADES),
-            history_trade_overflow: false,
-        }
-    }
-
-    fn evidence(&self) -> RithmicRuntimeStateEvidence {
-        RithmicRuntimeStateEvidence {
-            selection_installed: EvidenceFlag::from(self.selection_installed),
-            instrument_installed: EvidenceFlag::from(self.installed_instrument.is_some()),
-            history_request_active: EvidenceFlag::from(
-                self.history
-                    .as_ref()
-                    .is_some_and(RithmicHistoryTask::has_active_request),
-            ),
-            live_chart_installed: EvidenceFlag::from(self.live_chart.is_some()),
-            pending_live_request: EvidenceFlag::from(self.pending_live_request.is_some()),
-            buffered_history_trades: self.buffered_history_trades.len(),
-            history_trade_overflow: EvidenceFlag::from(self.history_trade_overflow),
-            depth_selection_installed: EvidenceFlag::from(self.installed_instrument.is_some()),
-        }
-    }
-}
-
-/// Starts the bounded Rithmic worker behind the shared coordinator boundary.
+/// Starts the bounded Rithmic UI bridge backed exclusively by the resident engine.
 ///
 /// # Errors
-/// Returns a redacted configuration, credential, storage, monitor, or worker-start failure.
-pub fn start(
-    detailed_diagnostics: bool,
-    native_transition_report: Option<PathBuf>,
-) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+/// Returns a redacted engine, shell, or worker-start failure.
+pub fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let shell = RithmicShellState::local()?;
-    spawn_worker(shell, move |message_tx, command_rx| {
-        run(
-            &message_tx,
-            &command_rx,
-            detailed_diagnostics,
-            native_transition_report,
-        );
-    })
+    spawn_worker(shell, |messages, commands| run(&messages, &commands))
 }
 
 fn spawn_worker(
     shell: RithmicShellState,
-    task: impl FnOnce(
-        axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-        Receiver<MarketWorkerCommand>,
-    ) + Send
+    task: impl FnOnce(crate::market_worker::MarketWorkerSender, Receiver<MarketWorkerCommand>)
+    + Send
     + 'static,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let (message_tx, message_rx) = market_worker_channel(nonzero(MESSAGE_CAPACITY));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("axiusflow-rithmic-market-worker".to_string())
+        .name("axiusflow-rithmic-engine-client".to_string())
         .spawn(move || {
             task(message_tx, command_rx);
             let _ = shutdown_tx.send(());
         })
-        .map_err(|_| "Rithmic market worker thread is unavailable".to_string())?;
+        .map_err(|_| "Rithmic engine client thread is unavailable".to_string())?;
 
     Ok((
         MarketWorkerStartup::Shell(shell),
@@ -191,1018 +76,415 @@ fn spawn_worker(
 }
 
 fn run(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
+    messages: &crate::market_worker::MarketWorkerSender,
     commands: &Receiver<MarketWorkerCommand>,
-    detailed_diagnostics: bool,
-    native_transition_report: Option<PathBuf>,
-) {
-    let mut transition_capture = match native_transition_report {
-        Some(report_path) => {
-            let Ok(capture) = NativeTransitionCapture::start(report_path) else {
-                send_connection(
-                    messages,
-                    FeedConnectionState::Recovering,
-                    "native transition evidence could not start",
-                );
-                wait_for_shutdown(commands);
-                return;
-            };
-            Some(capture)
-        }
-        None => None,
-    };
-    let capture_enabled = transition_capture.is_some();
-    let (environment_tx, environment_rx) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
-    let Ok(environment) = start_environment_monitors(environment_tx, capture_enabled) else {
-        apply_capture(&mut transition_capture, |capture| {
-            capture.observe_monitor_failure()
-        });
-        apply_capture(&mut transition_capture, |capture| capture.finalize(false));
-        send_connection(
-            messages,
-            FeedConnectionState::Stopped,
-            "Rithmic Test requires native lifecycle monitoring",
-        );
-        wait_for_shutdown(commands);
-        return;
-    };
-    let EnvironmentMonitorHandles {
-        initial_network,
-        overflow: environment_overflow,
-        failures: monitor_failures,
-    } = environment;
-    apply_capture(&mut transition_capture, |capture| {
-        capture.observe_initial_network(initial_network)
-    });
-    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
-    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        let _ = wake_tx.try_send(());
-    });
-    let opened = open_worker(detailed_diagnostics, wake);
-    let Ok((worker, events)) = opened else {
-        send_connection(
-            messages,
-            FeedConnectionState::Recovering,
-            "Rithmic Test is waiting for credentials or local runtime access",
-        );
-        wait_for_shutdown(commands);
-        return;
-    };
-    let mut transitions = TransitionCaptureContext {
-        events: &environment_rx,
-        overflow: &environment_overflow,
-        monitor_failures: &monitor_failures,
-        capture: &mut transition_capture,
-    };
-    run_connected(
-        messages,
-        commands,
-        worker,
-        &events,
-        &wake_rx,
-        initial_network,
-        &mut transitions,
-    );
-}
-
-fn run_connected(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    commands: &Receiver<MarketWorkerCommand>,
-    mut worker: RithmicWorker,
-    events: &RithmicEvents,
-    wake_rx: &Receiver<()>,
-    initial_network: Option<NetworkEvent>,
-    transitions: &mut TransitionCaptureContext<'_>,
 ) {
     send_connection(
         messages,
         FeedConnectionState::Discovering,
-        "discovering Rithmic Test systems",
+        "connecting to the resident Rithmic engine",
     );
-    let mut retries = RithmicRetryScheduler::default();
-    let mut state = RithmicRuntimeState::new();
-    apply_initial_network_state(&mut worker, events, &mut retries, messages, initial_network);
-    if worker.request_connection().is_err() {
+    let state = EngineCatalogSession::connect().and_then(|catalog| {
+        RithmicHistoryTask::start().map(|history| WorkerState {
+            catalog,
+            history,
+            installed: None,
+            pending_history: None,
+            pending_searches: BTreeSet::new(),
+            pending_selections: BTreeSet::new(),
+        })
+    });
+    let Ok(mut state) = state else {
         send_connection(
             messages,
             FeedConnectionState::Recovering,
-            "Rithmic Test credentials are unavailable or require attention",
+            "resident Rithmic engine is unavailable",
         );
-    }
-
-    let exit_reason = loop {
-        if transitions.monitor_failures.swap(0, Ordering::AcqRel) != 0 {
-            apply_capture(transitions.capture, |capture| {
-                capture.observe_monitor_failure()
-            });
-            reset_live_state(&mut state);
-            break WorkerExitReason::EnvironmentMonitorFailed;
-        }
-        let overflow_count = transitions.overflow.swap(0, Ordering::AcqRel);
-        if overflow_count > 0 {
-            apply_capture(transitions.capture, |capture| {
-                capture.observe_overflow(overflow_count)
-            });
-        }
-        if process_command(commands, &worker, events, messages, &mut state) {
-            break WorkerExitReason::Shutdown;
-        }
-        drain_environment_events(
-            transitions.events,
-            &mut worker,
-            events,
-            &mut retries,
-            messages,
-            &mut state,
-            transitions.capture,
-        );
-        drain_events(
-            &mut worker,
-            events,
-            &mut retries,
-            messages,
-            &mut state,
-            transitions.capture,
-        );
-        publish_engine_dom(messages, &state);
-        if let Some(result) = state
-            .history
-            .as_mut()
-            .and_then(RithmicHistoryTask::try_recv)
-            && apply_history_result(messages, &mut state, result)
-        {
-            continue;
-        }
-        if retries
-            .retry_due(&mut worker, Instant::now())
-            .is_ok_and(|generation| generation.is_some())
-        {
-            reset_live_state(&mut state);
-            send_connection(
-                messages,
-                FeedConnectionState::Discovering,
-                "reconnecting to Rithmic Test",
-            );
-        }
-        observe_capture_runtime(transitions.capture, &worker, &state);
-        publish_diagnostics(messages, &mut worker);
-        let wait = retries.ticket().map_or(IDLE_WAIT, |ticket| {
-            ticket
-                .due_at
-                .saturating_duration_since(Instant::now())
-                .min(IDLE_WAIT)
-        });
-        match wake_rx.recv_timeout(wait) {
-            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break WorkerExitReason::Shutdown,
-        }
+        wait_for_shutdown(commands);
+        return;
     };
-    let stopped = worker.stop().is_ok();
-    apply_capture(transitions.capture, |capture| capture.finalize(stopped));
     send_connection(
         messages,
-        if stopped {
-            FeedConnectionState::Stopped
-        } else {
-            FeedConnectionState::Recovering
-        },
-        if stopped && exit_reason == WorkerExitReason::EnvironmentMonitorFailed {
-            "Rithmic Test stopped because native lifecycle monitoring became unavailable"
-        } else if stopped {
-            "Rithmic Test session stopped"
-        } else {
-            "Rithmic Test session stop was not confirmed"
-        },
+        FeedConnectionState::Authenticating,
+        "resident engine owns the Rithmic catalog session",
     );
-}
 
-fn publish_engine_dom(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    state: &RithmicRuntimeState,
-) {
-    if let Some(frame) = state
-        .history
-        .as_ref()
-        .and_then(RithmicHistoryTask::try_recv_dom)
-    {
-        let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-    }
-}
-
-fn publish_diagnostics(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    worker: &mut RithmicWorker,
-) {
-    if let Ok(Some(snapshot)) = worker.try_diagnostics_snapshot() {
-        let _ = messages.send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)));
-    }
-}
-
-fn apply_initial_network_state(
-    worker: &mut RithmicWorker,
-    events: &RithmicEvents,
-    retries: &mut RithmicRetryScheduler,
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    initial_network: Option<NetworkEvent>,
-) {
-    if initial_network != Some(NetworkEvent::Unavailable) {
-        return;
-    }
-    if apply_rithmic_environment_event(
-        worker,
-        events,
-        retries,
-        RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
-    )
-    .is_err()
-    {
-        send_connection(
-            messages,
-            FeedConnectionState::Recovering,
-            "Rithmic Test could not apply native network state",
-        );
-    } else {
-        let (connection, message) = initial_offline_status();
-        send_connection(messages, connection, message);
-    }
-}
-
-fn start_environment_monitors(
-    sender: mpsc::SyncSender<ObservedEnvironmentEvent>,
-    fail_capture_on_overflow: bool,
-) -> Result<EnvironmentMonitorHandles, EnvironmentMonitorFailure> {
-    let network = NativeNetworkMonitor::connect()
-        .map(|monitor| {
-            let current = monitor.current();
-            (monitor, current)
-        })
-        .map_err(|_| EnvironmentMonitorFailure::Network);
-    let power = NativePowerMonitor::connect().map_err(|_| EnvironmentMonitorFailure::Power);
-    let (network, power, initial_network) = require_environment_monitors(network, power)?;
-    let source_ordinal = Arc::new(AtomicU64::new(0));
-    let overflow = Arc::new(AtomicU64::new(0));
-    let monitor_failures = Arc::new(AtomicU8::new(0));
-    {
-        let network_sender = sender.clone();
-        let network_ordinal = Arc::clone(&source_ordinal);
-        let network_overflow = Arc::clone(&overflow);
-        let network_failures = Arc::clone(&monitor_failures);
-        thread::Builder::new()
-            .name("axiusflow-rithmic-network-monitor".to_string())
-            .spawn(move || {
-                let mut monitor = network;
-                forward_environment_events(
-                    || monitor.next_event().map_err(|_| ()),
-                    RithmicEnvironmentEvent::Network,
-                    &EnvironmentForwarding {
-                        sender: &network_sender,
-                        source_ordinal: &network_ordinal,
-                        overflow: &network_overflow,
-                        fail_capture_on_overflow,
-                        monitor_failures: &network_failures,
-                        failure_flag: NETWORK_MONITOR_FAILED,
-                    },
-                );
-            })
-            .map_err(|_| EnvironmentMonitorFailure::Network)?;
-    }
-    {
-        let power_ordinal = Arc::clone(&source_ordinal);
-        let power_overflow = Arc::clone(&overflow);
-        let power_failures = Arc::clone(&monitor_failures);
-        thread::Builder::new()
-            .name("axiusflow-rithmic-power-monitor".to_string())
-            .spawn(move || {
-                let mut monitor = power;
-                forward_environment_events(
-                    || monitor.next_event().map_err(|_| ()),
-                    RithmicEnvironmentEvent::Power,
-                    &EnvironmentForwarding {
-                        sender: &sender,
-                        source_ordinal: &power_ordinal,
-                        overflow: &power_overflow,
-                        fail_capture_on_overflow,
-                        monitor_failures: &power_failures,
-                        failure_flag: POWER_MONITOR_FAILED,
-                    },
-                );
-            })
-            .map_err(|_| EnvironmentMonitorFailure::Power)?;
-    }
-    Ok(EnvironmentMonitorHandles {
-        initial_network: Some(initial_network),
-        overflow,
-        failures: monitor_failures,
-    })
-}
-
-fn require_environment_monitors<N, P>(
-    network: Result<(N, NetworkEvent), EnvironmentMonitorFailure>,
-    power: Result<P, EnvironmentMonitorFailure>,
-) -> Result<(N, P, NetworkEvent), EnvironmentMonitorFailure> {
-    let (network, initial_network) = network?;
-    let power = power?;
-    Ok((network, power, initial_network))
-}
-
-fn forward_environment_events<E>(
-    mut next_event: impl FnMut() -> Result<E, ()>,
-    wrap: impl Fn(E) -> RithmicEnvironmentEvent,
-    forwarding: &EnvironmentForwarding<'_>,
-) {
     loop {
-        let Ok(event) = next_event() else {
-            forwarding
-                .monitor_failures
-                .fetch_or(forwarding.failure_flag, Ordering::AcqRel);
-            break;
-        };
-        let observed = ObservedEnvironmentEvent {
-            source_ordinal: forwarding
-                .source_ordinal
-                .fetch_add(1, Ordering::AcqRel)
-                .saturating_add(1),
-            event: wrap(event),
-        };
-        if forwarding.fail_capture_on_overflow {
-            match forwarding.sender.try_send(observed) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => {
-                    forwarding.overflow.fetch_add(1, Ordering::AcqRel);
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => break,
-            }
-        } else if forwarding.sender.send(observed).is_err() {
-            break;
+        match commands.recv_timeout(POLL_INTERVAL) {
+            Ok(MarketWorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(command) => process_command(messages, &mut state, command),
+            Err(RecvTimeoutError::Timeout) => {}
         }
-    }
-}
-
-fn drain_environment_events(
-    receiver: &Receiver<ObservedEnvironmentEvent>,
-    worker: &mut RithmicWorker,
-    events: &RithmicEvents,
-    retries: &mut RithmicRetryScheduler,
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    state: &mut RithmicRuntimeState,
-    transition_capture: &mut Option<NativeTransitionCapture>,
-) {
-    for _ in 0..ENVIRONMENT_BATCH {
-        let Ok(observed) = receiver.try_recv() else {
-            break;
-        };
-        let event = observed.event;
-        let retired_generation = active_generation(worker)
-            .ok()
-            .flatten()
-            .map(axiusflow_desktop_provider_runtime::SessionGeneration::get);
-        let before = state.evidence();
-        let Ok(generation) = apply_rithmic_environment_event(worker, events, retries, event) else {
-            apply_capture(transition_capture, |capture| {
-                capture.observe_environment_failure()
-            });
-            send_connection(
-                messages,
-                FeedConnectionState::Recovering,
-                "Rithmic Test native environment transition failed closed",
-            );
-            continue;
-        };
-        reset_live_state(state);
-        let fresh_generation =
-            generation.map(axiusflow_desktop_provider_runtime::SessionGeneration::get);
-        let session_stop_confirmed = retired_generation.is_some()
-            && matches!(
-                event,
-                RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable)
-                    | RithmicEnvironmentEvent::Power(PowerEvent::Suspending)
-            );
-        apply_capture(transition_capture, |capture| {
-            capture.observe_environment_applied(AppliedEnvironmentEvidence {
-                event,
-                source_ordinal: observed.source_ordinal,
-                retired_generation,
-                fresh_generation,
-                session_stop_confirmed,
-                before,
-                after: state.evidence(),
-            })
-        });
-        let (connection, message) = match (event, generation) {
-            (_, Some(_)) => (
-                FeedConnectionState::Discovering,
-                "native environment restored; reconnecting to Rithmic Test",
-            ),
-            (RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable), None) => (
-                FeedConnectionState::Disconnected,
-                "Rithmic Test paused while the network is unavailable",
-            ),
-            (RithmicEnvironmentEvent::Power(PowerEvent::Suspending), None) => (
-                FeedConnectionState::Disconnected,
-                "Rithmic Test paused while the system is suspended",
-            ),
-            _ => (
-                FeedConnectionState::Recovering,
-                "Rithmic Test is waiting for native environment recovery",
-            ),
-        };
-        send_connection(messages, connection, message);
-    }
-}
-
-fn reset_live_state(state: &mut RithmicRuntimeState) {
-    if let Some(history) = state.history.as_mut() {
-        history.cancel();
-    }
-    state.selection_installed = false;
-    state.installed_instrument = None;
-    state.live_chart = None;
-    state.pending_live_request = None;
-    state.buffered_history_trades.clear();
-    state.history_trade_overflow = false;
-}
-
-fn apply_history_result(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    state: &mut RithmicRuntimeState,
-    result: RithmicHistoryResult,
-) -> bool {
-    let generation = RithmicChartGeneration {
-        selection: result.selection_generation,
-        series: result.series_generation,
-    };
-    let matching_request = state.pending_live_request.is_some_and(|request| {
-        request.selection_generation == generation.selection
-            && request.series_generation == generation.series
-    });
-    if !matching_request {
-        return false;
-    }
-    let continuous = result.result.is_ok();
-    let mut chart =
-        result.result.as_ref().ok().and_then(|bootstrap| {
-            RithmicLiveChart::from_history(generation, &bootstrap.snapshot).ok()
-        });
-    let _ = messages.send(history_message(result));
-    if matching_request && !state.history_trade_overflow {
-        let mut valid = true;
-        if let Some(active_chart) = chart.as_mut() {
-            while let Some(trade) = state.buffered_history_trades.pop_front() {
-                if !publish_trade(messages, active_chart, &trade) {
-                    valid = false;
-                    break;
-                }
-            }
-        }
-        if !valid {
-            chart = None;
-        }
-    }
-    if matching_request && state.history_trade_overflow && reschedule_history(state) {
-        let _ = messages.send(MarketWorkerMessage::State {
-            state: axiusflow_desktop_market_runtime::market_worker::ChartState::Recovering,
-            message: "Rithmic history is covering buffered trade overflow".to_string(),
-        });
-        return true;
-    }
-    if !continuous {
-        state.pending_live_request = None;
-    }
-    state.buffered_history_trades.clear();
-    state.history_trade_overflow = false;
-    state.live_chart = chart;
-    false
-}
-
-const fn initial_offline_status() -> (FeedConnectionState, &'static str) {
-    (
-        FeedConnectionState::Disconnected,
-        "Rithmic Test is offline; connection will start when the network returns",
-    )
-}
-
-fn reschedule_history(state: &mut RithmicRuntimeState) -> bool {
-    let rescheduled = state
-        .pending_live_request
-        .zip(state.installed_instrument.clone())
-        .is_some_and(|(request, instrument)| {
-            state
-                .history
-                .as_mut()
-                .is_some_and(|history| history.request(request, instrument).is_ok())
-        });
-    state.buffered_history_trades.clear();
-    state.history_trade_overflow = false;
-    rescheduled
-}
-
-fn process_command(
-    commands: &Receiver<MarketWorkerCommand>,
-    worker: &RithmicWorker,
-    events: &RithmicEvents,
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    state: &mut RithmicRuntimeState,
-) -> bool {
-    let (dispatch, rejection, failure_message) = match commands.try_recv() {
-        Ok(MarketWorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => return true,
-        Ok(MarketWorkerCommand::RithmicSearch(search)) => {
-            let command_generation = search.generation();
-            (
-                dispatch_catalog_command(worker, events, |events, generation| {
-                    events.search_symbols(generation, search)
-                }),
-                Some(catalog_dispatch_rejection(
-                    command_generation,
-                    CatalogDispatchDomain::Search,
-                )),
-                "Rithmic symbol search could not be scheduled",
-            )
-        }
-        Ok(MarketWorkerCommand::RithmicSelect(selection)) => {
-            let command_generation = selection.generation();
-            state.live_chart = None;
-            (
-                dispatch_catalog_command(worker, events, |events, generation| {
-                    events.select_instrument(generation, selection)
-                }),
-                Some(catalog_dispatch_rejection(
-                    command_generation,
-                    CatalogDispatchDomain::Selection,
-                )),
-                "Rithmic symbol selection could not be scheduled",
-            )
-        }
-        Ok(MarketWorkerCommand::RithmicHistory(request)) => {
-            state.live_chart = None;
-            state.pending_live_request = Some(request);
-            state.buffered_history_trades.clear();
-            state.history_trade_overflow = false;
-            (
-                state.history.as_mut().ok_or(()).and_then(|history| {
-                    state
-                        .installed_instrument
-                        .clone()
-                        .ok_or(())
-                        .and_then(|instrument| history.request(request, instrument).map_err(|_| ()))
-                }),
-                None,
-                "Rithmic visible history could not be scheduled",
-            )
-        }
-        Ok(
-            MarketWorkerCommand::Recovery(_)
-            | MarketWorkerCommand::CoinbaseSelect(_)
-            | MarketWorkerCommand::ChartViewport(_),
-        )
-        | Err(TryRecvError::Empty) => return false,
-    };
-    if dispatch.is_err() {
-        if let Some(rejection) = rejection {
-            let _ = messages.send(MarketWorkerMessage::RithmicCatalog(rejection));
-        }
-        send_connection(
-            messages,
-            catalog_connection_state(state.selection_installed),
-            failure_message,
-        );
-    }
-    false
-}
-
-fn catalog_dispatch_rejection(
-    command_generation: NonZeroUsize,
-    domain: CatalogDispatchDomain,
-) -> RithmicCatalogEvent {
-    let reason = match domain {
-        CatalogDispatchDomain::Search => {
-            axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SearchDispatchUnavailable
-        }
-        CatalogDispatchDomain::Selection => {
-            axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SelectionDispatchUnavailable
-        }
-    };
-    RithmicCatalogEvent::CommandRejected {
-        session_generation: None,
-        command_generation,
-        reason,
-    }
-}
-
-fn drain_events(
-    worker: &mut RithmicWorker,
-    events: &RithmicEvents,
-    retries: &mut RithmicRetryScheduler,
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    state: &mut RithmicRuntimeState,
-    transition_capture: &mut Option<NativeTransitionCapture>,
-) {
-    while events.has_ready() {
-        while let Some(callback) = events.try_recv_catalog() {
-            if active_generation(worker).ok().flatten() != Some(callback.generation) {
-                continue;
-            }
-            if let axiusflow_rithmic_protocol_adapter::RithmicCatalogEvent::SelectionInstalled {
-                selection_generation,
-                instrument,
-                entitlement_id,
-                ..
-            } = &callback.event
-            {
-                install_catalog_selection(
-                    state,
-                    callback.generation,
-                    *selection_generation,
-                    instrument,
-                    entitlement_id,
-                );
-            }
-            let _ = messages.send(MarketWorkerMessage::RithmicCatalog(callback.event));
-        }
-        match try_recv_rithmic_event(worker, events, retries, Instant::now()) {
-            Ok(Some(event)) => {
-                apply_capture(transition_capture, |capture| {
-                    capture.observe_provider_event(&event)
-                });
-                if matches!(
-                    event,
-                    AppliedRithmicEvent::RetryScheduled(_)
-                        | AppliedRithmicEvent::TerminalFailure { .. }
-                        | AppliedRithmicEvent::Semantic(ProviderSessionEvent::Invalidated { .. })
-                ) {
-                    if let Some(history) = state.history.as_mut() {
-                        history.cancel();
-                    }
-                    state.selection_installed = false;
-                    state.installed_instrument = None;
-                    state.live_chart = None;
-                    state.pending_live_request = None;
-                    state.buffered_history_trades.clear();
-                    state.history_trade_overflow = false;
-                }
-                publish_live_chart(messages, &event, state);
-                publish_event(messages, &event, &mut state.selection_installed);
-            }
-            Ok(None) => break,
+        match state.catalog.poll() {
+            Ok(Some(event)) => handle_catalog_event(messages, &mut state, event),
+            Ok(None) => {}
             Err(_) => {
                 send_connection(
                     messages,
                     FeedConnectionState::Recovering,
-                    "Rithmic Test session recovery is required",
+                    "resident Rithmic catalog connection is recovering",
                 );
                 break;
             }
         }
+        if let Some(frame) = state.history.try_recv_dom() {
+            let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+        }
+        if let Some(result) = state.history.try_recv() {
+            let current = state.pending_history.is_some_and(|request| {
+                request.selection_generation == result.selection_generation
+                    && request.series_generation == result.series_generation
+            });
+            if current {
+                if result.result.is_err() {
+                    state.pending_history = None;
+                }
+                let _ = messages.send(history_message(result));
+            }
+        }
+    }
+    send_connection(
+        messages,
+        FeedConnectionState::Stopped,
+        "Rithmic engine client stopped",
+    );
+}
+
+fn process_command(
+    messages: &crate::market_worker::MarketWorkerSender,
+    state: &mut WorkerState,
+    command: MarketWorkerCommand,
+) {
+    match command {
+        MarketWorkerCommand::RithmicSearch(search) => {
+            let generation = u64_generation(search.generation());
+            if state.catalog.search(&search).is_ok() {
+                state.pending_searches.insert(generation);
+            } else {
+                publish_dispatch_rejection(messages, search.generation(), false);
+            }
+        }
+        MarketWorkerCommand::RithmicSelect(selection) => {
+            let generation = u64_generation(selection.generation());
+            state.history.cancel();
+            state.pending_history = None;
+            if state.catalog.select(&selection).is_ok() {
+                state.pending_selections.insert(generation);
+            } else {
+                publish_dispatch_rejection(messages, selection.generation(), true);
+            }
+        }
+        MarketWorkerCommand::RithmicHistory(request) => {
+            let result = state
+                .installed
+                .clone()
+                .ok_or_else(|| "Rithmic instrument selection is unavailable".to_string())
+                .and_then(|instrument| state.history.request(request, instrument));
+            if result.is_ok() {
+                state.pending_history = Some(request);
+            } else {
+                let _ = messages.send(MarketWorkerMessage::RithmicHistory {
+                    selection_generation: request.selection_generation,
+                    series_generation: request.series_generation,
+                    result: Err(result
+                        .err()
+                        .unwrap_or_else(|| "Rithmic history is unavailable".to_string())),
+                });
+            }
+        }
+        MarketWorkerCommand::Shutdown
+        | MarketWorkerCommand::Recovery(_)
+        | MarketWorkerCommand::CoinbaseSelect(_)
+        | MarketWorkerCommand::ChartViewport(_) => {}
     }
 }
 
-fn install_catalog_selection(
-    state: &mut RithmicRuntimeState,
-    session_generation: axiusflow_desktop_provider_runtime::SessionGeneration,
-    selection_generation: NonZeroUsize,
-    instrument: &axiusflow_desktop_provider_runtime::InstrumentDescriptor,
-    entitlement_id: &str,
+fn handle_catalog_event(
+    messages: &crate::market_worker::MarketWorkerSender,
+    state: &mut WorkerState,
+    event: envelope::Payload,
 ) {
-    if let Some(history) = state.history.as_mut() {
-        history.cancel();
-    }
-    state.live_chart = None;
-    state.pending_live_request = None;
-    state.buffered_history_trades.clear();
-    state.history_trade_overflow = false;
-    state.selection_installed = true;
-    state.installed_instrument = Some(InstalledRithmicInstrument {
-        session_generation: session_generation.get(),
-        selection_generation,
-        descriptor: instrument.clone(),
-        entitlement_id: entitlement_id.to_string(),
-    });
-}
-
-fn observe_capture_runtime(
-    transition_capture: &mut Option<NativeTransitionCapture>,
-    worker: &RithmicWorker,
-    state: &RithmicRuntimeState,
-) {
-    let generation = active_generation(worker)
-        .ok()
-        .flatten()
-        .map(axiusflow_desktop_provider_runtime::SessionGeneration::get);
-    let evidence = state.evidence();
-    apply_capture(transition_capture, |capture| {
-        capture.observe_runtime(generation, &evidence)
-    });
-}
-
-fn apply_capture(
-    transition_capture: &mut Option<NativeTransitionCapture>,
-    operation: impl FnOnce(
-        &mut NativeTransitionCapture,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
-) {
-    let failed = transition_capture
-        .as_mut()
-        .is_some_and(|capture| operation(capture).is_err());
-    if failed {
-        eprintln!("native transition evidence checkpoint failed");
-        *transition_capture = None;
-    }
-}
-
-fn publish_live_chart(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    event: &AppliedRithmicEvent,
-    state: &mut RithmicRuntimeState,
-) {
-    let AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market {
-        event: MarketEvent::Trade(trade),
-        ..
-    }) = event
-    else {
-        return;
-    };
-    let Some(chart) = state.live_chart.as_mut() else {
-        if state.pending_live_request.is_some() && !state.history_trade_overflow {
-            buffer_history_trade(
-                &mut state.buffered_history_trades,
-                &mut state.history_trade_overflow,
-                trade,
+    match event {
+        envelope::Payload::ProviderInstrumentSearchResult(result) => {
+            publish_search_result(messages, state, result);
+        }
+        envelope::Payload::ProviderInstrumentSelection(selection) => {
+            publish_selection(messages, state, selection);
+        }
+        envelope::Payload::ProviderCatalogRejected(rejection) => {
+            let selection = state
+                .pending_selections
+                .remove(&rejection.command_generation);
+            state.pending_searches.remove(&rejection.command_generation);
+            let Some(command_generation) = usize_generation(rejection.command_generation) else {
+                return;
+            };
+            let session_generation = rejection
+                .provider_generation
+                .and_then(NonZeroU64::new)
+                .map(SessionGeneration::new);
+            let reason = catalog_rejection(rejection.reason, selection);
+            let _ = messages.send(MarketWorkerMessage::RithmicCatalog(
+                RithmicCatalogEvent::CommandRejected {
+                    session_generation,
+                    command_generation,
+                    reason,
+                },
+            ));
+            send_connection(
+                messages,
+                FeedConnectionState::Recovering,
+                "Rithmic catalog command was rejected",
             );
         }
+        envelope::Payload::ProviderState(provider) if provider.provider == "rithmic" => {}
+        envelope::Payload::Fault(fault) => {
+            send_connection(
+                messages,
+                FeedConnectionState::Recovering,
+                &fault.redacted_detail,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn publish_search_result(
+    messages: &crate::market_worker::MarketWorkerSender,
+    state: &mut WorkerState,
+    result: ProviderInstrumentSearchResult,
+) {
+    if result.provider != "rithmic" {
+        return;
+    }
+    let Some(session_generation) = NonZeroU64::new(result.provider_generation) else {
         return;
     };
-    if !publish_trade(messages, chart, trade) {
-        state.live_chart = None;
-    }
-}
-
-fn buffer_history_trade(
-    buffer: &mut VecDeque<axiusflow_market_data::MarketTrade>,
-    overflowed: &mut bool,
-    trade: &axiusflow_market_data::MarketTrade,
-) {
-    if buffer.len() >= MAXIMUM_BUFFERED_HISTORY_TRADES {
-        buffer.clear();
-        *overflowed = true;
-    } else {
-        buffer.push_back(trade.clone());
-    }
-}
-
-fn publish_trade(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    chart: &mut RithmicLiveChart,
-    trade: &axiusflow_market_data::MarketTrade,
-) -> bool {
-    let generation = chart.generation();
-    match chart.apply_trade(generation, trade) {
-        Ok(publication) => {
-            let _ = messages.send(MarketWorkerMessage::RithmicLive {
-                selection_generation: publication.generation.selection,
-                series_generation: publication.generation.series,
-                snapshot: publication.snapshot,
-            });
-            true
-        }
-        Err(
-            crate::rithmic_live_chart::RithmicLiveChartError::OutOfOrderTrade
-            | crate::rithmic_live_chart::RithmicLiveChartError::StaleGeneration,
-        ) => true,
-        Err(_) => {
-            let _ = messages.send(MarketWorkerMessage::State {
-                state: axiusflow_desktop_market_runtime::market_worker::ChartState::Recovering,
-                message: "Rithmic live candles require a covering history snapshot".to_string(),
-            });
-            false
-        }
-    }
-}
-
-fn open_worker(
-    detailed_diagnostics: bool,
-    wake: Arc<dyn Fn() + Send + Sync>,
-) -> Result<(RithmicWorker, RithmicEvents), String> {
-    let credential_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
-        .map_err(|_| "native credential vault unavailable".to_string())?;
-    let provider = RithmicProviderConfig::try_new(
-        "Axiusflow",
-        env!("CARGO_PKG_VERSION"),
-        RithmicSessionLimits::default(),
-        MESSAGE_SILENCE,
-        Vec::new(),
-    )
-    .map_err(|_| "Rithmic provider configuration is invalid".to_string())?;
-    let callback_limits = RithmicCallbackLimits::try_new(
-        nonzero(CALLBACK_CAPACITY),
-        nonzero(CALLBACK_BYTES),
-        nonzero(MAXIMUM_DEPTH),
-    )
-    .map_err(|_| "Rithmic callback limits are invalid".to_string())?;
-    let (driver, events) = RithmicProviderDriver::new_with_wake(provider, callback_limits, wake);
-    let provider_config =
-        DesktopProviderConfig::new(nonzero(32), nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
-            .with_diagnostics(
-                RithmicProviderConfig::environment(),
-                detailed_diagnostics
-                    .then_some(NonZeroU64::new(10_000_000_000).unwrap_or(NonZeroU64::MIN)),
-            )
-            .map_err(|_| "Rithmic diagnostics configuration is invalid".to_string())?;
-    let worker = DesktopProviderRuntime::try_new(
-        credential_vault,
-        driver,
-        RITHMIC_TEST_VAULT_KEY,
-        provider_config,
-    )
-    .map_err(|_| "Rithmic provider runtime is unavailable".to_string())?;
-    Ok((worker, events))
-}
-
-fn publish_event(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    event: &AppliedRithmicEvent,
-    selection_installed: &mut bool,
-) {
-    if matches!(
-        event,
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered {
-            instruments,
-            ..
-        }) if !instruments.is_empty()
-    ) {
-        *selection_installed = true;
-    }
-    let (state, message) = reduce_event(event, *selection_installed);
-    send_connection(messages, state, message);
-}
-
-fn reduce_event(
-    event: &AppliedRithmicEvent,
-    selection_installed: bool,
-) -> (FeedConnectionState, &'static str) {
-    match event {
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::DiscoveryStarted) => (
-            FeedConnectionState::Discovering,
-            "discovering Rithmic Test systems",
-        ),
-        AppliedRithmicEvent::Semantic(
-            ProviderSessionEvent::SystemsDiscovered { .. }
-            | ProviderSessionEvent::AuthenticationChanged {
-                state: AuthenticationState::Required | AuthenticationState::Accepted,
-                ..
-            },
-        ) => (
-            FeedConnectionState::Authenticating,
-            "authenticating the Rithmic Test session",
-        ),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::AuthenticationChanged {
-            state: AuthenticationState::Rejected,
-            ..
-        }) => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test authentication was rejected",
-        ),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::AuthenticationChanged {
-            state: AuthenticationState::AgreementRequired,
-            ..
-        }) => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test agreements require attention",
-        ),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered {
-            instruments,
-            ..
-        }) if instruments.is_empty() => (
-            FeedConnectionState::Authenticating,
-            "Rithmic Test session is ready for instrument search",
-        ),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered { .. }) => (
-            FeedConnectionState::Streaming,
-            "Rithmic Test instrument selection is installed",
-        ),
-        AppliedRithmicEvent::RetryScheduled(ticket) => retry_presentation(ticket.reason),
-        AppliedRithmicEvent::TerminalFailure { reason, .. } => terminal_failure(*reason),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Stopped) => {
-            (FeedConnectionState::Stopped, "Rithmic Test session stopped")
-        }
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market { .. }) => (
-            FeedConnectionState::Streaming,
-            "Rithmic Test feed is streaming",
-        ),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Heartbeat { .. })
-            if selection_installed =>
-        {
-            (
-                FeedConnectionState::Streaming,
-                "Rithmic Test selected feed is active",
-            )
-        }
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Heartbeat { .. }) => (
-            FeedConnectionState::Authenticating,
-            "Rithmic Test session is ready for instrument search",
-        ),
-        AppliedRithmicEvent::Semantic(ProviderSessionEvent::Invalidated { .. }) => (
-            FeedConnectionState::Recovering,
-            "Rithmic Test session recovery is required",
-        ),
-    }
-}
-
-fn active_generation(
-    worker: &RithmicWorker,
-) -> Result<Option<axiusflow_desktop_provider_runtime::SessionGeneration>, ()> {
-    match worker.state().map_err(|_| ())? {
-        axiusflow_desktop_provider_runtime::DesktopProviderState::Connecting {
-            generation, ..
-        }
-        | axiusflow_desktop_provider_runtime::DesktopProviderState::Streaming { generation } => {
-            Ok(Some(generation))
-        }
-        _ => Ok(None),
-    }
-}
-
-const fn catalog_connection_state(selection_installed: bool) -> FeedConnectionState {
-    if selection_installed {
-        FeedConnectionState::Streaming
-    } else {
-        FeedConnectionState::Authenticating
-    }
-}
-
-fn dispatch_catalog_command(
-    worker: &RithmicWorker,
-    events: &RithmicEvents,
-    dispatch: impl FnOnce(
-        &RithmicEvents,
-        axiusflow_desktop_provider_runtime::SessionGeneration,
-    )
-        -> Result<(), axiusflow_rithmic_protocol_adapter::RithmicProviderCommandError>,
-) -> Result<(), ()> {
-    let generation = active_generation(worker)?.ok_or(())?;
-    dispatch(events, generation).map_err(|_| ())
-}
-
-fn terminal_failure(reason: ProviderInvalidationReason) -> (FeedConnectionState, &'static str) {
-    match reason {
-        ProviderInvalidationReason::Authentication => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test authentication was rejected",
-        ),
-        ProviderInvalidationReason::AgreementRequired => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test agreements require attention",
-        ),
-        ProviderInvalidationReason::UnsupportedSystem => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test was not offered by system discovery",
-        ),
-        ProviderInvalidationReason::SchemaMismatch => (
-            FeedConnectionState::Stopped,
-            "Rithmic rejected the protocol template version",
-        ),
-        ProviderInvalidationReason::MalformedMessage => (
-            FeedConnectionState::Stopped,
-            "Rithmic returned an unexpected protocol response",
-        ),
-        ProviderInvalidationReason::Transport => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test transport stopped",
-        ),
-        ProviderInvalidationReason::HeartbeatSilence
-        | ProviderInvalidationReason::MessageSilence
-        | ProviderInvalidationReason::SequenceGap
-        | ProviderInvalidationReason::QueueOverflow => (
-            FeedConnectionState::Stopped,
-            "Rithmic Test session cannot continue",
-        ),
-    }
-}
-
-fn retry_presentation(reason: ProviderInvalidationReason) -> (FeedConnectionState, &'static str) {
-    let message = match reason {
-        ProviderInvalidationReason::HeartbeatSilence => {
-            "Rithmic heartbeat response timed out; reconnecting"
-        }
-        ProviderInvalidationReason::MessageSilence => {
-            "Rithmic market data became silent; reconnecting"
-        }
-        ProviderInvalidationReason::SequenceGap => {
-            "Rithmic market data sequence gap detected; reconnecting"
-        }
-        ProviderInvalidationReason::QueueOverflow => {
-            "Rithmic market data queue overflowed; reconnecting"
-        }
-        ProviderInvalidationReason::Transport
-        | ProviderInvalidationReason::Authentication
-        | ProviderInvalidationReason::AgreementRequired
-        | ProviderInvalidationReason::UnsupportedSystem
-        | ProviderInvalidationReason::SchemaMismatch
-        | ProviderInvalidationReason::MalformedMessage => "Rithmic Test session will retry",
+    let Some(search_generation) = usize_generation(result.search_generation) else {
+        return;
     };
-    (FeedConnectionState::Recovering, message)
+    if !state.pending_searches.remove(&result.search_generation) {
+        return;
+    }
+    let symbols = CollectedSymbols {
+        results: result
+            .instruments
+            .into_iter()
+            .map(|instrument| SymbolSearchResult {
+                symbol: instrument.symbol,
+                exchange: instrument.exchange,
+                name: instrument.name,
+                product_code: instrument.product_code,
+                instrument_type: instrument.instrument_type,
+                expiration_date: instrument.expiration_date,
+            })
+            .collect(),
+        duplicate_count: 0,
+    };
+    let _ = messages.send(MarketWorkerMessage::RithmicCatalog(
+        RithmicCatalogEvent::SearchCompleted {
+            session_generation: SessionGeneration::new(session_generation),
+            search_generation,
+            symbols,
+        },
+    ));
+    send_connection(
+        messages,
+        FeedConnectionState::Authenticating,
+        "Rithmic catalog search completed in the resident engine",
+    );
+}
+
+fn publish_selection(
+    messages: &crate::market_worker::MarketWorkerSender,
+    state: &mut WorkerState,
+    selection: ProviderInstrumentSelection,
+) {
+    let Some(instrument) = selection.instrument else {
+        return;
+    };
+    if instrument.provider != "rithmic"
+        || !state
+            .pending_selections
+            .remove(&instrument.selection_generation)
+    {
+        return;
+    }
+    let Some(session_generation) = NonZeroU64::new(instrument.session_generation) else {
+        return;
+    };
+    let Some(selection_generation) = usize_generation(instrument.selection_generation) else {
+        return;
+    };
+    let Ok(price_scale) = u8::try_from(instrument.price_scale) else {
+        return;
+    };
+    let Ok(quantity_scale) = u8::try_from(instrument.quantity_scale) else {
+        return;
+    };
+    let descriptor = InstrumentDescriptor {
+        instrument_id: instrument.instrument_id,
+        provider_symbol: instrument.provider_symbol,
+        display_symbol: instrument.display_symbol,
+        venue_id: instrument.venue_id,
+        price_scale,
+        quantity_scale,
+    };
+    if descriptor.validate().is_err() {
+        return;
+    }
+    let session_generation = SessionGeneration::new(session_generation);
+    state.history.cancel();
+    state.pending_history = None;
+    state.installed = Some(InstalledRithmicInstrument {
+        session_generation: session_generation.get(),
+        selection_generation,
+        descriptor: descriptor.clone(),
+        entitlement_id: instrument.entitlement_id.clone(),
+    });
+    let _ = messages.send(MarketWorkerMessage::RithmicCatalog(
+        RithmicCatalogEvent::SelectionInstalled {
+            session_generation,
+            selection_generation,
+            instrument: descriptor,
+            entitlement_id: instrument.entitlement_id,
+        },
+    ));
+    send_connection(
+        messages,
+        FeedConnectionState::Streaming,
+        "resident engine installed the Rithmic instrument",
+    );
+}
+
+fn publish_dispatch_rejection(
+    messages: &crate::market_worker::MarketWorkerSender,
+    command_generation: NonZeroUsize,
+    selection: bool,
+) {
+    let reason = if selection {
+        RithmicCatalogRejection::SelectionDispatchUnavailable
+    } else {
+        RithmicCatalogRejection::SearchDispatchUnavailable
+    };
+    let _ = messages.send(MarketWorkerMessage::RithmicCatalog(
+        RithmicCatalogEvent::CommandRejected {
+            session_generation: None,
+            command_generation,
+            reason,
+        },
+    ));
+}
+
+fn catalog_rejection(reason: i32, selection: bool) -> RithmicCatalogRejection {
+    match ProviderCatalogRejectionReason::try_from(reason).ok() {
+        Some(ProviderCatalogRejectionReason::SearchRejected) => {
+            RithmicCatalogRejection::SearchRejected
+        }
+        Some(ProviderCatalogRejectionReason::SupersededSearch) => {
+            RithmicCatalogRejection::SupersededSearch
+        }
+        Some(ProviderCatalogRejectionReason::InstrumentUnavailable) => {
+            RithmicCatalogRejection::InstrumentUnavailable
+        }
+        Some(ProviderCatalogRejectionReason::SubscriptionRejected) => {
+            RithmicCatalogRejection::SubscriptionRejected
+        }
+        Some(
+            ProviderCatalogRejectionReason::DispatchUnavailable
+            | ProviderCatalogRejectionReason::Unspecified,
+        )
+        | None
+            if selection =>
+        {
+            RithmicCatalogRejection::SelectionDispatchUnavailable
+        }
+        Some(
+            ProviderCatalogRejectionReason::DispatchUnavailable
+            | ProviderCatalogRejectionReason::Unspecified,
+        )
+        | None => RithmicCatalogRejection::SearchDispatchUnavailable,
+    }
+}
+
+struct EngineCatalogSession {
+    client: EngineClient,
+    client_id: u64,
+    consumer_id: u64,
+}
+
+impl EngineCatalogSession {
+    fn connect() -> Result<Self, String> {
+        let executable = sibling_engine_executable()?;
+        let mut client = connect_or_start_engine(&executable)?;
+        let client_id = random_identity()?;
+        let consumer_id = random_identity()?;
+        client.attach_client(client_id)?;
+        if let Err(error) = client.register_consumer(client_id, ENGINE_WORKSPACE_ID, consumer_id) {
+            let _ = client.detach_client(client_id);
+            return Err(error);
+        }
+        Ok(Self {
+            client,
+            client_id,
+            consumer_id,
+        })
+    }
+
+    fn search(&mut self, search: &RithmicSymbolSearch) -> Result<(), String> {
+        if search.exchange().is_some()
+            || search.product_code().is_some()
+            || search.instrument_type().is_some()
+            || search.pattern() != SearchPattern::Equals
+        {
+            return Err("Rithmic search shape is unsupported".to_string());
+        }
+        self.client
+            .search_provider_instruments(SearchProviderInstruments {
+                consumer_id: self.consumer_id,
+                search_generation: u64_generation(search.generation()),
+                provider: "rithmic".to_string(),
+                query: search.query().to_string(),
+                maximum_results: u32::try_from(search.maximum_results().get())
+                    .map_err(|_| "Rithmic search result bound is invalid".to_string())?,
+            })
+    }
+
+    fn select(&mut self, selection: &RithmicInstrumentSelection) -> Result<(), String> {
+        self.client
+            .select_provider_instrument(SelectProviderInstrument {
+                consumer_id: self.consumer_id,
+                selection_generation: u64_generation(selection.generation()),
+                search_generation: u64_generation(selection.search_generation()),
+                provider: "rithmic".to_string(),
+                symbol: selection.symbol().to_string(),
+                exchange: selection.exchange().to_string(),
+                entitlement_id: selection.entitlement_id().to_string(),
+            })
+    }
+
+    fn poll(&mut self) -> Result<Option<envelope::Payload>, String> {
+        self.client.poll_market_event(self.consumer_id)
+    }
+}
+
+impl Drop for EngineCatalogSession {
+    fn drop(&mut self) {
+        let _ = self.client.remove_market_consumer(self.consumer_id);
+        let _ = self.client.detach_client(self.client_id);
+    }
+}
+
+fn random_identity() -> Result<u64, String> {
+    let mut bytes = [0_u8; 8];
+    getrandom::fill(&mut bytes).map_err(|_| "system CSPRNG is unavailable".to_string())?;
+    Ok(NonZeroU64::new(u64::from_le_bytes(bytes))
+        .unwrap_or(NonZeroU64::MIN)
+        .get())
 }
 
 fn send_connection(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
+    messages: &crate::market_worker::MarketWorkerSender,
     state: FeedConnectionState,
     message: &str,
 ) {
@@ -1220,296 +502,17 @@ fn wait_for_shutdown(commands: &Receiver<MarketWorkerCommand>) {
     }
 }
 
-fn nonzero(value: usize) -> NonZeroUsize {
-    NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN)
+const fn nonzero(value: usize) -> NonZeroUsize {
+    match NonZeroUsize::new(value) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axiusflow_desktop_provider_runtime::{ProviderEnvironment, SessionGeneration};
-    use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
+fn u64_generation(generation: NonZeroUsize) -> u64 {
+    u64::try_from(generation.get()).unwrap_or(u64::MAX)
+}
 
-    fn generation() -> SessionGeneration {
-        SessionGeneration::new(NonZeroU64::MIN)
-    }
-
-    #[test]
-    fn local_catalog_dispatch_failures_are_unfenced_and_domain_specific() {
-        let generation = nonzero(7);
-        let search = catalog_dispatch_rejection(generation, CatalogDispatchDomain::Search);
-        let selection = catalog_dispatch_rejection(generation, CatalogDispatchDomain::Selection);
-        assert!(matches!(
-            search,
-            RithmicCatalogEvent::CommandRejected {
-                session_generation: None,
-                command_generation,
-                reason: axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SearchDispatchUnavailable,
-            } if command_generation == generation
-        ));
-        assert!(matches!(
-            selection,
-            RithmicCatalogEvent::CommandRejected {
-                session_generation: None,
-                command_generation,
-                reason: axiusflow_rithmic_protocol_adapter::RithmicCatalogRejection::SelectionDispatchUnavailable,
-            } if command_generation == generation
-        ));
-    }
-
-    #[test]
-    fn initial_offline_state_is_explicit_and_not_discovering() {
-        let (state, message) = initial_offline_status();
-        assert_eq!(state, FeedConnectionState::Disconnected);
-        assert!(message.contains("offline"));
-        assert!(!message.contains("discover"));
-    }
-
-    #[test]
-    fn environment_reset_fences_stale_history_results_before_publication() {
-        let (messages, receiver) = market_worker_channel(nonzero(4));
-        let mut state = RithmicRuntimeState::new();
-        state.pending_live_request = Some(RithmicSeriesRequest {
-            selection_generation: nonzero(2),
-            series_generation: nonzero(3),
-            series: crate::rithmic_history::RithmicSeries::Minute1,
-        });
-        reset_live_state(&mut state);
-        assert!(!apply_history_result(
-            &messages,
-            &mut state,
-            RithmicHistoryResult {
-                selection_generation: nonzero(2),
-                series_generation: nonzero(3),
-                result: Err("stale environment result".to_string()),
-            },
-        ));
-        assert!(receiver.drain().0.is_empty());
-    }
-
-    #[test]
-    fn reducer_exposes_only_coarse_lifecycle_states() {
-        let cases = [
-            (
-                AppliedRithmicEvent::Semantic(ProviderSessionEvent::DiscoveryStarted),
-                FeedConnectionState::Discovering,
-            ),
-            (
-                AppliedRithmicEvent::Semantic(ProviderSessionEvent::SystemsDiscovered {
-                    environments: vec![ProviderEnvironment {
-                        provider_id: "rithmic".to_string(),
-                        system_id: "RITHMIC_TEST".to_string(),
-                        environment: "Test".to_string(),
-                    }],
-                }),
-                FeedConnectionState::Authenticating,
-            ),
-            (
-                AppliedRithmicEvent::Semantic(ProviderSessionEvent::InstrumentsDiscovered {
-                    generation: generation(),
-                    instruments: Vec::new(),
-                }),
-                FeedConnectionState::Authenticating,
-            ),
-            (
-                AppliedRithmicEvent::Semantic(ProviderSessionEvent::Stopped),
-                FeedConnectionState::Stopped,
-            ),
-        ];
-        for (event, expected) in cases {
-            assert_eq!(reduce_event(&event, false).0, expected);
-        }
-    }
-
-    #[test]
-    fn preselection_heartbeat_never_claims_live_market_data() {
-        let heartbeat = AppliedRithmicEvent::Semantic(ProviderSessionEvent::Heartbeat {
-            generation: generation(),
-            received_unix_nanos: 1,
-        });
-        let (state, message) = reduce_event(&heartbeat, false);
-        assert_eq!(state, FeedConnectionState::Authenticating);
-        assert!(!message.contains("streaming"));
-        assert!(!message.contains("live"));
-
-        assert_eq!(
-            reduce_event(&heartbeat, true).0,
-            FeedConnectionState::Streaming
-        );
-    }
-
-    #[test]
-    fn delayed_selection_preserves_the_engine_entitlement_identity() {
-        let entitlement_id = "rithmic-test:CME-Delayed:MNQU6";
-        let instrument = axiusflow_desktop_provider_runtime::InstrumentDescriptor {
-            instrument_id: "rithmic:CME:MNQU6".to_string(),
-            provider_symbol: "MNQU6".to_string(),
-            display_symbol: "MNQU6".to_string(),
-            venue_id: "CME".to_string(),
-            price_scale: 2,
-            quantity_scale: 0,
-        };
-        let mut state = RithmicRuntimeState::new();
-        install_catalog_selection(
-            &mut state,
-            generation(),
-            nonzero(7),
-            &instrument,
-            entitlement_id,
-        );
-
-        let installed = state
-            .installed_instrument
-            .as_ref()
-            .expect("history identity is installed");
-        assert_eq!(installed.descriptor.venue_id, "CME");
-        assert_eq!(installed.entitlement_id, entitlement_id);
-        assert_eq!(
-            state.evidence().depth_selection_installed,
-            EvidenceFlag::from(true)
-        );
-    }
-
-    #[test]
-    fn terminal_provider_failures_never_render_provider_text() {
-        for reason in [
-            ProviderInvalidationReason::Authentication,
-            ProviderInvalidationReason::AgreementRequired,
-            ProviderInvalidationReason::UnsupportedSystem,
-        ] {
-            let (state, message) = reduce_event(
-                &AppliedRithmicEvent::TerminalFailure {
-                    generation: generation(),
-                    reason,
-                },
-                false,
-            );
-            assert_eq!(state, FeedConnectionState::Stopped);
-            assert!(!message.contains("account"));
-            assert!(!message.contains("user"));
-            assert!(!message.contains("password"));
-        }
-    }
-
-    #[test]
-    fn transient_silence_reasons_remain_visible_at_the_shipping_boundary() {
-        let (heartbeat_state, heartbeat_message) =
-            retry_presentation(ProviderInvalidationReason::HeartbeatSilence);
-        assert_eq!(heartbeat_state, FeedConnectionState::Recovering);
-        assert!(heartbeat_message.contains("heartbeat"));
-
-        let (message_state, message) =
-            retry_presentation(ProviderInvalidationReason::MessageSilence);
-        assert_eq!(message_state, FeedConnectionState::Recovering);
-        assert!(message.contains("silent"));
-    }
-
-    #[test]
-    fn shell_returns_before_background_completion_and_drop_acknowledges_shutdown() {
-        let shell = RithmicShellState::local().expect("fixed shell profile validates");
-        let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let (stopped_tx, stopped_rx) = mpsc::sync_channel(1);
-        let (startup, worker) = spawn_worker(shell, move |_messages, commands| {
-            let _ = started_tx.send(());
-            wait_for_shutdown(&commands);
-            let _ = stopped_tx.send(());
-        })
-        .expect("bounded worker thread starts");
-
-        assert!(matches!(startup, MarketWorkerStartup::Shell(_)));
-        started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("background task starts independently");
-        drop(worker);
-        stopped_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("drop requests and acknowledges shutdown");
-    }
-
-    #[test]
-    fn native_lifecycle_startup_requires_both_monitors() {
-        assert_eq!(
-            require_environment_monitors::<(), ()>(Err(EnvironmentMonitorFailure::Network), Ok(())),
-            Err(EnvironmentMonitorFailure::Network)
-        );
-        assert_eq!(
-            require_environment_monitors::<(), ()>(
-                Ok(((), NetworkEvent::Available)),
-                Err(EnvironmentMonitorFailure::Power)
-            ),
-            Err(EnvironmentMonitorFailure::Power)
-        );
-        assert_eq!(
-            require_environment_monitors(Ok(((), NetworkEvent::Unavailable)), Ok(())),
-            Ok(((), (), NetworkEvent::Unavailable))
-        );
-    }
-
-    #[test]
-    fn monitor_stream_failure_is_latched_even_when_capture_inbox_is_full() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let source_ordinal = AtomicU64::new(0);
-        let overflow = AtomicU64::new(0);
-        let failures = AtomicU8::new(0);
-        let mut events = VecDeque::from([
-            Ok(NetworkEvent::Unavailable),
-            Ok(NetworkEvent::Available),
-            Err(()),
-        ]);
-        forward_environment_events(
-            || events.pop_front().unwrap_or(Err(())),
-            RithmicEnvironmentEvent::Network,
-            &EnvironmentForwarding {
-                sender: &sender,
-                source_ordinal: &source_ordinal,
-                overflow: &overflow,
-                fail_capture_on_overflow: true,
-                monitor_failures: &failures,
-                failure_flag: NETWORK_MONITOR_FAILED,
-            },
-        );
-
-        let retained = receiver.try_recv().expect("first event remains bounded");
-        assert_eq!(retained.source_ordinal, 1);
-        assert_eq!(
-            retained.event,
-            RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable)
-        );
-        assert_eq!(source_ordinal.load(Ordering::Acquire), 2);
-        assert_eq!(overflow.load(Ordering::Acquire), 1);
-        assert_eq!(failures.load(Ordering::Acquire), NETWORK_MONITOR_FAILED);
-    }
-
-    #[test]
-    fn history_handoff_trade_buffer_fails_closed_at_its_exact_bound() {
-        let trade = MarketTrade {
-            metadata: EventMetadata {
-                provider_id: "rithmic".to_string(),
-                instrument_id: "mnq".to_string(),
-                entitlement_id: "test".to_string(),
-                source_sequence: 1,
-                session_generation: 1,
-                timestamps: QualifiedTimestamp {
-                    exchange_unix_nanos: Some(1),
-                    provider_unix_nanos: Some(1),
-                    received_unix_nanos: 1,
-                },
-            },
-            trade_id: "trade".to_string(),
-            price: 1,
-            quantity: 1,
-            aggressor: AggressorSide::Unknown,
-        };
-        let mut buffer = VecDeque::new();
-        let mut overflowed = false;
-        for _ in 0..MAXIMUM_BUFFERED_HISTORY_TRADES {
-            buffer_history_trade(&mut buffer, &mut overflowed, &trade);
-        }
-        assert_eq!(buffer.len(), MAXIMUM_BUFFERED_HISTORY_TRADES);
-        assert!(!overflowed);
-
-        buffer_history_trade(&mut buffer, &mut overflowed, &trade);
-        assert!(buffer.is_empty());
-        assert!(overflowed);
-    }
+fn usize_generation(generation: u64) -> Option<NonZeroUsize> {
+    usize::try_from(generation).ok().and_then(NonZeroUsize::new)
 }

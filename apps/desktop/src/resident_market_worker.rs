@@ -9,8 +9,5 @@ pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String>
 }
 
 pub(super) fn start_rithmic() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    axiusflow_desktop_market_runtime::rithmic_market_worker::start(
-        cfg!(feature = "diagnostics"),
-        None,
-    )
+    axiusflow_desktop_market_runtime::rithmic_market_worker::start()
 }

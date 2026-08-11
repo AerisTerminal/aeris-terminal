@@ -441,6 +441,108 @@ pub struct ProviderInstrumentInstalled {
     pub instrument_id: String,
 }
 
+/// Requests one bounded exact provider-instrument search for a market consumer.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct SearchProviderInstruments {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub search_generation: u64,
+    #[prost(string, tag = "3")]
+    pub provider: String,
+    #[prost(string, tag = "4")]
+    pub query: String,
+    #[prost(uint32, tag = "5")]
+    pub maximum_results: u32,
+}
+
+/// Selects one exact instrument from the latest completed provider search.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct SelectProviderInstrument {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub selection_generation: u64,
+    #[prost(uint64, tag = "3")]
+    pub search_generation: u64,
+    #[prost(string, tag = "4")]
+    pub provider: String,
+    #[prost(string, tag = "5")]
+    pub symbol: String,
+    #[prost(string, tag = "6")]
+    pub exchange: String,
+    #[prost(string, tag = "7")]
+    pub entitlement_id: String,
+}
+
+/// Bounded provider-neutral presentation metadata for one search result.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderInstrumentSummary {
+    #[prost(string, tag = "1")]
+    pub symbol: String,
+    #[prost(string, tag = "2")]
+    pub exchange: String,
+    #[prost(string, optional, tag = "3")]
+    pub name: Option<String>,
+    #[prost(string, optional, tag = "4")]
+    pub product_code: Option<String>,
+    #[prost(string, optional, tag = "5")]
+    pub instrument_type: Option<String>,
+    #[prost(string, optional, tag = "6")]
+    pub expiration_date: Option<String>,
+}
+
+/// Completed bounded provider-instrument search publication.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderInstrumentSearchResult {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(string, tag = "2")]
+    pub provider: String,
+    #[prost(uint64, tag = "3")]
+    pub provider_generation: u64,
+    #[prost(uint64, tag = "4")]
+    pub search_generation: u64,
+    #[prost(message, repeated, tag = "5")]
+    pub instruments: Vec<ProviderInstrumentSummary>,
+}
+
+/// Coarse catalog-command failure safe to expose across local IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum ProviderCatalogRejectionReason {
+    Unspecified = 0,
+    SearchRejected = 1,
+    SupersededSearch = 2,
+    InstrumentUnavailable = 3,
+    SubscriptionRejected = 4,
+    DispatchUnavailable = 5,
+}
+
+/// Generation-fenced provider catalog command rejection.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderCatalogRejected {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(string, tag = "2")]
+    pub provider: String,
+    #[prost(uint64, optional, tag = "3")]
+    pub provider_generation: Option<u64>,
+    #[prost(uint64, tag = "4")]
+    pub command_generation: u64,
+    #[prost(enumeration = "ProviderCatalogRejectionReason", tag = "5")]
+    pub reason: i32,
+}
+
+/// Completed provider-instrument selection with canonical engine identity.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderInstrumentSelection {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub instrument: Option<InstallProviderInstrument>,
+}
+
 /// Requests complete resident-engine shutdown.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct ShutdownEngine {}
@@ -677,7 +779,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -774,5 +876,20 @@ pub mod envelope {
         /// Conflated engine-owned order-book image. Tag 43.
         #[prost(message, tag = "43")]
         OrderBookSnapshot(super::OrderBookSnapshot),
+        /// Bounded provider-instrument search command. Tag 44.
+        #[prost(message, tag = "44")]
+        SearchProviderInstruments(super::SearchProviderInstruments),
+        /// Exact provider-instrument selection command. Tag 45.
+        #[prost(message, tag = "45")]
+        SelectProviderInstrument(super::SelectProviderInstrument),
+        /// Completed provider-instrument search. Tag 46.
+        #[prost(message, tag = "46")]
+        ProviderInstrumentSearchResult(super::ProviderInstrumentSearchResult),
+        /// Coarse provider catalog command rejection. Tag 47.
+        #[prost(message, tag = "47")]
+        ProviderCatalogRejected(super::ProviderCatalogRejected),
+        /// Completed provider-instrument selection. Tag 48.
+        #[prost(message, tag = "48")]
+        ProviderInstrumentSelection(super::ProviderInstrumentSelection),
     }
 }
