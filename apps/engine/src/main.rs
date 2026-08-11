@@ -63,7 +63,7 @@ fn shutdown_running_engine() -> Result<(), String> {
 fn run() -> Result<(), String> {
     const MAXIMUM_CLIENTS: usize = 4;
     const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-    const CLIENT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+    const ENGINE_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
     let token = Arc::new(native_installation_token()?);
     let listener = bind_listener(ENGINE_SOCKET_NAME).map_err(|error| error.to_string())?;
@@ -119,11 +119,12 @@ fn run() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     drop(listener);
-    let deadline = Instant::now() + CLIENT_SHUTDOWN_DEADLINE;
+    let deadline = Instant::now() + ENGINE_SHUTDOWN_DEADLINE;
+    let market_shutdown = market.shutdown(deadline.saturating_duration_since(Instant::now()));
     while active_clients.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
         thread::sleep(ACCEPT_POLL_INTERVAL);
     }
-    Ok(())
+    market_shutdown
 }
 
 #[cfg(test)]

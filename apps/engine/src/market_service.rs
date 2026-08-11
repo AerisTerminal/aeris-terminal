@@ -5,12 +5,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -68,6 +68,20 @@ type Reply<T> = SyncSender<Result<T, String>>;
 #[derive(Clone)]
 pub struct MarketService {
     commands: SyncSender<Command>,
+    runtime: Arc<MarketRuntime>,
+}
+
+struct MarketRuntime {
+    shutdown: Arc<AtomicBool>,
+    realtime_stop: Arc<AtomicBool>,
+    workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
+}
+
+impl Drop for MarketRuntime {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.realtime_stop.store(true, Ordering::Release);
+    }
 }
 
 enum Command {
@@ -839,77 +853,139 @@ impl MarketService {
             mpsc::sync_channel(COMMAND_CAPACITY);
         let realtime_overflow = Arc::new(AtomicBool::new(false));
         let realtime_stop = Arc::new(AtomicBool::new(true));
-        let completion_tx = command_tx.clone();
-        thread::Builder::new()
-            .name("axiusflow-coinbase-history".to_string())
-            .spawn(move || {
-                run_history_worker(coinbase_source, &coinbase_history_rx, &completion_tx);
-            })
-            .map_err(|error| error.to_string())?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::with_capacity(7);
+        workers.push(spawn_history_worker(
+            "axiusflow-coinbase-history",
+            coinbase_source,
+            coinbase_history_rx,
+            command_tx.clone(),
+            Arc::clone(&shutdown),
+        )?);
         if let Some((source, requests)) = rithmic_source.zip(rithmic_history_rx) {
-            let completion_tx = command_tx.clone();
-            thread::Builder::new()
-                .name("axiusflow-rithmic-history".to_string())
-                .spawn(move || run_history_worker(source, &requests, &completion_tx))
-                .map_err(|error| error.to_string())?;
+            workers.push(spawn_history_worker(
+                "axiusflow-rithmic-history",
+                source,
+                requests,
+                command_tx.clone(),
+                Arc::clone(&shutdown),
+            )?);
         }
-        let storage_completion_tx = command_tx.clone();
-        thread::Builder::new()
-            .name("axiusflow-local-history".to_string())
-            .spawn(move || {
-                run_storage_worker(storage, &storage_rx, &storage_completion_tx);
-            })
-            .map_err(|error| error.to_string())?;
+        workers.push(spawn_storage_worker(
+            storage,
+            storage_rx,
+            command_tx.clone(),
+            Arc::clone(&shutdown),
+        )?);
         if let Some(realtime) = realtime {
-            let overflow = Arc::clone(&realtime_overflow);
-            let stop = Arc::clone(&realtime_stop);
-            thread::Builder::new()
-                .name("axiusflow-coinbase-realtime".to_string())
-                .spawn(move || {
-                    run_realtime_worker(
-                        realtime,
-                        &realtime_control_rx,
-                        &realtime_tx,
-                        &overflow,
-                        &stop,
-                    );
-                })
-                .map_err(|error| error.to_string())?;
+            workers.push(spawn_realtime_worker(
+                realtime,
+                realtime_control_rx,
+                realtime_tx,
+                Arc::clone(&realtime_overflow),
+                Arc::clone(&realtime_stop),
+            )?);
         }
-        start_rithmic_workers(
+        workers.extend(start_rithmic_workers(
             rithmic_realtime,
             rithmic_catalog_control_rx,
             rithmic_catalog_tx,
             rithmic_realtime_control_rx,
             rithmic_realtime_tx,
-        )?;
-        thread::Builder::new()
-            .name("axiusflow-market-engine".to_string())
-            .spawn(move || {
-                run_coordinator(
-                    engine,
-                    CoordinatorChannels {
-                        commands: &command_rx,
-                        coinbase_history: &coinbase_history_tx,
-                        rithmic_history: &rithmic_history_tx,
-                        storage: &storage_tx,
-                        realtime_control: &realtime_control_tx,
-                        realtime: &realtime_rx,
-                        rithmic_realtime_control: rithmic_realtime
-                            .then_some(&rithmic_realtime_control_tx),
-                        rithmic_realtime: &rithmic_realtime_rx,
-                        rithmic_catalog_control: rithmic_realtime
-                            .then_some(&rithmic_catalog_control_tx),
-                        rithmic_catalog: &rithmic_catalog_rx,
-                    },
-                    &realtime_overflow,
-                    &realtime_stop,
-                );
-            })
-            .map_err(|error| error.to_string())?;
+        )?);
+        let coordinator_shutdown = Arc::clone(&shutdown);
+        let coordinator_realtime_stop = Arc::clone(&realtime_stop);
+        workers.push(
+            thread::Builder::new()
+                .name("axiusflow-market-engine".to_string())
+                .spawn(move || {
+                    run_coordinator(
+                        engine,
+                        CoordinatorChannels {
+                            commands: &command_rx,
+                            coinbase_history: &coinbase_history_tx,
+                            rithmic_history: &rithmic_history_tx,
+                            storage: &storage_tx,
+                            realtime_control: &realtime_control_tx,
+                            realtime: &realtime_rx,
+                            rithmic_realtime_control: rithmic_realtime
+                                .then_some(&rithmic_realtime_control_tx),
+                            rithmic_realtime: &rithmic_realtime_rx,
+                            rithmic_catalog_control: rithmic_realtime
+                                .then_some(&rithmic_catalog_control_tx),
+                            rithmic_catalog: &rithmic_catalog_rx,
+                        },
+                        &realtime_overflow,
+                        &coordinator_realtime_stop,
+                        &coordinator_shutdown,
+                    );
+                })
+                .map_err(|error| error.to_string())?,
+        );
         Ok(Self {
             commands: command_tx,
+            runtime: Arc::new(MarketRuntime {
+                shutdown,
+                realtime_stop,
+                workers: Mutex::new(Some(workers)),
+            }),
         })
+    }
+
+    /// Cancels provider work, drains accepted persistence, and joins owned workers.
+    ///
+    /// # Errors
+    /// Returns an error when a worker panics or the complete shutdown exceeds `timeout`.
+    pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
+        self.runtime.shutdown.store(true, Ordering::Release);
+        self.runtime.realtime_stop.store(true, Ordering::Release);
+        let mut workers = self
+            .runtime
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| "market engine shutdown is already in progress".to_string())?;
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "market engine shutdown deadline overflowed".to_string())?;
+        let mut panicked = Vec::new();
+        loop {
+            let mut index = 0;
+            while index < workers.len() {
+                if workers[index].is_finished() {
+                    let worker = workers.swap_remove(index);
+                    let name = worker.thread().name().unwrap_or("unnamed").to_string();
+                    if worker.join().is_err() {
+                        panicked.push(name);
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            if workers.is_empty() {
+                return if panicked.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "market engine workers panicked during shutdown: {}",
+                        panicked.join(", ")
+                    ))
+                };
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                let pending = workers
+                    .iter()
+                    .map(|worker| worker.thread().name().unwrap_or("unnamed"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "market engine shutdown deadline expired with active workers: {pending}"
+                ));
+            }
+            thread::sleep(Duration::from_millis(5).min(deadline.duration_since(now)));
+        }
     }
 
     /// Attaches a client identity to resident market state.
@@ -1118,34 +1194,80 @@ impl MarketService {
     }
 }
 
+fn spawn_history_worker(
+    name: &'static str,
+    source: Box<dyn HistorySource>,
+    requests: Receiver<HistoryRequest>,
+    completions: SyncSender<Command>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>, String> {
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || run_history_worker(source, &requests, &completions, &shutdown))
+        .map_err(|error| error.to_string())
+}
+
+fn spawn_storage_worker(
+    storage: Option<Result<LocalHistoryStore, String>>,
+    requests: Receiver<StorageRequest>,
+    completions: SyncSender<Command>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>, String> {
+    thread::Builder::new()
+        .name("axiusflow-local-history".to_string())
+        .spawn(move || run_storage_worker(storage, &requests, &completions, &shutdown))
+        .map_err(|error| error.to_string())
+}
+
+fn spawn_realtime_worker(
+    realtime: Box<dyn RealtimeSource>,
+    controls: Receiver<RealtimeControl>,
+    events: SyncSender<RealtimeEvent>,
+    overflow: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>, String> {
+    thread::Builder::new()
+        .name("axiusflow-coinbase-realtime".to_string())
+        .spawn(move || run_realtime_worker(realtime, &controls, &events, &overflow, &stop))
+        .map_err(|error| error.to_string())
+}
+
 fn start_rithmic_workers(
     enabled: bool,
     catalog_controls: Receiver<RithmicCatalogControl>,
     catalog_events: SyncSender<RithmicCatalogEvent>,
     realtime_controls: Receiver<RithmicRealtimeControl>,
     realtime_events: SyncSender<RithmicRealtimeEvent>,
-) -> Result<(), String> {
+) -> Result<Vec<thread::JoinHandle<()>>, String> {
     if !enabled {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    thread::Builder::new()
+    let catalog = thread::Builder::new()
         .name("axiusflow-rithmic-catalog".to_string())
         .spawn(move || crate::rithmic_realtime::run_catalog(&catalog_controls, &catalog_events))
         .map_err(|error| error.to_string())?;
-    thread::Builder::new()
+    let realtime = thread::Builder::new()
         .name("axiusflow-rithmic-realtime".to_string())
         .spawn(move || crate::rithmic_realtime::run(&realtime_controls, &realtime_events))
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(vec![catalog, realtime])
 }
 
 fn run_history_worker(
     mut source: Box<dyn HistorySource>,
     requests: &Receiver<HistoryRequest>,
     completions: &SyncSender<Command>,
+    shutdown: &AtomicBool,
 ) {
     while let Ok(request) = requests.recv() {
+        if shutdown.load(Ordering::Acquire) {
+            request.stop.store(true, Ordering::Release);
+            return;
+        }
         let result = source.fetch(&request);
+        if shutdown.load(Ordering::Acquire) {
+            return;
+        }
         if completions
             .send(Command::HistoryCompleted(
                 request.series,
@@ -1163,6 +1285,7 @@ fn run_storage_worker(
     mut storage: Option<Result<LocalHistoryStore, String>>,
     requests: &Receiver<StorageRequest>,
     completions: &SyncSender<Command>,
+    shutdown: &AtomicBool,
 ) {
     while let Ok(request) = requests.recv() {
         let completion = match request {
@@ -1183,7 +1306,10 @@ fn run_storage_worker(
                 Command::PersistenceCompleted(series, generation, result)
             }
         };
-        if completions.send(completion).is_err() {
+        if !shutdown.load(Ordering::Acquire)
+            && completions.send(completion).is_err()
+            && !shutdown.load(Ordering::Acquire)
+        {
             return;
         }
     }
@@ -1264,6 +1390,7 @@ fn run_coordinator(
     channels: CoordinatorChannels<'_>,
     realtime_overflow: &AtomicBool,
     realtime_stop: &Arc<AtomicBool>,
+    shutdown: &AtomicBool,
 ) {
     let mut coordinator = Coordinator {
         engine,
@@ -1290,6 +1417,10 @@ fn run_coordinator(
         realtime_connected: false,
     };
     loop {
+        if shutdown.load(Ordering::Acquire) {
+            coordinator.begin_shutdown();
+            return;
+        }
         for _ in 0..REALTIME_DRAIN_BUDGET {
             match channels.realtime.try_recv() {
                 Ok(event) => coordinator.handle_realtime(event),
@@ -1314,7 +1445,13 @@ fn run_coordinator(
         coordinator.publish_live();
         coordinator.publish_rithmic_live();
         match channels.commands.recv_timeout(COORDINATOR_TICK) {
-            Ok(command) => coordinator.handle_command(command),
+            Ok(command) if !shutdown.load(Ordering::Acquire) => {
+                coordinator.handle_command(command);
+            }
+            Ok(_) => {
+                coordinator.begin_shutdown();
+                return;
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -1347,6 +1484,13 @@ struct Coordinator<'a> {
 }
 
 impl Coordinator<'_> {
+    fn begin_shutdown(&self) {
+        for stop in self.history_cancellations.values() {
+            stop.store(true, Ordering::Release);
+        }
+        self.realtime_stop.store(true, Ordering::Release);
+    }
+
     fn handle_command(&mut self, command: Command) {
         match command {
             Command::Attach(client_id, reply) => {
@@ -3396,6 +3540,12 @@ mod tests {
         cancelled: SyncSender<()>,
     }
 
+    struct UncancellableHistory {
+        started: SyncSender<()>,
+        release: Receiver<()>,
+        exited: SyncSender<()>,
+    }
+
     fn retained_history_coordinator<'a>(
         engine: MarketEngine,
         history: &'a SyncSender<HistoryRequest>,
@@ -3943,6 +4093,84 @@ mod tests {
                 .map_err(|_| "Rithmic cancellation observer disconnected".to_string())?;
             Err("Rithmic history request was cancelled".to_string())
         }
+    }
+
+    impl HistorySource for UncancellableHistory {
+        fn fetch(&mut self, _request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+            self.started
+                .send(())
+                .map_err(|_| "history start observer disconnected".to_string())?;
+            self.release
+                .recv()
+                .map_err(|_| "history release disconnected".to_string())?;
+            self.exited
+                .send(())
+                .map_err(|_| "history exit observer disconnected".to_string())?;
+            Err("fixture history stopped".to_string())
+        }
+    }
+
+    #[test]
+    fn shutdown_cancels_inflight_history_and_joins_owned_workers() {
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (cancelled_tx, cancelled_rx) = mpsc::sync_channel(1);
+        let service = MarketService::start_with_source(BlockingRithmicHistory {
+            started: started_tx,
+            cancelled: cancelled_tx,
+        })
+        .expect("market service starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("history demand starts");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("history worker starts");
+
+        service
+            .shutdown(Duration::from_secs(1))
+            .expect("owned market workers stop before the deadline");
+
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("inflight history observes cancellation");
+        assert!(service.attach(2).is_err());
+    }
+
+    #[test]
+    fn shutdown_deadline_reports_an_uncancellable_worker_without_waiting_forever() {
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let (exited_tx, exited_rx) = mpsc::sync_channel(1);
+        let service = MarketService::start_with_source(UncancellableHistory {
+            started: started_tx,
+            release: release_rx,
+            exited: exited_tx,
+        })
+        .expect("market service starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("history demand starts");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("history worker starts");
+
+        let error = service
+            .shutdown(Duration::from_millis(20))
+            .expect_err("uncancellable history must hit the process deadline");
+
+        assert!(error.contains("axiusflow-coinbase-history"));
+        release_tx.send(()).expect("blocked history releases");
+        exited_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached worker exits after release");
     }
 
     fn btc() -> SeriesKey {
