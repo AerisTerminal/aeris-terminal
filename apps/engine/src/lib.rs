@@ -974,6 +974,8 @@ mod tests {
     const MULTI_CONSUMERS: u64 = 20;
     const MULTI_WARMUP_SAMPLES: usize = 8;
     const MULTI_MEASURED_SAMPLES: usize = 32;
+    const BTC_INSTRUMENT: &str = "instrument:coinbase:btc:usd";
+    const ETH_INSTRUMENT: &str = "instrument:coinbase:eth:usd";
 
     fn socket_name(label: &str) -> String {
         format!(
@@ -1024,11 +1026,11 @@ mod tests {
     #[cfg(not(debug_assertions))]
     fn require_release_profile() {}
 
-    fn cached_series() -> SeriesKey {
+    fn cached_series(instrument_id: &str, cadence_value: u32) -> SeriesKey {
         SeriesKey {
             provider: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            cadence_value: 60,
+            instrument_id: instrument_id.to_string(),
+            cadence_value,
             definition_revision: 1,
             entitlement_id: ENTITLEMENT_CLASS.to_string(),
             cadence: SeriesCadence::FixedSeconds as i32,
@@ -1055,6 +1057,7 @@ mod tests {
         client_id: u64,
         consumer_id: u64,
         generation: u64,
+        series: &SeriesKey,
     ) {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
@@ -1064,6 +1067,7 @@ mod tests {
                 && snapshot.generation == generation
             {
                 assert_eq!(snapshot.consumer_id, consumer_id);
+                assert_eq!(snapshot.series.as_ref(), Some(series));
                 assert_eq!(snapshot.bars.len(), 350);
                 return;
             }
@@ -1072,7 +1076,12 @@ mod tests {
         }
     }
 
-    fn poll_ipc_snapshot(client: &mut EngineClient, consumer_id: u64, generation: u64) {
+    fn poll_ipc_snapshot(
+        client: &mut EngineClient,
+        consumer_id: u64,
+        generation: u64,
+        series: &SeriesKey,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = client
@@ -1081,7 +1090,8 @@ mod tests {
                 && snapshot.generation == generation
             {
                 assert_eq!(snapshot.consumer_id, consumer_id);
-                assert_eq!(snapshot.bars.len(), 350);
+                assert_eq!(snapshot.series.as_ref(), Some(series));
+                assert!(!snapshot.bars.is_empty(), "IPC snapshot is usable");
                 return;
             }
             assert!(Instant::now() < deadline, "IPC snapshot timed out");
@@ -1097,20 +1107,41 @@ mod tests {
         market
             .set_demand(1, 1, 1, series)
             .expect("initial direct demand succeeds");
-        poll_direct_snapshot(market, 1, 1, 1);
+        poll_direct_snapshot(market, 1, 1, 1, series);
         measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
             let generation = u64::try_from(sample).expect("sample fits") + 2;
             market
                 .set_demand(1, 1, generation, series)
                 .expect("cached direct demand succeeds");
-            poll_direct_snapshot(market, 1, 1, generation);
+            poll_direct_snapshot(market, 1, 1, generation, series);
         })
+    }
+
+    fn prime_cached_switch_series(market: &MarketService) {
+        market.attach(3).expect("switch prime client attaches");
+        market
+            .register_consumer(3, 1, 3)
+            .expect("switch prime consumer registers");
+        for (generation, series) in [
+            cached_series(BTC_INSTRUMENT, 300),
+            cached_series(ETH_INSTRUMENT, 60),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let generation = u64::try_from(generation).expect("prime generation fits") + 1;
+            market
+                .set_demand(3, 3, generation, series)
+                .expect("switch series primes");
+            poll_direct_snapshot(market, 3, 3, generation, series);
+        }
+        market.detach(3).expect("switch prime client detaches");
     }
 
     fn measure_ipc_demand(
         market: &MarketService,
         series: &SeriesKey,
-    ) -> (Percentiles, Percentiles) {
+    ) -> (Percentiles, Percentiles, Percentiles, Percentiles) {
         let performance_socket_name = socket_name("performance");
         let listener = bind_listener(&performance_socket_name).expect("bind performance endpoint");
         let token = [11_u8; 32];
@@ -1132,8 +1163,9 @@ mod tests {
             client
                 .set_series_demand(2, generation, series.clone())
                 .expect("cached IPC demand succeeds");
-            poll_ipc_snapshot(&mut client, 2, generation);
+            poll_ipc_snapshot(&mut client, 2, generation, series);
         });
+        let (timeframe, symbol) = measure_cached_switches(&mut client);
 
         for consumer_id in 100..100 + MULTI_CONSUMERS {
             client
@@ -1151,12 +1183,46 @@ mod tests {
                     .expect("multi-consumer demand succeeds");
             }
             for consumer_id in 100..100 + MULTI_CONSUMERS {
-                poll_ipc_snapshot(&mut client, consumer_id, generation);
+                poll_ipc_snapshot(&mut client, consumer_id, generation, series);
             }
         });
         drop(client);
         server.join().expect("join performance server");
-        (ipc, multi)
+        (ipc, timeframe, symbol, multi)
+    }
+
+    fn measure_cached_switches(client: &mut EngineClient) -> (Percentiles, Percentiles) {
+        let btc_minute = cached_series(BTC_INSTRUMENT, 60);
+        let btc_five_minute = cached_series(BTC_INSTRUMENT, 300);
+        let eth_minute = cached_series(ETH_INSTRUMENT, 60);
+        let measured_end = WARMUP_SAMPLES + MEASURED_SAMPLES;
+        let mut generation = u64::try_from(measured_end).expect("sample count fits") + 1;
+        let timeframe = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
+            let series = if sample % 2 == 0 {
+                &btc_minute
+            } else {
+                &btc_five_minute
+            };
+            let current = generation + u64::try_from(sample).expect("sample fits");
+            client
+                .set_series_demand(2, current, series.clone())
+                .expect("cached timeframe switch succeeds");
+            poll_ipc_snapshot(client, 2, current, series);
+        });
+        generation += u64::try_from(measured_end).expect("sample count fits");
+        let symbol = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
+            let series = if sample % 2 == 0 {
+                &btc_minute
+            } else {
+                &eth_minute
+            };
+            let current = generation + u64::try_from(sample).expect("sample fits");
+            client
+                .set_series_demand(2, current, series.clone())
+                .expect("cached symbol switch succeeds");
+            poll_ipc_snapshot(client, 2, current, series);
+        });
+        (timeframe, symbol)
     }
 
     fn measure_ipc_attach(market: &MarketService) -> Percentiles {
@@ -1195,13 +1261,14 @@ mod tests {
         require_release_profile();
         let market =
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let series = cached_series();
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        prime_cached_switch_series(&market);
         let direct = measure_direct_demand(&market, &series);
-        let (ipc, multi) = measure_ipc_demand(&market, &series);
+        let (ipc, timeframe, symbol, multi) = measure_ipc_demand(&market, &series);
         let attach = measure_ipc_attach(&market);
 
         println!(
-            "AXIUSFLOW_ENGINE_PERFORMANCE schema=1 samples={} warmups={} bars=350 direct_demand_snapshot_p50_ns={} direct_demand_snapshot_p95_ns={} direct_demand_snapshot_p99_ns={} ipc_demand_snapshot_p50_ns={} ipc_demand_snapshot_p95_ns={} ipc_demand_snapshot_p99_ns={} ipc_attach_restore_p50_ns={} ipc_attach_restore_p95_ns={} ipc_attach_restore_p99_ns={} multi_consumers={} multi_samples={} ipc_multi_batch_p50_ns={} ipc_multi_batch_p95_ns={} ipc_multi_batch_p99_ns={} ipc_multi_per_consumer_p50_ns={}",
+            "AXIUSFLOW_ENGINE_PERFORMANCE schema=2 samples={} warmups={} bars=350 direct_demand_snapshot_p50_ns={} direct_demand_snapshot_p95_ns={} direct_demand_snapshot_p99_ns={} ipc_demand_snapshot_p50_ns={} ipc_demand_snapshot_p95_ns={} ipc_demand_snapshot_p99_ns={} ipc_timeframe_switch_p50_ns={} ipc_timeframe_switch_p95_ns={} ipc_timeframe_switch_p99_ns={} ipc_symbol_switch_p50_ns={} ipc_symbol_switch_p95_ns={} ipc_symbol_switch_p99_ns={} ipc_attach_restore_p50_ns={} ipc_attach_restore_p95_ns={} ipc_attach_restore_p99_ns={} multi_consumers={} multi_samples={} ipc_multi_batch_p50_ns={} ipc_multi_batch_p95_ns={} ipc_multi_batch_p99_ns={} ipc_multi_per_consumer_p50_ns={}",
             MEASURED_SAMPLES,
             WARMUP_SAMPLES,
             direct.p50,
@@ -1210,6 +1277,12 @@ mod tests {
             ipc.p50,
             ipc.p95,
             ipc.p99,
+            timeframe.p50,
+            timeframe.p95,
+            timeframe.p99,
+            symbol.p50,
+            symbol.p95,
+            symbol.p99,
             attach.p50,
             attach.p95,
             attach.p99,
@@ -1220,15 +1293,21 @@ mod tests {
             multi.p99,
             multi.p50 / u128::from(MULTI_CONSUMERS)
         );
+        assert_local_interaction_target("cached IPC demand-to-snapshot", ipc);
+        assert_local_interaction_target("cached timeframe switch", timeframe);
+        assert_local_interaction_target("cached symbol switch", symbol);
+    }
+
+    fn assert_local_interaction_target(label: &str, latency: Percentiles) {
         assert!(
-            ipc.p50 < 20_000_000,
-            "cached IPC demand-to-snapshot p50 exceeded 20 ms: {} ns",
-            ipc.p50
+            latency.p50 < 20_000_000,
+            "{label} p50 exceeded 20 ms: {} ns",
+            latency.p50
         );
         assert!(
-            ipc.p95 < 50_000_000,
-            "cached IPC demand-to-snapshot p95 exceeded 50 ms: {} ns",
-            ipc.p95
+            latency.p95 < 50_000_000,
+            "{label} p95 exceeded 50 ms: {} ns",
+            latency.p95
         );
     }
 
