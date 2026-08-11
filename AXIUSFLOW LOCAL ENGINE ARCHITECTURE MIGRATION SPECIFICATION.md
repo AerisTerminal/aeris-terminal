@@ -3742,6 +3742,8 @@ Remove desktop access to storage.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): protocol v6 and the canonical `BarPeriod` now preserve provider, instrument, entitlement revision, definition revision, and the complete Rithmic chart cadence catalog across fixed-time, 100-trade, session-day, calendar-week, and calendar-month identities. Trust-boundary tests round-trip all 15 supported Rithmic periods and reject an unspecified cadence. The transitional desktop Rithmic runtime still owns catalog, provider history, streaming, reconnect, and depth, so this phase remains unchecked.
+
 Move Rithmic provider ownership into ProviderManager.
 
 Keep:

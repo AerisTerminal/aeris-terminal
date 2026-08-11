@@ -253,7 +253,9 @@ fn validate_levels(
 pub enum BarPeriod {
     Tick { trades: u32 },
     Time { seconds: u32 },
-    Daily,
+    Session { days: u32 },
+    Week { weeks: u32 },
+    Month { months: u32 },
 }
 
 impl BarPeriod {
@@ -266,11 +268,16 @@ impl BarPeriod {
         match self {
             Self::Tick { trades } if trades > 0 => Ok(()),
             Self::Time {
-                seconds: 60 | 300 | 900 | 3_600,
-            } => Ok(()),
-            Self::Daily | Self::Tick { .. } | Self::Time { .. } => {
-                Err(MarketDataValidationError::InvalidPeriod)
+                seconds: 60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200,
             }
+            | Self::Session { days: 1 | 3 }
+            | Self::Week { weeks: 1 }
+            | Self::Month { months: 1 } => Ok(()),
+            Self::Tick { .. }
+            | Self::Time { .. }
+            | Self::Session { .. }
+            | Self::Week { .. }
+            | Self::Month { .. } => Err(MarketDataValidationError::InvalidPeriod),
         }
     }
 
@@ -290,12 +297,42 @@ impl BarPeriod {
     ///
     /// # Errors
     ///
-    /// Returns an error unless seconds represent 1m, 5m, 15m, or 1h.
+    /// Returns an error unless seconds represent a supported intraday interval.
     pub fn time(seconds: u32) -> Result<Self, MarketDataValidationError> {
-        if !matches!(seconds, 60 | 300 | 900 | 3_600) {
+        if !matches!(
+            seconds,
+            60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200
+        ) {
             return Err(MarketDataValidationError::InvalidPeriod);
         }
         Ok(Self::Time { seconds })
+    }
+
+    /// Creates a supported exchange-session day period.
+    ///
+    /// # Errors
+    /// Returns an error unless the day count is supported.
+    pub fn session(days: u32) -> Result<Self, MarketDataValidationError> {
+        let period = Self::Session { days };
+        period.validate().map(|()| period)
+    }
+
+    /// Creates a supported calendar-week period.
+    ///
+    /// # Errors
+    /// Returns an error unless the week count is supported.
+    pub fn week(weeks: u32) -> Result<Self, MarketDataValidationError> {
+        let period = Self::Week { weeks };
+        period.validate().map(|()| period)
+    }
+
+    /// Creates a supported calendar-month period.
+    ///
+    /// # Errors
+    /// Returns an error unless the month count is supported.
+    pub fn month(months: u32) -> Result<Self, MarketDataValidationError> {
+        let period = Self::Month { months };
+        period.validate().map(|()| period)
     }
 
     /// Returns the time period in nanoseconds, when clock-based.
@@ -303,7 +340,9 @@ impl BarPeriod {
     pub fn duration_nanos(self) -> Option<i64> {
         match self {
             Self::Time { seconds } => Some(i64::from(seconds) * NANOS_PER_SECOND),
-            Self::Daily | Self::Tick { .. } => None,
+            Self::Tick { .. } | Self::Session { .. } | Self::Week { .. } | Self::Month { .. } => {
+                None
+            }
         }
     }
 }
@@ -563,10 +602,17 @@ mod tests {
     }
 
     #[test]
-    fn only_declared_standard_time_periods_are_enabled() {
-        for seconds in [60, 300, 900, 3_600] {
+    fn canonical_periods_cover_the_complete_rithmic_chart_catalog() {
+        for seconds in [
+            60, 180, 300, 900, 1_800, 3_600, 7_200, 14_400, 28_800, 43_200,
+        ] {
             assert_eq!(BarPeriod::time(seconds), Ok(BarPeriod::Time { seconds }));
         }
+        assert_eq!(BarPeriod::tick(100), Ok(BarPeriod::Tick { trades: 100 }));
+        assert_eq!(BarPeriod::session(1), Ok(BarPeriod::Session { days: 1 }));
+        assert_eq!(BarPeriod::session(3), Ok(BarPeriod::Session { days: 3 }));
+        assert_eq!(BarPeriod::week(1), Ok(BarPeriod::Week { weeks: 1 }));
+        assert_eq!(BarPeriod::month(1), Ok(BarPeriod::Month { months: 1 }));
         assert_eq!(
             BarPeriod::time(30),
             Err(MarketDataValidationError::InvalidPeriod)
@@ -575,11 +621,11 @@ mod tests {
             BarPeriod::tick(0),
             Err(MarketDataValidationError::InvalidPeriod)
         );
-        assert_eq!(BarPeriod::Daily.duration_nanos(), None);
         assert_eq!(
-            BarPeriod::Daily.validate(),
+            BarPeriod::session(2),
             Err(MarketDataValidationError::InvalidPeriod)
         );
+        assert_eq!(BarPeriod::month(1).expect("month").duration_nanos(), None);
         let invalid_key = BarSeriesKey {
             provider_id: "fixture".to_string(),
             instrument_id: "instrument:fixture:es".to_string(),

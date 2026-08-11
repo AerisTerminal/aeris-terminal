@@ -100,6 +100,24 @@ pub enum PersistenceState {
     Degraded = 3,
 }
 
+/// Canonical cadence carried by a provider-neutral bar-series identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum SeriesCadence {
+    /// Invalid or absent cadence.
+    Unspecified = 0,
+    /// Fixed intraday seconds.
+    FixedSeconds = 1,
+    /// Trades per bar.
+    Trades = 2,
+    /// Exchange-session days per bar.
+    SessionDays = 3,
+    /// Calendar weeks per bar.
+    CalendarWeeks = 4,
+    /// Calendar months per bar.
+    CalendarMonths = 5,
+}
+
 /// First authenticated client message.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct ClientHello {
@@ -253,12 +271,18 @@ pub struct SeriesKey {
     /// Stable canonical instrument identifier.
     #[prost(string, tag = "2")]
     pub instrument_id: String,
-    /// Fixed chart interval in seconds for the first migration slices.
+    /// Positive value interpreted by `cadence`.
     #[prost(uint32, tag = "3")]
-    pub interval_seconds: u32,
+    pub cadence_value: u32,
     /// Canonical series-definition revision.
     #[prost(uint32, tag = "4")]
     pub definition_revision: u32,
+    /// Exact entitlement revision used for this series.
+    #[prost(string, tag = "5")]
+    pub entitlement_id: String,
+    /// Cadence kind for the positive `cadence_value`.
+    #[prost(enumeration = "SeriesCadence", tag = "6")]
+    pub cadence: i32,
 }
 
 /// Authenticated client attachment to engine-owned market state.

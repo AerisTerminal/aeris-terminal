@@ -23,7 +23,7 @@ use axiusflow_coinbase_market_adapter::{
 };
 use axiusflow_local_engine_protocol::{
     DemandError, EngineFaultCode, MarketBar as IpcMarketBar, PersistenceState,
-    ProviderConnectionState, ProviderState, SeriesKey, SeriesLoadState,
+    ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey, SeriesLoadState,
     SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
 };
 use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar};
@@ -1029,7 +1029,11 @@ impl Coordinator<'_> {
     ) -> Result<bool, String> {
         let target_seconds = match series.period {
             BarPeriod::Time { seconds } if seconds > 60 && seconds % 60 == 0 => seconds,
-            BarPeriod::Time { .. } | BarPeriod::Tick { .. } | BarPeriod::Daily => return Ok(false),
+            BarPeriod::Time { .. }
+            | BarPeriod::Tick { .. }
+            | BarPeriod::Session { .. }
+            | BarPeriod::Week { .. }
+            | BarPeriod::Month { .. } => return Ok(false),
         };
         let source_series = BarSeriesKey {
             period: BarPeriod::time(60).map_err(|error| error.to_string())?,
@@ -1909,7 +1913,10 @@ fn coinbase_series_profile(series: &BarSeriesKey) -> Result<CoinbaseSeriesProfil
     };
     let interval_seconds = match series.period {
         BarPeriod::Time { seconds } => seconds,
-        BarPeriod::Tick { .. } | BarPeriod::Daily => {
+        BarPeriod::Tick { .. }
+        | BarPeriod::Session { .. }
+        | BarPeriod::Week { .. }
+        | BarPeriod::Month { .. } => {
             return Err("unsupported Coinbase engine interval".to_string());
         }
     };
@@ -1942,15 +1949,29 @@ fn coinbase_interval(seconds: u32) -> Result<CoinbaseInterval, String> {
 fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
     if series.provider.trim().is_empty()
         || series.instrument_id.trim().is_empty()
+        || series.entitlement_id.trim().is_empty()
         || series.definition_revision == 0
     {
         return Err("market series identity is invalid".to_string());
     }
+    let period = match SeriesCadence::try_from(series.cadence)
+        .map_err(|_| "market series cadence is invalid".to_string())?
+    {
+        SeriesCadence::FixedSeconds => BarPeriod::time(series.cadence_value),
+        SeriesCadence::Trades => BarPeriod::tick(series.cadence_value),
+        SeriesCadence::SessionDays => BarPeriod::session(series.cadence_value),
+        SeriesCadence::CalendarWeeks => BarPeriod::week(series.cadence_value),
+        SeriesCadence::CalendarMonths => BarPeriod::month(series.cadence_value),
+        SeriesCadence::Unspecified => {
+            Err(axiusflow_market_data::MarketDataValidationError::InvalidPeriod)
+        }
+    }
+    .map_err(|error| error.to_string())?;
     Ok(BarSeriesKey {
         provider_id: series.provider.clone(),
         instrument_id: series.instrument_id.clone(),
-        entitlement_id: ENTITLEMENT_CLASS.to_string(),
-        period: BarPeriod::time(series.interval_seconds).map_err(|error| error.to_string())?,
+        entitlement_id: series.entitlement_id.clone(),
+        period,
         definition_version: series.definition_revision,
     })
 }
@@ -1959,11 +1980,22 @@ fn ipc_series(series: &BarSeriesKey) -> SeriesKey {
     SeriesKey {
         provider: series.provider_id.clone(),
         instrument_id: series.instrument_id.clone(),
-        interval_seconds: match series.period {
+        cadence_value: match series.period {
             BarPeriod::Time { seconds } => seconds,
-            BarPeriod::Tick { .. } | BarPeriod::Daily => 0,
+            BarPeriod::Tick { trades } => trades,
+            BarPeriod::Session { days } => days,
+            BarPeriod::Week { weeks } => weeks,
+            BarPeriod::Month { months } => months,
         },
         definition_revision: series.definition_version,
+        entitlement_id: series.entitlement_id.clone(),
+        cadence: match series.period {
+            BarPeriod::Time { .. } => SeriesCadence::FixedSeconds,
+            BarPeriod::Tick { .. } => SeriesCadence::Trades,
+            BarPeriod::Session { .. } => SeriesCadence::SessionDays,
+            BarPeriod::Week { .. } => SeriesCadence::CalendarWeeks,
+            BarPeriod::Month { .. } => SeriesCadence::CalendarMonths,
+        } as i32,
     }
 }
 
@@ -1998,6 +2030,47 @@ mod tests {
     struct SwitchingHistory {
         requested: SyncSender<BarSeriesKey>,
         release: Receiver<()>,
+    }
+
+    #[test]
+    fn protocol_series_identity_roundtrips_every_rithmic_chart_cadence() {
+        let periods = [
+            BarPeriod::tick(100).expect("tick"),
+            BarPeriod::time(60).expect("1m"),
+            BarPeriod::time(180).expect("3m"),
+            BarPeriod::time(300).expect("5m"),
+            BarPeriod::time(900).expect("15m"),
+            BarPeriod::time(1_800).expect("30m"),
+            BarPeriod::time(3_600).expect("1h"),
+            BarPeriod::time(7_200).expect("2h"),
+            BarPeriod::time(14_400).expect("4h"),
+            BarPeriod::time(28_800).expect("8h"),
+            BarPeriod::time(43_200).expect("12h"),
+            BarPeriod::session(1).expect("1D"),
+            BarPeriod::session(3).expect("3D"),
+            BarPeriod::week(1).expect("1W"),
+            BarPeriod::month(1).expect("1M"),
+        ];
+        for period in periods {
+            let internal = BarSeriesKey {
+                provider_id: "rithmic".to_string(),
+                instrument_id: "rithmic:CME:MNQU6".to_string(),
+                entitlement_id: "rithmic-test:CME-Delayed:MNQU6".to_string(),
+                period,
+                definition_version: 1,
+            };
+            assert_eq!(internal_series(&ipc_series(&internal)), Ok(internal));
+        }
+
+        let mut invalid = ipc_series(&BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "rithmic:CME:MNQU6".to_string(),
+            entitlement_id: "rithmic-test:CME-Delayed:MNQU6".to_string(),
+            period: BarPeriod::time(60).expect("1m"),
+            definition_version: 1,
+        });
+        invalid.cadence = SeriesCadence::Unspecified as i32;
+        assert!(internal_series(&invalid).is_err());
     }
 
     impl HistorySource for ControlledHistory {
@@ -2052,8 +2125,10 @@ mod tests {
         SeriesKey {
             provider: "coinbase".to_string(),
             instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            interval_seconds: 60,
+            cadence_value: 60,
             definition_revision: 1,
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
         }
     }
 
@@ -2061,8 +2136,10 @@ mod tests {
         SeriesKey {
             provider: "coinbase".to_string(),
             instrument_id: instrument_id.to_string(),
-            interval_seconds,
+            cadence_value: interval_seconds,
             definition_revision: 1,
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
         }
     }
 
@@ -2612,7 +2689,7 @@ mod tests {
                 if snapshot.generation == 7
                     && snapshot.series.as_ref().is_some_and(|series| {
                         series.instrument_id == "instrument:coinbase:btc:usd"
-                            && series.interval_seconds == 60
+                            && series.cadence_value == 60
                     })
         ));
 
@@ -2785,7 +2862,7 @@ mod tests {
             envelope::Payload::SeriesSnapshot(snapshot)
                 if snapshot.series.as_ref().is_some_and(|series| {
                     series.instrument_id == "instrument:coinbase:eth:usd"
-                        && series.interval_seconds == 300
+                        && series.cadence_value == 300
                 })
         ));
         assert!(

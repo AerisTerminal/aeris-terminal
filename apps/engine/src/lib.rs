@@ -1368,8 +1368,11 @@ mod tests {
                 SeriesKey {
                     provider: "coinbase".to_string(),
                     instrument_id: "instrument:coinbase:btc:usd".to_string(),
-                    interval_seconds: 60,
+                    cadence_value: 60,
                     definition_revision: 1,
+                    entitlement_id: axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS
+                        .to_string(),
+                    cadence: axiusflow_local_engine_protocol::SeriesCadence::FixedSeconds as i32,
                 },
             )
             .expect("send demand");

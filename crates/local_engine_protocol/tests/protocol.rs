@@ -5,10 +5,10 @@ use axiusflow_local_engine_protocol::{
     EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
     MAX_FRAME_BYTES, MarketBar, MarketEventIdle, PROTOCOL_VERSION, PersistenceState,
     PollMarketEvent, ProtocolError, ProviderConnectionState, ProviderState, RegisterConsumer,
-    RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey, SeriesLoadState,
-    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport,
-    SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState,
-    encode_envelope, envelope,
+    RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesCadence, SeriesDemand, SeriesKey,
+    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode,
+    SetSelection, SetViewport, SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand,
+    WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -84,8 +84,10 @@ fn market_payloads() -> Vec<envelope::Payload> {
     let series = SeriesKey {
         provider: "coinbase".into(),
         instrument_id: "coinbase:spot:BTC-USD".into(),
-        interval_seconds: 60,
+        cadence_value: 60,
         definition_revision: 1,
+        entitlement_id: "coinbase-public-market-data".into(),
+        cadence: SeriesCadence::FixedSeconds as i32,
     };
     let bar = MarketBar {
         source_sequence: 1,
@@ -193,6 +195,34 @@ fn every_payload_variant_roundtrips_under_fragmentation_and_coalescing() {
     }
     let mut decoder = EnvelopeDecoder::try_new().expect("decoder builds");
     assert_eq!(decoder.push(&coalesced).expect("frames decode"), envelopes);
+}
+
+#[test]
+fn every_series_cadence_roundtrips_with_entitlement_identity() {
+    for (cadence, value) in [
+        (SeriesCadence::FixedSeconds, 180),
+        (SeriesCadence::Trades, 100),
+        (SeriesCadence::SessionDays, 3),
+        (SeriesCadence::CalendarWeeks, 1),
+        (SeriesCadence::CalendarMonths, 1),
+    ] {
+        let series = SeriesKey {
+            provider: "rithmic".into(),
+            instrument_id: "rithmic:CME:MNQU6".into(),
+            cadence_value: value,
+            definition_revision: 1,
+            entitlement_id: "rithmic-test:CME-Delayed:MNQU6".into(),
+            cadence: cadence as i32,
+        };
+        let envelope = wrap(envelope::Payload::SeriesDemand(SeriesDemand {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series.clone()),
+        }));
+        let encoded = encode_envelope(&envelope).expect("cadence encodes");
+        let mut decoder = EnvelopeDecoder::try_new().expect("decoder builds");
+        assert_eq!(decoder.push(&encoded).expect("cadence decodes"), [envelope]);
+    }
 }
 
 #[test]

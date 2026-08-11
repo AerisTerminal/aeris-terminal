@@ -17,7 +17,7 @@ use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_local_engine_protocol::{
-    DemandError, EngineFaultCode, ProviderConnectionState, ProviderState, SeriesKey,
+    DemandError, EngineFaultCode, ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey,
     SeriesLoadState, SeriesSnapshot, envelope,
 };
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
@@ -472,8 +472,10 @@ fn send_recovery(
         SeriesKey {
             provider: "coinbase".to_string(),
             instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            interval_seconds: 60,
+            cadence_value: 60,
             definition_revision: 1,
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
         },
         model,
         messages,
@@ -513,6 +515,12 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .series
         .clone()
         .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
+    if series.provider != "coinbase"
+        || series.entitlement_id != ENTITLEMENT_CLASS
+        || SeriesCadence::try_from(series.cadence) != Ok(SeriesCadence::FixedSeconds)
+    {
+        return Err("engine Coinbase snapshot identity is invalid".to_string());
+    }
     let price_scale = u8::try_from(snapshot.price_scale)
         .map_err(|_| "engine price scale is invalid".to_string())?;
     let quantity_scale = u8::try_from(snapshot.quantity_scale)
@@ -536,10 +544,10 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
     let definition = BarDefinition {
         definition_id: format!(
             "{}:{}:{}s",
-            series.provider, series.instrument_id, series.interval_seconds
+            series.provider, series.instrument_id, series.cadence_value
         ),
         version: series.definition_revision,
-        interval_seconds: series.interval_seconds,
+        interval_seconds: series.cadence_value,
         trades_per_bar: None,
     };
     let received = now_unix_nanos();
@@ -624,7 +632,7 @@ fn series_key(product: &CoinbaseSpotProduct, interval: ChartInterval) -> Result<
     Ok(SeriesKey {
         provider: "coinbase".to_string(),
         instrument_id: product.instrument_id.clone(),
-        interval_seconds: match interval {
+        cadence_value: match interval {
             ChartInterval::Minute1 => 60,
             ChartInterval::Minute5 => 300,
             ChartInterval::Minute15 => 900,
@@ -632,6 +640,8 @@ fn series_key(product: &CoinbaseSpotProduct, interval: ChartInterval) -> Result<
             _ => unreachable!("supported intervals were validated above"),
         },
         definition_revision: 1,
+        entitlement_id: ENTITLEMENT_CLASS.to_string(),
+        cadence: SeriesCadence::FixedSeconds as i32,
     })
 }
 
@@ -760,7 +770,7 @@ mod tests {
                 (ChartInterval::Hour1, 3_600),
             ] {
                 let series = series_key(product, interval).expect("phase-four series validates");
-                assert_eq!(series.interval_seconds, seconds);
+                assert_eq!(series.cadence_value, seconds);
                 assert_eq!(series.instrument_id, product.instrument_id);
             }
         }

@@ -238,9 +238,11 @@ fn resolution(series: &BarSeriesKey) -> Result<String, String> {
 fn interval_seconds(series: &BarSeriesKey) -> Result<u32, String> {
     match series.period {
         BarPeriod::Time { seconds } if seconds > 0 => Ok(seconds),
-        BarPeriod::Time { .. } | BarPeriod::Tick { .. } | BarPeriod::Daily => {
-            Err("local history supports fixed-time bars only".to_string())
-        }
+        BarPeriod::Time { .. }
+        | BarPeriod::Tick { .. }
+        | BarPeriod::Session { .. }
+        | BarPeriod::Week { .. }
+        | BarPeriod::Month { .. } => Err("local history supports fixed-time bars only".to_string()),
     }
 }
 
