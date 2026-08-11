@@ -3742,7 +3742,7 @@ Remove desktop access to storage.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): protocol v6 and the canonical `BarPeriod` now preserve provider, instrument, entitlement revision, definition revision, and the complete Rithmic chart cadence catalog across fixed-time, 100-trade, session-day, calendar-week, and calendar-month identities. Trust-boundary tests round-trip all 15 supported Rithmic periods and reject an unspecified cadence. The transitional desktop Rithmic runtime still owns catalog, provider history, streaming, reconnect, and depth, so this phase remains unchecked.
+Progress evidence (2026-08-11): protocol v6 and the canonical `BarPeriod` now preserve provider, instrument, entitlement revision, definition revision, and the complete Rithmic chart cadence catalog across fixed-time, 100-trade, session-day, calendar-week, and calendar-month identities. Trust-boundary tests round-trip all 15 supported Rithmic periods and reject an unspecified cadence. Canonical history collection for all 15 periods, tick subsecond ordering, and calendar week/month aggregation now live behind `rithmic_protocol`; the transitional desktop task only supplies the authenticated connection and consumes canonical results. Deterministic adapter tests cover every cadence, and moving the boundary fixed the desktop request guard that previously rejected tick, week, and month history before dispatch. The transitional desktop Rithmic runtime still owns credentials, catalog, authenticated provider sessions, history task scheduling, application snapshot construction, streaming, reconnect, and depth, so this phase remains unchecked.
 
 Move Rithmic provider ownership into ProviderManager.
 

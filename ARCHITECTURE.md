@@ -61,7 +61,7 @@ These crates must not depend on UI or a particular provider.
 ### Providers and coordination
 
 - `crates/adapters/coinbase_market`: Coinbase catalog, history, streaming, and wire behavior.
-- `crates/adapters/rithmic_protocol`: Rithmic protocol, network sessions, catalog, history, and market-data behavior.
+- `crates/adapters/rithmic_protocol`: Rithmic protocol, network sessions, catalog, history, and market-data behavior. It now owns canonical collection and exact timestamp conversion for all 15 supported chart cadences, including daily-session aggregation into calendar weeks and months.
 - `crates/adapters/market_protocol`: conversion between canonical market models and protobuf/wire representations.
 - `crates/desktop_provider_runtime`: bounded provider-session lifecycle and recovery.
 - `crates/provider_history`: provider-neutral pagination, rate limiting, coverage, scheduling, and history/live handoff.
@@ -73,7 +73,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 - `crates/desktop_storage`: SQLite metadata, encrypted local segments, and storage lifecycle.
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
-- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 5 is active for the default Coinbase history/realtime path; it makes series-demand success asynchronous and carries consumer generation, provider session generation, publication generation, decimal precision, canonical bars, forming-tail state, and bounded market-event polling. The v5 socket name prevents an older synchronous-demand resident engine from being mistaken for a compatible endpoint.
+- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 6 is active for the default Coinbase history/realtime path; it makes series-demand success asynchronous and carries consumer generation, provider session generation, publication generation, decimal precision, canonical bars, forming-tail state, bounded market-event polling, entitlement revision, definition revision, and exact fixed-time, trade-count, session-day, calendar-week, or calendar-month cadence identity. The versioned socket name prevents an older resident engine from being mistaken for a compatible endpoint.
 - `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
 - `crates/transport`: small transport framing primitives.
 
@@ -100,7 +100,7 @@ This production slice supports BTC-USD and ETH-USD history plus realtime at 1m, 
 
 `ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
 
-`desktop_market_runtime` temporarily remains the shared UI mailbox/model contract and owns only the direct Rithmic test runtime. Its obsolete direct Coinbase coordinator, history, persistence, conformance, and smoke-command path have been deleted. The remaining Rithmic worker now composes the provider lifecycle directly and no longer opens the unused desktop history/cache/store; its actual provider history task remains desktop-owned until Phase 7. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, and paging. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second market-state owner.
+`desktop_market_runtime` temporarily remains the shared UI mailbox/model contract and owns only the direct Rithmic test runtime. Its obsolete direct Coinbase coordinator, history, persistence, conformance, and smoke-command path have been deleted. The remaining Rithmic worker now composes the provider lifecycle directly and no longer opens the unused desktop history/cache/store. Canonical Rithmic history collection, tick subsecond ordering, fixed-time conversion, and week/month daily-session aggregation have moved behind `rithmic_protocol`; the desktop task still owns credential loading, authenticated history connection creation, cancellation, and application snapshot construction until the engine absorbs that task in Phase 7. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, paging, and provider-specific canonical conversion. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second market-state owner.
 
 The path is local by construction. Provider credentials stay on the user's machine, provider traffic terminates in a local worker, and durable history is stored under the user's local data root. No remote Axiusflow service, licensing gateway, or network chart service exists in the product architecture.
 

@@ -4,7 +4,9 @@ use crate::{
     RithmicHistoryConnection, RithmicProviderInstrument, RithmicSessionMessage,
     TimeBarReplayRequest, TimeBarType,
 };
-use axiusflow_market_data::MarketBar;
+use axiusflow_market_data::{
+    ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation, RithmicTimeUnit,
+};
 use axiusflow_provider_history::{
     DataClass, DatasetCapability, HandoffBatch, HandoffCoordinator, HandoffState,
     HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
@@ -597,6 +599,239 @@ pub struct CanonicalRithmicTickBar {
     pub exchange_timestamp_unix_nanos: i64,
 }
 
+/// One canonical Rithmic chart-history bar with its exact ordering timestamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalRithmicHistoryBar {
+    pub value: MarketBar,
+    pub exchange_timestamp_unix_nanos: i64,
+}
+
+/// Collects one bounded canonical chart-history response for any supported Rithmic interval.
+///
+/// # Errors
+///
+/// Returns an error for an invalid range, provider response, or canonical conversion.
+pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
+    transport: &mut T,
+    instrument: &RithmicProviderInstrument,
+    interval: ChartInterval,
+    range: HistoryRange,
+    maximum_bars: NonZeroUsize,
+) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+    if range.start_unix_nanos % NANOS_PER_SECOND_I64 != 0
+        || range.end_unix_nanos % NANOS_PER_SECOND_I64 != 0
+        || range.start_unix_nanos >= range.end_unix_nanos
+        || maximum_bars.get() > MAXIMUM_REPLAY_BARS
+    {
+        return Err(RithmicHistoryAdapterError::InvalidRequest);
+    }
+    let start_seconds = i32::try_from(range.start_unix_nanos / NANOS_PER_SECOND_I64)
+        .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
+    let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND_I64)
+        .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
+    match interval
+        .rithmic_aggregation()
+        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?
+    {
+        RithmicChartAggregation::Trades { trades_per_bar } => collect_tick_chart_history(
+            transport,
+            instrument,
+            trades_per_bar.get(),
+            start_seconds,
+            finish_seconds,
+            maximum_bars,
+        ),
+        RithmicChartAggregation::Time { unit, period } => collect_time_chart_history(
+            transport,
+            instrument,
+            &RithmicTimeBarResolution::try_new(
+                interval.label(),
+                match unit {
+                    RithmicTimeUnit::Minute => TimeBarType::Minute,
+                    RithmicTimeUnit::Day => TimeBarType::Daily,
+                },
+                period,
+            )?,
+            start_seconds,
+            finish_seconds,
+            maximum_bars,
+        ),
+        RithmicChartAggregation::DailySessions { period } => {
+            let daily = collect_time_chart_history(
+                transport,
+                instrument,
+                &RithmicTimeBarResolution::try_new(
+                    ChartInterval::Day1.label(),
+                    TimeBarType::Daily,
+                    NonZeroU16::MIN,
+                )?,
+                start_seconds,
+                finish_seconds,
+                maximum_bars,
+            )?;
+            aggregate_daily_chart_history(daily, period)
+        }
+    }
+}
+
+fn collect_time_chart_history<T: RithmicHistoryTransport>(
+    transport: &mut T,
+    instrument: &RithmicProviderInstrument,
+    resolution: &RithmicTimeBarResolution,
+    start_seconds: i32,
+    finish_seconds: i32,
+    maximum_bars: NonZeroUsize,
+) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+    let interval_seconds = i32::try_from(resolution.interval_seconds()?)
+        .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
+    let collection_start = start_seconds
+        .checked_sub(interval_seconds)
+        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
+    let collection_finish = finish_seconds
+        .checked_add(interval_seconds)
+        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
+    let collected = transport
+        .collect_history(HistoryCollectionRequest {
+            symbol: instrument.descriptor.provider_symbol.clone(),
+            exchange: instrument.descriptor.venue_id.clone(),
+            series: HistorySeries::Time {
+                bar_type: resolution.decoded_type(),
+                period: i32::from(resolution.period.get()),
+            },
+            start_seconds: collection_start,
+            finish_seconds: collection_finish,
+            maximum_bars,
+        })
+        .map_err(|_| RithmicHistoryAdapterError::Transport)?;
+    let HistoryBars::Time(decoded) = collected.bars else {
+        return Err(RithmicHistoryAdapterError::MalformedHistory);
+    };
+    decoded
+        .iter()
+        .filter(|bar| bar.marker_seconds >= start_seconds && bar.marker_seconds <= finish_seconds)
+        .enumerate()
+        .map(|(index, bar)| {
+            canonical_rithmic_time_bar(instrument, resolution, bar).map(|sequenced| {
+                let mut value = sequenced.value;
+                value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+                CanonicalRithmicHistoryBar {
+                    value,
+                    exchange_timestamp_unix_nanos: value.exchange_timestamp_seconds
+                        * NANOS_PER_SECOND_I64,
+                }
+            })
+        })
+        .collect()
+}
+
+fn collect_tick_chart_history<T: RithmicHistoryTransport>(
+    transport: &mut T,
+    instrument: &RithmicProviderInstrument,
+    trades_per_bar: u16,
+    start_seconds: i32,
+    finish_seconds: i32,
+    maximum_bars: NonZeroUsize,
+) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+    let collected = transport
+        .collect_history(HistoryCollectionRequest {
+            symbol: instrument.descriptor.provider_symbol.clone(),
+            exchange: instrument.descriptor.venue_id.clone(),
+            series: HistorySeries::Tick { trades_per_bar },
+            start_seconds,
+            finish_seconds,
+            maximum_bars,
+        })
+        .map_err(|_| RithmicHistoryAdapterError::Transport)?;
+    let HistoryBars::Tick(decoded) = collected.bars else {
+        return Err(RithmicHistoryAdapterError::MalformedHistory);
+    };
+    decoded
+        .iter()
+        .enumerate()
+        .map(|(index, bar)| {
+            let sequence =
+                NonZeroU64::new(u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
+                    .unwrap_or(NonZeroU64::MIN);
+            canonical_rithmic_tick_bar(instrument, trades_per_bar, sequence, bar).map(|bar| {
+                CanonicalRithmicHistoryBar {
+                    value: bar.value,
+                    exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
+                }
+            })
+        })
+        .collect()
+}
+
+fn aggregate_daily_chart_history(
+    daily: Vec<CanonicalRithmicHistoryBar>,
+    period: RithmicDailyAggregation,
+) -> Result<Vec<CanonicalRithmicHistoryBar>, RithmicHistoryAdapterError> {
+    let daily = daily
+        .into_iter()
+        .map(|bar| (bar.exchange_timestamp_unix_nanos, bar))
+        .collect::<BTreeMap<_, _>>();
+    let mut aggregated = Vec::new();
+    let mut active = None::<(i64, CanonicalRithmicHistoryBar)>;
+    for (_, daily_bar) in daily {
+        let bucket = daily_bucket(daily_bar.value.exchange_timestamp_seconds, period);
+        match &mut active {
+            Some((active_bucket, aggregate)) if *active_bucket == bucket => {
+                aggregate.value.high = aggregate.value.high.max(daily_bar.value.high);
+                aggregate.value.low = aggregate.value.low.min(daily_bar.value.low);
+                aggregate.value.close = daily_bar.value.close;
+                aggregate.value.volume = aggregate
+                    .value
+                    .volume
+                    .checked_add(daily_bar.value.volume)
+                    .ok_or(RithmicHistoryAdapterError::MalformedHistory)?;
+            }
+            _ => {
+                if let Some((_, completed)) = active.take() {
+                    aggregated.push(completed);
+                }
+                active = Some((bucket, daily_bar));
+            }
+        }
+    }
+    if let Some((_, completed)) = active {
+        aggregated.push(completed);
+    }
+    for (index, bar) in aggregated.iter_mut().enumerate() {
+        bar.value.source_sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        bar.value
+            .validate()
+            .map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
+    }
+    Ok(aggregated)
+}
+
+fn daily_bucket(timestamp_seconds: i64, period: RithmicDailyAggregation) -> i64 {
+    let unix_day = timestamp_seconds.div_euclid(86_400);
+    match period {
+        RithmicDailyAggregation::Week => unix_day - (unix_day + 3).rem_euclid(7),
+        RithmicDailyAggregation::Month => {
+            let (year, month) = civil_year_month(unix_day);
+            year * 12 + i64::from(month)
+        }
+    }
+}
+
+fn civil_year_month(unix_day: i64) -> (i64, u32) {
+    let day = unix_day + 719_468;
+    let era = day.div_euclid(146_097);
+    let day_of_era = day - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, u32::try_from(month).unwrap_or(1))
+}
+
 /// Converts one provider tick bar without discarding its subsecond ordering key.
 ///
 /// # Errors
@@ -995,6 +1230,79 @@ mod tests {
         }
     }
 
+    struct EchoChartTransport;
+
+    impl RithmicHistoryTransport for EchoChartTransport {
+        fn collect_history(
+            &mut self,
+            request: HistoryCollectionRequest,
+        ) -> Result<CollectedHistory, String> {
+            let bars = match request.series {
+                HistorySeries::Time { bar_type, period } => {
+                    let interval = match bar_type {
+                        DecodedTimeBarType::Second => period,
+                        DecodedTimeBarType::Minute => period.saturating_mul(60),
+                        DecodedTimeBarType::Daily => period.saturating_mul(86_400),
+                        DecodedTimeBarType::Weekly => period.saturating_mul(7 * 86_400),
+                    };
+                    let marker_seconds = request.start_seconds.saturating_add(interval);
+                    HistoryBars::Time(vec![DecodedTimeBar {
+                        identity: BarIdentity {
+                            symbol: request.symbol.clone(),
+                            exchange: request.exchange.clone(),
+                        },
+                        bar_type,
+                        period: match bar_type {
+                            DecodedTimeBarType::Minute => interval.to_string(),
+                            DecodedTimeBarType::Second
+                            | DecodedTimeBarType::Daily
+                            | DecodedTimeBarType::Weekly => period.to_string(),
+                        },
+                        marker_seconds,
+                        ohlc: Ohlc {
+                            open: 5_100.0,
+                            high: 5_101.0,
+                            low: 5_099.0,
+                            close: 5_100.5,
+                        },
+                        trades: Some(1),
+                        volume: Some(2),
+                        bid_volume: None,
+                        ask_volume: None,
+                    }])
+                }
+                HistorySeries::Tick { trades_per_bar } => HistoryBars::Tick(vec![DecodedTickBar {
+                    identity: BarIdentity {
+                        symbol: request.symbol.clone(),
+                        exchange: request.exchange.clone(),
+                    },
+                    trades_per_bar: trades_per_bar.to_string(),
+                    keys: vec![TickBarKey {
+                        sequence: "echo".to_string(),
+                        seconds: request.start_seconds,
+                        microseconds: 123_456,
+                    }],
+                    ohlc: Ohlc {
+                        open: 5_100.0,
+                        high: 5_101.0,
+                        low: 5_099.0,
+                        close: 5_100.5,
+                    },
+                    trades: Some(u64::from(trades_per_bar)),
+                    volume: Some(2),
+                    bid_volume: None,
+                    ask_volume: None,
+                }]),
+            };
+            Ok(CollectedHistory {
+                request,
+                bars,
+                observed_range: None,
+                duplicate_count: 0,
+            })
+        }
+    }
+
     fn instrument() -> RithmicProviderInstrument {
         RithmicProviderInstrument {
             descriptor: InstrumentDescriptor {
@@ -1075,6 +1383,85 @@ mod tests {
             canonical.exchange_timestamp_unix_nanos,
             1_800_000_000_123_456_000
         );
+    }
+
+    #[test]
+    fn chart_history_boundary_covers_every_rithmic_interval() {
+        for interval in ChartInterval::ALL {
+            let bars = collect_rithmic_chart_history(
+                &mut EchoChartTransport,
+                &instrument(),
+                interval,
+                HistoryRange {
+                    start_unix_nanos: 0,
+                    end_unix_nanos: 259_200 * NANOS_PER_SECOND_I64,
+                },
+                NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+            )
+            .expect("chart interval collects");
+            assert_eq!(bars.len(), 1, "{} response", interval.label());
+            assert_eq!(bars[0].value.source_sequence, 1);
+        }
+    }
+
+    fn daily_bar(timestamp: i64, ohlc: [i64; 4], volume: i64) -> CanonicalRithmicHistoryBar {
+        CanonicalRithmicHistoryBar {
+            value: MarketBar {
+                source_sequence: 99,
+                exchange_timestamp_seconds: timestamp,
+                open: ohlc[0],
+                high: ohlc[1],
+                low: ohlc[2],
+                close: ohlc[3],
+                volume,
+            },
+            exchange_timestamp_unix_nanos: timestamp * NANOS_PER_SECOND_I64,
+        }
+    }
+
+    #[test]
+    fn calendar_aggregation_uses_monday_month_and_leap_day_boundaries() {
+        let monday = 1_704_067_200;
+        let weekly = aggregate_daily_chart_history(
+            vec![
+                daily_bar(monday, [100, 110, 90, 105], 10),
+                daily_bar(monday + 86_400, [105, 115, 95, 112], 20),
+                daily_bar(monday + 4 * 86_400, [112, 120, 108, 118], 30),
+                daily_bar(monday + 7 * 86_400, [118, 125, 115, 122], 40),
+            ],
+            RithmicDailyAggregation::Week,
+        )
+        .expect("weekly aggregation validates");
+        assert_eq!(weekly.len(), 2);
+        assert_eq!(weekly[0].value.source_sequence, 1);
+        assert_eq!(weekly[0].value.exchange_timestamp_seconds, monday);
+        assert_eq!(
+            [
+                weekly[0].value.open,
+                weekly[0].value.high,
+                weekly[0].value.low,
+                weekly[0].value.close,
+            ],
+            [100, 120, 90, 118]
+        );
+        assert_eq!(weekly[0].value.volume, 60);
+
+        let february_1 = 1_706_745_600;
+        let march_1 = 1_709_251_200;
+        let monthly = aggregate_daily_chart_history(
+            vec![
+                daily_bar(1_706_659_200, [90, 100, 80, 95], 5),
+                daily_bar(february_1, [100, 110, 90, 105], 10),
+                daily_bar(1_709_164_800, [105, 120, 85, 115], 20),
+                daily_bar(march_1, [115, 130, 110, 125], 30),
+            ],
+            RithmicDailyAggregation::Month,
+        )
+        .expect("monthly aggregation validates");
+        assert_eq!(monthly.len(), 3);
+        assert_eq!(monthly[1].value.exchange_timestamp_seconds, february_1);
+        assert_eq!(monthly[1].value.volume, 30);
+        assert_eq!(monthly[2].value.exchange_timestamp_seconds, march_1);
     }
 
     fn limits() -> RithmicHistoryLimits {
