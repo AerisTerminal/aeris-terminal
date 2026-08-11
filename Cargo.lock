@@ -706,8 +706,8 @@ dependencies = [
  "axiusflow_coinbase_market_adapter",
  "axiusflow_design_system",
  "axiusflow_desktop_market_runtime",
- "axiusflow_engine",
  "axiusflow_instruments",
+ "axiusflow_local_engine_client",
  "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
  "axiusflow_observability",
@@ -795,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_coinbase_market_adapter",
  "axiusflow_desktop_storage",
+ "axiusflow_local_engine_client",
  "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
  "axiusflow_market_engine",
@@ -808,6 +809,17 @@ dependencies = [
 [[package]]
 name = "axiusflow_instruments"
 version = "0.1.0"
+
+[[package]]
+name = "axiusflow_local_engine_client"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_local_engine_protocol",
+ "axiusflow_platform_runtime",
+ "getrandom 0.4.3",
+ "interprocess",
+ "zeroize",
+]
 
 [[package]]
 name = "axiusflow_local_engine_protocol"

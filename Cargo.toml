@@ -14,6 +14,7 @@ members = [
     "crates/desktop_history",
     "crates/desktop_provider_runtime",
     "crates/local_engine_protocol",
+    "crates/local_engine_client",
     "crates/observability",
     "crates/platform_runtime",
     "crates/provider_history",

@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use axiusflow_engine::{connect_or_start_engine, sibling_engine_executable};
+use axiusflow_local_engine_client::{connect_or_start_engine, sibling_engine_executable};
 use axiusflow_local_engine_protocol::InstallProviderInstrument;
 
 const COMMAND_CAPACITY: usize = 4;

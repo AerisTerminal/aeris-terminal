@@ -7,10 +7,8 @@ use std::{
     thread,
 };
 
-use axiusflow_engine::{
-    EngineClient, EngineState, bind_listener, load_or_create_installation_token, serve_client,
-    serve_client_with_state,
-};
+use axiusflow_engine::{EngineState, bind_listener, serve_client, serve_client_with_state};
+use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
 use axiusflow_local_engine_protocol::{
     ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
     ResourceMode, WorkspaceState, encode_envelope, envelope,

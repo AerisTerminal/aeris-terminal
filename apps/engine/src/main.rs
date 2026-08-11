@@ -13,9 +13,9 @@ use std::{
 };
 
 use axiusflow_engine::{
-    ENGINE_SOCKET_NAME, EngineState, MarketService, bind_listener, default_engine_state_root,
-    native_installation_token, serve_client_with_market,
+    EngineState, MarketService, bind_listener, default_engine_state_root, serve_client_with_market,
 };
+use axiusflow_local_engine_client::{ENGINE_SOCKET_NAME, native_installation_token};
 use interprocess::local_socket::traits::Listener as _;
 
 fn main() {

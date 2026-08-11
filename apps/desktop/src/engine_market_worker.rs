@@ -12,9 +12,11 @@ use axiusflow_application::{
     ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate,
 };
 use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, ENTITLEMENT_CLASS};
-use axiusflow_engine::{EngineClient, connect_or_start_engine, sibling_engine_executable};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
+};
+use axiusflow_local_engine_client::{
+    EngineClient, connect_or_start_engine, sibling_engine_executable,
 };
 use axiusflow_local_engine_protocol::{
     DemandError, EngineFaultCode, ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey,
