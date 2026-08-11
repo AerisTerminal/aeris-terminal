@@ -1,11 +1,12 @@
 //! Windowed replay-to-frame-callback benchmark (`S1-13` and Stage E evidence path).
 //!
 //! Drives deterministic replay deltas through the real GPUI window one update per
-//! frame and measures update-to-next-frame latency and callback cadence from GPUI's
-//! `on_next_frame` callbacks against the display profile reported by
-//! [`NativeDisplayProbe`]. Renderer submission is genuinely performed through a
-//! native GPUI window. These callbacks run after the prior render but do not prove
-//! physical scanout, and the report says so.
+//! frame and measures update-to-next-frame latency, callback cadence, process
+//! working-set growth, and chart-queue occupancy from GPUI's `on_next_frame`
+//! callbacks against the display profile reported by [`NativeDisplayProbe`].
+//! Renderer submission is genuinely performed through a native GPUI window. These
+//! callbacks run after the prior render but do not prove physical scanout, and the
+//! report says so.
 
 use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate};
 use axiusflow_chart_integration::OriginChartView;
@@ -30,6 +31,8 @@ use std::{
     rc::Rc,
     time::Instant,
 };
+
+use crate::readiness_conformance::ProcessMemoryProbe;
 
 const SNAPSHOT_BARS: usize = 256;
 const WARMUP_FRAMES: usize = 32;
@@ -98,6 +101,24 @@ struct LatencyTargets {
 }
 
 #[derive(Serialize)]
+struct ProcessMemoryBytes {
+    baseline: u64,
+    current: u64,
+    observed_high_water: u64,
+    observed_growth: u64,
+}
+
+#[derive(Serialize)]
+struct ChartQueueEvidence {
+    maximum_pending_before_submission: usize,
+    maximum_pending_after_submission: usize,
+    overflows: u64,
+    drained_between_frames: bool,
+    one_update_per_frame: bool,
+    no_overflow: bool,
+}
+
+#[derive(Serialize)]
 struct WindowedBenchmarkReport {
     schema_version: u32,
     evidence_scope: &'static str,
@@ -111,6 +132,8 @@ struct WindowedBenchmarkReport {
     latency_targets: LatencyTargets,
     update_to_frame_callback: LatencyEvidence,
     frame_callback_interval: LatencyEvidence,
+    process_memory_bytes: ProcessMemoryBytes,
+    chart_queue: ChartQueueEvidence,
     renderer_submission_performed: bool,
     compositor_presentation_evidence: &'static str,
     #[cfg(target_os = "windows")]
@@ -140,6 +163,10 @@ struct BenchmarkDriver {
     first_pixel_nanos: Option<u64>,
     timeframe_switch_submitted_at: Option<Instant>,
     timeframe_switch_first_pixel_nanos: Option<u64>,
+    memory: ProcessMemoryProbe,
+    maximum_pending_before_submission: usize,
+    maximum_pending_after_submission: usize,
+    chart_queue_overflows: u64,
     #[cfg(target_os = "windows")]
     composition_probe: Option<WindowsCompositionProbe>,
     #[cfg(target_os = "windows")]
@@ -158,6 +185,13 @@ enum Step {
 impl BenchmarkDriver {
     fn step(&mut self, window: &mut Window, cx: &mut App) -> Step {
         let callback_at = Instant::now();
+        let pending_before_submission = self.chart.read(cx).replay_bridge_metrics();
+        self.maximum_pending_before_submission = self
+            .maximum_pending_before_submission
+            .max(pending_before_submission.queued_updates);
+        self.chart_queue_overflows = self
+            .chart_queue_overflows
+            .max(pending_before_submission.queue_overflows);
         self.first_pixel_nanos.get_or_insert_with(|| {
             u64::try_from(
                 callback_at
@@ -202,14 +236,19 @@ impl BenchmarkDriver {
             let Some(snapshot) = self.timeframe_snapshot.take() else {
                 return Step::Finish;
             };
-            self.chart.update(cx, |chart, _| {
+            let metrics = self.chart.update(cx, |chart, _| {
                 if chart
                     .try_queue_replay_update(ReplayStreamUpdate::Snapshot(snapshot))
                     .is_err()
                 {
                     eprintln!("windowed benchmark timeframe snapshot queue overflowed");
                 }
+                chart.replay_bridge_metrics()
             });
+            self.maximum_pending_after_submission = self
+                .maximum_pending_after_submission
+                .max(metrics.queued_updates);
+            self.chart_queue_overflows = self.chart_queue_overflows.max(metrics.queue_overflows);
             window.refresh();
             self.timeframe_switch_submitted_at = Some(Instant::now());
             return Step::Continue;
@@ -224,11 +263,16 @@ impl BenchmarkDriver {
         };
         self.previous_sequence = publication.generation.sequence_range().1;
         let update = publication.update;
-        self.chart.update(cx, |chart, _| {
+        let metrics = self.chart.update(cx, |chart, _| {
             if chart.try_queue_replay_update(update).is_err() {
                 eprintln!("windowed benchmark chart queue overflowed");
             }
+            chart.replay_bridge_metrics()
         });
+        self.maximum_pending_after_submission = self
+            .maximum_pending_after_submission
+            .max(metrics.queued_updates);
+        self.chart_queue_overflows = self.chart_queue_overflows.max(metrics.queue_overflows);
         window.refresh();
         self.iteration += 1;
         self.submitted_at = Instant::now();
@@ -266,7 +310,12 @@ impl Render for WindowedBenchmarkApp {
     }
 }
 
-fn schedule_frame(driver: Rc<RefCell<BenchmarkDriver>>, window: &mut Window, _cx: &mut App) {
+fn schedule_frame(
+    driver: Rc<RefCell<BenchmarkDriver>>,
+    outcome: Rc<RefCell<Option<Result<(), String>>>>,
+    window: &mut Window,
+    _cx: &mut App,
+) {
     window.on_next_frame(move |window, cx| {
         let finished = {
             let mut borrowed = driver.borrow_mut();
@@ -275,13 +324,15 @@ fn schedule_frame(driver: Rc<RefCell<BenchmarkDriver>>, window: &mut Window, _cx
         if finished {
             #[cfg(target_os = "windows")]
             driver.borrow_mut().finish_composition();
-            if let Err(error) = write_report(&driver.borrow()) {
+            let result = write_report(&mut driver.borrow_mut()).map_err(|error| error.to_string());
+            if let Err(error) = &result {
                 eprintln!("windowed benchmark report failed: {error}");
             }
+            *outcome.borrow_mut() = Some(result);
             cx.quit();
             return;
         }
-        schedule_frame(Rc::clone(&driver), window, cx);
+        schedule_frame(Rc::clone(&driver), Rc::clone(&outcome), window, cx);
     });
 }
 
@@ -508,12 +559,26 @@ const fn native_probe_name() -> &'static str {
     "unavailable"
 }
 
-fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
+fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
+    driver.memory.sample()?;
+    let observed_growth_bytes = driver.memory.observed_growth_bytes();
+    let queue_drained_between_frames = driver.maximum_pending_before_submission == 0;
+    let one_update_per_frame = driver.maximum_pending_after_submission <= 1;
+    let no_queue_overflow = driver.chart_queue_overflows == 0;
+    if !queue_drained_between_frames || !one_update_per_frame || !no_queue_overflow {
+        return Err(format!(
+            "windowed benchmark chart-queue bound failed: before={} after={} overflows={}",
+            driver.maximum_pending_before_submission,
+            driver.maximum_pending_after_submission,
+            driver.chart_queue_overflows
+        )
+        .into());
+    }
     #[cfg(target_os = "windows")]
     let windows_dwm_composition = windows_composition_evidence(driver);
     let report = WindowedBenchmarkReport {
-        schema_version: 5,
-        evidence_scope: "windowed_first_pixel_timeframe_switch_replay_and_native_compositor_timeline",
+        schema_version: 6,
+        evidence_scope: "windowed_first_pixel_timeframe_switch_replay_memory_queue_and_native_compositor_timeline",
         source_revision: env::var("GITHUB_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty()),
@@ -539,6 +604,20 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
         frame_callback_interval: latency_evidence(&driver.samples, |sample| {
             sample.frame_callback_interval_nanos
         }),
+        process_memory_bytes: ProcessMemoryBytes {
+            baseline: driver.memory.baseline_bytes(),
+            current: driver.memory.current_bytes(),
+            observed_high_water: driver.memory.high_water_bytes(),
+            observed_growth: observed_growth_bytes,
+        },
+        chart_queue: ChartQueueEvidence {
+            maximum_pending_before_submission: driver.maximum_pending_before_submission,
+            maximum_pending_after_submission: driver.maximum_pending_after_submission,
+            overflows: driver.chart_queue_overflows,
+            drained_between_frames: queue_drained_between_frames,
+            one_update_per_frame,
+            no_overflow: no_queue_overflow,
+        },
         renderer_submission_performed: true,
         #[cfg(target_os = "windows")]
         compositor_presentation_evidence: if windows_dwm_composition.timeline_observation
@@ -567,11 +646,15 @@ fn write_report(driver: &BenchmarkDriver) -> Result<(), Box<dyn Error>> {
     encoded.push(b'\n');
     fs::write(&driver.report_path, encoded)?;
     println!(
-        "windowed_chart_latency=completed first_pixel_ns={} timeframe_switch_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} report={}",
+        "windowed_chart_latency=completed first_pixel_ns={} timeframe_switch_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} process_memory_growth_bytes={} chart_queue_before={} chart_queue_after={} chart_queue_overflows={} report={}",
         report.first_pixel_nanos,
         report.timeframe_switch_first_pixel_nanos,
         driver.samples.len(),
         report.update_to_frame_callback.p50,
+        report.process_memory_bytes.observed_growth,
+        report.chart_queue.maximum_pending_before_submission,
+        report.chart_queue.maximum_pending_after_submission,
+        report.chart_queue.overflows,
         driver.report_path.display()
     );
     Ok(())
@@ -585,19 +668,26 @@ const fn presentation_measurement_method() -> &'static str {
     "gpui_on_next_frame_after_prior_render"
 }
 
+fn clear_report_path(report_path: &Path) -> Result<(), Box<dyn Error>> {
+    match fs::remove_file(report_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Runs the windowed benchmark and exits the process when measurement completes.
 pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
-    let mut worker = FixtureMarketWorker::try_new().map_err(Box::<dyn Error>::from)?;
+    clear_report_path(report_path)?;
+    let outcome = Rc::new(RefCell::new(None));
+    let application_outcome = Rc::clone(&outcome);
+    let memory = ProcessMemoryProbe::new()?;
+    let mut worker = FixtureMarketWorker::try_new().map_err(std::io::Error::other)?;
     let bootstrap = worker
         .publish_snapshot(SNAPSHOT_BARS)
-        .map_err(Box::<dyn Error>::from)?;
-    let source_bars = bootstrap
-        .snapshot
-        .stream()
-        .items()
-        .iter()
-        .map(|item| *item.value())
-        .collect::<Vec<_>>();
+        .map_err(std::io::Error::other)?;
+    let source_items = bootstrap.snapshot.stream().items();
+    let source_bars: Vec<_> = source_items.iter().map(|item| *item.value()).collect();
     let (timeframe_bars, _) = aggregate_coinbase_bars(&source_bars, CoinbaseInterval::Minute5)
         .map_err(Box::<dyn Error>::from)?;
     let timeframe_snapshot = ReplaySnapshot::try_new(
@@ -619,12 +709,11 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
             .saturating_add(1),
     )?;
     let previous_sequence = bootstrap.snapshot.stream().last_sequence();
-    let snapshot = bootstrap.snapshot;
-    let report_path = report_path.to_path_buf();
-
+    let (snapshot, report_path) = (bootstrap.snapshot, report_path.to_path_buf());
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         let bounds = Bounds::centered(None, size(px(1_280.0), px(820.0)), cx);
+        let window_outcome = Rc::clone(&application_outcome);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -656,6 +745,10 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                     first_pixel_nanos: None,
                     timeframe_switch_submitted_at: None,
                     timeframe_switch_first_pixel_nanos: None,
+                    memory,
+                    maximum_pending_before_submission: 0,
+                    maximum_pending_after_submission: 0,
+                    chart_queue_overflows: 0,
                     #[cfg(target_os = "windows")]
                     composition_probe,
                     #[cfg(target_os = "windows")]
@@ -665,7 +758,7 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                     #[cfg(target_os = "windows")]
                     final_composition_flush_succeeded: false,
                 }));
-                schedule_frame(driver, window, cx);
+                schedule_frame(driver, window_outcome, window, cx);
                 cx.new(|cx| {
                     gpui_component::Root::new(
                         cx.new(|_| WindowedBenchmarkApp { chart }),
@@ -678,7 +771,11 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
         .expect("the windowed benchmark window opens");
         cx.activate(true);
     });
-    Ok(())
+    let result = outcome
+        .borrow_mut()
+        .take()
+        .ok_or("windowed benchmark exited before report completion")?;
+    result.map_err(Into::into)
 }
 
 #[cfg(all(test, target_os = "windows"))]

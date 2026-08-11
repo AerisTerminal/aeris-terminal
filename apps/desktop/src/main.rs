@@ -3984,11 +3984,11 @@ fn configured_market_workers()
     let worker = if let Some(argument) = arguments.next() {
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
-            let report_path = arguments
-                .next()
-                .expect("usage: axiusflow_desktop --windowed-benchmark <report-path>");
+            let report_path = arguments.next().ok_or_else(|| {
+                "usage: axiusflow_desktop --windowed-benchmark <report-path>".to_string()
+            })?;
             windowed_benchmark::run(std::path::Path::new(&report_path))
-                .expect("the windowed benchmark completes");
+                .map_err(|error| format!("windowed benchmark failed: {error}"))?;
             return Ok(None);
         }
         #[cfg(feature = "diagnostics")]

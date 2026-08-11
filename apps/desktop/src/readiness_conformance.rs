@@ -105,7 +105,7 @@ struct DomGenerationFencingEvidence {
     current_dom_selection_recovers: bool,
 }
 
-struct ProcessMemoryProbe {
+pub(super) struct ProcessMemoryProbe {
     system: System,
     pid: Pid,
     baseline_bytes: u64,
@@ -147,7 +147,7 @@ struct DesktopEnduranceEvidence {
 }
 
 impl ProcessMemoryProbe {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    pub(super) fn new() -> Result<Self, Box<dyn Error>> {
         let pid = sysinfo::get_current_pid()?;
         let mut probe = Self {
             system: System::new(),
@@ -161,7 +161,7 @@ impl ProcessMemoryProbe {
         Ok(probe)
     }
 
-    fn sample(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(super) fn sample(&mut self) -> Result<(), Box<dyn Error>> {
         self.system
             .refresh_processes(ProcessesToUpdate::Some(&[self.pid]));
         self.current_bytes = self
@@ -171,6 +171,22 @@ impl ProcessMemoryProbe {
             .memory();
         self.high_water_bytes = self.high_water_bytes.max(self.current_bytes);
         Ok(())
+    }
+
+    pub(super) const fn baseline_bytes(&self) -> u64 {
+        self.baseline_bytes
+    }
+
+    pub(super) const fn current_bytes(&self) -> u64 {
+        self.current_bytes
+    }
+
+    pub(super) const fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    pub(super) const fn observed_growth_bytes(&self) -> u64 {
+        self.high_water_bytes.saturating_sub(self.baseline_bytes)
     }
 }
 
