@@ -732,16 +732,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_desktop_provider_runtime"
-version = "0.1.0"
-dependencies = [
- "axiusflow_market_data",
- "axiusflow_observability",
- "axiusflow_platform_runtime",
- "zeroize",
-]
-
-[[package]]
 name = "axiusflow_desktop_storage"
 version = "0.1.0"
 dependencies = [
@@ -766,7 +756,6 @@ name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
  "axiusflow_coinbase_market_adapter",
- "axiusflow_desktop_provider_runtime",
  "axiusflow_desktop_storage",
  "axiusflow_local_engine_client",
  "axiusflow_local_engine_protocol",
@@ -879,9 +868,9 @@ name = "axiusflow_rithmic_protocol_adapter"
 version = "0.1.0"
 dependencies = [
  "axiusflow_desktop_history",
- "axiusflow_desktop_provider_runtime",
  "axiusflow_desktop_storage",
  "axiusflow_market_data",
+ "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
  "prost",

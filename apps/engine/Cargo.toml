@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_coinbase_market_adapter = { path = "../../crates/adapters/coinbase_market" }
-axiusflow_desktop_provider_runtime = { path = "../../crates/desktop_provider_runtime" }
 axiusflow_desktop_storage = { path = "../../crates/desktop_storage" }
 axiusflow_local_engine_protocol = { path = "../../crates/local_engine_protocol" }
 axiusflow_local_engine_client = { path = "../../crates/local_engine_client" }

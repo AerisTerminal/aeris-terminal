@@ -10,14 +10,16 @@ mod book;
 mod catalog;
 mod collectors;
 mod credentials;
-mod desktop_driver;
 mod endpoint;
 mod history;
 mod history_adapter;
 mod market;
 mod network;
 mod protocol;
+mod provider_runtime;
+mod provider_session;
 mod session;
+mod session_contract;
 #[cfg(test)]
 mod session_tests;
 
@@ -34,17 +36,6 @@ pub use collectors::{
 pub use credentials::{
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES,
     RithmicCredentialBytes, RithmicCredentialError,
-};
-pub use desktop_driver::{
-    AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCatalogCallback,
-    RithmicCatalogEvent, RithmicCatalogRejection, RithmicDesktopEventError,
-    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCallback,
-    RithmicProviderCommandError, RithmicProviderConfig, RithmicProviderConfigError,
-    RithmicProviderDriver, RithmicProviderDriverError, RithmicProviderEvents,
-    RithmicProviderInstrument, RithmicReadOnlySubscription, RithmicRetryScheduler,
-    RithmicRetryTicket, RithmicSessionTiming, RithmicSymbolSearch, apply_rithmic_environment_event,
-    try_recv_rithmic_event,
 };
 pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};
 pub use history::{
@@ -71,7 +62,28 @@ pub use protocol::{
     SubscriptionAction, SymbolSearchRequest, TickBarReplayRequest, TickBarSubscription,
     TimeBarReplayRequest, TimeBarSubscription, TimeBarType,
 };
+pub use provider_runtime::{
+    ConnectTrigger, NetworkEvent, ProviderCredentialRequirement, ProviderSessionDriver,
+    RecoveryReason, RithmicProviderRuntime, RithmicProviderRuntimeConfig,
+    RithmicProviderRuntimeError, RithmicProviderRuntimeState, SessionGeneration,
+};
+pub use provider_session::{
+    AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
+    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCatalogCallback,
+    RithmicCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
+    RithmicInstrumentSelection, RithmicProviderCallback, RithmicProviderCommandError,
+    RithmicProviderConfig, RithmicProviderConfigError, RithmicProviderDriver,
+    RithmicProviderDriverError, RithmicProviderEventError, RithmicProviderEvents,
+    RithmicProviderInstrument, RithmicReadOnlySubscription, RithmicRetryScheduler,
+    RithmicRetryTicket, RithmicSessionTiming, RithmicSymbolSearch, apply_rithmic_environment_event,
+    try_recv_rithmic_event,
+};
 pub use session::{
     RithmicApplication, RithmicCredentials, RithmicHistoryConnection, RithmicSessionMessage,
     RithmicTestSession, RithmicTickerConnection,
+};
+pub use session_contract::{
+    AuthenticationState, InstrumentDescriptor, MAXIMUM_DISCOVERY_FIELD_BYTES,
+    ProviderContractError, ProviderEnvironment, ProviderInvalidationReason, ProviderSessionCommand,
+    ProviderSessionEvent, ProviderSubscription,
 };

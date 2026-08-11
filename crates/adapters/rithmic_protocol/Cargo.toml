@@ -7,8 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-axiusflow_desktop_provider_runtime = { path = "../../desktop_provider_runtime" }
 axiusflow_market_data = { path = "../../domain/market_data" }
+axiusflow_observability = { path = "../../observability" }
 axiusflow_platform_runtime = { path = "../../platform_runtime" }
 axiusflow_provider_history = { path = "../../provider_history" }
 prost.workspace = true

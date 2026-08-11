@@ -9,10 +9,10 @@ use crate::{
     SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
     SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
 };
-use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, ConnectTrigger, DesktopProviderError, DesktopProviderRuntime,
-    DesktopProviderState, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
+use crate::{
+    AuthenticationState, ConnectTrigger, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
     ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent, RecoveryReason,
+    RithmicProviderRuntime, RithmicProviderRuntimeError, RithmicProviderRuntimeState,
     SessionGeneration,
 };
 use axiusflow_market_data::{
@@ -906,7 +906,7 @@ pub enum RithmicProviderDriverError {
 
 impl fmt::Display for RithmicProviderDriverError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "Rithmic desktop driver failed: {self:?}")
+        write!(formatter, "Rithmic provider driver failed: {self:?}")
     }
 }
 
@@ -1390,7 +1390,7 @@ pub struct RithmicRetryTicket {
     pub due_at: Instant,
 }
 
-/// Nonblocking capped retry scheduler owned by the desktop worker loop.
+/// Nonblocking capped retry scheduler owned by the engine provider-worker loop.
 #[derive(Clone, Debug, Default)]
 pub struct RithmicRetryScheduler {
     next_delay: usize,
@@ -1444,9 +1444,9 @@ impl RithmicRetryScheduler {
     /// Returns a shared runtime state, vault, or driver error.
     pub fn retry_due<V: CredentialVault>(
         &mut self,
-        worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
+        worker: &mut RithmicProviderRuntime<V, RithmicProviderDriver>,
         now: Instant,
-    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
+    ) -> Result<Option<SessionGeneration>, RithmicProviderRuntimeError> {
         let state = worker.state()?;
         if !self.take_due(state, now) {
             return Ok(None);
@@ -1454,7 +1454,7 @@ impl RithmicRetryScheduler {
         worker.connect(ConnectTrigger::Retry).map(Some)
     }
 
-    fn take_due(&mut self, state: DesktopProviderState, now: Instant) -> bool {
+    fn take_due(&mut self, state: RithmicProviderRuntimeState, now: Instant) -> bool {
         let Some(ticket) = self.ticket else {
             return false;
         };
@@ -1463,7 +1463,7 @@ impl RithmicRetryScheduler {
         }
         let exact_recovery = matches!(
             state,
-            DesktopProviderState::RecoveryRequired {
+            RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(generation),
                 reason: RecoveryReason::TransportInvalid | RecoveryReason::SemanticQueueOverflow,
             } if generation == ticket.failed_generation
@@ -1490,13 +1490,13 @@ pub enum RithmicEnvironmentEvent {
 ///
 /// Returns a redacted source, lifecycle, vault, driver, or history-retirement failure.
 pub fn apply_rithmic_environment_event<V: CredentialVault>(
-    worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
+    worker: &mut RithmicProviderRuntime<V, RithmicProviderDriver>,
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     event: RithmicEnvironmentEvent,
-) -> Result<Option<SessionGeneration>, RithmicDesktopEventError> {
+) -> Result<Option<SessionGeneration>, RithmicProviderEventError> {
     if !worker.driver_matches(|driver| driver.owns_events(events))? {
-        return Err(RithmicDesktopEventError::CallbackSourceMismatch);
+        return Err(RithmicProviderEventError::CallbackSourceMismatch);
     }
     retries.clear();
     let discard = || {
@@ -1539,15 +1539,15 @@ pub enum AppliedRithmicEvent {
 
 /// Redacted failures while applying Rithmic callbacks to the shared runtime.
 #[derive(Debug)]
-pub enum RithmicDesktopEventError {
-    Runtime(DesktopProviderError),
+pub enum RithmicProviderEventError {
+    Runtime(RithmicProviderRuntimeError),
     CallbackSourceMismatch,
     GenerationMismatch,
     ProviderNotStreaming,
     MissingRetryDisposition,
 }
 
-impl fmt::Display for RithmicDesktopEventError {
+impl fmt::Display for RithmicProviderEventError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Runtime(error) => write!(formatter, "Rithmic callback failed: {error}"),
@@ -1567,7 +1567,7 @@ impl fmt::Display for RithmicDesktopEventError {
     }
 }
 
-impl Error for RithmicDesktopEventError {
+impl Error for RithmicProviderEventError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Runtime(error) => Some(error),
@@ -1579,8 +1579,8 @@ impl Error for RithmicDesktopEventError {
     }
 }
 
-impl From<DesktopProviderError> for RithmicDesktopEventError {
-    fn from(error: DesktopProviderError) -> Self {
+impl From<RithmicProviderRuntimeError> for RithmicProviderEventError {
+    fn from(error: RithmicProviderRuntimeError) -> Self {
         Self::Runtime(error)
     }
 }
@@ -1591,25 +1591,26 @@ impl From<DesktopProviderError> for RithmicDesktopEventError {
 ///
 /// Returns a redacted source, event-shape, or lifecycle failure.
 pub fn try_recv_rithmic_event<V: CredentialVault>(
-    worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
+    worker: &mut RithmicProviderRuntime<V, RithmicProviderDriver>,
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     now: Instant,
-) -> Result<Option<AppliedRithmicEvent>, RithmicDesktopEventError> {
+) -> Result<Option<AppliedRithmicEvent>, RithmicProviderEventError> {
     if !worker.driver_matches(|driver| driver.owns_events(events))? {
-        return Err(RithmicDesktopEventError::CallbackSourceMismatch);
+        return Err(RithmicProviderEventError::CallbackSourceMismatch);
     }
     let Some(callback) = events.try_recv() else {
         return Ok(None);
     };
     match worker.state()? {
-        DesktopProviderState::Connecting { generation, .. }
-        | DesktopProviderState::Streaming { generation }
+        RithmicProviderRuntimeState::Connecting { generation, .. }
+        | RithmicProviderRuntimeState::Streaming { generation }
             if generation == callback.generation => {}
-        DesktopProviderState::Connecting { .. } | DesktopProviderState::Streaming { .. } => {
-            return Err(RithmicDesktopEventError::GenerationMismatch);
+        RithmicProviderRuntimeState::Connecting { .. }
+        | RithmicProviderRuntimeState::Streaming { .. } => {
+            return Err(RithmicProviderEventError::GenerationMismatch);
         }
-        _ => return Err(RithmicDesktopEventError::ProviderNotStreaming),
+        _ => return Err(RithmicProviderEventError::ProviderNotStreaming),
     }
     match &callback.event {
         ProviderSessionEvent::InstrumentsDiscovered { generation, .. } => {
@@ -1643,7 +1644,7 @@ pub fn try_recv_rithmic_event<V: CredentialVault>(
             }
             let retry = callback
                 .retry
-                .ok_or(RithmicDesktopEventError::MissingRetryDisposition)?;
+                .ok_or(RithmicProviderEventError::MissingRetryDisposition)?;
             return if let Some(ticket) = retries.record_invalid(*generation, *reason, retry, now) {
                 Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket)))
             } else {
@@ -1665,13 +1666,17 @@ pub fn try_recv_rithmic_event<V: CredentialVault>(
 }
 
 fn ensure_streaming_generation<V: CredentialVault>(
-    worker: &DesktopProviderRuntime<V, RithmicProviderDriver>,
+    worker: &RithmicProviderRuntime<V, RithmicProviderDriver>,
     generation: SessionGeneration,
-) -> Result<(), RithmicDesktopEventError> {
+) -> Result<(), RithmicProviderEventError> {
     match worker.state()? {
-        DesktopProviderState::Streaming { generation: active } if active == generation => Ok(()),
-        DesktopProviderState::Streaming { .. } => Err(RithmicDesktopEventError::GenerationMismatch),
-        _ => Err(RithmicDesktopEventError::ProviderNotStreaming),
+        RithmicProviderRuntimeState::Streaming { generation: active } if active == generation => {
+            Ok(())
+        }
+        RithmicProviderRuntimeState::Streaming { .. } => {
+            Err(RithmicProviderEventError::GenerationMismatch)
+        }
+        _ => Err(RithmicProviderEventError::ProviderNotStreaming),
     }
 }
 
@@ -2820,11 +2825,11 @@ fn event_generation(event: &ProviderSessionEvent) -> Option<SessionGeneration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RithmicProviderRuntimeConfig;
     use crate::{
         MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, OrderBookSides, OrderBookUpdate,
         OrderBookUpdateKind, QuoteUpdate, TradeUpdate,
     };
-    use axiusflow_desktop_provider_runtime::DesktopProviderConfig;
     use axiusflow_market_data::{BookSide, DepthDelta};
     use std::{
         io::Read,
@@ -3211,13 +3216,13 @@ mod tests {
 
     fn open_worker(
         driver: RithmicProviderDriver,
-    ) -> DesktopProviderRuntime<MemoryVault, RithmicProviderDriver> {
+    ) -> RithmicProviderRuntime<MemoryVault, RithmicProviderDriver> {
         let encoded = credentials();
-        DesktopProviderRuntime::try_new(
+        RithmicProviderRuntime::try_new(
             MemoryVault(encoded.as_bytes().to_vec()),
             driver,
             RITHMIC_TEST_VAULT_KEY,
-            DesktopProviderConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
+            RithmicProviderRuntimeConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
                 .with_diagnostics(RithmicProviderConfig::environment(), None)
                 .expect("diagnostics identity validates"),
         )
@@ -3225,7 +3230,7 @@ mod tests {
     }
 
     fn wait_applied(
-        worker: &mut DesktopProviderRuntime<MemoryVault, RithmicProviderDriver>,
+        worker: &mut RithmicProviderRuntime<MemoryVault, RithmicProviderDriver>,
         events: &RithmicProviderEvents,
         retries: &mut RithmicRetryScheduler,
         now: Instant,
@@ -4127,7 +4132,7 @@ mod tests {
             .expect("established session resets the delay");
         assert_eq!(reset.due_at.duration_since(now), Duration::from_millis(250));
         assert!(!retries.take_due(
-            DesktopProviderState::RecoveryRequired {
+            RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(generation(10)),
                 reason: RecoveryReason::TransportInvalid,
             },
@@ -4145,7 +4150,7 @@ mod tests {
             )
             .expect("retry schedules");
         assert!(retries.take_due(
-            DesktopProviderState::RecoveryRequired {
+            RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(generation(9)),
                 reason: RecoveryReason::SemanticQueueOverflow,
             },
@@ -4193,7 +4198,7 @@ mod tests {
         ));
         assert_eq!(
             worker.state().expect("state reads"),
-            DesktopProviderState::Streaming { generation: first }
+            RithmicProviderRuntimeState::Streaming { generation: first }
         );
 
         let AppliedRithmicEvent::RetryScheduled(ticket) =
@@ -4209,7 +4214,7 @@ mod tests {
         );
         assert_eq!(
             worker.state().expect("state reads"),
-            DesktopProviderState::RecoveryRequired {
+            RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(first),
                 reason: RecoveryReason::TransportInvalid,
             }
@@ -4230,7 +4235,7 @@ mod tests {
             RithmicProviderDriver::with_task(config(), callback_limits(2, 4_096), runtime_task());
         assert!(matches!(
             try_recv_rithmic_event(&mut worker, &foreign_events, &mut retries, ticket.due_at,),
-            Err(RithmicDesktopEventError::CallbackSourceMismatch)
+            Err(RithmicProviderEventError::CallbackSourceMismatch)
         ));
         drop(foreign_driver);
 
@@ -4239,7 +4244,7 @@ mod tests {
         }
         assert_eq!(
             worker.state().expect("state reads"),
-            DesktopProviderState::RecoveryRequired {
+            RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(second),
                 reason: RecoveryReason::TransportInvalid,
             }
@@ -4266,7 +4271,7 @@ mod tests {
         }
         assert_eq!(
             worker.state().expect("state reads"),
-            DesktopProviderState::Streaming { generation: first }
+            RithmicProviderRuntimeState::Streaming { generation: first }
         );
         retries.record_invalid(
             first,
@@ -4290,7 +4295,7 @@ mod tests {
         assert_eq!(events.try_recv_catalog(), None);
         assert_eq!(
             worker.state().expect("state reads"),
-            DesktopProviderState::NetworkUnavailable
+            RithmicProviderRuntimeState::NetworkUnavailable
         );
 
         let second = apply_rithmic_environment_event(
@@ -4353,7 +4358,7 @@ mod tests {
         );
         assert_eq!(
             worker.state().expect("state reads"),
-            DesktopProviderState::NetworkUnavailable
+            RithmicProviderRuntimeState::NetworkUnavailable
         );
         let restored_generation = apply_rithmic_environment_event(
             &mut worker,

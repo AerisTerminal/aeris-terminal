@@ -4,10 +4,14 @@
 //! connection attempt and fences callbacks by a local generation. It has no cloud
 //! client or payload-upload boundary.
 
+use crate::session_contract::{
+    ProviderContractError, ProviderEnvironment, ProviderInvalidationReason,
+};
 use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::{
-    DiagnosticsQueue, FeedDiagnosticsSnapshot, LatencyTimestampChain, LocalLatencyMetric,
-    MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES,
+    DiagnosticsQueue, FeedConnectionState, FeedCounter, FeedDiagnostics, FeedDiagnosticsSnapshot,
+    FeedIdentity, FeedRecoveryReason, LatencyTimestampChain, LocalLatencyMetric,
+    MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES, OrderBookDiagnosticsState,
 };
 pub use axiusflow_platform_runtime::NetworkEvent;
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
@@ -22,16 +26,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroize;
-
-mod provider_diagnostics;
-mod session_contract;
-
-pub use provider_diagnostics::{ProviderFeedDiagnostics, ProviderFeedDiagnosticsError};
-pub use session_contract::{
-    AuthenticationState, InstrumentDescriptor, MAXIMUM_DISCOVERY_FIELD_BYTES,
-    ProviderContractError, ProviderEnvironment, ProviderInvalidationReason, ProviderSessionCommand,
-    ProviderSessionEvent, ProviderSubscription,
-};
 
 struct CredentialBytes(Vec<u8>);
 
@@ -89,7 +83,7 @@ pub enum RecoveryReason {
 
 /// Observable provider lifecycle state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DesktopProviderState {
+pub enum RithmicProviderRuntimeState {
     Disconnected,
     Connecting {
         generation: SessionGeneration,
@@ -113,12 +107,12 @@ pub enum DesktopProviderState {
 
 /// Explicit memory limits for one provider lifecycle owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DesktopProviderConfig {
+pub struct RithmicProviderRuntimeConfig {
     maximum_credential_bytes: NonZeroUsize,
-    diagnostics: Option<DesktopProviderDiagnosticsConfig>,
+    diagnostics: Option<RithmicProviderDiagnosticsConfig>,
 }
 
-impl DesktopProviderConfig {
+impl RithmicProviderRuntimeConfig {
     /// Creates a bounded credential limit.
     #[must_use]
     pub const fn new(maximum_credential_bytes: NonZeroUsize) -> Self {
@@ -154,7 +148,7 @@ impl DesktopProviderConfig {
                 return Err(ProviderContractError::ControlCharacter(field));
             }
         }
-        self.diagnostics = Some(DesktopProviderDiagnosticsConfig {
+        self.diagnostics = Some(RithmicProviderDiagnosticsConfig {
             environment,
             detailed_latency_maximum_nanos,
         });
@@ -163,12 +157,12 @@ impl DesktopProviderConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DesktopProviderDiagnosticsConfig {
+struct RithmicProviderDiagnosticsConfig {
     environment: ProviderEnvironment,
     detailed_latency_maximum_nanos: Option<NonZeroU64>,
 }
 
-/// Direct provider session boundary driven from one desktop worker thread.
+/// Direct provider session boundary driven from one provider worker thread.
 pub trait ProviderSessionDriver {
     type Error;
 
@@ -204,9 +198,9 @@ pub enum ProviderCredentialRequirement {
     Public,
 }
 
-/// Redacted failure classes returned by the desktop runtime.
+/// Redacted failure classes returned by the Rithmic provider runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DesktopProviderError {
+pub enum RithmicProviderRuntimeError {
     InvalidCredentialKey,
     WorkerThreadMismatch,
     InvalidTransition,
@@ -220,22 +214,22 @@ pub enum DesktopProviderError {
     SystemClockUnavailable,
 }
 
-impl fmt::Display for DesktopProviderError {
+impl fmt::Display for RithmicProviderRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "desktop provider runtime failed: {self:?}")
+        write!(formatter, "Rithmic provider runtime failed: {self:?}")
     }
 }
 
-impl Error for DesktopProviderError {}
+impl Error for RithmicProviderRuntimeError {}
 
-/// Single-writer desktop provider lifecycle owner.
-pub struct DesktopProviderRuntime<V, D: ProviderSessionDriver> {
+/// Single-writer Rithmic provider lifecycle owner.
+pub struct RithmicProviderRuntime<V, D: ProviderSessionDriver> {
     owner_thread: ThreadId,
     vault: V,
     driver: D,
     credential_key: String,
-    config: DesktopProviderConfig,
-    state: DesktopProviderState,
+    config: RithmicProviderRuntimeConfig,
+    state: RithmicProviderRuntimeState,
     last_generation: u64,
     connection_desired: bool,
     suspended: bool,
@@ -245,7 +239,7 @@ pub struct DesktopProviderRuntime<V, D: ProviderSessionDriver> {
 }
 
 struct ProviderRuntimeDiagnostics {
-    feed: ProviderFeedDiagnostics,
+    feed: FeedDiagnostics,
     epoch: Instant,
 }
 
@@ -255,16 +249,16 @@ impl ProviderRuntimeDiagnostics {
     }
 }
 
-impl<V, D: ProviderSessionDriver> fmt::Debug for DesktopProviderRuntime<V, D> {
+impl<V, D: ProviderSessionDriver> fmt::Debug for RithmicProviderRuntime<V, D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("DesktopProviderRuntime")
+            .debug_struct("RithmicProviderRuntime")
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
 
-impl<V, D> DesktopProviderRuntime<V, D>
+impl<V, D> RithmicProviderRuntime<V, D>
 where
     V: CredentialVault,
     D: ProviderSessionDriver,
@@ -279,27 +273,29 @@ where
         vault: V,
         driver: D,
         credential_key: impl Into<String>,
-        config: DesktopProviderConfig,
-    ) -> Result<Self, DesktopProviderError> {
+        config: RithmicProviderRuntimeConfig,
+    ) -> Result<Self, RithmicProviderRuntimeError> {
         let credential_key = credential_key.into();
         if credential_key.is_empty() || credential_key.chars().any(char::is_control) {
-            return Err(DesktopProviderError::InvalidCredentialKey);
+            return Err(RithmicProviderRuntimeError::InvalidCredentialKey);
         }
         let diagnostics = config
             .diagnostics
             .as_ref()
             .map(|diagnostics| {
-                ProviderFeedDiagnostics::try_new(
+                FeedIdentity::try_new(
                     diagnostics.environment.provider_id.clone(),
                     diagnostics.environment.system_id.clone(),
                     diagnostics.environment.environment.clone(),
-                    diagnostics.detailed_latency_maximum_nanos,
                 )
-                .map(|feed| ProviderRuntimeDiagnostics {
-                    feed,
+                .map(|identity| ProviderRuntimeDiagnostics {
+                    feed: FeedDiagnostics::new(
+                        identity,
+                        diagnostics.detailed_latency_maximum_nanos,
+                    ),
                     epoch: Instant::now(),
                 })
-                .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+                .map_err(|_| RithmicProviderRuntimeError::DiagnosticsUnavailable)
             })
             .transpose()?;
         Ok(Self {
@@ -308,7 +304,7 @@ where
             driver,
             credential_key,
             config,
-            state: DesktopProviderState::Disconnected,
+            state: RithmicProviderRuntimeState::Disconnected,
             last_generation: 0,
             connection_desired: false,
             suspended: false,
@@ -323,7 +319,7 @@ where
     /// # Errors
     ///
     /// Returns an error when called outside the owning worker thread.
-    pub fn state(&self) -> Result<DesktopProviderState, DesktopProviderError> {
+    pub fn state(&self) -> Result<RithmicProviderRuntimeState, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         Ok(self.state)
     }
@@ -335,7 +331,7 @@ where
     /// Returns an error for wrong-thread access, clock failure, or diagnostics failure.
     pub fn try_diagnostics_snapshot(
         &mut self,
-    ) -> Result<Option<FeedDiagnosticsSnapshot>, DesktopProviderError> {
+    ) -> Result<Option<FeedDiagnosticsSnapshot>, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         self.diagnostics_observe_runtime_memory()?;
         let Some(timestamp) = self.diagnostics_now() else {
@@ -343,16 +339,16 @@ where
         };
         let wall_clock_unix_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| DesktopProviderError::SystemClockUnavailable)?
+            .map_err(|_| RithmicProviderRuntimeError::SystemClockUnavailable)?
             .as_nanos();
         let wall_clock_unix_nanos = i64::try_from(wall_clock_unix_nanos)
-            .map_err(|_| DesktopProviderError::SystemClockUnavailable)?;
+            .map_err(|_| RithmicProviderRuntimeError::SystemClockUnavailable)?;
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
             .try_snapshot(timestamp, wall_clock_unix_nanos)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .map_err(|_| RithmicProviderRuntimeError::DiagnosticsUnavailable)
     }
 
     /// Records one live trade callback in production feed diagnostics.
@@ -364,17 +360,20 @@ where
         &mut self,
         generation: SessionGeneration,
         provider_timestamp_unix_nanos: Option<i64>,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
+        self.ensure_streaming_generation(generation)?;
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(());
         };
-        self.diagnostics
+        let feed = &mut self
+            .diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
-            .feed
-            .record_runtime_trade(generation, provider_timestamp_unix_nanos, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
+            .feed;
+        feed.record_message(timestamp, provider_timestamp_unix_nanos);
+        feed.increment(FeedCounter::Trades);
+        Ok(())
     }
 
     /// Records one generation-fenced market callback in production diagnostics.
@@ -387,17 +386,28 @@ where
         generation: SessionGeneration,
         event: &MarketEvent,
         message_timestamp_unix_nanos: Option<i64>,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
+        self.ensure_streaming_generation(generation)?;
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(());
         };
-        self.diagnostics
+        let feed = &mut self
+            .diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
-            .feed
-            .record_runtime_market_event(generation, event, message_timestamp_unix_nanos, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
+            .feed;
+        feed.record_message(timestamp, message_timestamp_unix_nanos);
+        match event {
+            MarketEvent::Trade(_) => feed.increment(FeedCounter::Trades),
+            MarketEvent::Quote(_) => feed.increment(FeedCounter::Quotes),
+            MarketEvent::DepthSnapshot(_) => {
+                feed.increment(FeedCounter::DepthSnapshots);
+                feed.set_order_book_state(OrderBookDiagnosticsState::Ready);
+            }
+            MarketEvent::DepthDelta(_) => feed.increment(FeedCounter::DepthDeltas),
+        }
+        Ok(())
     }
 
     /// Records one live heartbeat callback in production feed diagnostics.
@@ -408,17 +418,18 @@ where
     pub fn record_heartbeat_diagnostics(
         &mut self,
         generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
+        self.ensure_streaming_generation(generation)?;
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(());
         };
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
-            .record_runtime_heartbeat(generation, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .record_heartbeat(timestamp);
+        Ok(())
     }
 
     /// Observes one fixed-capacity queue in production diagnostics.
@@ -433,7 +444,7 @@ where
         item_capacity: usize,
         current_bytes: usize,
         byte_capacity: usize,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         let Some(diagnostics) = &mut self.diagnostics else {
             return Ok(());
@@ -447,7 +458,7 @@ where
                 current_bytes,
                 byte_capacity,
             )
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .map_err(|_| RithmicProviderRuntimeError::DiagnosticsUnavailable)
     }
 
     /// Records one correctly labelled local processing interval.
@@ -460,7 +471,7 @@ where
         generation: SessionGeneration,
         metric: LocalLatencyMetric,
         chain: &LatencyTimestampChain,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         if self.active_generation() != Some(generation) {
             return self.reject_stale();
@@ -471,7 +482,7 @@ where
         diagnostics
             .feed
             .record_latency_chain(metric, chain)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .map_err(|_| RithmicProviderRuntimeError::DiagnosticsUnavailable)
     }
 
     /// Records one UI update safely conflated before a frame was submitted.
@@ -483,20 +494,20 @@ where
         &mut self,
         generation: SessionGeneration,
         count: u64,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         if self.active_generation() != Some(generation) {
             return self.reject_stale();
         }
-        let Some(timestamp) = self.diagnostics_now() else {
+        if self.diagnostics.is_none() {
             return Ok(());
-        };
+        }
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
-            .record_coalesced_ui_update(timestamp, count)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .increment_by(FeedCounter::CoalescedUiUpdates, count);
+        Ok(())
     }
 
     /// Starts a fresh direct-provider session with vault-loaded credentials.
@@ -511,41 +522,44 @@ where
     pub fn connect(
         &mut self,
         trigger: ConnectTrigger,
-    ) -> Result<SessionGeneration, DesktopProviderError> {
+    ) -> Result<SessionGeneration, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         if self.suspended || !self.network_available {
-            return Err(DesktopProviderError::InvalidTransition);
+            return Err(RithmicProviderRuntimeError::InvalidTransition);
         }
         let valid_transition = matches!(
             (self.state, trigger),
             (
-                DesktopProviderState::Disconnected,
+                RithmicProviderRuntimeState::Disconnected,
                 ConnectTrigger::Initial | ConnectTrigger::Retry
             ) | (
-                DesktopProviderState::RecoveryRequired { .. },
+                RithmicProviderRuntimeState::RecoveryRequired { .. },
                 ConnectTrigger::Retry
-            ) | (DesktopProviderState::Suspended, ConnectTrigger::Resume)
-                | (
-                    DesktopProviderState::NetworkUnavailable,
-                    ConnectTrigger::NetworkRestored
-                )
+            ) | (
+                RithmicProviderRuntimeState::Suspended,
+                ConnectTrigger::Resume
+            ) | (
+                RithmicProviderRuntimeState::NetworkUnavailable,
+                ConnectTrigger::NetworkRestored
+            )
         );
         if !valid_transition {
-            return Err(DesktopProviderError::InvalidTransition);
+            return Err(RithmicProviderRuntimeError::InvalidTransition);
         }
         self.connection_desired = true;
         let generation_value = self
             .last_generation
             .checked_add(1)
-            .ok_or(DesktopProviderError::GenerationExhausted)?;
+            .ok_or(RithmicProviderRuntimeError::GenerationExhausted)?;
         let generation = SessionGeneration(
-            NonZeroU64::new(generation_value).ok_or(DesktopProviderError::GenerationExhausted)?,
+            NonZeroU64::new(generation_value)
+                .ok_or(RithmicProviderRuntimeError::GenerationExhausted)?,
         );
         let credentials = match self.driver.credential_requirement() {
             ProviderCredentialRequirement::Required => match self.load_credentials() {
                 Ok(credentials) => credentials,
                 Err(error) => {
-                    self.state = DesktopProviderState::RecoveryRequired {
+                    self.state = RithmicProviderRuntimeState::RecoveryRequired {
                         generation: None,
                         reason: RecoveryReason::CredentialUnavailable,
                     };
@@ -556,7 +570,7 @@ where
             ProviderCredentialRequirement::Public => CredentialBytes(Vec::new()),
         };
         self.last_generation = generation_value;
-        self.state = DesktopProviderState::Connecting {
+        self.state = RithmicProviderRuntimeState::Connecting {
             generation,
             trigger,
         };
@@ -566,12 +580,12 @@ where
             .start_session(generation, credentials.as_slice())
             .is_err()
         {
-            self.state = DesktopProviderState::RecoveryRequired {
+            self.state = RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(generation),
                 reason: RecoveryReason::ProviderFailure,
             };
             self.diagnostics_require_recovery(RecoveryReason::ProviderFailure)?;
-            return Err(DesktopProviderError::ProviderUnavailable);
+            return Err(RithmicProviderRuntimeError::ProviderUnavailable);
         }
         Ok(generation)
     }
@@ -588,24 +602,30 @@ where
     /// runtime, or a provider/vault failure while starting immediately.
     pub fn request_connection(
         &mut self,
-    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
+    ) -> Result<Option<SessionGeneration>, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         if matches!(
             self.state,
-            DesktopProviderState::Stopped
-                | DesktopProviderState::Connecting { .. }
-                | DesktopProviderState::Streaming { .. }
+            RithmicProviderRuntimeState::Stopped
+                | RithmicProviderRuntimeState::Connecting { .. }
+                | RithmicProviderRuntimeState::Streaming { .. }
         ) {
-            return Err(DesktopProviderError::InvalidTransition);
+            return Err(RithmicProviderRuntimeError::InvalidTransition);
         }
         self.connection_desired = true;
         if self.suspended
             || !self.network_available
-            || matches!(self.state, DesktopProviderState::StopUnconfirmed { .. })
+            || matches!(
+                self.state,
+                RithmicProviderRuntimeState::StopUnconfirmed { .. }
+            )
         {
             return Ok(None);
         }
-        let trigger = if matches!(self.state, DesktopProviderState::RecoveryRequired { .. }) {
+        let trigger = if matches!(
+            self.state,
+            RithmicProviderRuntimeState::RecoveryRequired { .. }
+        ) {
             ConnectTrigger::Retry
         } else {
             ConnectTrigger::Initial
@@ -621,17 +641,17 @@ where
     pub fn session_established(
         &mut self,
         generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         match self.state {
-            DesktopProviderState::Connecting {
+            RithmicProviderRuntimeState::Connecting {
                 generation: active, ..
             } if active == generation => {}
             _ if self.active_generation() != Some(generation) => return self.reject_stale(),
-            _ => return Err(DesktopProviderError::InvalidTransition),
+            _ => return Err(RithmicProviderRuntimeError::InvalidTransition),
         }
-        self.state = DesktopProviderState::Streaming { generation };
-        self.diagnostics_mark_streaming(generation)?;
+        self.state = RithmicProviderRuntimeState::Streaming { generation };
+        self.diagnostics_mark_streaming()?;
         Ok(())
     }
 
@@ -644,7 +664,7 @@ where
     pub fn session_invalid(
         &mut self,
         generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.session_invalid_with_reason(generation, RecoveryReason::TransportInvalid, None)
     }
 
@@ -659,7 +679,7 @@ where
         &mut self,
         generation: SessionGeneration,
         reason: ProviderInvalidationReason,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.session_invalid_with_reason(generation, RecoveryReason::TransportInvalid, Some(reason))
     }
 
@@ -672,7 +692,7 @@ where
     pub fn session_callback_queue_overflow(
         &mut self,
         generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.session_invalid_with_reason(generation, RecoveryReason::SemanticQueueOverflow, None)
     }
 
@@ -681,29 +701,29 @@ where
         generation: SessionGeneration,
         reason: RecoveryReason,
         provider_reason: Option<ProviderInvalidationReason>,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         if self.active_generation() != Some(generation) {
             return self.reject_stale();
         }
-        self.state = DesktopProviderState::RecoveryRequired {
+        self.state = RithmicProviderRuntimeState::RecoveryRequired {
             generation: Some(generation),
             reason,
         };
         if let Some(provider_reason) = provider_reason {
-            self.diagnostics_observe_invalidation(generation, provider_reason)?;
+            self.diagnostics_observe_invalidation(provider_reason)?;
         } else {
             self.diagnostics_require_recovery(reason)?;
         }
         let stop_failed = self.driver.stop_session(generation).is_err();
         if stop_failed {
-            self.state = DesktopProviderState::StopUnconfirmed {
+            self.state = RithmicProviderRuntimeState::StopUnconfirmed {
                 generation,
                 recovery: Some(reason),
             };
         }
         if stop_failed {
-            return Err(DesktopProviderError::ProviderUnavailable);
+            return Err(RithmicProviderRuntimeError::ProviderUnavailable);
         }
         Ok(())
     }
@@ -718,43 +738,49 @@ where
     pub fn handle_power_event(
         &mut self,
         event: PowerEvent,
-    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
+    ) -> Result<Option<SessionGeneration>, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         match event {
             PowerEvent::Suspending => {
-                if self.suspended || self.state == DesktopProviderState::Stopped {
-                    return Err(DesktopProviderError::InvalidTransition);
+                if self.suspended || self.state == RithmicProviderRuntimeState::Stopped {
+                    return Err(RithmicProviderRuntimeError::InvalidTransition);
                 }
                 self.suspended = true;
-                if matches!(self.state, DesktopProviderState::StopUnconfirmed { .. }) {
+                if matches!(
+                    self.state,
+                    RithmicProviderRuntimeState::StopUnconfirmed { .. }
+                ) {
                     return Ok(None);
                 }
-                let fence_result = self.fence_into(DesktopProviderState::Suspended, None);
+                let fence_result = self.fence_into(RithmicProviderRuntimeState::Suspended, None);
                 self.diagnostics_mark_disconnected()?;
                 fence_result?;
                 Ok(None)
             }
             PowerEvent::Resumed => {
-                if !self.suspended || self.state == DesktopProviderState::Stopped {
-                    return Err(DesktopProviderError::InvalidTransition);
+                if !self.suspended || self.state == RithmicProviderRuntimeState::Stopped {
+                    return Err(RithmicProviderRuntimeError::InvalidTransition);
                 }
                 self.suspended = false;
-                if matches!(self.state, DesktopProviderState::StopUnconfirmed { .. }) {
+                if matches!(
+                    self.state,
+                    RithmicProviderRuntimeState::StopUnconfirmed { .. }
+                ) {
                     return Ok(None);
                 }
                 if !self.connection_desired {
                     self.state = if self.network_available {
-                        DesktopProviderState::Disconnected
+                        RithmicProviderRuntimeState::Disconnected
                     } else {
-                        DesktopProviderState::NetworkUnavailable
+                        RithmicProviderRuntimeState::NetworkUnavailable
                     };
                     return Ok(None);
                 }
                 if !self.network_available {
-                    self.state = DesktopProviderState::NetworkUnavailable;
+                    self.state = RithmicProviderRuntimeState::NetworkUnavailable;
                     return Ok(None);
                 }
-                self.state = DesktopProviderState::Suspended;
+                self.state = RithmicProviderRuntimeState::Suspended;
                 self.connect(ConnectTrigger::Resume).map(Some)
             }
         }
@@ -770,40 +796,47 @@ where
     pub fn handle_network_event(
         &mut self,
         event: NetworkEvent,
-    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
+    ) -> Result<Option<SessionGeneration>, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         match event {
             NetworkEvent::Unavailable => {
-                if !self.network_available || self.state == DesktopProviderState::Stopped {
-                    return Err(DesktopProviderError::InvalidTransition);
+                if !self.network_available || self.state == RithmicProviderRuntimeState::Stopped {
+                    return Err(RithmicProviderRuntimeError::InvalidTransition);
                 }
                 self.network_available = false;
-                if matches!(self.state, DesktopProviderState::StopUnconfirmed { .. }) {
+                if matches!(
+                    self.state,
+                    RithmicProviderRuntimeState::StopUnconfirmed { .. }
+                ) {
                     return Ok(None);
                 }
-                let fence_result = self.fence_into(DesktopProviderState::NetworkUnavailable, None);
+                let fence_result =
+                    self.fence_into(RithmicProviderRuntimeState::NetworkUnavailable, None);
                 self.diagnostics_mark_disconnected()?;
                 fence_result?;
                 Ok(None)
             }
             NetworkEvent::Available => {
-                if self.network_available || self.state == DesktopProviderState::Stopped {
-                    return Err(DesktopProviderError::InvalidTransition);
+                if self.network_available || self.state == RithmicProviderRuntimeState::Stopped {
+                    return Err(RithmicProviderRuntimeError::InvalidTransition);
                 }
                 self.network_available = true;
-                if matches!(self.state, DesktopProviderState::StopUnconfirmed { .. }) {
+                if matches!(
+                    self.state,
+                    RithmicProviderRuntimeState::StopUnconfirmed { .. }
+                ) {
                     return Ok(None);
                 }
                 if !self.connection_desired {
                     self.state = if self.suspended {
-                        DesktopProviderState::Suspended
+                        RithmicProviderRuntimeState::Suspended
                     } else {
-                        DesktopProviderState::Disconnected
+                        RithmicProviderRuntimeState::Disconnected
                     };
                     return Ok(None);
                 }
                 if self.suspended {
-                    self.state = DesktopProviderState::Suspended;
+                    self.state = RithmicProviderRuntimeState::Suspended;
                     return Ok(None);
                 }
                 self.connect(ConnectTrigger::NetworkRestored).map(Some)
@@ -823,35 +856,35 @@ where
     /// stop failure.
     pub fn retry_unconfirmed_stop(
         &mut self,
-    ) -> Result<Option<SessionGeneration>, DesktopProviderError> {
+    ) -> Result<Option<SessionGeneration>, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
-        let DesktopProviderState::StopUnconfirmed {
+        let RithmicProviderRuntimeState::StopUnconfirmed {
             generation,
             recovery,
         } = self.state
         else {
-            return Err(DesktopProviderError::InvalidTransition);
+            return Err(RithmicProviderRuntimeError::InvalidTransition);
         };
         if self.driver.stop_session(generation).is_err() {
-            return Err(DesktopProviderError::ProviderUnavailable);
+            return Err(RithmicProviderRuntimeError::ProviderUnavailable);
         }
         if !self.connection_desired {
-            self.state = DesktopProviderState::Stopped;
+            self.state = RithmicProviderRuntimeState::Stopped;
             self.diagnostics_mark_stopped()?;
             return Ok(None);
         }
         if self.suspended {
-            self.state = DesktopProviderState::Suspended;
+            self.state = RithmicProviderRuntimeState::Suspended;
             self.diagnostics_mark_disconnected()?;
             return Ok(None);
         }
         if !self.network_available {
-            self.state = DesktopProviderState::NetworkUnavailable;
+            self.state = RithmicProviderRuntimeState::NetworkUnavailable;
             self.diagnostics_mark_disconnected()?;
             return Ok(None);
         }
         let reason = recovery.unwrap_or(RecoveryReason::ProviderFailure);
-        self.state = DesktopProviderState::RecoveryRequired {
+        self.state = RithmicProviderRuntimeState::RecoveryRequired {
             generation: Some(generation),
             reason,
         };
@@ -864,29 +897,32 @@ where
     ///
     /// Returns an error for wrong-thread use, repeated shutdown, or provider stop
     /// failure.
-    pub fn stop(&mut self) -> Result<(), DesktopProviderError> {
+    pub fn stop(&mut self) -> Result<(), RithmicProviderRuntimeError> {
         self.ensure_owner()?;
-        if self.state == DesktopProviderState::Stopped {
-            return Err(DesktopProviderError::InvalidTransition);
+        if self.state == RithmicProviderRuntimeState::Stopped {
+            return Err(RithmicProviderRuntimeError::InvalidTransition);
         }
         self.connection_desired = false;
-        if matches!(self.state, DesktopProviderState::StopUnconfirmed { .. }) {
+        if matches!(
+            self.state,
+            RithmicProviderRuntimeState::StopUnconfirmed { .. }
+        ) {
             return self.retry_unconfirmed_stop().map(|_| ());
         }
-        let fence_result = self.fence_into(DesktopProviderState::Stopped, None);
+        let fence_result = self.fence_into(RithmicProviderRuntimeState::Stopped, None);
         self.diagnostics_mark_stopped()?;
         fence_result
     }
 
-    fn load_credentials(&self) -> Result<CredentialBytes, DesktopProviderError> {
+    fn load_credentials(&self) -> Result<CredentialBytes, RithmicProviderRuntimeError> {
         let credentials = self
             .vault
             .load(&self.credential_key)
-            .map_err(|_| DesktopProviderError::CredentialVaultUnavailable)?
-            .ok_or(DesktopProviderError::CredentialMissing)?;
+            .map_err(|_| RithmicProviderRuntimeError::CredentialVaultUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::CredentialMissing)?;
         let credentials = CredentialBytes(credentials);
         if credentials.len() > self.config.maximum_credential_bytes.get() {
-            return Err(DesktopProviderError::CredentialTooLarge {
+            return Err(RithmicProviderRuntimeError::CredentialTooLarge {
                 requested: credentials.len(),
                 maximum: self.config.maximum_credential_bytes.get(),
             });
@@ -903,104 +939,125 @@ where
     fn diagnostics_begin_session(
         &mut self,
         generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         let Some(timestamp) = self.diagnostics_now() else {
             return Ok(());
         };
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
-            .begin_runtime_session(generation, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .begin_session(generation.0, timestamp)
+            .map_err(|_| RithmicProviderRuntimeError::DiagnosticsUnavailable)
     }
 
-    fn diagnostics_mark_streaming(
-        &mut self,
-        generation: SessionGeneration,
-    ) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
+    fn diagnostics_mark_streaming(&mut self) -> Result<(), RithmicProviderRuntimeError> {
+        if self.diagnostics.is_none() {
             return Ok(());
-        };
+        }
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
-            .mark_runtime_streaming(generation, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .set_connection_state(FeedConnectionState::Streaming);
+        Ok(())
     }
 
     fn diagnostics_require_recovery(
         &mut self,
         reason: RecoveryReason,
-    ) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
+    ) -> Result<(), RithmicProviderRuntimeError> {
+        if self.diagnostics.is_none() {
             return Ok(());
-        };
-        self.diagnostics
+        }
+        let feed = &mut self
+            .diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
-            .feed
-            .require_runtime_recovery(reason, timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
+            .feed;
+        let reason = match reason {
+            RecoveryReason::CredentialUnavailable => FeedRecoveryReason::Authentication,
+            RecoveryReason::ProviderFailure | RecoveryReason::TransportInvalid => {
+                FeedRecoveryReason::Transport
+            }
+            RecoveryReason::SemanticQueueOverflow => {
+                feed.increment(FeedCounter::Overflows);
+                FeedRecoveryReason::QueueOverflow
+            }
+        };
+        feed.require_recovery(reason);
+        Ok(())
     }
 
     fn diagnostics_observe_invalidation(
         &mut self,
-        generation: SessionGeneration,
         reason: ProviderInvalidationReason,
-    ) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
+    ) -> Result<(), RithmicProviderRuntimeError> {
+        if self.diagnostics.is_none() {
             return Ok(());
-        };
-        self.diagnostics
+        }
+        let feed = &mut self
+            .diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
-            .feed
-            .observe_event(
-                &ProviderSessionEvent::Invalidated {
-                    generation: Some(generation),
-                    reason,
-                },
-                timestamp,
-            )
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
+            .feed;
+        let recovery = match reason {
+            ProviderInvalidationReason::Transport => FeedRecoveryReason::Transport,
+            ProviderInvalidationReason::Authentication => FeedRecoveryReason::Authentication,
+            ProviderInvalidationReason::AgreementRequired => FeedRecoveryReason::AgreementRequired,
+            ProviderInvalidationReason::UnsupportedSystem => FeedRecoveryReason::UnsupportedSystem,
+            ProviderInvalidationReason::SchemaMismatch => FeedRecoveryReason::SchemaMismatch,
+            ProviderInvalidationReason::HeartbeatSilence => FeedRecoveryReason::HeartbeatSilence,
+            ProviderInvalidationReason::MessageSilence => FeedRecoveryReason::MessageSilence,
+            ProviderInvalidationReason::SequenceGap => {
+                feed.increment(FeedCounter::Gaps);
+                feed.set_order_book_state(OrderBookDiagnosticsState::Recovering);
+                FeedRecoveryReason::SequenceGap
+            }
+            ProviderInvalidationReason::QueueOverflow => {
+                feed.increment(FeedCounter::Overflows);
+                FeedRecoveryReason::QueueOverflow
+            }
+            ProviderInvalidationReason::MalformedMessage => {
+                feed.increment(FeedCounter::MalformedMessages);
+                FeedRecoveryReason::MalformedMessage
+            }
+        };
+        feed.require_recovery(recovery);
+        Ok(())
     }
 
-    fn diagnostics_mark_disconnected(&mut self) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
+    fn diagnostics_mark_disconnected(&mut self) -> Result<(), RithmicProviderRuntimeError> {
+        if self.diagnostics.is_none() {
             return Ok(());
-        };
+        }
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
-            .mark_runtime_disconnected(timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .set_connection_state(FeedConnectionState::Disconnected);
+        Ok(())
     }
 
-    fn diagnostics_mark_stopped(&mut self) -> Result<(), DesktopProviderError> {
-        let Some(timestamp) = self.diagnostics_now() else {
+    fn diagnostics_mark_stopped(&mut self) -> Result<(), RithmicProviderRuntimeError> {
+        if self.diagnostics.is_none() {
             return Ok(());
-        };
+        }
         self.diagnostics
             .as_mut()
-            .ok_or(DesktopProviderError::DiagnosticsUnavailable)?
+            .ok_or(RithmicProviderRuntimeError::DiagnosticsUnavailable)?
             .feed
-            .mark_runtime_stopped(timestamp)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .set_connection_state(FeedConnectionState::Stopped);
+        Ok(())
     }
 
     fn diagnostics_record_stale_callback(&mut self) {
-        let Some(timestamp) = self.diagnostics_now() else {
-            return;
-        };
         if let Some(diagnostics) = &mut self.diagnostics {
-            let _ = diagnostics.feed.record_stale_callback(timestamp);
+            diagnostics.feed.increment(FeedCounter::StaleCallbacks);
         }
     }
 
-    fn diagnostics_observe_runtime_memory(&mut self) -> Result<(), DesktopProviderError> {
+    fn diagnostics_observe_runtime_memory(&mut self) -> Result<(), RithmicProviderRuntimeError> {
         let Some(diagnostics) = &mut self.diagnostics else {
             return Ok(());
         };
@@ -1008,49 +1065,64 @@ where
         diagnostics
             .feed
             .observe_runtime_memory(fixed_bytes, fixed_bytes)
-            .map_err(|_| DesktopProviderError::DiagnosticsUnavailable)
+            .map_err(|_| RithmicProviderRuntimeError::DiagnosticsUnavailable)
+    }
+
+    fn ensure_streaming_generation(
+        &mut self,
+        generation: SessionGeneration,
+    ) -> Result<(), RithmicProviderRuntimeError> {
+        match self.state {
+            RithmicProviderRuntimeState::Streaming { generation: active }
+                if active == generation =>
+            {
+                Ok(())
+            }
+            _ if self.active_generation() != Some(generation) => self.reject_stale(),
+            _ => Err(RithmicProviderRuntimeError::InvalidTransition),
+        }
     }
 
     fn active_generation(&self) -> Option<SessionGeneration> {
         match self.state {
-            DesktopProviderState::Connecting { generation, .. }
-            | DesktopProviderState::Streaming { generation } => Some(generation),
-            DesktopProviderState::Disconnected
-            | DesktopProviderState::RecoveryRequired { .. }
-            | DesktopProviderState::StopUnconfirmed { .. }
-            | DesktopProviderState::Suspended
-            | DesktopProviderState::NetworkUnavailable
-            | DesktopProviderState::Stopped => None,
+            RithmicProviderRuntimeState::Connecting { generation, .. }
+            | RithmicProviderRuntimeState::Streaming { generation } => Some(generation),
+            RithmicProviderRuntimeState::Disconnected
+            | RithmicProviderRuntimeState::RecoveryRequired { .. }
+            | RithmicProviderRuntimeState::StopUnconfirmed { .. }
+            | RithmicProviderRuntimeState::Suspended
+            | RithmicProviderRuntimeState::NetworkUnavailable
+            | RithmicProviderRuntimeState::Stopped => None,
         }
     }
 
     fn fence_into(
         &mut self,
-        state: DesktopProviderState,
+        state: RithmicProviderRuntimeState,
         recovery: Option<RecoveryReason>,
-    ) -> Result<(), DesktopProviderError> {
+    ) -> Result<(), RithmicProviderRuntimeError> {
         let generation = self.active_generation();
         self.state = state;
         if let Some(generation) = generation
             && self.driver.stop_session(generation).is_err()
         {
-            self.state = DesktopProviderState::StopUnconfirmed {
+            self.state = RithmicProviderRuntimeState::StopUnconfirmed {
                 generation,
                 recovery,
             };
-            return Err(DesktopProviderError::ProviderUnavailable);
+            return Err(RithmicProviderRuntimeError::ProviderUnavailable);
         }
         Ok(())
     }
 
-    fn reject_stale<T>(&mut self) -> Result<T, DesktopProviderError> {
+    fn reject_stale<T>(&mut self) -> Result<T, RithmicProviderRuntimeError> {
         self.diagnostics_record_stale_callback();
-        Err(DesktopProviderError::StaleGeneration)
+        Err(RithmicProviderRuntimeError::StaleGeneration)
     }
 
-    fn ensure_owner(&self) -> Result<(), DesktopProviderError> {
+    fn ensure_owner(&self) -> Result<(), RithmicProviderRuntimeError> {
         if thread::current().id() != self.owner_thread {
-            return Err(DesktopProviderError::WorkerThreadMismatch);
+            return Err(RithmicProviderRuntimeError::WorkerThreadMismatch);
         }
         Ok(())
     }
@@ -1062,23 +1134,23 @@ where
     pub fn driver_matches(
         &self,
         predicate: impl FnOnce(&D) -> bool,
-    ) -> Result<bool, DesktopProviderError> {
+    ) -> Result<bool, RithmicProviderRuntimeError> {
         self.ensure_owner()?;
         Ok(predicate(&self.driver))
     }
 }
 
-impl<V, D: ProviderSessionDriver> Drop for DesktopProviderRuntime<V, D> {
+impl<V, D: ProviderSessionDriver> Drop for RithmicProviderRuntime<V, D> {
     fn drop(&mut self) {
         let generation = match self.state {
-            DesktopProviderState::Connecting { generation, .. }
-            | DesktopProviderState::Streaming { generation }
-            | DesktopProviderState::StopUnconfirmed { generation, .. } => Some(generation),
-            DesktopProviderState::Disconnected
-            | DesktopProviderState::RecoveryRequired { .. }
-            | DesktopProviderState::Suspended
-            | DesktopProviderState::NetworkUnavailable
-            | DesktopProviderState::Stopped => None,
+            RithmicProviderRuntimeState::Connecting { generation, .. }
+            | RithmicProviderRuntimeState::Streaming { generation }
+            | RithmicProviderRuntimeState::StopUnconfirmed { generation, .. } => Some(generation),
+            RithmicProviderRuntimeState::Disconnected
+            | RithmicProviderRuntimeState::RecoveryRequired { .. }
+            | RithmicProviderRuntimeState::Suspended
+            | RithmicProviderRuntimeState::NetworkUnavailable
+            | RithmicProviderRuntimeState::Stopped => None,
         };
         if let Some(generation) = generation {
             let _ = self.driver.stop_session(generation);
@@ -1089,10 +1161,10 @@ impl<V, D: ProviderSessionDriver> Drop for DesktopProviderRuntime<V, D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectTrigger, DesktopProviderConfig, DesktopProviderError, DesktopProviderRuntime,
-        DesktopProviderState, MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES, NetworkEvent,
-        ProviderContractError, ProviderEnvironment, ProviderInvalidationReason,
-        ProviderSessionDriver, RecoveryReason, SessionGeneration,
+        ConnectTrigger, MAXIMUM_DIAGNOSTICS_IDENTITY_BYTES, NetworkEvent, ProviderContractError,
+        ProviderEnvironment, ProviderInvalidationReason, ProviderSessionDriver, RecoveryReason,
+        RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeError,
+        RithmicProviderRuntimeState, SessionGeneration,
     };
     use axiusflow_observability::{
         DiagnosticsQueue, FeedConnectionState, FeedRecoveryReason, LatencyBoundary,
@@ -1161,8 +1233,8 @@ mod tests {
         }
     }
 
-    fn config(maximum_credential_bytes: usize) -> DesktopProviderConfig {
-        DesktopProviderConfig::new(
+    fn config(maximum_credential_bytes: usize) -> RithmicProviderRuntimeConfig {
+        RithmicProviderRuntimeConfig::new(
             NonZeroUsize::new(maximum_credential_bytes)
                 .expect("test credential capacity is nonzero"),
         )
@@ -1177,12 +1249,12 @@ mod tests {
     }
 
     fn runtime() -> (
-        DesktopProviderRuntime<MemoryVault, RecordingDriver>,
+        RithmicProviderRuntime<MemoryVault, RecordingDriver>,
         Arc<Mutex<DriverState>>,
     ) {
         let driver = RecordingDriver::default();
         let state = driver.0.clone();
-        let runtime = DesktopProviderRuntime::try_new(
+        let runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"device-only-provider-token".to_vec()),
                 fail_load: false,
@@ -1198,7 +1270,7 @@ mod tests {
     #[test]
     fn production_runtime_owns_lifecycle_and_feed_diagnostics() {
         let driver = RecordingDriver::default();
-        let mut runtime = DesktopProviderRuntime::try_new(
+        let mut runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"device-only-provider-token".to_vec()),
                 fail_load: false,
@@ -1236,8 +1308,27 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_fences_diagnostics_callbacks_when_metrics_are_disabled() {
+        let (mut runtime, _) = runtime();
+        let generation = runtime
+            .connect(ConnectTrigger::Initial)
+            .expect("session starts");
+        runtime
+            .session_established(generation)
+            .expect("session streams");
+        let stale = SessionGeneration::new(
+            NonZeroU64::new(generation.get() + 1).unwrap_or(NonZeroU64::MIN),
+        );
+
+        assert_eq!(
+            runtime.record_trade_diagnostics(stale, None),
+            Err(RithmicProviderRuntimeError::StaleGeneration)
+        );
+    }
+
+    #[test]
     fn production_runtime_records_generation_fenced_ui_diagnostics() {
-        let mut runtime = DesktopProviderRuntime::try_new(
+        let mut runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"device-only-provider-token".to_vec()),
                 fail_load: false,
@@ -1307,13 +1398,13 @@ mod tests {
         runtime.stop().expect("session stops");
         assert_eq!(
             runtime.record_coalesced_ui_update_diagnostics(generation, 1),
-            Err(DesktopProviderError::StaleGeneration)
+            Err(RithmicProviderRuntimeError::StaleGeneration)
         );
     }
 
     #[test]
     fn credential_failure_requires_authentication_recovery_diagnostics() {
-        let mut runtime = DesktopProviderRuntime::try_new(
+        let mut runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: None,
                 fail_load: false,
@@ -1328,7 +1419,7 @@ mod tests {
 
         assert_eq!(
             runtime.connect(ConnectTrigger::Initial),
-            Err(DesktopProviderError::CredentialMissing)
+            Err(RithmicProviderRuntimeError::CredentialMissing)
         );
         let snapshot = runtime
             .try_diagnostics_snapshot()
@@ -1343,7 +1434,7 @@ mod tests {
 
     #[test]
     fn provider_invalidation_retains_exact_silence_diagnostics() {
-        let mut runtime = DesktopProviderRuntime::try_new(
+        let mut runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"device-only-provider-token".to_vec()),
                 fail_load: false,
@@ -1379,7 +1470,7 @@ mod tests {
     fn failed_provider_stop_does_not_leave_diagnostics_streaming() {
         let driver = RecordingDriver::default();
         let state = driver.0.clone();
-        let mut runtime = DesktopProviderRuntime::try_new(
+        let mut runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"device-only-provider-token".to_vec()),
                 fail_load: false,
@@ -1404,7 +1495,7 @@ mod tests {
 
         assert_eq!(
             runtime.handle_network_event(NetworkEvent::Unavailable),
-            Err(DesktopProviderError::ProviderUnavailable)
+            Err(RithmicProviderRuntimeError::ProviderUnavailable)
         );
         let snapshot = runtime
             .try_diagnostics_snapshot()
@@ -1413,7 +1504,7 @@ mod tests {
         assert_eq!(snapshot.connection_state, FeedConnectionState::Disconnected);
         assert_eq!(
             runtime.state().expect("state is available"),
-            DesktopProviderState::StopUnconfirmed {
+            RithmicProviderRuntimeState::StopUnconfirmed {
                 generation,
                 recovery: None,
             }
@@ -1455,7 +1546,7 @@ mod tests {
     #[test]
     fn vault_credentials_are_bounded_and_errors_are_redacted() {
         let driver = RecordingDriver::default();
-        let mut missing = DesktopProviderRuntime::try_new(
+        let mut missing = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: None,
                 fail_load: false,
@@ -1467,10 +1558,10 @@ mod tests {
         .expect("runtime configuration is valid");
         assert_eq!(
             missing.connect(ConnectTrigger::Initial),
-            Err(DesktopProviderError::CredentialMissing)
+            Err(RithmicProviderRuntimeError::CredentialMissing)
         );
 
-        let mut oversized = DesktopProviderRuntime::try_new(
+        let mut oversized = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"secret-value".to_vec()),
                 fail_load: false,
@@ -1482,7 +1573,7 @@ mod tests {
         .expect("runtime configuration is valid");
         assert_eq!(
             oversized.connect(ConnectTrigger::Initial),
-            Err(DesktopProviderError::CredentialTooLarge {
+            Err(RithmicProviderRuntimeError::CredentialTooLarge {
                 requested: 12,
                 maximum: 8,
             })
@@ -1511,7 +1602,7 @@ mod tests {
         assert!(second > first);
         assert_eq!(
             runtime.session_established(first),
-            Err(DesktopProviderError::StaleGeneration)
+            Err(RithmicProviderRuntimeError::StaleGeneration)
         );
         runtime
             .session_established(second)
@@ -1526,7 +1617,7 @@ mod tests {
         assert!(third > second);
         assert_eq!(
             runtime.session_established(second),
-            Err(DesktopProviderError::StaleGeneration)
+            Err(RithmicProviderRuntimeError::StaleGeneration)
         );
         assert_eq!(
             driver.lock().expect("driver state lock is available").stops,
@@ -1570,7 +1661,7 @@ mod tests {
         );
         assert_eq!(
             runtime.state().expect("state is available"),
-            DesktopProviderState::Disconnected
+            RithmicProviderRuntimeState::Disconnected
         );
     }
 
@@ -1582,7 +1673,7 @@ mod tests {
             .expect("idle suspend is recorded");
         assert_eq!(
             runtime.connect(ConnectTrigger::Resume),
-            Err(DesktopProviderError::InvalidTransition)
+            Err(RithmicProviderRuntimeError::InvalidTransition)
         );
         runtime
             .handle_power_event(PowerEvent::Resumed)
@@ -1592,7 +1683,7 @@ mod tests {
             .expect("idle network loss is recorded");
         assert_eq!(
             runtime.connect(ConnectTrigger::NetworkRestored),
-            Err(DesktopProviderError::InvalidTransition)
+            Err(RithmicProviderRuntimeError::InvalidTransition)
         );
         assert!(
             driver
@@ -1649,18 +1740,18 @@ mod tests {
             .fail_stop = true;
         assert_eq!(
             runtime.session_invalid(generation),
-            Err(DesktopProviderError::ProviderUnavailable)
+            Err(RithmicProviderRuntimeError::ProviderUnavailable)
         );
         assert_eq!(
             runtime.state().expect("state is available"),
-            DesktopProviderState::StopUnconfirmed {
+            RithmicProviderRuntimeState::StopUnconfirmed {
                 generation,
                 recovery: Some(RecoveryReason::TransportInvalid),
             }
         );
         assert_eq!(
             runtime.connect(ConnectTrigger::Retry),
-            Err(DesktopProviderError::InvalidTransition)
+            Err(RithmicProviderRuntimeError::InvalidTransition)
         );
         driver
             .lock()
@@ -1673,7 +1764,7 @@ mod tests {
         assert!(replacement > generation);
         assert_eq!(
             runtime.state().expect("state is available"),
-            DesktopProviderState::Connecting {
+            RithmicProviderRuntimeState::Connecting {
                 generation: replacement,
                 trigger: ConnectTrigger::Retry,
             }
@@ -1684,7 +1775,7 @@ mod tests {
     fn confirmed_stop_retry_marks_production_diagnostics_stopped() {
         let driver = RecordingDriver::default();
         let state = driver.0.clone();
-        let mut runtime = DesktopProviderRuntime::try_new(
+        let mut runtime = RithmicProviderRuntime::try_new(
             MemoryVault {
                 secret: Some(b"device-only-provider-token".to_vec()),
                 fail_load: false,
@@ -1708,7 +1799,7 @@ mod tests {
             .fail_stop = true;
         assert_eq!(
             runtime.stop(),
-            Err(DesktopProviderError::ProviderUnavailable)
+            Err(RithmicProviderRuntimeError::ProviderUnavailable)
         );
         state
             .lock()
@@ -1791,7 +1882,7 @@ mod tests {
             .fail_stop = true;
         assert_eq!(
             runtime.handle_network_event(NetworkEvent::Unavailable),
-            Err(DesktopProviderError::ProviderUnavailable)
+            Err(RithmicProviderRuntimeError::ProviderUnavailable)
         );
         assert_eq!(
             runtime
@@ -1819,11 +1910,11 @@ mod tests {
             .fail_start = true;
         assert_eq!(
             runtime.connect(ConnectTrigger::Initial),
-            Err(DesktopProviderError::ProviderUnavailable)
+            Err(RithmicProviderRuntimeError::ProviderUnavailable)
         );
         assert_eq!(
             runtime.state().expect("state is available"),
-            DesktopProviderState::RecoveryRequired {
+            RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(SessionGeneration::new(NonZeroU64::MIN)),
                 reason: RecoveryReason::ProviderFailure,
             }

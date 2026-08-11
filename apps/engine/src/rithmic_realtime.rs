@@ -8,10 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_desktop_provider_runtime::{
-    DesktopProviderConfig, DesktopProviderRuntime, DesktopProviderState, InstrumentDescriptor,
-    ProviderSessionEvent, SessionGeneration,
-};
 use axiusflow_local_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
@@ -22,12 +18,14 @@ use axiusflow_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
 };
 use axiusflow_rithmic_protocol_adapter::{
-    AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent,
-    RithmicCatalogRejection, RithmicEnvironmentEvent, RithmicInstrumentSelection,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
+    ProviderSessionEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
+    RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderConfig,
+    RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeState,
     RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
-    SearchPattern, apply_rithmic_environment_event, try_recv_rithmic_event,
+    SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 
 const CALLBACK_CAPACITY: usize = 256;
@@ -68,7 +66,7 @@ pub(crate) enum RithmicRealtimeEvent {
     Disconnected(u64),
 }
 
-type Runtime = DesktopProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
+type Runtime = RithmicProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
 
 enum EnvironmentMessage {
     Event(RithmicEnvironmentEvent),
@@ -503,14 +501,14 @@ const fn protocol_rejection(reason: RithmicCatalogRejection) -> ProviderCatalogR
 
 fn active_generation(runtime: &Runtime) -> Option<SessionGeneration> {
     match runtime.state().ok()? {
-        DesktopProviderState::Connecting { generation, .. }
-        | DesktopProviderState::Streaming { generation } => Some(generation),
-        DesktopProviderState::RecoveryRequired { generation, .. } => generation,
-        DesktopProviderState::Disconnected
-        | DesktopProviderState::StopUnconfirmed { .. }
-        | DesktopProviderState::Suspended
-        | DesktopProviderState::NetworkUnavailable
-        | DesktopProviderState::Stopped => None,
+        RithmicProviderRuntimeState::Connecting { generation, .. }
+        | RithmicProviderRuntimeState::Streaming { generation } => Some(generation),
+        RithmicProviderRuntimeState::RecoveryRequired { generation, .. } => generation,
+        RithmicProviderRuntimeState::Disconnected
+        | RithmicProviderRuntimeState::StopUnconfirmed { .. }
+        | RithmicProviderRuntimeState::Suspended
+        | RithmicProviderRuntimeState::NetworkUnavailable
+        | RithmicProviderRuntimeState::Stopped => None,
     }
 }
 
@@ -880,11 +878,11 @@ fn open_runtime_with_instruments(
     let (driver, events) = RithmicProviderDriver::new(provider, limits);
     let vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
         .map_err(|_| "Rithmic live credential vault is unavailable".to_string())?;
-    let runtime = DesktopProviderRuntime::try_new(
+    let runtime = RithmicProviderRuntime::try_new(
         vault,
         driver,
         RITHMIC_TEST_VAULT_KEY,
-        DesktopProviderConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES)),
+        RithmicProviderRuntimeConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES)),
     )
     .map_err(|_| "Rithmic live runtime is unavailable".to_string())?;
     Ok((runtime, events))

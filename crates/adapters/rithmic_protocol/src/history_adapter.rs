@@ -1194,8 +1194,8 @@ pub fn collect_rithmic_covering_recovery_evidence()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InstrumentDescriptor;
     use crate::{BarIdentity, DecodedTickBar, ObservedHistoryRange, Ohlc, TickBarKey};
-    use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
     use axiusflow_provider_history::HistoryRange;
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 

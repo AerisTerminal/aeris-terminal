@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 21 of 180 tasks complete.**
+**Verified progress: 22 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -412,7 +412,6 @@ Do not leave permanent:
 
 The current repository still contains:
 
-- `desktop_provider_runtime`
 - `desktop_history`
 - `desktop_storage`
 - `local_engine_protocol`
@@ -507,7 +506,7 @@ There must not remain a second Rithmic product runtime inside the generic market
 
 # 9. `desktop_provider_runtime` MIGRATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Current:
 
@@ -517,7 +516,7 @@ desktop_provider_runtime/
     session_contract.rs
 ```
 
-Progress evidence (2026-08-11): Coinbase no longer depends on this crate. Its obsolete desktop session driver, event bridge, deterministic session fixture, and dead feature flag were deleted after the caller trace confirmed that production Coinbase history and realtime use the resident engine workers. The uncalled `DesktopMarketWorker` provider/history composition and its integration harness were also deleted, removing the crate's dependencies on `desktop_history`, `desktop_storage`, and `provider_history`. Rithmic callback-source and generation-state errors now belong to the Rithmic adapter. The remaining crate surface is the generation-fenced provider lifecycle, session contract, and diagnostics still called by the engine-owned Rithmic catalog/realtime workers, so the crate cannot yet be deleted and this section remains unchecked.
+Evidence (2026-08-11): every remaining caller and dependency was traced. The Rithmic adapter was the only production implementation and the resident engine was its only product caller, so the generation-fenced lifecycle and bounded session contract moved into `rithmic_protocol`; the desktop-era `desktop_driver.rs` module was renamed `provider_session.rs`. The redundant `ProviderFeedDiagnostics` wrapper was deleted because the lifecycle already owns generation validation and now records directly into `observability::FeedDiagnostics`. The stale standalone conformance script, workspace member, dependent manifest entries, lockfile package, and the entire `desktop_provider_runtime` crate were deleted. Focused adapter and engine suites pass with 103 adapter library tests, 11 adapter binary tests, and 36 engine library/integration tests.
 
 This crate must be reviewed extremely critically.
 
@@ -549,7 +548,7 @@ Do not keep it simply because code already exists.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): every source file, public export, dependency, and workspace caller was audited. `application` contains only provider-neutral generation/provenance validation, replay snapshot and delta models, client-model state transitions, and embedded deterministic replay input. It has no threads, sockets, network worker, provider session, Tokio runtime, persistent storage, queue, or market-data worker lifetime. The misleading `stream_runtime.rs` name described only an immutable publication validator; its sole remaining consumer was an unconsumed desktop event/publication queue inside the transitional provider runtime. Both were deleted, and `desktop_provider_runtime` no longer depends on `application`.
+Evidence (2026-08-11): every source file, public export, dependency, and workspace caller was audited. `application` contains only provider-neutral generation/provenance validation, replay snapshot and delta models, client-model state transitions, and embedded deterministic replay input. It has no threads, sockets, network worker, provider session, Tokio runtime, persistent storage, queue, or market-data worker lifetime. The misleading `stream_runtime.rs` name described only an immutable publication validator; its sole remaining consumer was an unconsumed desktop event/publication queue inside the transitional provider runtime. Both were deleted, and the later removal of the entire `desktop_provider_runtime` crate leaves no provider-runtime dependency on `application`.
 
 `application` should remain intentionally boring.
 
@@ -3805,7 +3804,7 @@ It must not hide cold-start failures.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): `desktop_market_runtime` is deleted after its engine-owned execution paths disappeared and its final desktop-only presentation mailbox and fixture moved beside their sole consumer. The dead Coinbase desktop provider driver/fixture, the uncalled `desktop_provider_runtime::DesktopMarketWorker` provider/history composition, the old `application::stream_runtime` wrapper, and the provider runtime's unconsumed desktop event/publication queue are also deleted. The remaining Rithmic lifecycle/diagnostics surface in `desktop_provider_runtime`, duplicate IPC review, and remaining dead bridge review are still open, so this phase remains unchecked.
+Progress evidence (2026-08-11): `desktop_market_runtime` and `desktop_provider_runtime` are deleted after their real owners moved to the resident engine, Rithmic adapter, observability, or the sole desktop presentation consumer. Dead Coinbase drivers/fixtures, the uncalled provider/history composition, old `application::stream_runtime`, the unconsumed desktop event/publication queue, the desktop-era Rithmic adapter module name, and the stale provider-runtime conformance script are also gone. Duplicate IPC and remaining dead bridge review are still open, so this phase remains unchecked.
 
 After Coinbase and Rithmic use the new engine:
 
@@ -4173,7 +4172,7 @@ Do not mix future order execution into chart publication queues.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): every credentialed shipping application market path runs inside `axiusflow_engine` and loads bounded opaque credential bytes from `NativeCredentialVault`; the desktop Rithmic bridge has no vault, credential, provider-runtime owner, provider-network import, `rithmic_protocol` dependency, or `desktop_provider_runtime` dependency. Provider-neutral protocol v10 catalog commands/results contain only bounded identity, generation, entitlement revision, precision, and presentation metadata, never credentials. The existing installation token and encrypted-history keys remain native-vault backed, secret bytes are zeroized at the provider-runtime boundary, and repository searches plus deterministic protocol tests confirm that credentials do not cross IPC or enter logs/persistence.
+Evidence (2026-08-11): every credentialed shipping application market path runs inside `axiusflow_engine` and loads bounded opaque credential bytes from `NativeCredentialVault`; the desktop Rithmic bridge has no vault, credential, provider-runtime owner, provider-network import, Rithmic adapter dependency, or deleted `desktop_provider_runtime` dependency. Provider-neutral protocol v10 catalog commands/results contain only bounded identity, generation, entitlement revision, precision, and presentation metadata, never credentials. The existing installation token and encrypted-history keys remain native-vault backed, secret bytes are zeroized at the Rithmic adapter's provider-runtime boundary, and repository searches plus deterministic protocol tests confirm that credentials do not cross IPC or enter logs/persistence.
 
 Provider credentials remain local.
 

@@ -9,7 +9,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_desktop_provider_runtime::InstrumentDescriptor;
 use axiusflow_local_engine_protocol::InstallProviderInstrument;
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, ChartAggregation, ChartInterval, MarketBar, RithmicChartAggregation,
@@ -18,9 +17,9 @@ use axiusflow_market_data::{
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
-    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSessionLimits,
-    RithmicTestSession, collect_rithmic_chart_history,
+    InstrumentDescriptor, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication,
+    RithmicCredentialBytes, RithmicHistorySessionTransport, RithmicProviderInstrument,
+    RithmicSessionLimits, RithmicTestSession, collect_rithmic_chart_history,
 };
 use zeroize::Zeroize;
 

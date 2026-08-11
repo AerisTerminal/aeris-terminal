@@ -1,4 +1,4 @@
-use crate::{ConnectTrigger, RecoveryReason, SessionGeneration};
+use crate::provider_runtime::{ConnectTrigger, RecoveryReason, SessionGeneration};
 use axiusflow_market_data::{BarSeriesKey, MarketEvent};
 use core::fmt;
 use std::{collections::BTreeSet, error::Error, num::NonZeroUsize};
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn market_event_generation_must_match_the_session_envelope() {
-        let generation = SessionGeneration(NonZeroU64::new(4).unwrap_or(NonZeroU64::MIN));
+        let generation = SessionGeneration::new(NonZeroU64::new(4).unwrap_or(NonZeroU64::MIN));
         let event = ProviderSessionEvent::Market {
             generation,
             event: MarketEvent::Trade(MarketTrade {
