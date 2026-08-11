@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 8 of 180 tasks complete.**
+**Verified progress: 20 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -410,15 +410,13 @@ Do not leave permanent:
 
 - [ ] **Status: Not verified complete**
 
-The current repository contains:
+The current repository still contains:
 
-- `desktop_market_runtime`
 - `desktop_provider_runtime`
 - `desktop_history`
 - `desktop_storage`
 - `local_engine_protocol`
 - `application::stream_runtime`
-- app-local Rithmic presentation-client modules that still consume the shared mailbox contract
 
 These require deliberate migration.
 
@@ -426,7 +424,7 @@ These require deliberate migration.
 
 # 8. `desktop_market_runtime` MIGRATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 At migration start, `desktop_market_runtime` contained files such as:
 
@@ -449,9 +447,9 @@ live_market_worker/
     publication.rs
 ```
 
-This crate currently contains too many overlapping concepts.
+This crate contained too many overlapping concepts.
 
-Its responsibilities should migrate into `market_engine`.
+Its execution responsibilities migrated into `market_engine`; its desktop-only presentation contracts moved beside their sole consumer.
 
 Do NOT copy all files into `market_engine` unchanged.
 
@@ -502,7 +500,7 @@ either generic market_engine series logic
 or rithmic_protocol if truly provider-specific
 ```
 
-Migration evidence (2026-08-11): `rithmic_live_chart.rs`, `rithmic_transition_capture.rs`, the runtime-owned `rithmic_market_worker.rs`, and the runtime-owned `rithmic_shell.rs` were deleted after live aggregation, native provider lifecycle, and catalog ownership moved into the resident engine. The engine-protocol-only `rithmic_engine_client.rs` and `rithmic_engine_history.rs` now live beside the desktop application, and `rithmic_series.rs` has collapsed into the app's presentation series browser. The generic runtime contains no Rithmic module, provider client, credential access, provider socket, native lifecycle monitor, retry scheduler, bar aggregation, order-book reconstruction, or `local_engine_client` dependency. It and `apps/desktop` exchange provider-neutral protocol catalog and series-demand types directly and depend on neither `rithmic_protocol` nor `desktop_provider_runtime`. The shared mailbox still carries Rithmic-named presentation events; those contracts and the deterministic fixture worker must move or be generalized before this section can be verified complete.
+Migration evidence (2026-08-11): the resident engine owns provider lifecycle, history, live aggregation, catalog, depth, and persistence, while provider-specific desktop execution modules were deleted. The engine-protocol-only `rithmic_engine_client.rs` and `rithmic_engine_history.rs` live beside the desktop application, and `rithmic_series.rs` collapsed into the app's presentation series browser. The final bounded mailbox/application-model handoff and deterministic disconnected fixture moved unchanged beside their sole desktop consumer, all 23 focused regression tests passed, and the now-empty `desktop_market_runtime` package, workspace member, dependency, and lockfile entry were deleted. No second Rithmic product runtime or compatibility crate remains.
 
 There must not remain a second Rithmic product runtime inside the generic market engine.
 
@@ -3749,7 +3747,7 @@ Remove desktop access to storage.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): protocol v10 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, the complete Rithmic chart cadence catalog, exact nanosecond bar time, bounded engine-owned order-book images, bounded exact catalog search, coarse catalog rejection, and complete selected-instrument metadata. Search and selection cross authenticated IPC as consumer- and command-generation-fenced provider-neutral messages. The resident engine owns the native-vault catalog/quote session, converts adapter catalog results at the worker boundary, installs canonical identity and precision before publishing selection success, and then coordinates its separate native-vault history and realtime sessions. It owns replay planning, cancellation, all 15 cadence collection, encrypted persistence, snapshot publication, bounded transport retry, native power/network transitions, provider-generation advancement, history/live buffering, live tick/fixed/session candle publication, the sole depth subscription, canonical top-20 order-book reconstruction, recovery state, and conflated depth IPC publication. Native environment state is retained across recovery, unavailable/suspended states fence connection startup, restored states start newer generations, and monitor failure closes a provider worker rather than continuing without lifecycle evidence. The desktop creates no Rithmic socket, loads no provider credential, starts no native provider lifecycle monitor, and performs no provider retry or live aggregation. Its app-local bounded `rithmic_engine_client` and `rithmic_engine_history` modules speak provider-neutral engine protocol directly and project engine chart/DOM snapshots; every provider-specific Rithmic module has left `desktop_market_runtime`, the old runtime-owned worker and shell plus `rithmic_live_chart.rs`, `rithmic_transition_capture.rs`, and `rithmic_series.rs` are deleted, and neither desktop crate depends on `rithmic_protocol` or `desktop_provider_runtime`. Deterministic tests cover protocol catalog round trips, catalog installation before publication, exact-time live handoff, completed-history immutability, forming-tail continuation, session-change rejection, generation monotonicity, native-state retention, continuous snapshot conversion, engine-owned depth reconstruction/projection, all-cadence encrypted restart, and provider-history isolation/cancellation. Credentialed native catalog smoke testing and exchange-calendar-owned live week/month bars remain open, so this phase remains unchecked.
+Progress evidence (2026-08-11): protocol v10 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, the complete Rithmic chart cadence catalog, exact nanosecond bar time, bounded engine-owned order-book images, bounded exact catalog search, coarse catalog rejection, and complete selected-instrument metadata. Search and selection cross authenticated IPC as consumer- and command-generation-fenced provider-neutral messages. The resident engine owns the native-vault catalog/quote session, converts adapter catalog results at the worker boundary, installs canonical identity and precision before publishing selection success, and then coordinates its separate native-vault history and realtime sessions. It owns replay planning, cancellation, all 15 cadence collection, encrypted persistence, snapshot publication, bounded transport retry, native power/network transitions, provider-generation advancement, history/live buffering, live tick/fixed/session candle publication, the sole depth subscription, canonical top-20 order-book reconstruction, recovery state, and conflated depth IPC publication. Native environment state is retained across recovery, unavailable/suspended states fence connection startup, restored states start newer generations, and monitor failure closes a provider worker rather than continuing without lifecycle evidence. The desktop creates no Rithmic socket, loads no provider credential, starts no native provider lifecycle monitor, and performs no provider retry or live aggregation. Its app-local bounded `rithmic_engine_client` and `rithmic_engine_history` modules speak provider-neutral engine protocol directly and project engine chart/DOM snapshots; the old runtime-owned worker, shell, live chart, transition capture, series browser, and the entire `desktop_market_runtime` compatibility crate are deleted, and the desktop depends on neither `rithmic_protocol` nor `desktop_provider_runtime`. Deterministic tests cover protocol catalog round trips, catalog installation before publication, exact-time live handoff, completed-history immutability, forming-tail continuation, session-change rejection, generation monotonicity, native-state retention, continuous snapshot conversion, engine-owned depth reconstruction/projection, all-cadence encrypted restart, provider-history isolation/cancellation, and app-local mailbox conflation. Credentialed native catalog smoke testing and exchange-calendar-owned live week/month bars remain open, so this phase remains unchecked.
 
 Move Rithmic provider ownership into ProviderManager.
 
@@ -3804,6 +3802,8 @@ It must not hide cold-start failures.
 # 117. PHASE 9 — DELETE LEGACY RUNTIMES
 
 - [ ] **Status: Not verified complete**
+
+Progress evidence (2026-08-11): `desktop_market_runtime` is deleted after its engine-owned execution paths disappeared and its final desktop-only presentation mailbox and fixture moved beside their sole consumer. `desktop_provider_runtime`, old stream-runtime logic, and remaining dead bridge review are still open, so this phase remains unchecked.
 
 After Coinbase and Rithmic use the new engine:
 

@@ -705,11 +705,11 @@ dependencies = [
  "axiusflow_chart_integration",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_design_system",
- "axiusflow_desktop_market_runtime",
  "axiusflow_instruments",
  "axiusflow_local_engine_client",
  "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
+ "axiusflow_market_protocol_adapter",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
@@ -730,18 +730,6 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_desktop_storage",
  "axiusflow_provider_history",
-]
-
-[[package]]
-name = "axiusflow_desktop_market_runtime"
-version = "0.1.0"
-dependencies = [
- "axiusflow_application",
- "axiusflow_coinbase_market_adapter",
- "axiusflow_local_engine_protocol",
- "axiusflow_market_data",
- "axiusflow_market_protocol_adapter",
- "axiusflow_observability",
 ]
 
 [[package]]

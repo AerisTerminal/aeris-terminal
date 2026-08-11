@@ -84,7 +84,7 @@ fn start_group(
     for (workspace_id, product) in configurations {
         let consumer_id = random_identity()?;
         let startup = MarketWorkerStartup::Loading(Box::new(
-            axiusflow_desktop_market_runtime::market_worker::CoinbaseWorkerStartup {
+            axiusflow_desktop::market_worker::CoinbaseWorkerStartup {
                 coinbase_product: product.clone(),
                 subscription_id: SUBSCRIPTION_ID.to_string(),
                 worker_label: WORKER_LABEL.to_string(),

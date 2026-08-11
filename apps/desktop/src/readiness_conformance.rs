@@ -5,7 +5,7 @@ use crate::frame_poll_gate::FramePollGate;
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_desktop_market_runtime::market_worker::{
+use axiusflow_desktop::market_worker::{
     FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
     market_worker_channel,
 };

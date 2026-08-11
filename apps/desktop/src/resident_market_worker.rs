@@ -1,4 +1,4 @@
-pub(super) use axiusflow_desktop_market_runtime::market_worker::{
+pub(super) use axiusflow_desktop::market_worker::{
     ChartState, DesktopMarketGeneration, EngineSeriesRequest, MarketDataWorker,
     MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
     MarketWorkerSender, MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand,

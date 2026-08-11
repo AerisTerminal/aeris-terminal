@@ -1,4 +1,4 @@
-//! Deterministic binary fixture worker for the disconnected desktop Stage 2 path.
+//! Desktop market presentation mailbox and deterministic disconnected fixture.
 //!
 //! This module does not implement or claim a socket, WebSocket, live provider,
 //! entitlement service, or production transport. It exercises the same bounded
