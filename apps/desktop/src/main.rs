@@ -3399,7 +3399,7 @@ fn indicator_selector(
         "indicator_selector",
         "Indicators",
         button_activation(
-            chrome_button_style(trigger, theme, false, true, enabled),
+            chrome_button_style(trigger, theme, false, false, enabled),
             enabled,
             move |window, cx| {
                 app.update(cx, |app, app_cx| {
