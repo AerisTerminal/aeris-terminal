@@ -285,6 +285,97 @@ fn chart_viewport_is_generation_fenced_and_persisted_independently() {
 }
 
 #[test]
+fn shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation() {
+    let directory = TestDirectory::new();
+    let state = EngineState::open(&directory.0).expect("open persistent state");
+    let shutdown_state = state.clone();
+    let name = unique_name();
+    let listener = bind_listener(&name).expect("bind engine listener");
+    let token = [14_u8; 32];
+    let server = thread::spawn(move || {
+        let stream = listener.accept().expect("accept client");
+        serve_client_with_state(stream, &token, 94, &state).expect("serve client");
+    });
+    let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
+    let restored = client.restore_workspace().expect("restore workspace");
+    let selected = client
+        .set_selection(
+            restored.market,
+            restored.interval_seconds,
+            restored.workspace_revision,
+            7,
+        )
+        .expect("select initial series");
+    let viewport = client
+        .set_viewport(1_000, 2_000, 7)
+        .expect("persist older hot-set manifest");
+    let latest = client
+        .set_provider_selection(
+            "rithmic".to_string(),
+            "MNQU6".to_string(),
+            300,
+            selected.workspace_revision,
+            8,
+        )
+        .expect("select newer series without another viewport");
+    assert_eq!(
+        latest.cache_manifest_revision,
+        viewport.cache_manifest_revision
+    );
+    drop(client);
+    server.join().expect("join server");
+
+    let flushed = shutdown_state
+        .persist_shutdown_hot_set()
+        .expect("persist final hot set");
+    assert_eq!(
+        flushed.cache_manifest_revision,
+        latest.cache_manifest_revision + 1
+    );
+
+    let name = unique_name();
+    let listener = bind_listener(&name).expect("bind shutdown listener");
+    let blocked_state = shutdown_state.clone();
+    let server = thread::spawn(move || {
+        let stream = listener.accept().expect("accept shutdown client");
+        serve_client_with_state(stream, &token, 95, &blocked_state).expect("serve shutdown client");
+    });
+    let mut client = EngineClient::connect(&name, &token).expect("connect shutdown client");
+    let current = client
+        .restore_workspace()
+        .expect("restore flushed workspace");
+    assert_eq!(
+        client
+            .set_selection(
+                current.market,
+                current.interval_seconds,
+                current.workspace_revision,
+                9,
+            )
+            .expect_err("late workspace mutation is fenced"),
+        "engine workspace is shutting down"
+    );
+    drop(client);
+    server.join().expect("join shutdown server");
+
+    let reopened = EngineState::open(&directory.0).expect("reopen flushed state");
+    let workspace = reopened.workspace();
+    assert_eq!(
+        workspace.cache_manifest_revision,
+        flushed.cache_manifest_revision
+    );
+    assert_eq!(workspace.hot_series[0].provider, "rithmic");
+    assert_eq!(workspace.hot_series[0].market, "MNQU6");
+    assert_eq!(workspace.hot_series[0].interval_seconds, 300);
+    let manifests = fs::read_dir(&directory.0)
+        .expect("read workspace directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("hot-set-"))
+        .count();
+    assert_eq!(manifests, 2);
+}
+
+#[test]
 fn corrupt_latest_workspace_is_quarantined_and_falls_back() {
     let directory = TestDirectory::new();
     fs::write(

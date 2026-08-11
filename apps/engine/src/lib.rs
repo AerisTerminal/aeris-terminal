@@ -29,6 +29,7 @@ use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as
 const WORKSPACE_SCHEMA_REVISION: u32 = 1;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
+const WORKSPACE_SHUTTING_DOWN: &str = "engine workspace is shutting down";
 
 /// Process-wide resident-engine shutdown state shared with authenticated sessions.
 #[derive(Clone, Default)]
@@ -54,6 +55,7 @@ pub struct EngineState {
     workspace: Arc<Mutex<WorkspaceState>>,
     workspace_root: Option<Arc<PathBuf>>,
     selection_generation: Arc<AtomicU64>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl Default for EngineState {
@@ -62,6 +64,7 @@ impl Default for EngineState {
             workspace: Arc::new(Mutex::new(default_workspace())),
             workspace_root: None,
             selection_generation: Arc::new(AtomicU64::new(0)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -90,6 +93,7 @@ impl EngineState {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
             selection_generation: Arc::new(AtomicU64::new(0)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         };
         if state.workspace().workspace_revision == 0 || migrated {
             state.persist(&state.workspace())?;
@@ -116,11 +120,43 @@ impl EngineState {
         workspace.clone()
     }
 
+    /// Persists one final revisioned hot-set snapshot after shutdown begins.
+    ///
+    /// # Errors
+    /// Returns an error when the state is invalid or durable publication fails.
+    pub fn persist_shutdown_hot_set(&self) -> Result<WorkspaceState, String> {
+        self.begin_shutdown();
+        let mut workspace = self
+            .workspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut candidate = workspace.clone();
+        candidate.cache_manifest_revision = candidate.cache_manifest_revision.saturating_add(1);
+        validate_workspace(&candidate)?;
+        if let Some(root) = &self.workspace_root {
+            persist_hot_set(root, &candidate)?;
+        }
+        *workspace = candidate.clone();
+        Ok(candidate)
+    }
+
+    fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+    }
+
+    fn ensure_mutable(&self) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(WORKSPACE_SHUTTING_DOWN.to_string());
+        }
+        Ok(())
+    }
+
     fn apply_selection(&self, selection: SetSelection) -> Result<WorkspaceState, String> {
         let mut workspace = self
             .workspace
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_mutable()?;
         if selection.workspace_revision != workspace.workspace_revision {
             return Err("workspace revision is stale".to_string());
         }
@@ -151,6 +187,7 @@ impl EngineState {
             .workspace
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_mutable()?;
         let mut candidate = workspace.clone();
         let provider = candidate.provider.clone();
         let market = candidate.market.clone();
@@ -183,6 +220,7 @@ impl EngineState {
             .workspace
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_mutable()?;
         if watchlist.workspace_revision != workspace.workspace_revision {
             return Err("workspace revision is stale".to_string());
         }
@@ -736,6 +774,7 @@ fn serve_authenticated_messages(
                     ))?;
                     continue;
                 };
+                state.begin_shutdown();
                 state.set_resource_mode(ResourceMode::OfflineSuspended);
                 shutdown.request();
                 connection.send(envelope::Payload::Goodbye(Goodbye {
@@ -966,6 +1005,9 @@ fn apply_selection(
 ) -> Result<(), String> {
     match state.apply_selection(selection) {
         Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == WORKSPACE_SHUTTING_DOWN => {
+            connection.send(cancelled_mutation_fault(error))
+        }
         Err(error) if error == "workspace revision is stale" => {
             connection.send(stale_workspace_fault())
         }
@@ -980,6 +1022,9 @@ fn apply_watchlist(
 ) -> Result<(), String> {
     match state.apply_watchlist(watchlist) {
         Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == WORKSPACE_SHUTTING_DOWN => {
+            connection.send(cancelled_mutation_fault(error))
+        }
         Err(error) if error == "workspace revision is stale" => {
             connection.send(stale_workspace_fault())
         }
@@ -994,6 +1039,9 @@ fn apply_viewport(
 ) -> Result<(), String> {
     match state.apply_viewport(viewport) {
         Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == WORKSPACE_SHUTTING_DOWN => {
+            connection.send(cancelled_mutation_fault(error))
+        }
         Err(error) if error == "chart viewport selection is stale" => {
             connection.send(cancelled_mutation_fault(error))
         }

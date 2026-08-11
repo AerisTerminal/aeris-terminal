@@ -1929,6 +1929,8 @@ Viewport changes do not recreate provider sessions.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): `EngineState` keeps at most 32 scored, last-used provider/market/interval identities with optional stable viewport bounds. Selection touches recency, viewport changes publish immutable revisioned manifests, and complete shutdown freezes later persistent mutations before writing one final newer manifest. Only the latest two manifests survive. A deterministic equal-revision regression proves an older viewport manifest cannot replace a newer selected series on restart. Active-workspace, watchlist, pinning, memory-pressure, and measured HOT/WARM/COLD retention policy remain incomplete, so this section stays unchecked.
+
 The engine retains a bounded working set.
 
 Classify data roughly as:
@@ -1957,7 +1959,7 @@ Do not warm the entire exchange catalog.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): protocol v10 lifecycle commands now cross the authenticated local boundary. `SetEngineResourceMode` updates and acknowledges the engine-owned workspace state, while `ShutdownEngine` marks the engine offline/suspended, rejects subsequent demand, closes the listener, cancels in-flight history and Coinbase realtime work, disconnects active Rithmic worker controls, drains accepted local-history requests, joins the top-level market workers, and exits within one shared two-second process deadline. The shipping `axiusflow_engine --shutdown` command exercises that boundary without starting a missing engine. Ordinary desktop detachment continues to provide the existing Keep Engine Warm behavior. User-facing lifetime-mode selection, Keep Markets Live provider policy, final hot-set flushing, optional autostart, cancellable native environment-monitor ownership, and warm-reopen proof remain incomplete, so this section stays unchecked.
+Progress evidence (2026-08-11): protocol v10 lifecycle commands now cross the authenticated local boundary. `SetEngineResourceMode` updates and acknowledges the engine-owned workspace state, while `ShutdownEngine` marks the engine offline/suspended, freezes later persistent workspace mutation, rejects subsequent demand, closes the listener, writes a final revisioned hot-set manifest, cancels in-flight history and Coinbase realtime work, disconnects active Rithmic worker controls, drains accepted local-history requests, joins the top-level market workers, and exits within one shared two-second process deadline. The shipping `axiusflow_engine --shutdown` command exercises that boundary without starting a missing engine. Ordinary desktop detachment continues to provide the existing Keep Engine Warm behavior. User-facing lifetime-mode selection, Keep Markets Live provider policy, optional autostart, cancellable native environment-monitor ownership, and warm-reopen proof remain incomplete, so this section stays unchecked.
 
 Support at least these product modes conceptually.
 
@@ -2740,6 +2742,8 @@ It does not own provider sockets.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-11): the engine persists a bounded list of recently selected provider/market/interval identities, recency scores, last-used times, provider/series watermarks, and stable viewport bounds rather than serializing decoded market structures. Immutable manifest revisions survive restart, retain only the latest two, quarantine corrupt candidates, migrate legacy workspace state, and now receive a final shutdown snapshot that wins over any equal-revision stale manifest. Multiple active workspaces, pins, account-scoped identity, and coverage-driven warm reconstruction remain incomplete, so this section stays unchecked.
+
 `market_engine/src/hot_set.rs`
 
 Persist/track:
@@ -2935,7 +2939,7 @@ No GPUI process remains.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): `axiusflow_engine --shutdown` connects only to an existing engine, authenticates with the native installation token, requests complete shutdown, and requires acknowledgement. The engine stops accepting connections and market demand, cancels every coordinator-owned in-flight history request and the Coinbase realtime source, drops Rithmic controls so active runtimes stop, drains the bounded queue of accepted local-history operations, and joins the coordinator plus top-level provider/history/storage workers. Worker panic or expiry names the unfinished workers and makes the process fail; the same two-second deadline bounds remaining client sessions before process termination. The final post-change optimized Windows run exited with code zero `2.025 ms` after acknowledgement and left no engine process. A final hot-set flush, explicit ownership of blocking native environment-monitor helper threads, desktop user action, and update/uninstall integration remain incomplete, so this section stays unchecked.
+Progress evidence (2026-08-11): `axiusflow_engine --shutdown` connects only to an existing engine, authenticates with the native installation token, requests complete shutdown, and requires acknowledgement. The engine stops accepting connections and market demand, freezes persistent workspace mutation, writes a final newer hot-set manifest on a named one-shot worker, cancels every coordinator-owned in-flight history request and the Coinbase realtime source, drops Rithmic controls so active runtimes stop, drains the bounded queue of accepted local-history operations, and joins the coordinator plus top-level provider/history/storage workers. Flush/worker panic or expiry and stuck client sessions produce process failure under the same two-second deadline. The final post-change optimized Windows run wrote manifest revision 2, exited with code zero `1.713 ms` after acknowledgement, and left no engine process; a second run retained exactly revisions 2 and 3. Explicit ownership of blocking native environment-monitor helper threads, desktop user action, and update/uninstall integration remain incomplete, so this section stays unchecked.
 
 Desktop requests engine shutdown.
 
@@ -3798,7 +3802,7 @@ Verify:
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): the authenticated resource-mode boundary and a real complete-exit command are implemented, unconditional Windows login registration is removed, and the optimized production engine was observed cancelling and joining its top-level market workers before clean exit. Existing desktop detach behavior preserves the resident engine. User-owned lifetime preferences, Keep Markets Live policy, optional cross-platform login startup, final hot-set flushing, cancellable native environment-monitor ownership, and warm snapshot-to-render verification remain incomplete, so Phase 8 stays unchecked.
+Progress evidence (2026-08-11): the authenticated resource-mode boundary and a real complete-exit command are implemented, unconditional Windows login registration is removed, and the optimized production engine was observed writing its final bounded hot-set manifest, cancelling and joining its top-level market workers, and exiting cleanly. Existing desktop detach behavior preserves the resident engine. User-owned lifetime preferences, Keep Markets Live policy, optional cross-platform login startup, cancellable native environment-monitor ownership, and warm snapshot-to-render verification remain incomplete, so Phase 8 stays unchecked.
 
 Only after cold behavior works correctly:
 
@@ -3849,7 +3853,7 @@ Progress evidence (2026-08-11): schema 3 of the release-only engine verifier add
 
 Progress evidence (2026-08-11): one optimized standalone Windows engine process reached authenticated shutdown acknowledgement `1,132.567 ms` after launch, measured `10,641,408` bytes of working set immediately before the request, and exited with code zero `3.902 ms` after acknowledgement, leaving no engine process. This covers the production executable, native installation credential, fixed local endpoint, lifecycle request, and bounded exit in one cold sample. It is not startup percentile, first-usable-snapshot, warm-reopen, provider-disconnect, endurance-memory, or persistence-flush evidence, so Phase 10 remains unchecked.
 
-Progress evidence (2026-08-11): after staged market-worker shutdown was added, the final optimized standalone Windows run retried the explicit command until IPC readiness, acknowledged at `2,647.282 ms`, measured `10,211,328` bytes immediately before the successful request, and exited with code zero `2.025 ms` later with no remaining engine process. Deterministic tests separately prove in-flight history cancellation plus successful joins within one second and prove that an intentionally uncancellable worker is named when a 20 ms deadline expires. These remain isolated lifecycle samples and fixtures rather than startup/reopen percentiles, connected-provider teardown, final hot-set persistence, or endurance evidence, so Phase 10 remains unchecked.
+Progress evidence (2026-08-11): with staged market-worker shutdown and final hot-set persistence active, the final optimized standalone Windows run retried the explicit command until IPC readiness, acknowledged at `2,616.279 ms`, measured `10,272,768` bytes immediately before the successful request, wrote `hot-set-0000000002.frame`, and exited with code zero `1.713 ms` later with no remaining engine process. A second run wrote revision 3 while retaining exactly revisions 2 and 3. Deterministic tests separately prove in-flight history cancellation plus successful joins within one second, name an intentionally uncancellable worker when a 20 ms deadline expires, and reproduce/reject stale equal-revision hot-set overwrite across restart. These remain isolated lifecycle samples and fixtures rather than startup/reopen percentiles, connected-provider teardown, or endurance evidence, so Phase 10 remains unchecked.
 
 Only after correctness:
 
@@ -5201,7 +5205,7 @@ Do not leave Axiusflow engine processes orphaned after uninstall/update.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): authenticated shutdown marks lifecycle state offline/suspended, stops the accept loop and publication, rejects subsequent demand, and closes the IPC listener. One shared two-second process deadline now covers cancellation of coordinator-owned history, Coinbase realtime, Rithmic control channels, draining already-accepted local-history work, joining every top-level market worker, and the remaining client-session wait. A panic or expired stage reports the affected worker names and returns process failure before termination. Deterministic tests prove both successful cancellation/join and the uncancellable-worker deadline path; the final optimized production process exited `2.025 ms` after acknowledgement with code zero and no remnant. Final hot-set flushing and explicit cancellation/join of blocking native environment-monitor helper threads remain incomplete, so this section stays unchecked.
+Progress evidence (2026-08-11): authenticated shutdown marks lifecycle state offline/suspended, freezes persistent workspace mutation, stops the accept loop and publication, rejects subsequent demand, and closes the IPC listener. One shared two-second process deadline covers a named final hot-set flush, cancellation of coordinator-owned history, Coinbase realtime, Rithmic control channels, draining already-accepted local-history work, joining every top-level market worker, and the remaining client-session wait. A panic or expired flush/worker/client stage returns process failure before termination. Deterministic tests prove final-manifest restart truth, successful cancellation/join, and the uncancellable-worker deadline path; the final optimized production process wrote the manifest and exited `1.713 ms` after acknowledgement with code zero and no remnant. Explicit cancellation/join of blocking native environment-monitor helper threads remains incomplete, so this section stays unchecked.
 
 Graceful shutdown is bounded.
 

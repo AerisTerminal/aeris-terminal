@@ -120,11 +120,50 @@ fn run() -> Result<(), String> {
     }
     drop(listener);
     let deadline = Instant::now() + ENGINE_SHUTDOWN_DEADLINE;
+    let hot_set_state = state.clone();
+    let hot_set_flush = thread::Builder::new()
+        .name("axiusflow-engine-hot-set-flush".to_string())
+        .spawn(move || hot_set_state.persist_shutdown_hot_set().map(|_| ()))
+        .map_err(|error| error.to_string());
     let market_shutdown = market.shutdown(deadline.saturating_duration_since(Instant::now()));
+    let hot_set_shutdown = match hot_set_flush {
+        Ok(worker) => finish_hot_set_flush(worker, deadline),
+        Err(error) => Err(format!("hot-set flush worker could not start: {error}")),
+    };
     while active_clients.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
         thread::sleep(ACCEPT_POLL_INTERVAL);
     }
-    market_shutdown
+    let client_shutdown = match active_clients.load(Ordering::Acquire) {
+        0 => Ok(()),
+        active => Err(format!(
+            "engine shutdown deadline expired with {active} active client sessions"
+        )),
+    };
+    let errors = [market_shutdown, hot_set_shutdown, client_shutdown]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn finish_hot_set_flush(
+    worker: thread::JoinHandle<Result<(), String>>,
+    deadline: Instant,
+) -> Result<(), String> {
+    while !worker.is_finished() {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err("engine hot-set flush exceeded the shutdown deadline".to_string());
+        }
+        thread::sleep(Duration::from_millis(5).min(deadline.duration_since(now)));
+    }
+    worker
+        .join()
+        .map_err(|_| "engine hot-set flush worker panicked".to_string())?
 }
 
 #[cfg(test)]
