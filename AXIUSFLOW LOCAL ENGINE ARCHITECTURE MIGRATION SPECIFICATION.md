@@ -1,5 +1,16 @@
 # AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION
 
+## Migration checklist status
+
+Every numbered section is a migration task or verification gate. Its status marker appears immediately below its heading:
+
+- `[ ]` means the section is not yet verified complete.
+- `[x]` means every requirement in the section is implemented and supported by the required tests, runtime evidence, cleanup, and documentation.
+
+Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
+
+**Verified progress: 0 of 180 tasks complete.**
+
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
 This task is NOT:
@@ -46,6 +57,8 @@ The architecture must also support multiple workspace tabs, with multiple charts
 
 # 1. PRIMARY DESIGN PRINCIPLE
 
+- [ ] **Status: Not verified complete**
+
 The most important architectural rule is:
 
 DESKTOP EXPRESSES DEMAND.
@@ -65,6 +78,8 @@ If a design violates that sentence, reject the design.
 ---
 
 # 2. CURRENT PROBLEM CONTEXT
+
+- [ ] **Status: Not verified complete**
 
 Axiusflow currently has approximately 80,000+ lines of platform-side Rust code while basic market-data behavior is unreliable.
 
@@ -105,6 +120,8 @@ The new architecture must dramatically shorten the path between valid canonical 
 
 # 3. DO NOT USE THE MIGRATION TO HIDE CURRENT BUGS
 
+- [ ] **Status: Not verified complete**
+
 Before deleting the current runtime path, preserve enough forensic instrumentation to answer:
 
 - where valid bars first enter the system,
@@ -135,6 +152,8 @@ A persistent storage failure must be tested separately and must not leave an alr
 ---
 
 # 4. TARGET PROCESS TOPOLOGY
+
+- [ ] **Status: Not verified complete**
 
 The final high-level topology is:
 
@@ -213,6 +232,8 @@ The desktop must not create Rithmic or Coinbase network sessions.
 
 # 5. TARGET PROCESS OWNERSHIP
 
+- [ ] **Status: Not verified complete**
+
 ## `axiusflow_desktop`
 
 The desktop owns:
@@ -283,6 +304,8 @@ That answer comes from `axiusflow_engine`.
 ---
 
 # 6. FINAL REPOSITORY SHAPE
+
+- [ ] **Status: Not verified complete**
 
 The final platform repository should converge toward approximately this shape.
 
@@ -385,6 +408,8 @@ Do not leave permanent:
 
 # 7. CURRENT CRATE MIGRATION
 
+- [ ] **Status: Not verified complete**
+
 The current repository contains:
 
 - `desktop_market_runtime`
@@ -400,6 +425,8 @@ These require deliberate migration.
 ---
 
 # 8. `desktop_market_runtime` MIGRATION
+
+- [ ] **Status: Not verified complete**
 
 Current `desktop_market_runtime` contains files such as:
 
@@ -484,6 +511,8 @@ There must not remain a second Rithmic product runtime inside the generic market
 
 # 9. `desktop_provider_runtime` MIGRATION
 
+- [ ] **Status: Not verified complete**
+
 Current:
 
 ```text
@@ -521,6 +550,8 @@ Do not keep it simply because code already exists.
 
 # 10. `application` CRATE
 
+- [ ] **Status: Not verified complete**
+
 `application` should remain intentionally boring.
 
 It may contain:
@@ -552,6 +583,8 @@ Do not maintain a second stream runtime above `market_engine`.
 
 # 11. `provider_kit`
 
+- [ ] **Status: Not verified complete**
+
 `provider_kit` contains Rithmic vendor reference/protocol material.
 
 It is NOT an Axiusflow application layer.
@@ -572,6 +605,8 @@ Treat it as vendor material/build input/reference material.
 ---
 
 # 12. RITHMIC BOUNDARY
+
+- [ ] **Status: Not verified complete**
 
 Rithmic protobuf/wire types must stop inside:
 
@@ -616,6 +651,8 @@ The same principle applies to Coinbase-specific types.
 
 # 13. CANONICAL MARKET TYPES
 
+- [ ] **Status: Not verified complete**
+
 All providers normalize into provider-neutral domain types.
 
 Examples conceptually include:
@@ -647,6 +684,8 @@ The rest of Axiusflow should not repeatedly carry `"BTC-USD"` or Rithmic symbol 
 ---
 
 # 14. `market_engine` IS THE PRIMARY OWNER
+
+- [ ] **Status: Not verified complete**
 
 The target `market_engine` crate owns all market-data orchestration.
 
@@ -704,6 +743,8 @@ where practical.
 
 # 15. ENGINE COMMAND MODEL
 
+- [ ] **Status: Not verified complete**
+
 The desktop communicates intent.
 
 It does not invoke provider implementations.
@@ -739,6 +780,8 @@ The protocol communicates product intent.
 ---
 
 # 16. ENGINE EVENT MODEL
+
+- [ ] **Status: Not verified complete**
 
 The engine sends useful state/publications.
 
@@ -776,6 +819,8 @@ IPC is a product boundary.
 ---
 
 # 17. EVERY UI CONSUMER HAS A STABLE IDENTITY
+
+- [ ] **Status: Not verified complete**
 
 Multiple tabs and multiple charts require this architecture from the beginning.
 
@@ -835,6 +880,8 @@ But they must NOT automatically become five independent provider sessions.
 
 # 18. MULTIPLE WORKSPACE TABS
 
+- [ ] **Status: Not verified complete**
+
 Axiusflow must support TradingView-like multi-workspace/multi-tab behavior using GPUI.
 
 A desktop window can contain:
@@ -869,6 +916,8 @@ They do not create Tokio runtimes.
 ---
 
 # 19. MULTI-CHART ARCHITECTURE
+
+- [ ] **Status: Not verified complete**
 
 Suppose the user opens:
 
@@ -934,6 +983,8 @@ The implementation must not reconnect to Rithmic simply because a second ES char
 
 # 20. SUBSCRIPTION REFERENCE COUNTING
 
+- [ ] **Status: Not verified complete**
+
 `SubscriptionRegistry` owns shared upstream demand.
 
 Conceptually:
@@ -981,6 +1032,8 @@ Only release the upstream subscription when no remaining consumer or hot-set pol
 
 # 21. CHART GENERATIONS ARE PER CONSUMER
 
+- [ ] **Status: Not verified complete**
+
 Each chart has a generation.
 
 Example:
@@ -1025,6 +1078,8 @@ A stale result must never overwrite a newer chart.
 
 # 22. CANCELLATION MUST NOT BLOCK NEW WORK
 
+- [ ] **Status: Not verified complete**
+
 This is non-negotiable.
 
 BAD:
@@ -1065,6 +1120,8 @@ Cancellation is not allowed to create a serialization barrier between user selec
 
 # 23. ENGINE COORDINATOR MUST REMAIN RESPONSIVE
 
+- [ ] **Status: Not verified complete**
+
 Do not write a coordinator loop equivalent to:
 
 ```rust
@@ -1094,6 +1151,8 @@ The owner remains responsive.
 
 # 24. ONE ENGINE ASYNC RUNTIME
 
+- [ ] **Status: Not verified complete**
+
 `axiusflow_engine` should own one long-lived asynchronous runtime/process execution environment.
 
 Do not:
@@ -1111,6 +1170,8 @@ GPUI should not have to know whether provider code uses Tokio or another mechani
 ---
 
 # 25. THREAD/EXECUTOR RESPONSIBILITIES
+
+- [ ] **Status: Not verified complete**
 
 Conceptually:
 
@@ -1169,6 +1230,8 @@ No GPUI callback may synchronously wait for provider/network/storage work.
 
 # 26. CRITICAL DATA PATH
 
+- [ ] **Status: Not verified complete**
+
 The critical visible chart path should be:
 
 ```text
@@ -1198,6 +1261,8 @@ This must remain short and easy to trace.
 ---
 
 # 27. PERSISTENCE IS NOT A FIRST-PIXEL GATE
+
+- [ ] **Status: Not verified complete**
 
 This is one of the most important changes.
 
@@ -1268,6 +1333,8 @@ Future actual order state may require stronger transactional guarantees and is o
 
 # 28. HISTORY STATE MACHINE
 
+- [ ] **Status: Not verified complete**
+
 Replace ambiguous loading booleans with explicit state.
 
 Conceptually:
@@ -1307,6 +1374,8 @@ A cancellation cannot leave it pending forever.
 ---
 
 # 29. PROGRESSIVE PUBLICATION
+
+- [ ] **Status: Not verified complete**
 
 The user should see useful data as soon as it exists.
 
@@ -1360,6 +1429,8 @@ Do not hide already-valid data behind a spinner.
 
 # 30. MEMORY / DISK / PROVIDER LOOKUP ORDER
 
+- [ ] **Status: Not verified complete**
+
 A normal series query should conceptually use:
 
 ```text
@@ -1379,6 +1450,8 @@ The chart does not know.
 ---
 
 # 31. TIMEFRAME SWITCHING
+
+- [ ] **Status: Not verified complete**
 
 Timeframe switching must not recreate the provider session merely because the interval changed.
 
@@ -1410,6 +1483,8 @@ If a provider has native bar subscriptions, that is an adapter optimization, not
 
 # 32. TIMEFRAME DERIVATION RULE
 
+- [ ] **Status: Not verified complete**
+
 Never derive finer data from coarser data.
 
 Example:
@@ -1439,6 +1514,8 @@ If the requested timeframe requires data that is unavailable locally, fetch miss
 ---
 
 # 33. DERIVED SERIES CACHE
+
+- [ ] **Status: Not verified complete**
 
 Maintain a bounded derived series cache.
 
@@ -1482,6 +1559,8 @@ publish immediately
 
 # 34. ACTIVE BAR UPDATES
 
+- [ ] **Status: Not verified complete**
+
 Do not repeatedly rebuild all historical bars when a new tick arrives.
 
 For a current interval:
@@ -1499,6 +1578,8 @@ Historical bars remain immutable unless corrections occur.
 ---
 
 # 35. HISTORY/LIVE HANDOFF
+
+- [ ] **Status: Not verified complete**
 
 History and realtime must be coordinated explicitly.
 
@@ -1534,6 +1615,8 @@ Historical and realtime state must be distinct.
 
 # 36. PROVIDER CONNECTION STATE
 
+- [ ] **Status: Not verified complete**
+
 Use explicit provider connection state.
 
 Conceptually:
@@ -1563,6 +1646,8 @@ Diagnostic names must match what they actually mean.
 
 # 37. ORDER BOOK OWNERSHIP
 
+- [ ] **Status: Not verified complete**
+
 Order books belong in `axiusflow_engine`.
 
 Not in GPUI.
@@ -1590,6 +1675,8 @@ consumer-specific publications
 ---
 
 # 38. ORDER BOOK SEQUENCE SAFETY
+
+- [ ] **Status: Not verified complete**
 
 Depth events must preserve correctness.
 
@@ -1621,6 +1708,8 @@ The UI must never display a plausible but silently corrupted book.
 ---
 
 # 39. DO NOT SEND EVERY MARKET EVENT TO GPUI
+
+- [ ] **Status: Not verified complete**
 
 The engine may receive:
 
@@ -1669,6 +1758,8 @@ for 20,000 feed events.
 
 # 40. FOOTPRINT / ORDER FLOW FUTURE SUPPORT
 
+- [ ] **Status: Not verified complete**
+
 This architecture must support future or existing:
 
 - footprint charts,
@@ -1690,6 +1781,8 @@ Do not couple footprint calculations directly to GPUI render callbacks.
 ---
 
 # 41. MULTI-TAB RESOURCE POLICY
+
+- [ ] **Status: Not verified complete**
 
 Multiple workspace tabs must not force every hidden chart to consume full presentation resources.
 
@@ -1741,6 +1834,8 @@ Detached:
 
 # 42. TAB SWITCHING
 
+- [ ] **Status: Not verified complete**
+
 Switching workspace tabs should primarily be a GPUI operation.
 
 If data is already warm:
@@ -1765,6 +1860,8 @@ Do not reconstruct the engine.
 
 # 43. MANY CHARTS MUST SHARE IMMUTABLE DATA
 
+- [ ] **Status: Not verified complete**
+
 Avoid copying giant bar vectors per chart.
 
 Prefer immutable shared snapshots where appropriate.
@@ -1786,6 +1883,8 @@ Do not clone 100,000 bars eight times because eight charts request them.
 ---
 
 # 44. VIEWPORT DEMAND
+
+- [ ] **Status: Not verified complete**
 
 Charts express viewport demand.
 
@@ -1821,6 +1920,8 @@ Viewport changes do not recreate provider sessions.
 
 # 45. HOT-SET MANAGER
 
+- [ ] **Status: Not verified complete**
+
 The engine retains a bounded working set.
 
 Classify data roughly as:
@@ -1846,6 +1947,8 @@ Do not warm the entire exchange catalog.
 ---
 
 # 46. WARM ENGINE MODES
+
+- [ ] **Status: Not verified complete**
 
 Support at least these product modes conceptually.
 
@@ -1919,6 +2022,8 @@ Reopening the UI should effectively attach to an already-running trading termina
 
 # 47. MACHINE REBOOT
 
+- [ ] **Status: Not verified complete**
+
 Do not claim state remains in RAM after machine power-off.
 
 Instead support optional engine auto-start.
@@ -1947,6 +2052,8 @@ When the user later launches the desktop, the engine may already be ready.
 
 # 48. PLATFORM SERVICE ABSTRACTION
 
+- [ ] **Status: Not verified complete**
+
 Add a narrow platform boundary.
 
 Conceptually:
@@ -1970,6 +2077,8 @@ Do not spread Windows/macOS/Linux service APIs through the product.
 
 # 49. ENGINE SUPERVISOR
 
+- [ ] **Status: Not verified complete**
+
 Desktop uses:
 
 ```text
@@ -1989,6 +2098,8 @@ It does NOT own engine market state.
 ---
 
 # 50. DESKTOP IPC CLIENT
+
+- [ ] **Status: Not verified complete**
 
 Use:
 
@@ -2011,6 +2122,8 @@ It must run off the GPUI foreground thread where blocking operations are involve
 
 # 51. IPC MUST BE LOCAL
 
+- [ ] **Status: Not verified complete**
+
 The engine is not an internet server.
 
 Do not expose a public HTTP port.
@@ -2030,6 +2143,8 @@ It must not expose provider credentials.
 ---
 
 # 52. IPC CONTROL PLANE MUST NOT BE STARVED
+
+- [ ] **Status: Not verified complete**
 
 Control messages include:
 
@@ -2055,6 +2170,8 @@ from reaching the engine.
 ---
 
 # 53. IPC PUBLICATION BACKPRESSURE
+
+- [ ] **Status: Not verified complete**
 
 Use bounded publication.
 
@@ -2088,6 +2205,8 @@ UI display publications may be coalesced only after the engine has built correct
 
 # 54. SLOW DESKTOP MUST NOT BLOCK ENGINE
 
+- [ ] **Status: Not verified complete**
+
 If GPUI stops reading IPC temporarily:
 
 The engine must not block provider sockets indefinitely.
@@ -2103,6 +2222,8 @@ The client publisher should use bounded/latest-state behavior and recovery snaps
 ---
 
 # 55. SERIES STORE
+
+- [ ] **Status: Not verified complete**
 
 `market_engine/src/series_store.rs` owns hot canonical/derived series.
 
@@ -2126,6 +2247,8 @@ It does NOT write directly to GPUI.
 
 # 56. HISTORY COORDINATOR
 
+- [ ] **Status: Not verified complete**
+
 `market_engine/src/history.rs` owns orchestration only.
 
 Responsibilities:
@@ -2147,6 +2270,8 @@ Do not rebuild provider scheduling logic in this file.
 
 # 57. LOCAL HISTORY
 
+- [ ] **Status: Not verified complete**
+
 Rename `desktop_history` conceptually to `local_history`.
 
 It should not be desktop-owned.
@@ -2167,6 +2292,8 @@ GPUI does not.
 
 # 58. LOCAL STORAGE
 
+- [ ] **Status: Not verified complete**
+
 Rename `desktop_storage` conceptually to `local_storage`.
 
 Responsibilities:
@@ -2186,6 +2313,8 @@ Do not expose its API to GPUI.
 ---
 
 # 59. STORAGE FAILURE SEMANTICS
+
+- [ ] **Status: Not verified complete**
 
 Storage errors must be explicit.
 
@@ -2208,6 +2337,8 @@ Exceptions require explicit correctness justification.
 ---
 
 # 60. OBSERVABILITY
+
+- [ ] **Status: Not verified complete**
 
 Keep forensic and production diagnostics.
 
@@ -2245,6 +2376,8 @@ Do not log high-cardinality provider payloads or credentials.
 ---
 
 # 61. ERRORS MUST INCLUDE STAGE
+
+- [ ] **Status: Not verified complete**
 
 Never emit merely:
 
@@ -2285,6 +2418,8 @@ chart_install
 
 # 62. NO HIDDEN INFINITE LOADING
 
+- [ ] **Status: Not verified complete**
+
 Every consumer demand must eventually publish a state.
 
 Example:
@@ -2304,6 +2439,8 @@ The engine is authoritative about market-data readiness.
 ---
 
 # 63. GPUI PRESENTATION MODEL
+
+- [ ] **Status: Not verified complete**
 
 A chart presentation model should conceptually look like:
 
@@ -2336,6 +2473,8 @@ OrderBookEngine
 
 # 64. CHART INTEGRATION
 
+- [ ] **Status: Not verified complete**
+
 `crates/ui/chart_integration` remains the only Axiusflow-specific bridge to Origin Charts.
 
 Responsibilities:
@@ -2352,6 +2491,8 @@ It does not request provider data directly.
 ---
 
 # 65. ORIGIN CHART ENGINE
+
+- [ ] **Status: Not verified complete**
 
 Do not migrate provider/backend responsibilities into Origin Charts.
 
@@ -2372,6 +2513,8 @@ Origin renders/interacts.
 ---
 
 # 66. MULTI-TAB GPUI COMPONENTS
+
+- [ ] **Status: Not verified complete**
 
 Add or evolve terminal UI components conceptually around:
 
@@ -2413,6 +2556,8 @@ None of these files may import provider adapter crates.
 
 # 67. TAB STATE VS MARKET STATE
 
+- [ ] **Status: Not verified complete**
+
 Desktop owns:
 
 ```text
@@ -2440,6 +2585,8 @@ Do not confuse these.
 
 # 68. INACTIVE TAB BEHAVIOR
 
+- [ ] **Status: Not verified complete**
+
 When a tab becomes inactive:
 
 Desktop may stop rendering its charts.
@@ -2460,6 +2607,8 @@ Switching back should reuse retained state.
 
 # 69. NO THREAD PER CHART
 
+- [ ] **Status: Not verified complete**
+
 Opening 20 charts must not create:
 
 - 20 runtimes,
@@ -2475,6 +2624,8 @@ The engine is shared.
 
 # 70. NO DATABASE CONNECTION PER CHART
 
+- [ ] **Status: Not verified complete**
+
 Storage is engine-owned.
 
 Charts never touch SQLite/local segments.
@@ -2483,6 +2634,8 @@ Charts never touch SQLite/local segments.
 
 # 71. NO PROVIDER AUTH PER CHART
 
+- [ ] **Status: Not verified complete**
+
 Provider authentication belongs to ProviderManager.
 
 One account/provider session should serve compatible consumers.
@@ -2490,6 +2643,8 @@ One account/provider session should serve compatible consumers.
 ---
 
 # 72. PROVIDER MANAGER
+
+- [ ] **Status: Not verified complete**
 
 `market_engine/src/provider_manager.rs`
 
@@ -2511,6 +2666,8 @@ It does not understand GPUI charts.
 
 # 73. SUBSCRIPTION REGISTRY
 
+- [ ] **Status: Not verified complete**
+
 `market_engine/src/subscription_registry.rs`
 
 Responsibilities:
@@ -2526,6 +2683,8 @@ It does not render.
 ---
 
 # 74. DEMAND REGISTRY
+
+- [ ] **Status: Not verified complete**
 
 `market_engine/src/demand.rs`
 
@@ -2545,6 +2704,8 @@ A single chart update only mutates that chart's demand.
 
 # 75. PUBLICATION MANAGER
 
+- [ ] **Status: Not verified complete**
+
 `market_engine/src/publication.rs`
 
 Responsibilities:
@@ -2561,6 +2722,8 @@ It does not own provider sockets.
 ---
 
 # 76. HOT SET
+
+- [ ] **Status: Not verified complete**
 
 `market_engine/src/hot_set.rs`
 
@@ -2579,6 +2742,8 @@ Persist enough identity/coverage information to rebuild efficiently.
 ---
 
 # 77. RESOURCE POLICY
+
+- [ ] **Status: Not verified complete**
 
 `market_engine/src/resource_policy.rs`
 
@@ -2606,6 +2771,8 @@ Do not optimize resource use before correctness.
 ---
 
 # 78. MEMORY IS ALLOWED TO BUY LATENCY
+
+- [ ] **Status: Not verified complete**
 
 Do not treat every MB as failure.
 
@@ -2635,6 +2802,8 @@ Still bound memory intentionally.
 
 # 79. APPLICATION STARTUP
 
+- [ ] **Status: Not verified complete**
+
 Desktop startup path:
 
 ```text
@@ -2662,6 +2831,8 @@ Do not wait for all provider connections before opening the window.
 
 # 80. ENGINE STARTUP
 
+- [ ] **Status: Not verified complete**
+
 Engine startup:
 
 ```text
@@ -2683,6 +2854,8 @@ IPC readiness is separate from provider readiness.
 ---
 
 # 81. WARM ATTACH
+
+- [ ] **Status: Not verified complete**
 
 If engine is already warm:
 
@@ -2706,6 +2879,8 @@ No provider round trip should be required for first pixels when usable hot/local
 
 # 82. COLD START
 
+- [ ] **Status: Not verified complete**
+
 Cold start must still be correct and reasonably fast.
 
 The warm daemon must not become a mechanism for hiding broken cold behavior.
@@ -2723,6 +2898,8 @@ Cold startup should:
 
 # 83. CLOSE UI / KEEP ENGINE WARM
 
+- [ ] **Status: Not verified complete**
+
 Desktop sends `DetachClient`.
 
 Engine:
@@ -2738,6 +2915,8 @@ No GPUI process remains.
 ---
 
 # 84. COMPLETE EXIT
+
+- [ ] **Status: Not verified complete**
 
 Desktop requests engine shutdown.
 
@@ -2756,6 +2935,8 @@ Do not rely on graceful shutdown for correctness of already-committed data.
 ---
 
 # 85. DO NOT BUILD A DISTRIBUTED SYSTEM
+
+- [ ] **Status: Not verified complete**
 
 Although there are two local processes, this is not a cloud microservice architecture.
 
@@ -2778,6 +2959,8 @@ Keep IPC simple.
 ---
 
 # 86. DO NOT RECREATE DOCKER INSIDE RUST
+
+- [ ] **Status: Not verified complete**
 
 The goal is not to simulate ten container services.
 
@@ -2803,6 +2986,8 @@ Internal work uses threads/tasks/modules.
 ---
 
 # 87. CODE SIZE / COMPLEXITY BUDGET
+
+- [ ] **Status: Not verified complete**
 
 Current platform-side code is too large relative to working functionality.
 
@@ -2846,6 +3031,8 @@ If the migration adds 20,000 new lines while leaving all old runtime code intact
 
 # 88. DELETE DEAD CODE
 
+- [ ] **Status: Not verified complete**
+
 Once a migrated path is proven:
 
 DELETE the old path.
@@ -2871,6 +3058,8 @@ Git already provides history.
 
 # 89. NO PLACEHOLDER ARCHITECTURE
 
+- [ ] **Status: Not verified complete**
+
 Do not create a new module containing mostly:
 
 ```rust
@@ -2886,6 +3075,8 @@ Each migration phase must own real runtime behavior.
 ---
 
 # 90. NO DUPLICATE AUTHORITY
+
+- [ ] **Status: Not verified complete**
 
 At no time in the final architecture may both:
 
@@ -2909,6 +3100,8 @@ After cutover the old owner must be removed.
 
 # 91. TRAIT POLICY
 
+- [ ] **Status: Not verified complete**
+
 Do not add traits merely because "clean architecture uses interfaces."
 
 Add a trait only for:
@@ -2923,6 +3116,8 @@ Prefer concrete types internally where abstraction has no current consumer.
 ---
 
 # 92. CRATE POLICY
+
+- [ ] **Status: Not verified complete**
 
 Do not add a crate for every concept.
 
@@ -2944,6 +3139,8 @@ without an actual dependency reason.
 
 # 93. LOCK POLICY
 
+- [ ] **Status: Not verified complete**
+
 Audit all shared locks.
 
 For every important lock:
@@ -2961,6 +3158,8 @@ Avoid nested lock graphs.
 ---
 
 # 94. QUEUE POLICY
+
+- [ ] **Status: Not verified complete**
 
 Every queue documents:
 
@@ -2980,6 +3179,8 @@ No bounded queue may create deadlock by blocking the only task capable of draini
 
 # 95. PROVIDER THREAD MUST NEVER BLOCK ON UI
 
+- [ ] **Status: Not verified complete**
+
 Provider read loops may not wait for:
 
 - GPUI,
@@ -2993,6 +3194,8 @@ Provider heartbeat/protocol progress must remain independent.
 
 # 96. STORAGE WRITER MUST NOT BLOCK PROVIDER
 
+- [ ] **Status: Not verified complete**
+
 Storage is downstream.
 
 If disk becomes slow:
@@ -3005,6 +3208,8 @@ If disk becomes slow:
 ---
 
 # 97. TEST ENGINE WITHOUT GPUI
+
+- [ ] **Status: Not verified complete**
 
 The entire market engine must be testable without launching the desktop.
 
@@ -3076,6 +3281,8 @@ Verify recovery.
 
 # 98. MULTI-CHART TEST
 
+- [ ] **Status: Not verified complete**
+
 Create a deterministic non-GPUI engine test representing:
 
 ```text
@@ -3112,6 +3319,8 @@ Verify:
 
 # 99. GPUI MULTI-TAB TEST
 
+- [ ] **Status: Not verified complete**
+
 Run the real desktop.
 
 Create several tabs.
@@ -3131,6 +3340,8 @@ Verify:
 ---
 
 # 100. WARM ENGINE TEST
+
+- [ ] **Status: Not verified complete**
 
 Run:
 
@@ -3159,6 +3370,8 @@ There should be no provider history request on the critical path when sufficient
 
 # 101. COLD ENGINE TEST
 
+- [ ] **Status: Not verified complete**
+
 Fully terminate everything.
 
 Launch desktop.
@@ -3176,6 +3389,8 @@ Verify:
 ---
 
 # 102. TIMEFRAME PERFORMANCE CONTRACT
+
+- [ ] **Status: Not verified complete**
 
 When compatible source data is already in memory:
 
@@ -3199,6 +3414,8 @@ Separate network latency from local engine latency.
 ---
 
 # 103. WARM ATTACH PERFORMANCE TARGET
+
+- [ ] **Status: Not verified complete**
 
 When engine is already running and requested series is in memory:
 
@@ -3226,6 +3443,8 @@ These are engineering targets, not universal guarantees.
 
 # 104. GPUI RESPONSIVENESS
 
+- [ ] **Status: Not verified complete**
+
 GPUI foreground callbacks should not perform expensive work.
 
 Instrument:
@@ -3242,6 +3461,8 @@ Any unexpectedly long foreground operation must be investigated.
 ---
 
 # 105. PROVIDER NETWORK BENCHMARKS
+
+- [ ] **Status: Not verified complete**
 
 Do not mix provider network latency with local engine performance.
 
@@ -3267,6 +3488,8 @@ A provider taking 500 ms does not justify another 500 ms of local orchestration.
 ---
 
 # 106. CURRENT `history.install_failed` REGRESSION
+
+- [ ] **Status: Not verified complete**
 
 Before retiring the current Coinbase path, create a regression reproducer.
 
@@ -3296,6 +3519,8 @@ chart loading forever
 
 # 107. MIGRATION MUST BE INCREMENTAL
 
+- [ ] **Status: Not verified complete**
+
 Do NOT perform a 100-file big-bang rewrite.
 
 Use phases.
@@ -3310,6 +3535,8 @@ Each phase must:
 ---
 
 # 108. PHASE 0 — FORENSIC BASELINE
+
+- [ ] **Status: Not verified complete**
 
 Before migration:
 
@@ -3329,6 +3556,8 @@ Create baseline evidence.
 ---
 
 # 109. PHASE 1 — ENGINE PROTOCOL
+
+- [ ] **Status: Not verified complete**
 
 Expand/replace `local_engine_protocol` into final `engine_protocol`.
 
@@ -3354,6 +3583,8 @@ Keep protocol versioned.
 
 # 110. PHASE 2 — MARKET ENGINE CORE
 
+- [ ] **Status: Not verified complete**
+
 Create `market_engine`.
 
 Move only generic ownership first:
@@ -3370,6 +3601,8 @@ Write deterministic tests.
 ---
 
 # 111. PHASE 3 — COINBASE FIRST END-TO-END ENGINE PATH
+
+- [ ] **Status: Not verified complete**
 
 Move Coinbase execution into `axiusflow_engine`.
 
@@ -3407,6 +3640,8 @@ Prove Coinbase first.
 
 # 112. PHASE 4 — TIMEFRAME/SYMBOL SWITCHING
 
+- [ ] **Status: Not verified complete**
+
 Before moving Rithmic:
 
 Prove:
@@ -3439,6 +3674,8 @@ No infinite loading.
 
 # 113. PHASE 5 — MULTI-CHART ENGINE DEMAND
 
+- [ ] **Status: Not verified complete**
+
 Implement multiple consumer IDs.
 
 Test 20 consumers.
@@ -3452,6 +3689,8 @@ This proves the core architecture is genuinely multi-chart rather than another s
 ---
 
 # 114. PHASE 6 — LOCAL HISTORY / STORAGE
+
+- [ ] **Status: Not verified complete**
 
 Move storage/history behind engine.
 
@@ -3468,6 +3707,8 @@ Remove desktop access to storage.
 ---
 
 # 115. PHASE 7 — RITHMIC MIGRATION
+
+- [ ] **Status: Not verified complete**
 
 Move Rithmic provider ownership into ProviderManager.
 
@@ -3502,6 +3743,8 @@ Verify:
 
 # 116. PHASE 8 — WARM ENGINE MODE
 
+- [ ] **Status: Not verified complete**
+
 Only after cold behavior works correctly:
 
 Implement:
@@ -3519,6 +3762,8 @@ It must not hide cold-start failures.
 
 # 117. PHASE 9 — DELETE LEGACY RUNTIMES
 
+- [ ] **Status: Not verified complete**
+
 After Coinbase and Rithmic use the new engine:
 
 Delete obsolete:
@@ -3534,6 +3779,8 @@ Do not leave compatibility paths.
 ---
 
 # 118. PHASE 10 — PERFORMANCE / MEMORY TUNING
+
+- [ ] **Status: Not verified complete**
 
 Only after correctness:
 
@@ -3556,6 +3803,8 @@ Then optimize observed hot spots.
 ---
 
 # 119. `ARCHITECTURE.md`
+
+- [ ] **Status: Not verified complete**
 
 Update the existing root `ARCHITECTURE.md`.
 
@@ -3586,6 +3835,8 @@ Respect the repository rule against document sprawl.
 
 # 120. `AGENTS.md`
 
+- [ ] **Status: Not verified complete**
+
 Update `AGENTS.md` with enforceable rules for future coding agents.
 
 At minimum include:
@@ -3609,6 +3860,8 @@ At minimum include:
 ---
 
 # 121. CARGO DEPENDENCY RULES
+
+- [ ] **Status: Not verified complete**
 
 Final dependency direction conceptually:
 
@@ -3653,6 +3906,8 @@ desktop UI → coinbase_market
 
 # 122. DESKTOP CARGO CONSTRAINT
 
+- [ ] **Status: Not verified complete**
+
 `apps/desktop/Cargo.toml` should not directly depend on:
 
 ```text
@@ -3678,6 +3933,8 @@ Final desktop dependencies should primarily be:
 
 # 123. ENGINE CARGO CONSTRAINT
 
+- [ ] **Status: Not verified complete**
+
 `apps/engine/Cargo.toml` owns backend composition.
 
 It may depend on:
@@ -3695,6 +3952,8 @@ It may depend on:
 
 # 124. PROVIDER ADAPTER CONSTRAINT
 
+- [ ] **Status: Not verified complete**
+
 Adapters may depend on:
 
 - canonical domain,
@@ -3708,6 +3967,8 @@ They may not depend on UI.
 
 # 125. NO CROSS-LAYER CONVENIENCE IMPORTS
 
+- [ ] **Status: Not verified complete**
+
 Do not bypass architecture because importing a lower-level type is convenient.
 
 If GPUI needs information:
@@ -3720,6 +3981,8 @@ Do not import Rithmic structs into GPUI.
 
 # 126. FAIL FAST ON ARCHITECTURAL VIOLATIONS
 
+- [ ] **Status: Not verified complete**
+
 Where practical, enforce boundaries using Cargo dependencies.
 
 A compiler error caused by illegal dependency direction is preferable to a comment saying "don't do this."
@@ -3727,6 +3990,8 @@ A compiler error caused by illegal dependency direction is preferable to a comme
 ---
 
 # 127. CONSUMER CLEANUP
+
+- [ ] **Status: Not verified complete**
 
 When a chart closes:
 
@@ -3747,6 +4012,8 @@ Closing Chart A must not disconnect Chart B.
 
 # 128. TAB CLEANUP
 
+- [ ] **Status: Not verified complete**
+
 Closing a workspace:
 
 remove only consumers belonging to that workspace.
@@ -3756,6 +4023,8 @@ Do not globally reset MarketEngine.
 ---
 
 # 129. UI RESTART
+
+- [ ] **Status: Not verified complete**
 
 If desktop crashes or is killed while warm engine remains:
 
@@ -3768,6 +4037,8 @@ Do not leak consumers permanently.
 ---
 
 # 130. ENGINE RESTART
+
+- [ ] **Status: Not verified complete**
 
 If engine restarts while desktop is open:
 
@@ -3786,6 +4057,8 @@ Do not freeze GPUI.
 
 # 131. PROVIDER RECONNECT
 
+- [ ] **Status: Not verified complete**
+
 Provider reconnect must not rebuild the entire desktop state.
 
 Engine marks affected market streams recovering.
@@ -3803,6 +4076,8 @@ Upon reconnect:
 
 # 132. ERROR LOCALIZATION
 
+- [ ] **Status: Not verified complete**
+
 An error in Rithmic must not break Coinbase.
 
 An error in one instrument must not globally invalidate every chart.
@@ -3816,6 +4091,8 @@ Use ownership boundaries for failure isolation.
 ---
 
 # 133. MULTI-PROVIDER SERIES IDENTITY
+
+- [ ] **Status: Not verified complete**
 
 A canonical series identity must include enough provider/account provenance that:
 
@@ -3837,6 +4114,8 @@ Retain source/provenance correctness.
 
 # 134. FUTURE TRADING EXECUTION
 
+- [ ] **Status: Not verified complete**
+
 Do not implement trade execution in this migration.
 
 But preserve a future clean boundary.
@@ -3848,6 +4127,8 @@ Do not mix future order execution into chart publication queues.
 ---
 
 # 135. SECURITY
+
+- [ ] **Status: Not verified complete**
 
 Provider credentials remain local.
 
@@ -3864,6 +4145,8 @@ Do not put secrets in forensic logs.
 ---
 
 # 136. BENCHMARKS
+
+- [ ] **Status: Not verified complete**
 
 Maintain deterministic local benchmarks.
 
@@ -3885,6 +4168,8 @@ Separate network/provider benchmark results.
 ---
 
 # 137. MULTI-CHART PERFORMANCE TARGET
+
+- [ ] **Status: Not verified complete**
 
 Test representative workstation use.
 
@@ -3911,6 +4196,8 @@ Record CPU and memory rather than guessing.
 
 # 138. MEMORY SHARING
 
+- [ ] **Status: Not verified complete**
+
 Where appropriate:
 
 ```text
@@ -3927,6 +4214,8 @@ Desktop may create chart-engine-specific vertex/geometry representations where n
 
 # 139. UI RENDER CADENCE
 
+- [ ] **Status: Not verified complete**
+
 Market data may arrive faster than screen refresh.
 
 The UI should render based on frame demand.
@@ -3938,6 +4227,8 @@ Conflate presentation updates between frames when semantically safe.
 ---
 
 # 140. NO GLOBAL UI BUSY LOOP
+
+- [ ] **Status: Not verified complete**
 
 The market stream must not keep GPUI permanently busy.
 
@@ -3952,6 +4243,8 @@ Input remains responsive during:
 ---
 
 # 141. PERFORMANCE ORDER OF OPERATIONS
+
+- [ ] **Status: Not verified complete**
 
 Optimize in this order:
 
@@ -3970,6 +4263,8 @@ Do not begin with unsafe code or shared-memory IPC.
 
 # 142. SHARED MEMORY IS NOT PHASE 1
 
+- [ ] **Status: Not verified complete**
+
 Do not introduce shared-memory ring buffers merely because this is a trading platform.
 
 Start with simple bounded local IPC.
@@ -3981,6 +4276,8 @@ Only optimize IPC after evidence proves serialization/copying is significant.
 ---
 
 # 143. DO NOT REPLACE EVERYTHING WITH ACTORS
+
+- [ ] **Status: Not verified complete**
 
 Message ownership is useful.
 
@@ -3994,6 +4291,8 @@ One coordinator plus provider/history/storage workers is preferable to fifty tin
 
 # 144. EXPECTED FINAL MENTAL MODEL
 
+- [ ] **Status: Not verified complete**
+
 A developer should be able to explain Axiusflow in one minute:
 
 > Axiusflow Desktop is a GPUI client. It creates chart and workspace consumers and tells the local Axiusflow Engine what data they need. The Engine owns provider sessions, history, caches, order books, aggregation, subscriptions, and persistence. Multiple charts share the same engine data and provider streams. The Engine publishes versioned snapshots/deltas back to Desktop over local IPC. It can optionally remain warm after the UI closes. Provider-specific protocol types never escape their adapters.
@@ -4003,6 +4302,8 @@ If the system requires a ten-minute explanation involving many overlapping runti
 ---
 
 # 145. EXPECTED FINAL CHART FLOW
+
+- [ ] **Status: Not verified complete**
 
 For BTC 1m:
 
@@ -4060,6 +4361,8 @@ chart
 
 # 146. EXPECTED TIMEFRAME FLOW
 
+- [ ] **Status: Not verified complete**
+
 BTC 1m → 5m:
 
 ```text
@@ -4095,6 +4398,8 @@ No provider session recreation merely because interval changed.
 
 # 147. EXPECTED SYMBOL FLOW
 
+- [ ] **Status: Not verified complete**
+
 BTC → ETH:
 
 ```text
@@ -4118,6 +4423,8 @@ Other BTC charts remain unaffected.
 ---
 
 # 148. EXPECTED MULTI-TAB FLOW
+
+- [ ] **Status: Not verified complete**
 
 Tab A contains four charts.
 
@@ -4146,6 +4453,8 @@ create Tab B provider stack
 ---
 
 # 149. EXPECTED WARM REOPEN FLOW
+
+- [ ] **Status: Not verified complete**
 
 User previously viewed:
 
@@ -4178,6 +4487,8 @@ Provider network is not required before rendering those cached states.
 ---
 
 # 150. DEFINITION OF MIGRATION SUCCESS
+
+- [ ] **Status: Not verified complete**
 
 The migration is NOT successful because:
 
@@ -4217,6 +4528,8 @@ At minimum:
 ---
 
 # 151. FINAL DELIVERY REQUIREMENT
+
+- [ ] **Status: Not verified complete**
 
 Do not return with:
 
@@ -4265,6 +4578,8 @@ Exclude:
 
 # 152. MOST IMPORTANT RESTRAINT
 
+- [ ] **Status: Not verified complete**
+
 Do not solve complexity by adding complexity.
 
 Do not turn:
@@ -4294,6 +4609,8 @@ The final system should have fewer owners than the current one.
 ---
 
 # 153. FINAL ARCHITECTURAL CONTRACT
+
+- [ ] **Status: Not verified complete**
 
 When implementation is complete, these statements must all be true:
 
@@ -4334,6 +4651,8 @@ If any earlier wording appears weaker than a rule below, follow the stricter rul
 ---
 
 # 154. COINBASE REALTIME IS A MIGRATION GATE
+
+- [ ] **Status: Not verified complete**
 
 Do not interpret successful Coinbase historical candles as completion of the Coinbase migration.
 
@@ -4383,6 +4702,8 @@ This is a hard migration gate.
 
 # 155. FIRST VERTICAL SLICE REMAINS EXTREMELY SMALL
 
+- [ ] **Status: Not verified complete**
+
 The first new engine path must not contain every eventual feature.
 
 The first proving slice is:
@@ -4427,6 +4748,8 @@ Then continue the migration.
 ---
 
 # 156. PROVIDER CAPABILITY MODEL
+
+- [ ] **Status: Not verified complete**
 
 Do not assume every provider has identical semantics.
 
@@ -4479,6 +4802,8 @@ But when runtime behavior genuinely differs between providers, expose that diffe
 ---
 
 # 157. PROVIDER NETWORK MUST BE REPLACEABLE IN TESTS
+
+- [ ] **Status: Not verified complete**
 
 MarketEngine correctness must not depend on live internet access.
 
@@ -4534,6 +4859,8 @@ real provider smoke
 
 # 158. NO IPC INSIDE THE ENGINE
 
+- [ ] **Status: Not verified complete**
+
 The desktop↔engine process boundary is the IPC boundary.
 
 Inside `axiusflow_engine` and `market_engine`, use normal Rust:
@@ -4567,6 +4894,8 @@ The process boundary already provides isolation.
 ---
 
 # 159. PURE FUNCTIONS MUST REMAIN PURE
+
+- [ ] **Status: Not verified complete**
 
 Not every operation needs:
 
@@ -4618,6 +4947,8 @@ Math and transformations should remain easy to test.
 
 # 160. NO MAGIC GLOBAL MARKET STATE
 
+- [ ] **Status: Not verified complete**
+
 Do not introduce a process-global mutable singleton as a shortcut during migration.
 
 Avoid architecture such as:
@@ -4639,6 +4970,8 @@ One engine process does NOT mean one uncontrolled global variable.
 ---
 
 # 161. WRAPPER COLLAPSE RULE
+
+- [ ] **Status: Not verified complete**
 
 Every runtime layer must justify its existence by at least one real responsibility:
 
@@ -4692,6 +5025,8 @@ Do not recreate equivalent forwarding layers under new names.
 
 # 162. ERROR WRAPPER COLLAPSE RULE
 
+- [ ] **Status: Not verified complete**
+
 Do not create meaningless error nesting such as:
 
 ```text
@@ -4726,6 +5061,8 @@ Do not stringify errors prematurely.
 
 # 163. MULTIPLE DESKTOP INSTANCE POLICY
 
+- [ ] **Status: Not verified complete**
+
 Choose this deliberately.
 
 For the current scope, prefer one primary `axiusflow_desktop` instance per user unless there is a concrete product requirement for multiple simultaneous desktop clients.
@@ -4748,6 +5085,8 @@ Do NOT accidentally support multiple desktop processes through undefined behavio
 ---
 
 # 164. ENGINE MUST NOT BECOME A ZOMBIE
+
+- [ ] **Status: Not verified complete**
 
 Warm background mode is a user-controlled product feature.
 
@@ -4780,6 +5119,8 @@ Do not leave Axiusflow engine processes orphaned after uninstall/update.
 ---
 
 # 165. SHUTDOWN HAS DEADLINES
+
+- [ ] **Status: Not verified complete**
 
 Graceful shutdown is bounded.
 
@@ -4820,6 +5161,8 @@ If graceful deadline expires:
 
 # 166. IPC VERSION / UPDATE COMPATIBILITY
 
+- [ ] **Status: Not verified complete**
+
 Desktop and engine are separate binaries.
 
 During application update, they may temporarily be different versions.
@@ -4854,6 +5197,8 @@ The versioning scheme must clearly distinguish:
 
 # 167. SCHEMA DISCIPLINE
 
+- [ ] **Status: Not verified complete**
+
 If protobuf is used for Axiusflow IPC:
 
 * keep Axiusflow IPC schemas separate from Rithmic vendor protobuf,
@@ -4879,6 +5224,8 @@ They have completely different ownership.
 ---
 
 # 168. WORKSPACE REVISION / RESTORE SAFETY
+
+- [ ] **Status: Not verified complete**
 
 Warm engine mode means the engine may retain durable workspace/hot-set intent while the desktop is absent.
 
@@ -4915,6 +5262,8 @@ does not need engine persistence.
 ---
 
 # 169. MEMORY LEAK / LONG-RUNNING ENGINE CONTRACT
+
+- [ ] **Status: Not verified complete**
 
 Because `axiusflow_engine` may remain alive for hours or days, test long-running memory behavior.
 
@@ -4975,6 +5324,8 @@ Eviction should consider:
 
 # 170. TEST FILES MUST FOLLOW THE NEW ARCHITECTURE
 
+- [ ] **Status: Not verified complete**
+
 After migration, retain tests for durable boundaries:
 
 ```text
@@ -4997,6 +5348,8 @@ The historical `history.install_failed` regression must remain represented after
 
 # 171. PROVIDER CONTROL PLANE
 
+- [ ] **Status: Not verified complete**
+
 The desktop may need user-facing provider controls.
 
 These remain commands to the engine.
@@ -5018,6 +5371,8 @@ Provider controls always pass through EngineClient/IPC.
 ---
 
 # 172. ENGINE CLIENT MUST NOT WAIT FOR PROVIDER READINESS
+
+- [ ] **Status: Not verified complete**
 
 Starting/attaching the engine and connecting a market provider are different states.
 
@@ -5047,6 +5402,8 @@ One slow provider must not prevent locally available charts from another provide
 
 # 173. PROVIDER FAILURE ISOLATION
 
+- [ ] **Status: Not verified complete**
+
 A Rithmic failure must not globally degrade Coinbase.
 
 A Coinbase failure must not destroy Rithmic state.
@@ -5064,6 +5421,8 @@ Explicit failure scopes are required.
 ---
 
 # 174. MULTI-TAB STARTUP RESTORE ORDER
+
+- [ ] **Status: Not verified complete**
 
 With several workspace tabs and many charts, do not cold-load every chart at identical priority.
 
@@ -5107,6 +5466,8 @@ This is essential once Axiusflow supports many workspace tabs.
 
 # 175. MULTI-CHART FAIRNESS
 
+- [ ] **Status: Not verified complete**
+
 One expensive chart must not starve all other charts.
 
 Examples:
@@ -5127,6 +5488,8 @@ Do not create unlimited parallel provider requests as the solution.
 ---
 
 # 176. LINKED CHARTS ARE A DESKTOP FEATURE, NOT PROVIDER DUPLICATION
+
+- [ ] **Status: Not verified complete**
 
 Future chart linking may allow several charts to follow the same:
 
@@ -5157,6 +5520,8 @@ Crosshair synchronization is primarily desktop/chart presentation state and shou
 ---
 
 # 177. CODE SIZE GUARDRAIL CORRECTION
+
+- [ ] **Status: Not verified complete**
 
 Do not aggressively force the platform into 45,000–60,000 lines merely because a previous architecture prompt mentioned that range.
 
@@ -5231,6 +5596,8 @@ new architecture 40k
 
 # 178. ROUGH RESPONSIBILITY SIZE CHECK
 
+- [ ] **Status: Not verified complete**
+
 These are diagnostic guardrails only.
 
 Conceptually:
@@ -5273,6 +5640,8 @@ becomes an unstructured dumping ground, organize it internally before inventing 
 ---
 
 # 179. REQUIRED RESPONSE BEFORE ARCHITECTURAL CODE CHANGES
+
+- [ ] **Status: Not verified complete**
 
 Before making the migration, the agent must first provide an implementation-grounded migration map.
 
@@ -5385,6 +5754,8 @@ Only after this map is grounded in the actual source may structural migration be
 ---
 
 # 180. FINAL ANTI-OVERENGINEERING RULE
+
+- [ ] **Status: Not verified complete**
 
 The fact that Axiusflow has two processes does NOT make it a distributed system.
 
