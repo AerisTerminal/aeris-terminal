@@ -7,8 +7,8 @@ use std::{
 };
 
 use axiusflow_coinbase_market_adapter::{
-    COINBASE_PUBLIC_ACCOUNT_ID, ENTITLEMENT_CLASS, decode_history_segment, encode_history_bar,
-    encode_history_segment,
+    COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseInterval, ENTITLEMENT_CLASS, aggregate_coinbase_bars,
+    decode_history_segment, encode_history_bar, encode_history_segment,
 };
 use axiusflow_desktop_storage::{
     CatalogKey, DataKind, HistoryRead, HistoryScope, HistorySeriesIdentity, HistoryStore,
@@ -32,6 +32,7 @@ pub(crate) struct LocalHistoryStore {
 pub(crate) struct StoredHistory {
     pub(crate) bars: Vec<MarketBar>,
     pub(crate) derived: bool,
+    pub(crate) durable: bool,
 }
 
 impl LocalHistoryStore {
@@ -75,38 +76,67 @@ impl LocalHistoryStore {
         &mut self,
         series: &BarSeriesKey,
     ) -> Result<Option<StoredHistory>, String> {
+        for data_kind in [DataKind::Derived, DataKind::Bars] {
+            if let Some(bars) = self.read_kind(series, data_kind)? {
+                return Ok(Some(StoredHistory {
+                    bars,
+                    derived: data_kind == DataKind::Derived,
+                    durable: true,
+                }));
+            }
+        }
+        let Some(interval) = derived_interval(series)? else {
+            return Ok(None);
+        };
+        let source_series = BarSeriesKey {
+            period: BarPeriod::time(60).map_err(|error| error.to_string())?,
+            ..series.clone()
+        };
+        let Some(source_bars) = self.read_kind(&source_series, DataKind::Bars)? else {
+            return Ok(None);
+        };
+        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval).map_err(redacted)?;
+        if bars.is_empty() {
+            return Ok(None);
+        }
+        let durable = self.persist(series, &bars, true).is_ok();
+        Ok(Some(StoredHistory {
+            bars,
+            derived: true,
+            durable,
+        }))
+    }
+
+    fn read_kind(
+        &mut self,
+        series: &BarSeriesKey,
+        data_kind: DataKind,
+    ) -> Result<Option<Vec<MarketBar>>, String> {
         let scope = history_scope();
         let resolution = resolution(series)?;
-        for data_kind in [DataKind::Derived, DataKind::Bars] {
-            let identity = self
-                .store
-                .latest_identity(
-                    series_identity(&scope, series, &resolution, data_kind),
-                    now_seconds(),
-                )
-                .map_err(redacted)?;
-            let Some(identity) = identity else {
-                continue;
-            };
-            if let HistoryRead::Hit(payload) = self
-                .store
-                .read(
-                    &identity,
-                    &self.segment_key,
-                    now_seconds(),
-                    RecoveryAction::ProviderRefetch,
-                )
-                .map_err(redacted)?
-            {
-                return decode_history_segment(&payload)
-                    .map(|values| {
-                        Some(StoredHistory {
-                            bars: values.into_iter().map(|value| value.value).collect(),
-                            derived: data_kind == DataKind::Derived,
-                        })
-                    })
-                    .map_err(redacted);
-            }
+        let identity = self
+            .store
+            .latest_identity(
+                series_identity(&scope, series, &resolution, data_kind),
+                now_seconds(),
+            )
+            .map_err(redacted)?;
+        let Some(identity) = identity else {
+            return Ok(None);
+        };
+        if let HistoryRead::Hit(payload) = self
+            .store
+            .read(
+                &identity,
+                &self.segment_key,
+                now_seconds(),
+                RecoveryAction::ProviderRefetch,
+            )
+            .map_err(redacted)?
+        {
+            return decode_history_segment(&payload)
+                .map(|values| Some(values.into_iter().map(|value| value.value).collect()))
+                .map_err(redacted);
         }
         Ok(None)
     }
@@ -214,6 +244,15 @@ fn interval_seconds(series: &BarSeriesKey) -> Result<u32, String> {
     }
 }
 
+fn derived_interval(series: &BarSeriesKey) -> Result<Option<CoinbaseInterval>, String> {
+    interval_seconds(series).map(|seconds| match seconds {
+        300 => Some(CoinbaseInterval::Minute5),
+        900 => Some(CoinbaseInterval::Minute15),
+        3_600 => Some(CoinbaseInterval::Hour1),
+        _ => None,
+    })
+}
+
 fn load_or_create_key(vault: &NativeCredentialVault, key_id: &str) -> Result<[u8; 32], String> {
     if let Some(mut stored) = vault.load(key_id).map_err(redacted)? {
         let result = <[u8; 32]>::try_from(stored.as_slice())
@@ -305,5 +344,62 @@ mod tests {
             .expect("history exists");
         assert_eq!(retained.bars[0].close, 106);
         assert!(retained.derived);
+        assert!(retained.durable);
+    }
+
+    #[test]
+    fn cold_store_derives_and_retains_a_coarser_series_from_native_minutes() {
+        let root = TempRoot::new();
+        let minute_series = BarSeriesKey {
+            provider_id: "coinbase".to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            period: BarPeriod::time(60).expect("interval"),
+            definition_version: 1,
+        };
+        let bars = (0_i64..5)
+            .map(|minute| MarketBar {
+                source_sequence: u64::try_from(minute + 1).expect("sequence"),
+                exchange_timestamp_seconds: minute * 60,
+                open: 100 + minute,
+                high: 110 + minute,
+                low: 90 + minute,
+                close: 105 + minute,
+                volume: 7,
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
+                .expect("fixture store opens");
+            storage
+                .persist(&minute_series, &bars, false)
+                .expect("minute history persists");
+        }
+        let five_minute_series = BarSeriesKey {
+            period: BarPeriod::time(300).expect("interval"),
+            ..minute_series
+        };
+        let mut reopened = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
+            .expect("fixture store reopens");
+        let derived = reopened
+            .read_latest(&five_minute_series)
+            .expect("history derives")
+            .expect("derived history exists");
+        assert!(derived.derived);
+        assert!(derived.durable);
+        assert_eq!(derived.bars.len(), 1);
+        assert_eq!(derived.bars[0].exchange_timestamp_seconds, 0);
+        assert_eq!(derived.bars[0].close, 109);
+        drop(reopened);
+
+        let mut restarted = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
+            .expect("fixture store restarts");
+        let retained = restarted
+            .read_latest(&five_minute_series)
+            .expect("derived cache reads")
+            .expect("derived cache exists");
+        assert!(retained.derived);
+        assert!(retained.durable);
+        assert_eq!(retained.bars, derived.bars);
     }
 }

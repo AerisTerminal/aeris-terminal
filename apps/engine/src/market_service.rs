@@ -1120,6 +1120,11 @@ impl Coordinator<'_> {
                 let Ok(profile) = coinbase_series_profile(series) else {
                     return;
                 };
+                let persistence = if stored.durable {
+                    PersistenceState::Durable
+                } else {
+                    PersistenceState::Degraded
+                };
                 if let Ok(publications) = self.engine.install_history(
                     generation,
                     series,
@@ -1134,8 +1139,10 @@ impl Coordinator<'_> {
                                 events,
                                 &publication,
                                 SeriesLoadState::Partial,
-                                PersistenceState::Durable,
-                                Some(if stored.derived {
+                                persistence,
+                                Some(if stored.derived && !stored.durable {
+                                    "Showing derived history from retained one-minute data; derived-cache persistence is unavailable"
+                                } else if stored.derived {
                                     "Showing retained derived history while provider repair runs"
                                 } else {
                                     "Showing retained local history while provider repair runs"
@@ -2371,6 +2378,7 @@ mod tests {
             Ok(Some(StoredHistory {
                 bars: vec![local],
                 derived: false,
+                durable: true,
             })),
         );
         assert!(matches!(
