@@ -26,7 +26,7 @@ use axiusflow_local_engine_protocol::{
     PersistenceState, ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey,
     SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
 };
-use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar};
+use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar, MarketTrade};
 use axiusflow_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, EngineError, GenerationId, MarketEngine,
     MarketEngineConfig, ProviderCapabilities, ProviderGeneration, ProviderHealth, Viewport,
@@ -35,6 +35,7 @@ use axiusflow_market_engine::{
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 
 use crate::local_history::{LocalHistoryStore, StoredHistory};
+use crate::rithmic_realtime::{RithmicRealtimeControl, RithmicRealtimeEvent};
 
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
@@ -143,6 +144,240 @@ struct LiveHandoff {
     connected: bool,
     history_ready: bool,
     dirty: bool,
+}
+
+struct RithmicLiveHandoff {
+    series: BarSeriesKey,
+    generation: ProviderGeneration,
+    cadence: RithmicLiveCadence,
+    price_scale: u8,
+    quantity_scale: u8,
+    bars: Vec<MarketBar>,
+    buffered: VecDeque<MarketTrade>,
+    connected: bool,
+    history_ready: bool,
+    dirty: bool,
+    live_session_generation: Option<u64>,
+    last_trade_sequence: Option<u64>,
+    history_boundary_unix_nanos: i64,
+}
+
+enum RithmicLiveCadence {
+    Fixed { seconds: i64 },
+    Tick { trades: u32, forming: u32 },
+}
+
+impl RithmicLiveHandoff {
+    fn new(series: &BarSeriesKey, generation: ProviderGeneration) -> Option<Self> {
+        let cadence = match series.period {
+            BarPeriod::Tick { trades } => RithmicLiveCadence::Tick {
+                trades,
+                forming: trades,
+            },
+            BarPeriod::Time { seconds } => RithmicLiveCadence::Fixed {
+                seconds: i64::from(seconds),
+            },
+            BarPeriod::Session { days } => RithmicLiveCadence::Fixed {
+                seconds: i64::from(days) * 86_400,
+            },
+            BarPeriod::Week { .. } | BarPeriod::Month { .. } => return None,
+        };
+        Some(Self {
+            series: series.clone(),
+            generation,
+            cadence,
+            price_scale: 0,
+            quantity_scale: 0,
+            bars: Vec::new(),
+            buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
+            connected: false,
+            history_ready: false,
+            dirty: false,
+            live_session_generation: None,
+            last_trade_sequence: None,
+            history_boundary_unix_nanos: i64::MIN,
+        })
+    }
+
+    fn reset(&mut self, generation: ProviderGeneration) {
+        self.generation = generation;
+        self.bars.clear();
+        self.buffered.clear();
+        self.connected = false;
+        self.history_ready = false;
+        self.dirty = false;
+        self.live_session_generation = None;
+        self.last_trade_sequence = None;
+        self.history_boundary_unix_nanos = i64::MIN;
+        if let RithmicLiveCadence::Tick { trades, forming } = &mut self.cadence {
+            *forming = *trades;
+        }
+    }
+
+    fn seed(
+        &mut self,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: &[MarketBar],
+    ) -> Result<(), String> {
+        let boundary = bars
+            .last()
+            .ok_or_else(|| "Rithmic live handoff requires history".to_string())?
+            .exchange_timestamp_unix_nanos;
+        self.price_scale = price_scale;
+        self.quantity_scale = quantity_scale;
+        self.bars = bars.to_vec();
+        self.history_boundary_unix_nanos = boundary;
+        self.live_session_generation = None;
+        self.last_trade_sequence = None;
+        if let RithmicLiveCadence::Tick { trades, forming } = &mut self.cadence {
+            *forming = *trades;
+        }
+        let buffered = std::mem::take(&mut self.buffered);
+        self.history_ready = true;
+        for trade in &buffered {
+            if self.apply_trade(trade)? {
+                self.dirty = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
+        if self.history_ready {
+            if self.apply_trade(trade)? {
+                self.dirty = true;
+            }
+        } else if self.buffered.len() == LIVE_BUFFER_CAPACITY {
+            return Err("Rithmic history/live buffer overflowed".to_string());
+        } else {
+            self.buffered.push_back(trade.clone());
+        }
+        Ok(())
+    }
+
+    fn apply_trade(&mut self, trade: &MarketTrade) -> Result<bool, String> {
+        trade.validate().map_err(|error| error.to_string())?;
+        if trade.metadata.provider_id != self.series.provider_id
+            || trade.metadata.instrument_id != self.series.instrument_id
+            || trade.metadata.entitlement_id != self.series.entitlement_id
+        {
+            return Ok(false);
+        }
+        if let Some(session_generation) = self.live_session_generation
+            && session_generation != trade.metadata.session_generation
+        {
+            return Err("Rithmic live session generation changed".to_string());
+        }
+        if self
+            .last_trade_sequence
+            .is_some_and(|sequence| trade.metadata.source_sequence <= sequence)
+        {
+            return Ok(false);
+        }
+        let exchange_nanos = trade
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .ok_or_else(|| "Rithmic live trade has no exchange timestamp".to_string())?;
+        if self.last_trade_sequence.is_none() && exchange_nanos <= self.history_boundary_unix_nanos
+        {
+            return Ok(false);
+        }
+        let Some(last) = self.bars.last().copied() else {
+            return Err("Rithmic live handoff has no history".to_string());
+        };
+        let next = match self.cadence {
+            RithmicLiveCadence::Fixed { seconds } => {
+                let trade_seconds = exchange_nanos.div_euclid(1_000_000_000);
+                if trade_seconds < last.exchange_timestamp_seconds {
+                    return Ok(false);
+                }
+                let elapsed = trade_seconds - last.exchange_timestamp_seconds;
+                if elapsed < seconds {
+                    if self.last_trade_sequence.is_none() {
+                        return Ok(false);
+                    }
+                    updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
+                } else {
+                    let intervals = elapsed.div_euclid(seconds);
+                    let start_seconds = last
+                        .exchange_timestamp_seconds
+                        .checked_add(intervals.saturating_mul(seconds))
+                        .ok_or_else(|| "Rithmic live timestamp overflowed".to_string())?;
+                    started_rithmic_bar(
+                        last,
+                        trade,
+                        start_seconds
+                            .checked_mul(1_000_000_000)
+                            .ok_or_else(|| "Rithmic live timestamp overflowed".to_string())?,
+                    )?
+                }
+            }
+            RithmicLiveCadence::Tick {
+                trades,
+                ref mut forming,
+            } => {
+                if *forming >= trades {
+                    *forming = 1;
+                    started_rithmic_bar(last, trade, exchange_nanos)?
+                } else {
+                    *forming = forming.saturating_add(1);
+                    updated_rithmic_bar(last, trade, exchange_nanos)?
+                }
+            }
+        };
+        if next.source_sequence == last.source_sequence {
+            if let Some(forming) = self.bars.last_mut() {
+                *forming = next;
+            }
+        } else {
+            self.bars.push(next);
+            if self.bars.len() > HISTORY_BARS_PER_SERIES + 1 {
+                self.bars.remove(0);
+            }
+        }
+        self.live_session_generation = Some(trade.metadata.session_generation);
+        self.last_trade_sequence = Some(trade.metadata.source_sequence);
+        Ok(true)
+    }
+}
+
+fn updated_rithmic_bar(
+    mut bar: MarketBar,
+    trade: &MarketTrade,
+    exchange_timestamp_unix_nanos: i64,
+) -> Result<MarketBar, String> {
+    bar.high = bar.high.max(trade.price);
+    bar.low = bar.low.min(trade.price);
+    bar.close = trade.price;
+    bar.volume = bar
+        .volume
+        .checked_add(trade.quantity)
+        .ok_or_else(|| "Rithmic live volume overflowed".to_string())?;
+    bar.exchange_timestamp_seconds = exchange_timestamp_unix_nanos.div_euclid(1_000_000_000);
+    bar.exchange_timestamp_unix_nanos = exchange_timestamp_unix_nanos;
+    Ok(bar)
+}
+
+fn started_rithmic_bar(
+    completed: MarketBar,
+    trade: &MarketTrade,
+    exchange_timestamp_unix_nanos: i64,
+) -> Result<MarketBar, String> {
+    Ok(MarketBar {
+        source_sequence: completed
+            .source_sequence
+            .checked_add(1)
+            .ok_or_else(|| "Rithmic live sequence overflowed".to_string())?,
+        exchange_timestamp_seconds: exchange_timestamp_unix_nanos.div_euclid(1_000_000_000),
+        exchange_timestamp_unix_nanos,
+        open: trade.price,
+        high: trade.price,
+        low: trade.price,
+        close: trade.price,
+        volume: trade.quantity,
+    })
 }
 
 impl LiveHandoff {
@@ -477,6 +712,7 @@ impl MarketService {
             },
             Some(Box::new(LiveCoinbaseRealtime::try_new()?)),
             Some(storage),
+            true,
         )
     }
 
@@ -534,13 +770,19 @@ impl MarketService {
         realtime: Option<Box<dyn RealtimeSource>>,
         storage: Option<Result<LocalHistoryStore, String>>,
     ) -> Result<Self, String> {
-        Self::start_composed(HistorySources::Shared(Box::new(source)), realtime, storage)
+        Self::start_composed(
+            HistorySources::Shared(Box::new(source)),
+            realtime,
+            storage,
+            false,
+        )
     }
 
     fn start_composed(
         sources: HistorySources,
         realtime: Option<Box<dyn RealtimeSource>>,
         storage: Option<Result<LocalHistoryStore, String>>,
+        rithmic_realtime: bool,
     ) -> Result<Self, String> {
         let engine = configured_engine()?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
@@ -557,6 +799,8 @@ impl MarketService {
         let (storage_tx, storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
         let (realtime_tx, realtime_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_control_tx, realtime_control_rx) = mpsc::sync_channel(1);
+        let (rithmic_realtime_tx, rithmic_realtime_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
+        let (rithmic_realtime_control_tx, rithmic_realtime_control_rx) = mpsc::sync_channel(1);
         let realtime_overflow = Arc::new(AtomicBool::new(false));
         let realtime_stop = Arc::new(AtomicBool::new(true));
         let completion_tx = command_tx.clone();
@@ -596,6 +840,17 @@ impl MarketService {
                 })
                 .map_err(|error| error.to_string())?;
         }
+        if rithmic_realtime {
+            thread::Builder::new()
+                .name("axiusflow-rithmic-realtime".to_string())
+                .spawn(move || {
+                    crate::rithmic_realtime::run(
+                        &rithmic_realtime_control_rx,
+                        &rithmic_realtime_tx,
+                    );
+                })
+                .map_err(|error| error.to_string())?;
+        }
         thread::Builder::new()
             .name("axiusflow-market-engine".to_string())
             .spawn(move || {
@@ -608,6 +863,9 @@ impl MarketService {
                         storage: &storage_tx,
                         realtime_control: &realtime_control_tx,
                         realtime: &realtime_rx,
+                        rithmic_realtime_control: rithmic_realtime
+                            .then_some(&rithmic_realtime_control_tx),
+                        rithmic_realtime: &rithmic_realtime_rx,
                     },
                     &realtime_overflow,
                     &realtime_stop,
@@ -901,6 +1159,8 @@ struct CoordinatorChannels<'a> {
     storage: &'a SyncSender<StorageRequest>,
     realtime_control: &'a SyncSender<RealtimeControl>,
     realtime: &'a Receiver<RealtimeEvent>,
+    rithmic_realtime_control: Option<&'a SyncSender<RithmicRealtimeControl>>,
+    rithmic_realtime: &'a Receiver<RithmicRealtimeEvent>,
 }
 
 fn run_coordinator(
@@ -915,6 +1175,7 @@ fn run_coordinator(
         rithmic_history: channels.rithmic_history,
         storage: channels.storage,
         realtime_control: channels.realtime_control,
+        rithmic_realtime_control: channels.rithmic_realtime_control,
         realtime_stop,
         attached: BTreeSet::new(),
         pending: BTreeMap::new(),
@@ -923,6 +1184,7 @@ fn run_coordinator(
         local_loaded: BTreeSet::new(),
         events: BTreeMap::new(),
         live: BTreeMap::new(),
+        rithmic_live: BTreeMap::new(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
@@ -936,10 +1198,17 @@ fn run_coordinator(
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        for _ in 0..REALTIME_DRAIN_BUDGET {
+            match channels.rithmic_realtime.try_recv() {
+                Ok(event) => coordinator.handle_rithmic_realtime(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
         if realtime_overflow.swap(false, Ordering::AcqRel) {
             coordinator.realtime_interrupted("Coinbase realtime queue overflowed");
         }
         coordinator.publish_live();
+        coordinator.publish_rithmic_live();
         match channels.commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) => coordinator.handle_command(command),
             Err(RecvTimeoutError::Timeout) => {}
@@ -954,6 +1223,7 @@ struct Coordinator<'a> {
     rithmic_history: &'a SyncSender<HistoryRequest>,
     storage: &'a SyncSender<StorageRequest>,
     realtime_control: &'a SyncSender<RealtimeControl>,
+    rithmic_realtime_control: Option<&'a SyncSender<RithmicRealtimeControl>>,
     realtime_stop: &'a Arc<AtomicBool>,
     attached: BTreeSet<ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -962,6 +1232,7 @@ struct Coordinator<'a> {
     local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
+    rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
     catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     catalog_sessions: BTreeMap<String, u64>,
     catalog_selections: BTreeMap<String, u64>,
@@ -1080,9 +1351,6 @@ impl Coordinator<'_> {
             .engine
             .provider_status(&provider)
             .and_then(|status| status.generation);
-        if engine_generation.is_some_and(|current| provider_generation < current) {
-            return Err("provider instrument session is stale".to_string());
-        }
         let session = self.catalog_sessions.get(&provider).copied();
         if session.is_some_and(|current| instrument.session_generation < current) {
             return Err("provider instrument session is stale".to_string());
@@ -1115,7 +1383,23 @@ impl Coordinator<'_> {
         if !key_exists_after_reset && retained_catalog_len >= MAXIMUM_CATALOG_INSTRUMENTS {
             return Err("provider instrument catalog capacity is exhausted".to_string());
         }
-        if engine_generation.is_none_or(|current| provider_generation > current) {
+        if provider == "rithmic"
+            && let Some(control) = self.rithmic_realtime_control
+        {
+            match control.try_send(RithmicRealtimeControl::Select(instrument.clone())) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    return Err("Rithmic live selection capacity is exhausted".to_string());
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err("Rithmic live worker is unavailable".to_string());
+                }
+            }
+        }
+        if engine_generation.is_none()
+            || provider != "rithmic"
+                && engine_generation.is_some_and(|current| provider_generation > current)
+        {
             self.engine
                 .begin_provider_session(&provider, provider_generation)
                 .map_err(|error| error.to_string())?;
@@ -1438,18 +1722,11 @@ impl Coordinator<'_> {
                 if installed.entitlement_id != series.entitlement_id {
                     return Err("Rithmic series entitlement is inconsistent".to_string());
                 }
-                let generation = ProviderGeneration(
-                    NonZeroU64::new(installed.session_generation)
-                        .ok_or_else(|| "Rithmic session generation is invalid".to_string())?,
-                );
-                if self
+                let generation = self
                     .engine
                     .provider_status("rithmic")
                     .and_then(|status| status.generation)
-                    != Some(generation)
-                {
-                    return Err("Rithmic engine session is stale".to_string());
-                }
+                    .ok_or_else(|| "Rithmic engine session is unavailable".to_string())?;
                 Ok(generation)
             }
             _ => Err("resident engine market provider is unsupported".to_string()),
@@ -1483,6 +1760,16 @@ impl Coordinator<'_> {
 
     fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
         if series.provider_id == "rithmic" {
+            if !self.rithmic_live.contains_key(series)
+                && let Some(mut handoff) =
+                    RithmicLiveHandoff::new(series, self.provider_generation_for_series(series)?)
+            {
+                handoff.connected = self
+                    .engine
+                    .provider_status("rithmic")
+                    .is_some_and(|status| status.health == ProviderHealth::Online);
+                self.rithmic_live.insert(series.clone(), handoff);
+            }
             return Ok(());
         }
         if series.provider_id != "coinbase" {
@@ -1646,6 +1933,20 @@ impl Coordinator<'_> {
                 );
             }
         }
+        if let Some(live) = self.rithmic_live.get_mut(series)
+            && live
+                .seed(snapshot.price_scale, snapshot.quantity_scale, &bars)
+                .is_err()
+        {
+            live.history_ready = false;
+            live.dirty = false;
+            self.broadcast_rithmic_provider(
+                ProviderConnectionState::Recovering,
+                generation,
+                Some("Rithmic history/live handoff failed"),
+            );
+            return;
+        }
         if let Some(live) = self.live.get_mut(series) {
             let connected = live.connected;
             let buffered = std::mem::take(&mut live.buffered);
@@ -1777,6 +2078,185 @@ impl Coordinator<'_> {
                 if generation == self.coinbase_provider_generation() {
                     self.realtime_interrupted("Coinbase realtime disconnected");
                 }
+            }
+        }
+    }
+
+    fn handle_rithmic_realtime(&mut self, event: RithmicRealtimeEvent) {
+        match event {
+            RithmicRealtimeEvent::Connecting(generation) => self.rithmic_connecting(generation),
+            RithmicRealtimeEvent::Connected(generation)
+            | RithmicRealtimeEvent::Heartbeat(generation) => self.rithmic_online(generation),
+            RithmicRealtimeEvent::Trade(generation, trade) => {
+                self.rithmic_trade(generation, &trade);
+            }
+            RithmicRealtimeEvent::Recovering(generation)
+            | RithmicRealtimeEvent::Disconnected(generation) => {
+                self.rithmic_recovering(generation, "Rithmic live session is recovering");
+            }
+        }
+    }
+
+    fn rithmic_connecting(&mut self, generation: u64) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        let current = self
+            .engine
+            .provider_status("rithmic")
+            .and_then(|status| status.generation);
+        if current.is_some_and(|current| generation < current) {
+            return;
+        }
+        if current.is_none_or(|current| generation > current)
+            && self
+                .engine
+                .begin_provider_session("rithmic", generation)
+                .is_err()
+        {
+            return;
+        }
+        if current.is_some_and(|current| generation > current) {
+            for ((series, _), stop) in &self.history_cancellations {
+                if series.provider_id == "rithmic" {
+                    stop.store(true, Ordering::Release);
+                }
+            }
+            let series = self.rithmic_live.keys().cloned().collect::<Vec<_>>();
+            for selected in &series {
+                self.engine.invalidate_series(selected);
+                if let Some(live) = self.rithmic_live.get_mut(selected) {
+                    live.reset(generation);
+                }
+                self.broadcast_series_resolution_for(
+                    selected,
+                    SeriesLoadState::Resolving,
+                    PersistenceState::Durable,
+                    Some("Rithmic live session changed; covering history is reloading"),
+                );
+            }
+            for selected in series {
+                let _ = self.enqueue_local_history(&selected, generation);
+            }
+        }
+        let _ = self
+            .engine
+            .set_provider_health("rithmic", generation, ProviderHealth::Connecting);
+        self.broadcast_rithmic_provider(ProviderConnectionState::Connecting, generation, None);
+    }
+
+    fn rithmic_online(&mut self, generation: u64) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("rithmic")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let _ = self
+            .engine
+            .set_provider_health("rithmic", generation, ProviderHealth::Online);
+        self.broadcast_rithmic_provider(ProviderConnectionState::Online, generation, None);
+        let missing = self
+            .rithmic_live
+            .iter_mut()
+            .filter_map(|(series, live)| {
+                if live.generation != generation {
+                    return None;
+                }
+                live.connected = true;
+                (!live.history_ready).then(|| series.clone())
+            })
+            .collect::<Vec<_>>();
+        for series in missing {
+            if !self
+                .history_inflight
+                .contains(&(series.clone(), generation))
+            {
+                let _ = self.enqueue_history(&series, generation);
+            }
+        }
+    }
+
+    fn rithmic_trade(&mut self, generation: u64, trade: &MarketTrade) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("rithmic")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let failed = self
+            .rithmic_live
+            .values_mut()
+            .filter(|live| live.generation == generation && live.connected)
+            .any(|live| live.accept_trade(trade).is_err());
+        if failed {
+            self.rithmic_recovering(
+                generation.0.get(),
+                "Rithmic live aggregation requires covering history",
+            );
+            for live in self.rithmic_live.values_mut() {
+                live.history_ready = false;
+                live.dirty = false;
+                live.buffered.clear();
+            }
+        }
+    }
+
+    fn rithmic_recovering(&mut self, generation: u64, detail: &'static str) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("rithmic")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let _ = self
+            .engine
+            .set_provider_health("rithmic", generation, ProviderHealth::Recovering);
+        self.broadcast_rithmic_provider(
+            ProviderConnectionState::Recovering,
+            generation,
+            Some(detail),
+        );
+        for live in self.rithmic_live.values_mut() {
+            live.connected = false;
+        }
+    }
+
+    fn broadcast_rithmic_provider(
+        &mut self,
+        state: ProviderConnectionState,
+        generation: ProviderGeneration,
+        detail: Option<&str>,
+    ) {
+        let payload = envelope::Payload::ProviderState(ProviderState {
+            provider: "rithmic".to_string(),
+            state: state as i32,
+            generation: generation.0.get(),
+            detail: detail.map(str::to_string),
+        });
+        for (consumer_id, events) in &mut self.events {
+            if self
+                .engine
+                .current_demand(*consumer_id)
+                .and_then(|demand| demand.series.as_ref())
+                .is_some_and(|series| series.provider_id == "rithmic")
+            {
+                events.provider = Some(payload.clone());
             }
         }
     }
@@ -1961,6 +2441,55 @@ impl Coordinator<'_> {
         }
     }
 
+    fn publish_rithmic_live(&mut self) {
+        let ready = self
+            .rithmic_live
+            .values_mut()
+            .filter(|live| live.connected && live.history_ready && live.dirty)
+            .map(|live| {
+                live.dirty = false;
+                (
+                    live.series.clone(),
+                    live.generation,
+                    live.price_scale,
+                    live.quantity_scale,
+                    live.bars.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (series, generation, price_scale, quantity_scale, bars) in ready {
+            if let Ok(publications) = self.engine.install_realtime(
+                generation,
+                &series,
+                price_scale,
+                quantity_scale,
+                bars,
+                true,
+            ) {
+                for publication in publications {
+                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                        publish_state(
+                            events,
+                            &publication,
+                            SeriesLoadState::Live,
+                            PersistenceState::Durable,
+                            None,
+                        );
+                    }
+                }
+            } else {
+                if let Some(live) = self.rithmic_live.get_mut(&series) {
+                    live.history_ready = false;
+                }
+                self.broadcast_rithmic_provider(
+                    ProviderConnectionState::Recovering,
+                    generation,
+                    Some("Rithmic live publication requires covering history"),
+                );
+            }
+        }
+    }
+
     fn broadcast_provider(
         &mut self,
         state: ProviderConnectionState,
@@ -2076,6 +2605,8 @@ impl Coordinator<'_> {
             })
             .collect::<BTreeSet<_>>();
         self.live.retain(|series, _| demanded.contains(series));
+        self.rithmic_live
+            .retain(|series, _| demanded.contains(series));
     }
 
     fn stop_realtime_if_idle(&mut self) {
@@ -2425,6 +2956,7 @@ const fn ipc_bar(bar: MarketBar) -> IpcMarketBar {
 mod tests {
     use super::*;
     use axiusflow_coinbase_market_adapter::FixedPointValue;
+    use axiusflow_market_data::{AggressorSide, EventMetadata, QualifiedTimestamp};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -2462,6 +2994,7 @@ mod tests {
             rithmic_history: history,
             storage,
             realtime_control: realtime,
+            rithmic_realtime_control: None,
             realtime_stop,
             attached: BTreeSet::new(),
             pending: BTreeMap::from([(
@@ -2476,6 +3009,7 @@ mod tests {
             local_loaded: BTreeSet::new(),
             events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
             live: BTreeMap::new(),
+            rithmic_live: BTreeMap::new(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             catalog_selections: BTreeMap::new(),
@@ -2500,6 +3034,104 @@ mod tests {
             quantity_scale: 0,
             entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
         }
+    }
+
+    fn rithmic_trade(sequence: u64, session: u64, nanos: i64, price: i64) -> MarketTrade {
+        MarketTrade {
+            metadata: EventMetadata {
+                provider_id: "rithmic".to_string(),
+                instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+                entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+                source_sequence: sequence,
+                session_generation: session,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(nanos),
+                    provider_unix_nanos: Some(nanos + 1),
+                    received_unix_nanos: nanos + 2,
+                },
+            },
+            trade_id: format!("trade-{sequence}"),
+            price,
+            quantity: 2,
+            aggressor: AggressorSide::Buy,
+        }
+    }
+
+    #[test]
+    fn rithmic_live_handoff_continues_fixed_and_tick_history_without_desktop_aggregation() {
+        let generation = ProviderGeneration(id(7).expect("provider generation"));
+        let fixed_series = BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            period: BarPeriod::time(60).expect("minute"),
+            definition_version: 1,
+        };
+        let history = MarketBar {
+            source_sequence: 40,
+            exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        };
+        let mut fixed =
+            RithmicLiveHandoff::new(&fixed_series, generation).expect("fixed cadence streams");
+        fixed.seed(2, 0, &[history]).expect("history seeds");
+        fixed
+            .accept_trade(&rithmic_trade(1, 1, 70_000_000_000, 108))
+            .expect("trade inside completed history is stale");
+        assert_eq!(fixed.bars.len(), 1);
+        assert_eq!(fixed.bars[0].close, 105);
+        assert_eq!(fixed.bars[0].exchange_timestamp_unix_nanos, 60_000_000_000);
+        fixed
+            .accept_trade(&rithmic_trade(2, 1, 121_000_000_000, 115))
+            .expect("next minute starts");
+        assert_eq!(fixed.bars.len(), 2);
+        assert_eq!(fixed.bars[1].source_sequence, 41);
+        assert_eq!(fixed.bars[1].exchange_timestamp_seconds, 120);
+        fixed
+            .accept_trade(&rithmic_trade(3, 1, 125_000_000_000, 116))
+            .expect("forming minute updates");
+        assert_eq!(fixed.bars[1].close, 116);
+        let mut engine = configured_engine().expect("engine configures");
+        engine
+            .begin_provider_session("rithmic", generation)
+            .expect("Rithmic generation begins");
+        engine
+            .install_history(generation, &fixed_series, 2, 0, vec![history])
+            .expect("completed history installs");
+        engine
+            .install_realtime(generation, &fixed_series, 2, 0, fixed.bars.clone(), true)
+            .expect("engine accepts the live forming suffix");
+
+        let tick_series = BarSeriesKey {
+            period: BarPeriod::tick(100).expect("tick"),
+            ..fixed_series
+        };
+        let tick_history = MarketBar {
+            exchange_timestamp_unix_nanos: 60_123_456_789,
+            ..history
+        };
+        let mut tick =
+            RithmicLiveHandoff::new(&tick_series, generation).expect("tick cadence streams");
+        tick.seed(2, 0, &[tick_history])
+            .expect("tick history seeds");
+        tick.accept_trade(&rithmic_trade(1, 1, 60_500_000_000, 120))
+            .expect("first trade starts a new tick bar");
+        tick.accept_trade(&rithmic_trade(2, 1, 60_600_000_000, 121))
+            .expect("second trade updates tick bar");
+        assert_eq!(tick.bars.len(), 2);
+        assert_eq!(tick.bars[1].source_sequence, 41);
+        assert_eq!(tick.bars[1].close, 121);
+        assert_eq!(tick.bars[1].volume, 4);
+        assert_eq!(tick.bars[1].exchange_timestamp_unix_nanos, 60_600_000_000);
+        assert!(
+            tick.accept_trade(&rithmic_trade(4, 2, 60_700_000_000, 122))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2625,6 +3257,7 @@ mod tests {
             },
             None,
             None,
+            false,
         )
         .expect("split provider history starts");
         service.attach(1).expect("client attaches");

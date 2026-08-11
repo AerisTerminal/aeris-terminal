@@ -146,13 +146,14 @@ impl RithmicHistoryTask {
 
     pub(crate) fn try_recv(&mut self) -> Option<RithmicHistoryResult> {
         let result = self.results.take()?;
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|(selection_generation, series_generation, _)| {
-                *selection_generation == result.selection_generation
-                    && *series_generation == result.series_generation
-            })
+        if result.result.is_err()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|(selection_generation, series_generation, _)| {
+                    *selection_generation == result.selection_generation
+                        && *series_generation == result.series_generation
+                })
         {
             self.active = None;
         }
@@ -214,7 +215,6 @@ impl EngineHistorySession {
             series.clone(),
         )?;
         let deadline = Instant::now() + HISTORY_TIMEOUT;
-        let mut accepted = None;
         loop {
             if request.stop.load(Ordering::Acquire) {
                 self.reset_consumer()?;
@@ -224,55 +224,60 @@ impl EngineHistorySession {
                 self.reset_consumer()?;
                 return Err("Rithmic engine history request timed out".to_string());
             }
-            let Some(event) = self.client.poll_market_event(self.consumer_id)? else {
+            let Some(bootstrap) = self.poll_update(request)? else {
                 thread::sleep(POLL_INTERVAL);
                 continue;
             };
-            match event {
-                envelope::Payload::SeriesSnapshot(snapshot) => {
-                    if snapshot.consumer_id != self.consumer_id
-                        || snapshot.generation
-                            != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
-                        || snapshot.series.as_ref() != Some(&series)
-                    {
-                        return Err("Rithmic engine snapshot identity mismatched".to_string());
-                    }
-                    accepted = Some(snapshot);
+            return Ok(bootstrap);
+        }
+    }
+
+    fn poll_update(
+        &mut self,
+        request: &HistoryFetchRequest,
+    ) -> Result<Option<MarketWorkerBootstrap>, String> {
+        let series = engine_series_key(request)?;
+        let Some(event) = self.client.poll_market_event(self.consumer_id)? else {
+            return Ok(None);
+        };
+        match event {
+            envelope::Payload::SeriesSnapshot(snapshot) => {
+                if snapshot.consumer_id != self.consumer_id
+                    || snapshot.generation
+                        != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
+                    || snapshot.series.as_ref() != Some(&series)
+                {
+                    return Err("Rithmic engine snapshot identity mismatched".to_string());
                 }
-                envelope::Payload::SeriesState(state) => {
-                    if state.consumer_id != self.consumer_id
-                        || state.generation
-                            != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
-                    {
-                        continue;
-                    }
-                    match SeriesLoadState::try_from(state.state)
-                        .map_err(|_| "Rithmic engine returned invalid history state".to_string())?
-                    {
-                        SeriesLoadState::Ready | SeriesLoadState::Live => {
-                            let snapshot = accepted.ok_or_else(|| {
-                                "Rithmic engine marked history ready without a snapshot".to_string()
-                            })?;
-                            return bootstrap_from_snapshot(request, &snapshot);
-                        }
-                        SeriesLoadState::Failed => {
-                            return Err(state.detail.unwrap_or_else(|| {
-                                "Rithmic engine history is unavailable".to_string()
-                            }));
-                        }
-                        SeriesLoadState::Superseded => {
-                            return Err("Rithmic engine history demand was superseded".to_string());
-                        }
-                        SeriesLoadState::Empty
-                        | SeriesLoadState::Resolving
-                        | SeriesLoadState::Partial => {}
-                    }
-                }
-                envelope::Payload::DemandError(error) => return Err(demand_error(&error)),
-                envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
-                envelope::Payload::ProviderState(_) | envelope::Payload::MarketEventIdle(_) => {}
-                _ => return Err("Rithmic engine returned an unexpected history event".to_string()),
+                bootstrap_from_snapshot(request, &snapshot).map(Some)
             }
+            envelope::Payload::SeriesState(state) => {
+                if state.consumer_id != self.consumer_id
+                    || state.generation
+                        != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
+                {
+                    return Ok(None);
+                }
+                match SeriesLoadState::try_from(state.state)
+                    .map_err(|_| "Rithmic engine returned invalid history state".to_string())?
+                {
+                    SeriesLoadState::Failed => Err(state
+                        .detail
+                        .unwrap_or_else(|| "Rithmic engine history is unavailable".to_string())),
+                    SeriesLoadState::Superseded => {
+                        Err("Rithmic engine history demand was superseded".to_string())
+                    }
+                    SeriesLoadState::Empty
+                    | SeriesLoadState::Resolving
+                    | SeriesLoadState::Partial
+                    | SeriesLoadState::Ready
+                    | SeriesLoadState::Live => Ok(None),
+                }
+            }
+            envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+            envelope::Payload::ProviderState(_) | envelope::Payload::MarketEventIdle(_) => Ok(None),
+            _ => Err("Rithmic engine returned an unexpected history event".to_string()),
         }
     }
 
@@ -295,27 +300,70 @@ impl Drop for EngineHistorySession {
 
 fn run_history_worker(commands: &Receiver<HistoryCommand>, results: &LatestHistoryResult) {
     let mut session: Option<EngineHistorySession> = None;
-    while let Ok(command) = commands.recv() {
-        let HistoryCommand::Fetch(request) = command;
-        let result = if let Some(active) = session.as_mut() {
-            active.fetch(&request)
-        } else {
-            EngineHistorySession::connect().and_then(|mut active| {
-                let result = active.fetch(&request);
-                session = Some(active);
-                result
-            })
+    let mut active_request: Option<HistoryFetchRequest> = None;
+    loop {
+        match commands.recv_timeout(POLL_INTERVAL) {
+            Ok(HistoryCommand::Fetch(request)) => {
+                let result = if let Some(active) = session.as_mut() {
+                    active.fetch(&request)
+                } else {
+                    EngineHistorySession::connect().and_then(|mut active| {
+                        let result = active.fetch(&request);
+                        session = Some(active);
+                        result
+                    })
+                };
+                let succeeded = result.is_ok();
+                publish_history_result(results, &request, result);
+                if succeeded {
+                    active_request = Some(request);
+                } else {
+                    active_request = None;
+                    session = None;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let Some(request) = active_request.as_ref() else {
+                    continue;
+                };
+                if request.stop.load(Ordering::Acquire) {
+                    if let Some(active) = session.as_mut() {
+                        let _ = active.reset_consumer();
+                    }
+                    active_request = None;
+                    continue;
+                }
+                let Some(active) = session.as_mut() else {
+                    active_request = None;
+                    continue;
+                };
+                match active.poll_update(request) {
+                    Ok(Some(bootstrap)) => {
+                        publish_history_result(results, request, Ok(bootstrap));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        publish_history_result(results, request, Err(error));
+                        active_request = None;
+                        session = None;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        .map(Box::new);
-        if result.is_err() {
-            session = None;
-        }
-        results.publish(RithmicHistoryResult {
-            selection_generation: request.selection_generation,
-            series_generation: request.series_generation,
-            result,
-        });
     }
+}
+
+fn publish_history_result(
+    results: &LatestHistoryResult,
+    request: &HistoryFetchRequest,
+    result: Result<MarketWorkerBootstrap, String>,
+) {
+    results.publish(RithmicHistoryResult {
+        selection_generation: request.selection_generation,
+        series_generation: request.series_generation,
+        result: result.map(Box::new),
+    });
 }
 
 fn engine_instrument(
@@ -368,7 +416,7 @@ fn bootstrap_from_snapshot(
     request: &HistoryFetchRequest,
     snapshot: &SeriesSnapshot,
 ) -> Result<MarketWorkerBootstrap, String> {
-    if snapshot.provider_generation != request.instrument.session_generation
+    if snapshot.provider_generation < request.instrument.session_generation
         || snapshot.bars.is_empty()
         || snapshot.bars.len() > MAXIMUM_VISIBLE_BARS
         || snapshot.price_scale != u32::from(request.instrument.descriptor.price_scale)
@@ -567,7 +615,7 @@ mod tests {
             consumer_id: 5,
             generation: 3,
             series: Some(series),
-            provider_generation: 7,
+            provider_generation: 8,
             price_scale: 2,
             quantity_scale: 0,
             bars: vec![IpcMarketBar {
@@ -586,7 +634,7 @@ mod tests {
         let bootstrap = bootstrap_from_snapshot(&request, &snapshot).expect("bootstrap validates");
         assert_eq!(
             bootstrap.snapshot.bars()[0].provenance().session_generation,
-            7
+            8
         );
         assert_eq!(
             bootstrap.snapshot.bars()[0]

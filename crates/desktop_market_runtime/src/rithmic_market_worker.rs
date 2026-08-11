@@ -622,6 +622,7 @@ fn apply_history_result(
     if !matching_request {
         return false;
     }
+    let continuous = result.result.is_ok();
     let mut chart =
         result.result.as_ref().ok().and_then(|bootstrap| {
             RithmicLiveChart::from_history(generation, &bootstrap.snapshot).ok()
@@ -648,7 +649,9 @@ fn apply_history_result(
         });
         return true;
     }
-    state.pending_live_request = None;
+    if !continuous {
+        state.pending_live_request = None;
+    }
     state.buffered_history_trades.clear();
     state.history_trade_overflow = false;
     state.live_chart = chart;

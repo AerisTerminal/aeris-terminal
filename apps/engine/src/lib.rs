@@ -3,6 +3,7 @@
 mod local_history;
 mod market_service;
 mod rithmic_history;
+mod rithmic_realtime;
 
 pub use market_service::MarketService;
 
