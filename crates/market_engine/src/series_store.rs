@@ -9,6 +9,7 @@ pub struct SeriesSnapshot {
     pub publication_generation: u64,
     pub price_scale: u8,
     pub quantity_scale: u8,
+    pub forming: bool,
     pub bars: Arc<[MarketBar]>,
 }
 
@@ -17,6 +18,12 @@ pub(crate) struct SeriesStore {
     maximum_bars: NonZeroUsize,
     total_bars: usize,
     series: BTreeMap<BarSeriesKey, Arc<SeriesSnapshot>>,
+}
+
+#[derive(Clone, Copy)]
+enum InstallMode {
+    History,
+    Realtime { forming: bool },
 }
 
 impl SeriesStore {
@@ -37,6 +44,48 @@ impl SeriesStore {
         quantity_scale: u8,
         bars: Vec<MarketBar>,
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
+        self.install_inner(
+            series,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+            InstallMode::History,
+        )
+    }
+
+    pub(crate) fn install_realtime(
+        &mut self,
+        series: BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: Vec<MarketBar>,
+        forming: bool,
+    ) -> Result<Arc<SeriesSnapshot>, EngineError> {
+        self.install_inner(
+            series,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+            InstallMode::Realtime { forming },
+        )
+    }
+
+    fn install_inner(
+        &mut self,
+        series: BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: Vec<MarketBar>,
+        mode: InstallMode,
+    ) -> Result<Arc<SeriesSnapshot>, EngineError> {
+        let (forming, realtime) = match mode {
+            InstallMode::History => (false, false),
+            InstallMode::Realtime { forming } => (forming, true),
+        };
         series.validate()?;
         if price_scale > 18 || quantity_scale > 18 {
             return Err(EngineError::InvalidSeriesPrecision);
@@ -54,10 +103,13 @@ impl SeriesStore {
                 if current.bars.as_ref() == bars
                     && current.price_scale == price_scale
                     && current.quantity_scale == quantity_scale
+                    && current.forming == forming
                 {
                     return Ok(Arc::clone(current));
                 }
-                if bars.last().map(|bar| bar.source_sequence)
+                if realtime {
+                    validate_realtime_transition(current, price_scale, quantity_scale, &bars)?;
+                } else if bars.last().map(|bar| bar.source_sequence)
                     <= current.bars.last().map(|bar| bar.source_sequence)
                 {
                     return Err(EngineError::ConflictingSeriesGeneration(
@@ -95,6 +147,7 @@ impl SeriesStore {
             publication_generation,
             price_scale,
             quantity_scale,
+            forming,
             bars: bars.into(),
         });
         self.total_bars = projected;
@@ -125,6 +178,65 @@ impl SeriesStore {
     pub(crate) fn approximate_bytes(&self) -> usize {
         self.total_bars.saturating_mul(size_of::<MarketBar>())
     }
+}
+
+fn validate_realtime_transition(
+    current: &SeriesSnapshot,
+    price_scale: u8,
+    quantity_scale: u8,
+    bars: &[MarketBar],
+) -> Result<(), EngineError> {
+    if current.price_scale != price_scale || current.quantity_scale != quantity_scale {
+        return Err(EngineError::ConflictingSeriesGeneration(
+            current.provider_generation,
+        ));
+    }
+    let current_first = current
+        .bars
+        .first()
+        .ok_or(EngineError::EmptySeries)?
+        .source_sequence;
+    let current_last = current
+        .bars
+        .last()
+        .ok_or(EngineError::EmptySeries)?
+        .source_sequence;
+    let new_first = bars
+        .first()
+        .ok_or(EngineError::EmptySeries)?
+        .source_sequence;
+    let new_last = bars.last().ok_or(EngineError::EmptySeries)?.source_sequence;
+    if new_last < current_last
+        || new_first
+            > current_last
+                .checked_add(1)
+                .ok_or(EngineError::CapacityOverflow)?
+        || new_last == current_last && !current.forming
+    {
+        return Err(EngineError::ConflictingSeriesGeneration(
+            current.provider_generation,
+        ));
+    }
+    for bar in bars {
+        if bar.source_sequence < current_first || bar.source_sequence > current_last {
+            continue;
+        }
+        let offset = bar
+            .source_sequence
+            .checked_sub(current_first)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(EngineError::CapacityOverflow)?;
+        let previous = current
+            .bars
+            .get(offset)
+            .ok_or(EngineError::CapacityOverflow)?;
+        if previous != bar && !(current.forming && bar.source_sequence == current_last) {
+            return Err(EngineError::ConflictingSeriesGeneration(
+                current.provider_generation,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_bars(bars: &[MarketBar]) -> Result<(), EngineError> {

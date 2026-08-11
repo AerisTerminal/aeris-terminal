@@ -353,6 +353,42 @@ impl MarketEngine {
             .collect()
     }
 
+    /// Installs one bounded live covering image and publishes it to matching demand.
+    ///
+    /// The newest forming bar may be revised within the same provider generation;
+    /// completed overlap remains immutable.
+    ///
+    /// # Errors
+    /// Returns an error for stale generation, invalid continuity, precision, or capacity.
+    pub fn install_realtime(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: Vec<MarketBar>,
+        forming: bool,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        let snapshot = self.series.install_realtime(
+            series.clone(),
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+            forming,
+        )?;
+        self.demands
+            .matching(series)
+            .into_iter()
+            .map(|(consumer_id, generation)| {
+                self.publications
+                    .publish(consumer_id, generation, Arc::clone(&snapshot))
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn current_demand(&self, consumer_id: ConsumerId) -> Option<&ConsumerDemand> {
         self.demands.current(consumer_id)
@@ -631,5 +667,29 @@ mod tests {
             .expect("snapshot is cached");
         assert_eq!(snapshot.snapshot.price_scale, 2);
         assert_eq!(snapshot.snapshot.quantity_scale, 8);
+    }
+
+    #[test]
+    fn realtime_may_revise_only_the_forming_tail() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("forming bar appends");
+        let mut revised = bars(3);
+        revised[2].close = 106;
+        let publication = engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, revised, true)
+            .expect("forming bar revises");
+        assert!(publication.is_empty());
+        let mut corrupted = bars(4);
+        corrupted[0].close = 106;
+        assert!(matches!(
+            engine.install_realtime(provider_generation(1), &btc, 2, 8, corrupted, true),
+            Err(EngineError::ConflictingSeriesGeneration(_))
+        ));
     }
 }

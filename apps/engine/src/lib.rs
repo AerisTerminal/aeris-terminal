@@ -20,16 +20,17 @@ use std::{
 
 use axiusflow_local_engine_protocol::{
     AttachClient, ClientHello, ClientKind, DetachClient, EngineFaultCode, EngineReady, Envelope,
-    EnvelopeDecoder, Fault, Goodbye, HotSeries, PROTOCOL_VERSION, RegisterConsumer, RemoveConsumer,
-    ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey, SetSelection, SetViewport,
-    SetWatchlist, ViewportDemand, WorkspaceState, encode_envelope, envelope,
+    EnvelopeDecoder, Fault, Goodbye, HotSeries, MarketEventIdle, PROTOCOL_VERSION, PollMarketEvent,
+    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey,
+    SetSelection, SetViewport, SetWatchlist, ViewportDemand, WorkspaceState, encode_envelope,
+    envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
-/// Stable per-user local socket name for protocol version three.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v3";
+/// Stable per-user local socket name for protocol version four.
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v4";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 
@@ -746,6 +747,27 @@ impl EngineClient {
         self.connection.receive()
     }
 
+    /// Polls at most one bounded publication for an attached market consumer.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated exchange cannot complete.
+    pub fn poll_market_event(
+        &mut self,
+        consumer_id: u64,
+    ) -> Result<Option<envelope::Payload>, String> {
+        self.connection
+            .send(envelope::Payload::PollMarketEvent(PollMarketEvent {
+                consumer_id,
+            }))?;
+        match self.connection.receive()? {
+            envelope::Payload::MarketEventIdle(idle) if idle.consumer_id == consumer_id => Ok(None),
+            envelope::Payload::MarketEventIdle(_) => {
+                Err("engine returned market idle for another consumer".to_string())
+            }
+            payload => Ok(Some(payload)),
+        }
+    }
+
     /// Removes one consumer without affecting shared engine state.
     ///
     /// # Errors
@@ -1102,7 +1124,8 @@ fn handle_market_message(
         | envelope::Payload::SeriesDemand(_)
         | envelope::Payload::ViewportDemand(_)
         | envelope::Payload::VisibilityDemand(_)
-        | envelope::Payload::RemoveConsumer(_)) => (require_market(market)?, payload),
+        | envelope::Payload::RemoveConsumer(_)
+        | envelope::Payload::PollMarketEvent(_)) => (require_market(market)?, payload),
         _ => return Ok(false),
     };
     dispatch_market_command(connection, market.0, *attached_client, market.1)?;
@@ -1178,6 +1201,24 @@ fn dispatch_market_command(
             };
             if let Err(error) = market.remove_consumer(client_id, removal.consumer_id) {
                 send_market_fault(connection, error)?;
+            }
+        }
+        envelope::Payload::PollMarketEvent(poll) => {
+            let Some(client_id) = attached_client else {
+                send_market_fault(
+                    connection,
+                    "client must attach before polling market events",
+                )?;
+                return Ok(());
+            };
+            match market.poll_event(client_id, poll.consumer_id) {
+                Ok(Some(event)) => connection.send(event)?,
+                Ok(None) => {
+                    connection.send(envelope::Payload::MarketEventIdle(MarketEventIdle {
+                        consumer_id: poll.consumer_id,
+                    }))?;
+                }
+                Err(error) => send_market_fault(connection, error)?,
             }
         }
         _ => unreachable!("market payloads were filtered above"),
@@ -1349,6 +1390,10 @@ mod tests {
             client.receive_market_event().expect("ready state"),
             envelope::Payload::SeriesState(state) if state.generation == 1
         ));
+        assert_eq!(
+            client.poll_market_event(1).expect("poll market event"),
+            None
+        );
         drop(client);
         server.join().expect("join market server");
     }

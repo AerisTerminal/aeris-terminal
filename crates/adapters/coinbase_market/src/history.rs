@@ -852,7 +852,7 @@ impl DeadlineTcpStream {
             .is_some_and(|stop| stop.load(Ordering::Acquire))
         {
             return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
+                io::ErrorKind::ConnectionAborted,
                 "Coinbase connection cancelled",
             ));
         }
@@ -1113,10 +1113,37 @@ mod tests {
     };
     use std::{
         cell::RefCell,
+        io,
+        net::{TcpListener, TcpStream},
         num::NonZeroUsize,
         rc::Rc,
-        sync::{Arc, atomic::AtomicBool},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
     };
+
+    #[test]
+    fn established_socket_cancellation_is_terminal_for_buffered_readers() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fixture socket");
+        let client = TcpStream::connect(listener.local_addr().expect("fixture address"))
+            .expect("connect fixture socket");
+        let (_server, _) = listener.accept().expect("accept fixture socket");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stream = super::DeadlineTcpStream {
+            stream: client,
+            deadline: Instant::now() + Duration::from_secs(1),
+            next_read_at: Instant::now(),
+            stop: Some(Arc::clone(&stop)),
+        };
+        stop.store(true, Ordering::Release);
+
+        let error = stream
+            .operation_timeout()
+            .expect_err("cancellation fails I/O");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    }
 
     #[derive(Clone)]
     struct FixtureTransport {

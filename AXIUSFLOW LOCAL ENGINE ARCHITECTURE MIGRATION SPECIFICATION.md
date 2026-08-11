@@ -3620,7 +3620,7 @@ Write deterministic tests.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the default desktop Coinbase startup attaches a bounded `EngineClient` to protocol-v3 IPC; `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, and desktop precision/provenance conversion. A clean Windows release run started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered visible BTC-USD one-minute candles in Origin. Coinbase realtime remains separately unchecked under the hard gate in section 154.
+Evidence (2026-08-11): the default desktop Coinbase startup attaches a bounded `EngineClient` to protocol-v4 IPC; `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Origin.
 
 Move Coinbase execution into `axiusflow_engine`.
 
@@ -4670,7 +4670,9 @@ If any earlier wording appears weaker than a rule below, follow the stricter rul
 
 # 154. COINBASE REALTIME IS A MIGRATION GATE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): protocol-v4 bounded market-event polling now carries explicit provider/series state and forming-tail covering snapshots from the resident engine to the existing desktop model and Origin chart. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
 
 Do not interpret successful Coinbase historical candles as completion of the Coinbase migration.
 

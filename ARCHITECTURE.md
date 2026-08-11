@@ -23,18 +23,18 @@ This document describes the current architectural direction. Source code, tests,
 Axiusflow ships two local application processes:
 
 - `axiusflow_desktop` owns the GPUI window, terminal interaction, presentation state, chart integration, and a bounded authenticated engine client. The default Coinbase path owns no Coinbase provider or history adapter. The temporary `--rithmic-test` path and explicit legacy Coinbase smoke command still use direct desktop workers until their later migration phases.
-- `axiusflow_engine` is the per-user resident local process. It owns authenticated workspace/watchlist/viewport/hot-set persistence and the first production market slice: one bounded market coordinator, one Coinbase public-history worker, canonical in-memory BTC-USD one-minute bars, and per-consumer IPC snapshots. Coinbase realtime, durable market history, Rithmic, and complete warm lifecycle policy are not engine-owned yet.
+- `axiusflow_engine` is the per-user resident local process. It owns authenticated workspace/watchlist/viewport/hot-set persistence and the first production market slice: one bounded market coordinator, one Coinbase public-history worker, one Coinbase realtime worker, canonical in-memory BTC-USD one-minute bars, and per-consumer IPC snapshots. Durable market history, Rithmic, and complete warm lifecycle policy are not engine-owned yet.
 
-The default shipping desktop starts a background `EngineClient`, attaches random process-lifetime client and consumer identities, and sends generation-fenced BTC-USD one-minute demand over protocol v3. The engine resolves a memory hit or schedules the single Coinbase history adapter away from its coordinator, validates and stores fixed-point bars once, and returns an immutable snapshot. The desktop validates the IPC snapshot into the existing application model, publishes through the bounded UI mailbox, and hands the covering snapshot to Origin on GPUI.
+The default shipping desktop starts a background `EngineClient`, attaches random process-lifetime client and consumer identities, and sends generation-fenced BTC-USD one-minute demand over protocol v4. The engine resolves a memory hit or schedules the single Coinbase history adapter away from its coordinator while one process-owned realtime worker maintains the provider session. The coordinator buffers bounded live trades during history repair, seeds the canonical bar aggregator from completed history, installs only a forming-tail revision, and publishes covering snapshots through bounded per-consumer event slots. The desktop polls those events away from GPUI, validates them into the existing application model, publishes through the bounded UI mailbox, and hands each covering snapshot to Origin on GPUI.
 
 ```text
 GPUI demand
     -> bounded desktop EngineClient worker
-    -> authenticated protocol-v3 local IPC
+    -> authenticated protocol-v4 local IPC
     -> resident MarketEngine coordinator
-    -> single Coinbase public-history worker
+    -> Coinbase public-history worker + Coinbase realtime worker
     -> canonical fixed-point bars and bounded SeriesStore
-    -> immutable per-consumer IPC snapshot
+    -> bounded per-consumer IPC state/snapshot publication
     -> desktop application model and bounded UI mailbox
     -> terminal UI and Origin chart renderer
 
@@ -73,7 +73,7 @@ Provider-specific types stop at adapter boundaries. Downstream code consumes can
 
 - `crates/desktop_storage`: SQLite metadata, encrypted local segments, and storage lifecycle.
 - `crates/desktop_history`: local history cache behavior built on storage and provider-history contracts.
-- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 3 is active for the default Coinbase historical path and carries consumer generation, provider session generation, publication generation, decimal precision, and canonical bars.
+- `crates/local_engine_protocol`: versioned authentication, workspace, lifecycle, engine market-demand, readiness, provider-state, and fixed-point series publication framing. Protocol version 4 is active for the default Coinbase history/realtime path and carries consumer generation, provider session generation, publication generation, decimal precision, canonical bars, forming-tail state, and bounded market-event polling.
 - `crates/protocols`: shared protobuf-backed stream contracts and sequence semantics.
 - `crates/transport`: small transport framing primitives.
 
@@ -88,15 +88,15 @@ GPUI demand
     -> desktop EngineClient worker
     -> authenticated local IPC
     -> engine MarketEngine coordinator
-    -> CoinbaseHistoryCapabilityAdapter worker
-    -> canonical MarketBar values
+    -> Coinbase history worker + realtime WebSocket worker
+    -> canonical completed bars + active-candle aggregation
     -> bounded shared SeriesStore
-    -> fixed-point IPC snapshot
+    -> bounded fixed-point IPC snapshots and explicit provider state
     -> desktop validation and bounded mailbox
     -> chart bridge and Origin Charts
 ```
 
-This first production slice is deliberately BTC-USD one-minute completed history only. It does not claim Coinbase realtime, history/live handoff, engine-owned persistence, multi-timeframe or multi-symbol UI behavior, Rithmic migration, or a completed warm-engine product. The Rithmic test path and legacy Coinbase smoke path still use the direct runtime described below, and must not run as a second default Coinbase feed.
+This production slice is deliberately limited to BTC-USD one-minute history plus realtime. On first demand, completed history is installed before the buffered live suffix; only the current forming candle may revise an installed series tail. A provider generation change exposes Recovering state, retains the prior covering chart, refetches completed history for the new generation, replays the bounded live buffer, and resumes active-candle publication without rebuilding desktop consumers. The realtime WebSocket is released when the last consumer detaches. Engine-owned persistence, multi-timeframe or multi-symbol UI behavior, Rithmic migration, depth, and a completed warm-engine product remain later slices. The Rithmic test path and legacy Coinbase smoke path still use the direct runtime described below, and must not run as a second default Coinbase feed.
 
 `ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
 
@@ -125,7 +125,9 @@ The durable identity includes resolution and source revision, so native and deri
 - The resident market coordinator is the single mutable owner of default Coinbase demand, provider generation, cached series, and consumer publications.
 - Each market command is authorized against the authenticated session's attached client identity; one desktop client cannot mutate another client's consumers.
 - One bounded engine history worker owns the Coinbase history adapter; provider I/O never blocks GPUI or the market coordinator.
-- The bounded desktop engine-client worker owns IPC reads and application-model conversion, never provider execution or canonical market state.
+- One bounded engine realtime worker owns the Coinbase WebSocket. Its generation-fenced events enter a bounded queue; queue overflow, sequence invalidation, or disconnect forces explicit recovery and a covering history repair.
+- The coordinator stores at most the latest provider state, snapshot, and series state per consumer. Covering snapshots may conflate; provider deltas are not silently discarded.
+- The bounded desktop engine-client worker interleaves commands with 16 ms market-event polling and application-model conversion, never provider execution or canonical market state.
 - Direct Rithmic test and explicit Coinbase smoke workers retain their legacy provider-session ownership until their named migration phases.
 - Blocking history and storage work stays off GPUI and communicates through bounded channels.
 - Selection generations make obsolete symbol and timeframe results stale; stale work cannot overwrite the new selection.
@@ -254,6 +256,6 @@ The first migration preparation slice was protocol-only and created no second pr
 
 The second preparation slice added the headless `market_engine` state owner. Its bounded store shares one immutable bar snapshot across matching consumers, consumer generations fence stale presentation, provider generations fence stale sessions, and client detach removes only that client's demand.
 
-The current third slice connects default BTC-USD one-minute historical demand through authenticated IPC. An engine-owned coordinator and one Coinbase history worker populate `MarketEngine`; the desktop bridge validates precision and provenance and reuses the existing bounded application/UI publication boundary. Deterministic tests cover service cache sharing, authenticated IPC snapshot delivery, fixed-point desktop conversion, stale generations, and disconnect cleanup. A clean Windows release run with no pre-existing engine spawned the sibling process and rendered visible Origin candles while remaining responsive. Realtime, switching, engine-owned persistence, and Rithmic remain later gates.
+The current fourth slice connects default BTC-USD one-minute historical and realtime demand through authenticated IPC. An engine-owned coordinator plus one history and one realtime worker populate `MarketEngine`; the desktop bridge validates precision and provenance and reuses the existing bounded application/UI publication boundary. Deterministic tests cover service cache sharing, authenticated IPC delivery, fixed-point conversion, forming-tail rules, stale generations, deliberate realtime disconnect/reconnect, two-consumer isolation, retained history, resumed active candles, queue-overflow recovery, and last-consumer teardown. A clean Windows release run rendered visible Origin candles with a healthy connection state, remained responsive, and showed 12,850 sampled chart-region pixels change over twenty seconds. The live WebSocket closed within three seconds of desktop exit. Switching, engine-owned persistence, depth, Rithmic, and complete warm-mode policy remain later gates.
 
 Focused conformance and release-mode performance checks supplement this gate for provider, persistence, IPC, UI, and latency changes. A passing compile is not proof of runtime correctness.

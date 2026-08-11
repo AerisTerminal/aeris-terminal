@@ -3,11 +3,12 @@ use std::num::NonZeroUsize;
 use axiusflow_local_engine_protocol::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
     EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
-    MAX_FRAME_BYTES, MarketBar, PROTOCOL_VERSION, PersistenceState, ProtocolError,
-    ProviderConnectionState, ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode,
-    RestoreWorkspace, SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState,
-    SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, ShutdownEngine,
-    ViewportDemand, VisibilityDemand, WorkspaceState, encode_envelope, envelope,
+    MAX_FRAME_BYTES, MarketBar, MarketEventIdle, PROTOCOL_VERSION, PersistenceState,
+    PollMarketEvent, ProtocolError, ProviderConnectionState, ProviderState, RegisterConsumer,
+    RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey, SeriesLoadState,
+    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport,
+    SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState,
+    encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -119,6 +120,8 @@ fn market_payloads() -> Vec<envelope::Payload> {
             visible: true,
         }),
         envelope::Payload::RemoveConsumer(RemoveConsumer { consumer_id: 13 }),
+        envelope::Payload::PollMarketEvent(PollMarketEvent { consumer_id: 13 }),
+        envelope::Payload::MarketEventIdle(MarketEventIdle { consumer_id: 13 }),
         envelope::Payload::SetEngineResourceMode(SetEngineResourceMode {
             resource_mode: ResourceMode::Warm as i32,
         }),
@@ -140,6 +143,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
             quantity_scale: 8,
             bars: vec![bar],
             publication_generation: 1,
+            forming: false,
         }),
         envelope::Payload::SeriesUpdate(SeriesUpdate {
             consumer_id: 13,

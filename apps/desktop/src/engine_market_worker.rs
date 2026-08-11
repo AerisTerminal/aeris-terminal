@@ -1,10 +1,10 @@
-//! Desktop-side client for engine-owned Coinbase historical bars.
+//! Desktop-side client for engine-owned Coinbase historical and realtime bars.
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, atomic::AtomicU64, mpsc},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axiusflow_application::{
@@ -17,7 +17,8 @@ use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_local_engine_protocol::{
-    DemandError, EngineFaultCode, SeriesKey, SeriesLoadState, SeriesSnapshot, envelope,
+    DemandError, EngineFaultCode, ProviderConnectionState, ProviderState, SeriesKey,
+    SeriesLoadState, SeriesSnapshot, envelope,
 };
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
@@ -34,7 +35,8 @@ const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 1;
 const MODEL_CAPACITY: usize = 350;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
-const WORKER_LABEL: &str = "Coinbase engine - historical IPC";
+const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
+const POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let product = btc_product();
@@ -108,74 +110,172 @@ fn run_worker(
     )?;
     send_publication(messages, snapshot, generation)?;
     let _ = messages.send(MarketWorkerMessage::Connection {
-        state: FeedConnectionState::Streaming,
-        message: "Resident engine delivered Coinbase historical bars".to_string(),
+        state: FeedConnectionState::Discovering,
+        message: "Historical bars are visible; Coinbase realtime is connecting".to_string(),
     });
     let mut active_generation = INITIAL_GENERATION;
 
-    while let Ok(command) = commands.recv() {
-        match command {
-            MarketWorkerCommand::CoinbaseSelect(request) => {
-                let series = match series_key(&request.product, request.interval) {
-                    Ok(series) => series,
-                    Err(error) => {
-                        let _ = messages.send(MarketWorkerMessage::State {
-                            state: ChartState::Error,
-                            message: error,
-                        });
-                        continue;
-                    }
-                };
-                let _ = messages.send(MarketWorkerMessage::CoinbaseSwitchMarker {
-                    sequence: request.sequence,
-                });
-                let _ = messages.send(MarketWorkerMessage::State {
-                    state: ChartState::Loading,
-                    message: "Loading Coinbase history through the resident engine".to_string(),
-                });
-                model = empty_model();
-                let (snapshot, generation) = request_snapshot(
-                    &mut client,
-                    consumer_id,
-                    request.sequence,
-                    series,
-                    &mut model,
-                    messages,
-                )?;
-                active_generation = request.sequence;
-                send_publication(messages, snapshot, generation)?;
-            }
-            MarketWorkerCommand::Recovery(command) => {
-                send_recovery(
-                    &mut client,
-                    consumer_id,
-                    active_generation,
-                    command,
-                    &mut model,
-                    messages,
-                )?;
-            }
-            MarketWorkerCommand::ChartViewport(viewport) => {
-                if viewport.selection_generation > 0 {
-                    client.set_market_viewport(
+    loop {
+        match commands.recv_timeout(POLL_INTERVAL) {
+            Ok(command) => match command {
+                MarketWorkerCommand::CoinbaseSelect(request) => {
+                    let series = match series_key(&request.product, request.interval) {
+                        Ok(series) => series,
+                        Err(error) => {
+                            let _ = messages.send(MarketWorkerMessage::State {
+                                state: ChartState::Error,
+                                message: error,
+                            });
+                            continue;
+                        }
+                    };
+                    let _ = messages.send(MarketWorkerMessage::CoinbaseSwitchMarker {
+                        sequence: request.sequence,
+                    });
+                    let _ = messages.send(MarketWorkerMessage::State {
+                        state: ChartState::Loading,
+                        message: "Loading Coinbase history through the resident engine".to_string(),
+                    });
+                    model = empty_model();
+                    let (snapshot, generation) = request_snapshot(
+                        &mut client,
                         consumer_id,
-                        viewport.selection_generation,
-                        viewport.start_unix_nanos,
-                        viewport.end_unix_nanos,
+                        request.sequence,
+                        series,
+                        &mut model,
+                        messages,
+                    )?;
+                    active_generation = request.sequence;
+                    send_publication(messages, snapshot, generation)?;
+                }
+                MarketWorkerCommand::Recovery(command) => {
+                    send_recovery(
+                        &mut client,
+                        consumer_id,
+                        active_generation,
+                        command,
+                        &mut model,
+                        messages,
                     )?;
                 }
-            }
-            MarketWorkerCommand::Shutdown => break,
-            MarketWorkerCommand::RithmicSearch(_)
-            | MarketWorkerCommand::RithmicSelect(_)
-            | MarketWorkerCommand::RithmicHistory(_) => {
-                return Err("Rithmic commands cannot enter the Coinbase engine client".to_string());
-            }
+                MarketWorkerCommand::ChartViewport(viewport) => {
+                    if viewport.selection_generation > 0 {
+                        client.set_market_viewport(
+                            consumer_id,
+                            viewport.selection_generation,
+                            viewport.start_unix_nanos,
+                            viewport.end_unix_nanos,
+                        )?;
+                    }
+                }
+                MarketWorkerCommand::Shutdown => break,
+                MarketWorkerCommand::RithmicSearch(_)
+                | MarketWorkerCommand::RithmicSelect(_)
+                | MarketWorkerCommand::RithmicHistory(_) => {
+                    return Err(
+                        "Rithmic commands cannot enter the Coinbase engine client".to_string()
+                    );
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if let Some(event) = client.poll_market_event(consumer_id)? {
+            apply_polled_event(event, consumer_id, active_generation, &mut model, messages)?;
         }
     }
     let _ = client.remove_market_consumer(consumer_id);
     let _ = client.detach_client(client_id);
     Ok(())
+}
+
+fn apply_polled_event(
+    event: envelope::Payload,
+    consumer_id: u64,
+    active_generation: u64,
+    model: &mut MarketBarClientModel,
+    messages: &MarketWorkerSender,
+) -> Result<(), String> {
+    match event {
+        envelope::Payload::SeriesSnapshot(snapshot) => {
+            if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
+                return Err("engine realtime snapshot identity mismatched".to_string());
+            }
+            let replay = replay_snapshot(&snapshot)?;
+            let outcome = model
+                .apply_update(ReplayStreamUpdate::Snapshot(replay.clone()))
+                .map_err(|error| error.to_string())?;
+            let MarketBarModelOutcome::Published(generation) = outcome else {
+                return Err("engine realtime snapshot was not publishable".to_string());
+            };
+            send_publication(messages, replay, generation)
+        }
+        envelope::Payload::ProviderState(state) => apply_provider_state(&state, messages),
+        envelope::Payload::SeriesState(state) => {
+            if state.consumer_id != consumer_id || state.generation != active_generation {
+                return Err("engine realtime state identity mismatched".to_string());
+            }
+            match SeriesLoadState::try_from(state.state)
+                .map_err(|_| "engine returned an invalid realtime state".to_string())?
+            {
+                SeriesLoadState::Live => messages
+                    .send(MarketWorkerMessage::State {
+                        state: ChartState::Ready,
+                        message: "Coinbase history/live handoff is current".to_string(),
+                    })
+                    .map_err(|error| error.to_string()),
+                SeriesLoadState::Failed => Err(state
+                    .detail
+                    .unwrap_or_else(|| "Coinbase realtime failed".to_string())),
+                SeriesLoadState::Empty
+                | SeriesLoadState::Resolving
+                | SeriesLoadState::Partial
+                | SeriesLoadState::Ready
+                | SeriesLoadState::Superseded => Ok(()),
+            }
+        }
+        envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+        envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+        _ => Err("engine returned an unexpected polled market event".to_string()),
+    }
+}
+
+fn apply_provider_state(
+    state: &ProviderState,
+    messages: &MarketWorkerSender,
+) -> Result<(), String> {
+    if state.provider != "coinbase" {
+        return Err("engine provider state identity mismatched".to_string());
+    }
+    let provider_state = ProviderConnectionState::try_from(state.state)
+        .map_err(|_| "engine returned an invalid provider state".to_string())?;
+    let (connection, detail) = match provider_state {
+        ProviderConnectionState::Disconnected => (
+            FeedConnectionState::Disconnected,
+            "Coinbase realtime is disconnected",
+        ),
+        ProviderConnectionState::Connecting => (
+            FeedConnectionState::Discovering,
+            "Coinbase realtime is connecting",
+        ),
+        ProviderConnectionState::Online => (
+            FeedConnectionState::Streaming,
+            "Coinbase history and realtime are current",
+        ),
+        ProviderConnectionState::Recovering => (
+            FeedConnectionState::Recovering,
+            "Coinbase realtime is recovering; retained history remains visible",
+        ),
+        ProviderConnectionState::Failed => {
+            (FeedConnectionState::Stopped, "Coinbase realtime stopped")
+        }
+    };
+    messages
+        .send(MarketWorkerMessage::Connection {
+            state: connection,
+            message: state.detail.clone().unwrap_or_else(|| detail.to_string()),
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn request_snapshot(
@@ -341,7 +441,7 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
                     producer: "axiusflow_engine".to_string(),
                     schema_version: 1,
                     correlation_id: format!(
-                        "engine-history-{}-{}",
+                        "engine-series-{}-{}",
                         snapshot.consumer_id, snapshot.generation
                     ),
                     causation_id: String::new(),
@@ -379,7 +479,8 @@ fn series_key(product: &CoinbaseSpotProduct, interval: ChartInterval) -> Result<
         || interval != ChartInterval::Minute1
     {
         return Err(
-            "this migration slice supports Coinbase BTC-USD one-minute history only".to_string(),
+            "this migration slice supports Coinbase BTC-USD one-minute history and realtime only"
+                .to_string(),
         );
     }
     Ok(SeriesKey {
@@ -462,11 +563,35 @@ mod tests {
                 volume: 7,
             }],
             publication_generation: 1,
+            forming: false,
         })
         .expect("snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 2);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.evidence().session_generation, 7);
         assert_eq!(snapshot.bars()[0].provenance().producer, "axiusflow_engine");
+    }
+
+    #[test]
+    fn engine_recovery_state_remains_explicit_while_history_is_retained() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        apply_provider_state(
+            &ProviderState {
+                provider: "coinbase".to_string(),
+                state: ProviderConnectionState::Recovering as i32,
+                generation: 2,
+                detail: None,
+            },
+            &sender,
+        )
+        .expect("provider state applies");
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Recovering,
+                message,
+            }] if message.contains("retained history")
+        ));
     }
 }

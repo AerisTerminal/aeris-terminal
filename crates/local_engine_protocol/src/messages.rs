@@ -341,6 +341,22 @@ pub struct RemoveConsumer {
     pub consumer_id: u64,
 }
 
+/// Requests at most one pending covering market event for a consumer.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct PollMarketEvent {
+    /// Consumer whose conflated event slots should be drained.
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+}
+
+/// Indicates that a market-event poll found no pending publication.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct MarketEventIdle {
+    /// Consumer that was polled.
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+}
+
 /// Changes engine resource policy without changing user market demand.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct SetEngineResourceMode {
@@ -429,6 +445,9 @@ pub struct SeriesSnapshot {
     /// Monotonic publication generation within the provider session.
     #[prost(uint64, tag = "8")]
     pub publication_generation: u64,
+    /// Whether the newest bar is still forming and may be revised.
+    #[prost(bool, tag = "9")]
+    pub forming: bool,
 }
 
 /// Incremental bar publication after a covering snapshot.
@@ -526,7 +545,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -608,5 +627,11 @@ pub mod envelope {
         /// Demand-specific error. Tag 38.
         #[prost(message, tag = "38")]
         DemandError(super::DemandError),
+        /// Polls one consumer's bounded event slots. Tag 39.
+        #[prost(message, tag = "39")]
+        PollMarketEvent(super::PollMarketEvent),
+        /// No market event was pending. Tag 40.
+        #[prost(message, tag = "40")]
+        MarketEventIdle(super::MarketEventIdle),
     }
 }

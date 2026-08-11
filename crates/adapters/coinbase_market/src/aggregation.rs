@@ -175,7 +175,7 @@ impl CoinbaseBarAggregator {
         &mut self,
         bars: &[MarketBar],
     ) -> Result<usize, CoinbaseBarAggregationError> {
-        self.seed(bars, true)
+        self.seed(bars, true, false)
     }
 
     /// Atomically seeds completed history before a live current minute.
@@ -188,40 +188,64 @@ impl CoinbaseBarAggregator {
         &mut self,
         bars: &[MarketBar],
     ) -> Result<usize, CoinbaseBarAggregationError> {
-        self.seed(bars, false)
+        self.seed(bars, false, false)
+    }
+
+    /// Seeds completed canonical history without rewriting its source sequence.
+    ///
+    /// This is the engine handoff path: the history snapshot already owns a
+    /// contiguous canonical sequence and realtime must continue it exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for repeated seeding, invalid or discontinuous bars,
+    /// or sequence exhaustion.
+    pub fn seed_canonical_history(
+        &mut self,
+        bars: &[MarketBar],
+    ) -> Result<usize, CoinbaseBarAggregationError> {
+        self.seed(bars, false, true)
     }
 
     fn seed(
         &mut self,
         bars: &[MarketBar],
         newest_is_in_flight: bool,
+        preserve_sequence: bool,
     ) -> Result<usize, CoinbaseBarAggregationError> {
         if self.activity_started {
             return Err(CoinbaseBarAggregationError::AlreadyInitialized);
         }
-        let mut previous_timestamp = None;
+        let mut previous = None;
         for bar in bars {
             let mut validated = *bar;
-            validated.source_sequence = 1;
+            if !preserve_sequence {
+                validated.source_sequence = 1;
+            }
             validated
                 .validate()
                 .map_err(|_| CoinbaseBarAggregationError::InvalidBar)?;
-            if previous_timestamp.is_some_and(|previous| {
-                bar.exchange_timestamp_seconds <= previous
+            if previous.is_some_and(|previous: MarketBar| {
+                bar.exchange_timestamp_seconds <= previous.exchange_timestamp_seconds
                     || bar.exchange_timestamp_seconds % ONE_MINUTE_SECONDS != 0
-            }) || previous_timestamp.is_none()
-                && bar.exchange_timestamp_seconds % ONE_MINUTE_SECONDS != 0
+                    || preserve_sequence
+                        && previous.source_sequence.checked_add(1) != Some(bar.source_sequence)
+            }) || previous.is_none() && bar.exchange_timestamp_seconds % ONE_MINUTE_SECONDS != 0
             {
                 return Err(CoinbaseBarAggregationError::InvalidBar);
             }
-            previous_timestamp = Some(bar.exchange_timestamp_seconds);
+            previous = Some(*bar);
         }
         let retained_start = bars
             .len()
             .saturating_sub(self.config.maximum_history_bars.get());
         let retained = &bars[retained_start..];
         let mut history = VecDeque::with_capacity(self.config.maximum_history_bars.get());
-        let mut next_sequence = 1_u64;
+        let mut next_sequence = if preserve_sequence {
+            retained.first().map_or(1, |bar| bar.source_sequence)
+        } else {
+            1
+        };
         let completed_count = if newest_is_in_flight {
             retained.len().saturating_sub(1)
         } else {
@@ -229,7 +253,9 @@ impl CoinbaseBarAggregator {
         };
         for source in retained.iter().take(completed_count) {
             let mut bar = *source;
-            bar.source_sequence = next_sequence;
+            if !preserve_sequence {
+                bar.source_sequence = next_sequence;
+            }
             next_sequence = next_sequence
                 .checked_add(1)
                 .ok_or(CoinbaseBarAggregationError::SequenceOverflow)?;
@@ -594,6 +620,26 @@ mod tests {
         assert_eq!(
             completed.exchange_timestamp_seconds,
             102 * ONE_MINUTE_SECONDS
+        );
+    }
+
+    #[test]
+    fn canonical_history_sequence_continues_across_live_handoff() {
+        let mut aggregator = aggregator();
+        aggregator
+            .seed_canonical_history(&[bar(100, 10_000), bar(101, 10_100)])
+            .expect("canonical history seeds");
+        aggregator
+            .apply_trade(&trade(102, "103.00", "0.5"))
+            .expect("first live minute opens");
+        let completed = aggregator
+            .apply_trade(&trade(103, "104.00", "0.5"))
+            .expect("live minute rolls")
+            .expect("live bar completes");
+        assert_eq!(completed.source_sequence, 103);
+        assert_eq!(
+            aggregator.history()[..2],
+            [bar(100, 10_000), bar(101, 10_100)]
         );
     }
 

@@ -12,15 +12,15 @@ pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
 pub use messages::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
-    EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, HotSeries, MarketBar, PersistenceState,
-    ProviderConnectionState, ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode,
-    RestoreWorkspace, SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState,
-    SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, ShutdownEngine,
-    ViewportDemand, VisibilityDemand, WorkspaceState, envelope,
+    EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, HotSeries, MarketBar, MarketEventIdle,
+    PersistenceState, PollMarketEvent, ProviderConnectionState, ProviderState, RegisterConsumer,
+    RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesDemand, SeriesKey, SeriesLoadState,
+    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport,
+    SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, envelope,
 };
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Maximum prost payload accepted in one frame (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
