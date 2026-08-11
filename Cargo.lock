@@ -831,6 +831,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiusflow_market_engine"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_market_data",
+]
+
+[[package]]
 name = "axiusflow_market_protocol_adapter"
 version = "0.1.0"
 dependencies = [

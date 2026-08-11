@@ -52,6 +52,7 @@ Resident engine
 - `crates/domain/instruments`: provider-neutral instrument identity.
 - `crates/domain/market_data`: canonical bars, intervals, order-book state, and related market semantics.
 - `crates/application`: generation-aware client models, provenance validation, replay snapshots, and stream publication behavior.
+- `crates/market_engine`: headless target engine core with one explicitly owned demand registry, provider-session registry, bounded canonical series store, and immutable per-consumer publications. It currently has no provider adapter, storage, IPC, GPUI, thread, or production desktop path attached; that cutover begins with the Coinbase engine slice.
 
 These crates must not depend on UI or a particular provider.
 
@@ -242,5 +243,7 @@ cargo test --workspace --all-features
 ```
 
 The first migration preparation slice is protocol-only. It does not create a second provider runtime: market demand and series publication messages exist for the forthcoming engine owner, while all live provider execution still follows the desktop-owned path described above.
+
+The second preparation slice adds the headless `market_engine` state owner. It is deterministic library code rather than a parallel runtime: no provider socket is started and no desktop message is routed through it yet. Its bounded store shares one immutable bar snapshot across matching consumers, consumer generations fence stale presentation, provider generations fence stale sessions, and client detach removes only that client's demand.
 
 Focused conformance and release-mode performance checks supplement this gate for provider, persistence, IPC, UI, and latency changes. A passing compile is not proof of runtime correctness.

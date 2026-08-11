@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 3 of 180 tasks complete.**
+**Verified progress: 4 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -3597,7 +3597,9 @@ Keep protocol versioned.
 
 # 110. PHASE 2 — MARKET ENGINE CORE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-11): `crates/market_engine` now owns one explicit `MarketEngine` containing a bounded demand registry, provider-session/capability registry, bounded canonical series store, and latest immutable per-consumer publications. It uses ordinary Rust ownership with no GPUI, IPC serialization, sockets, storage, threads, globals, or new dependency beyond the canonical market-data domain. Deterministic tests prove per-consumer stale-generation rejection, exact provider-session fencing, bounded consumers/series/bars, disconnect cleanup, and twenty consumers sharing one `Arc<SeriesSnapshot>` while the store retains one series. Focused tests and strict package Clippy pass.
 
 Create `market_engine`.
 
