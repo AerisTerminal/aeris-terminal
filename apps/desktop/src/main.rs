@@ -51,6 +51,8 @@ use resident_market_worker::{
     MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
     PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
+#[cfg(feature = "diagnostics")]
+use std::time::Instant;
 use std::{
     borrow::Cow,
     pin::Pin,
@@ -208,6 +210,49 @@ fn reconnect_contract_index(
         .position(|result| result.symbol == target.symbol && result.exchange == target.exchange)
 }
 
+#[cfg(feature = "diagnostics")]
+const FOREGROUND_INTERACTION_SAMPLE_CAPACITY: usize = 128;
+
+#[cfg(feature = "diagnostics")]
+#[derive(Default)]
+struct ForegroundInteractionDiagnostics {
+    symbol_input_change: Vec<u64>,
+    symbol_input_submit: Vec<u64>,
+    instrument_selection: Vec<u64>,
+    interval_selection: Vec<u64>,
+}
+
+#[cfg(feature = "diagnostics")]
+impl ForegroundInteractionDiagnostics {
+    fn record(samples: &mut Vec<u64>, elapsed_nanos: u64) {
+        if samples.len() < FOREGROUND_INTERACTION_SAMPLE_CAPACITY {
+            samples.push(elapsed_nanos);
+        }
+    }
+
+    fn record_symbol_input(&mut self, submitted: bool, elapsed_nanos: u64) {
+        let samples = if submitted {
+            &mut self.symbol_input_submit
+        } else {
+            &mut self.symbol_input_change
+        };
+        Self::record(samples, elapsed_nanos);
+    }
+
+    fn record_instrument_selection(&mut self, elapsed_nanos: u64) {
+        Self::record(&mut self.instrument_selection, elapsed_nanos);
+    }
+
+    fn record_interval_selection(&mut self, elapsed_nanos: u64) {
+        Self::record(&mut self.interval_selection, elapsed_nanos);
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+fn elapsed_nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 struct TerminalApp {
     chart: Option<Entity<OriginChartView>>,
     dom: Entity<ReadOnlyDomView>,
@@ -250,6 +295,8 @@ struct TerminalApp {
     coinbase_pending_sequence: Option<u64>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
+    #[cfg(feature = "diagnostics")]
+    foreground_interactions: ForegroundInteractionDiagnostics,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -784,6 +831,8 @@ impl TerminalApp {
             coinbase_pending_sequence: None,
             restored_viewport: None,
             last_persisted_viewport: None,
+            #[cfg(feature = "diagnostics")]
+            foreground_interactions: ForegroundInteractionDiagnostics::default(),
         };
         let mut async_cx = cx.to_async();
         let this = cx.weak_entity();
@@ -822,34 +871,42 @@ impl TerminalApp {
     }
 
     fn select_interval(&mut self, interval: ChartInterval, cx: &mut Context<Self>) -> bool {
-        if self.provider != TerminalProvider::Coinbase {
-            self.select_rithmic_series(interval.into(), cx);
-            return true;
-        }
-        if self.coinbase_interval == interval && self.coinbase_pending_interval.is_none() {
-            return true;
-        }
-        if self.coinbase_pending_interval == Some(interval) {
-            return true;
-        }
-        let Some(product) = self.coinbase_product.clone() else {
-            self.series_message = "Coinbase market selection is unavailable".to_string();
+        #[cfg(feature = "diagnostics")]
+        let started = Instant::now();
+        let selected = (|| {
+            if self.provider != TerminalProvider::Coinbase {
+                self.select_rithmic_series(interval.into(), cx);
+                return true;
+            }
+            if self.coinbase_interval == interval && self.coinbase_pending_interval.is_none() {
+                return true;
+            }
+            if self.coinbase_pending_interval == Some(interval) {
+                return true;
+            }
+            let Some(product) = self.coinbase_product.clone() else {
+                self.series_message = "Coinbase market selection is unavailable".to_string();
+                cx.notify();
+                return false;
+            };
+            let Ok(sequence) = self.market_worker.try_select_coinbase(product, interval) else {
+                self.series_message = format!("{} history could not start", interval.label());
+                cx.notify();
+                return false;
+            };
+            self.coinbase_pending_interval = Some(interval);
+            self.coinbase_pending_sequence = Some(sequence);
+            self.coinbase_switch = CoinbaseSwitchState::Pending;
+            self.chart_state = ChartState::Loading;
+            self.chart_state_message = format!("Loading {} history", interval.label());
+            self.series_message = format!("Switching to {}", interval.label());
             cx.notify();
-            return false;
-        };
-        let Ok(sequence) = self.market_worker.try_select_coinbase(product, interval) else {
-            self.series_message = format!("{} history could not start", interval.label());
-            cx.notify();
-            return false;
-        };
-        self.coinbase_pending_interval = Some(interval);
-        self.coinbase_pending_sequence = Some(sequence);
-        self.coinbase_switch = CoinbaseSwitchState::Pending;
-        self.chart_state = ChartState::Loading;
-        self.chart_state_message = format!("Loading {} history", interval.label());
-        self.series_message = format!("Switching to {}", interval.label());
-        cx.notify();
-        true
+            true
+        })();
+        #[cfg(feature = "diagnostics")]
+        self.foreground_interactions
+            .record_interval_selection(elapsed_nanos(started));
+        selected
     }
 
     fn instrument_entries(&self, cx: &App) -> Vec<InstrumentMenuEntry> {
@@ -898,7 +955,9 @@ impl TerminalApp {
         selection: InstrumentMenuSelection,
         cx: &mut Context<Self>,
     ) -> bool {
-        match selection {
+        #[cfg(feature = "diagnostics")]
+        let started = Instant::now();
+        let selected = (|| match selection {
             InstrumentMenuSelection::Rithmic(index) => self.select_rithmic_symbol(index, cx),
             InstrumentMenuSelection::Coinbase(product) => {
                 if self
@@ -938,7 +997,11 @@ impl TerminalApp {
                 cx.notify();
                 true
             }
-        }
+        })();
+        #[cfg(feature = "diagnostics")]
+        self.foreground_interactions
+            .record_instrument_selection(elapsed_nanos(started));
+        selected
     }
 
     fn open_chrome_overlay(
@@ -3897,7 +3960,16 @@ fn subscribe_symbol_input(
     let terminal = terminal.clone();
     window
         .subscribe(&input, cx, move |_, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            #[cfg(feature = "diagnostics")]
+            let started = Instant::now();
+            #[cfg(feature = "diagnostics")]
+            let measured_submission = match event {
+                InputEvent::Change => Some(false),
+                InputEvent::PressEnter { .. } => Some(true),
+                InputEvent::Focus | InputEvent::Blur => None,
+            };
+            let submitted = matches!(event, InputEvent::PressEnter { .. });
+            if submitted {
                 let selected = terminal.update(cx, TerminalApp::submit_symbol_input);
                 if selected {
                     terminal.update(cx, |app, app_cx| {
@@ -3908,6 +3980,13 @@ fn subscribe_symbol_input(
                 terminal.update(cx, |app, cx| {
                     app.chrome_selection = 0;
                     cx.notify();
+                });
+            }
+            #[cfg(feature = "diagnostics")]
+            if let Some(submitted) = measured_submission {
+                terminal.update(cx, |app, _| {
+                    app.foreground_interactions
+                        .record_symbol_input(submitted, elapsed_nanos(started));
                 });
             }
         })
@@ -4073,9 +4152,41 @@ mod tests {
         reconnect_contract_index, rithmic_ready_action, series_selector_label,
         should_apply_rithmic_worker_stop,
     };
+    #[cfg(feature = "diagnostics")]
+    use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
     use axiusflow_design_system::ThemeColor;
     use axiusflow_local_engine_protocol::ProviderInstrumentSummary;
     use axiusflow_observability::FeedConnectionState;
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn foreground_interaction_samples_are_bounded_per_handler() {
+        let mut diagnostics = ForegroundInteractionDiagnostics::default();
+        for sample in 0..=FOREGROUND_INTERACTION_SAMPLE_CAPACITY {
+            let elapsed = u64::try_from(sample).unwrap_or(u64::MAX);
+            diagnostics.record_symbol_input(false, elapsed);
+            diagnostics.record_symbol_input(true, elapsed);
+            diagnostics.record_instrument_selection(elapsed);
+            diagnostics.record_interval_selection(elapsed);
+        }
+        assert_eq!(
+            diagnostics.symbol_input_change.len(),
+            FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+        );
+        assert_eq!(
+            diagnostics.symbol_input_submit.len(),
+            FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+        );
+        assert_eq!(
+            diagnostics.instrument_selection.len(),
+            FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+        );
+        assert_eq!(
+            diagnostics.interval_selection.len(),
+            FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+        );
+    }
+
     #[test]
     fn escape_exits_fullscreen_without_stealing_regular_escape() {
         assert_eq!(

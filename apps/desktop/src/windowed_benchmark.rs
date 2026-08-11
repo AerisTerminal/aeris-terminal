@@ -2,16 +2,22 @@
 //!
 //! Drives deterministic replay deltas through the real GPUI window one update per
 //! frame and measures update-to-next-frame latency, covering-snapshot installation,
-//! frame registration, callback cadence, process working-set growth, and chart-queue
-//! occupancy from GPUI's `on_next_frame` callbacks against the display profile
-//! reported by [`NativeDisplayProbe`].
+//! frame registration, production input/instrument/interval handler duration,
+//! callback cadence, process working-set growth, and chart-queue occupancy from
+//! GPUI's `on_next_frame` callbacks against the display profile reported by
+//! [`NativeDisplayProbe`].
 //! Renderer submission is genuinely performed through a native GPUI window. These
 //! callbacks run after the prior render but do not prove physical scanout, and the
 //! report says so.
 
 use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay, ReplaySnapshot};
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
-use axiusflow_desktop::market_worker::FixtureMarketWorker;
+use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
+use axiusflow_desktop::market_worker::{
+    CoinbaseWorkerStartup, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
+    MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
+};
+use axiusflow_market_data::ChartInterval;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
 use axiusflow_platform_runtime::{WindowsCompositionProbe, WindowsCompositionTiming};
@@ -19,6 +25,7 @@ use gpui::{
     App, Bounds, Context, Entity, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     size,
 };
+use gpui_component::input::{InputEvent, InputState};
 use gpui_platform::application;
 use serde::Serialize;
 use std::{
@@ -26,17 +33,26 @@ use std::{
     env,
     error::Error,
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::AtomicU64,
+        mpsc::{Receiver, TryRecvError, channel, sync_channel},
+    },
     time::Instant,
 };
 
 use crate::readiness_conformance::ProcessMemoryProbe;
+use crate::{TerminalApp, subscribe_symbol_input};
 
 const SNAPSHOT_BARS: usize = 256;
 const REPLACEMENT_SNAPSHOT_BARS: usize = 600;
 const WARMUP_FRAMES: usize = 32;
 const MEASURED_FRAMES: usize = 256;
+const INTERACTION_SAMPLES: usize = 128;
+const INTERACTION_COMMAND_CAPACITY: usize = 4;
 
 #[derive(Serialize)]
 struct DisplayOutputEvidence {
@@ -124,6 +140,14 @@ struct ForegroundDurationEvidence {
     chart_snapshot_installation: LatencyEvidence,
     frame_scheduling_samples: usize,
     frame_scheduling: LatencyEvidence,
+    symbol_input_change_samples: usize,
+    symbol_input_change: LatencyEvidence,
+    symbol_input_submit_samples: usize,
+    symbol_input_submit: LatencyEvidence,
+    instrument_selection_samples: usize,
+    instrument_selection: LatencyEvidence,
+    interval_selection_samples: usize,
+    interval_selection: LatencyEvidence,
 }
 
 #[derive(Serialize)]
@@ -150,7 +174,7 @@ struct WindowedBenchmarkReport {
     physical_presentation_measured: bool,
     presentation_measurement_method: &'static str,
     external_scanout_instrumented: bool,
-    limitations: [&'static str; 5],
+    limitations: [&'static str; 7],
 }
 
 struct FrameSample {
@@ -160,7 +184,11 @@ struct FrameSample {
 
 struct BenchmarkDriver {
     chart: Entity<OriginChartView>,
+    terminal: Entity<TerminalApp>,
+    symbol_input: Entity<InputState>,
     worker: FixtureMarketWorker,
+    _message_sender: MarketWorkerSender,
+    interaction_commands: Receiver<MarketWorkerCommand>,
     replacement_snapshot: Option<ReplaySnapshot>,
     previous_sequence: u64,
     iteration: usize,
@@ -178,6 +206,7 @@ struct BenchmarkDriver {
     chart_queue_overflows: u64,
     chart_snapshot_installation_nanos: Vec<u64>,
     frame_scheduling_nanos: Vec<u64>,
+    interaction_iterations: usize,
     failure: Option<String>,
     #[cfg(target_os = "windows")]
     composition_probe: Option<WindowsCompositionProbe>,
@@ -192,6 +221,22 @@ struct BenchmarkDriver {
 enum Step {
     Continue,
     Finish,
+}
+
+type BenchmarkOutcome = Rc<RefCell<Option<Result<(), String>>>>;
+
+struct BenchmarkSetup {
+    memory: ProcessMemoryProbe,
+    worker: FixtureMarketWorker,
+    replacement_snapshot: ReplaySnapshot,
+    previous_sequence: u64,
+    snapshot: ReplaySnapshot,
+    report_path: PathBuf,
+    interaction_worker: MarketDataWorker,
+    interaction_commands: Receiver<MarketWorkerCommand>,
+    message_sender: MarketWorkerSender,
+    coinbase_products: [CoinbaseSpotProduct; 2],
+    interaction_startup: MarketWorkerStartup,
 }
 
 impl BenchmarkDriver {
@@ -242,25 +287,7 @@ impl BenchmarkDriver {
         }
         self.last_callback_at = callback_at;
         if self.samples.len() >= MEASURED_FRAMES {
-            if self.snapshot_replacement_first_pixel_nanos.is_some() {
-                return Step::Finish;
-            }
-            let Some(snapshot) = self.replacement_snapshot.take() else {
-                return Step::Finish;
-            };
-            let submitted_at = Instant::now();
-            if let Err(error) = self
-                .chart
-                .update(cx, |chart, _| chart.load_replay(&snapshot))
-            {
-                self.failure = Some(format!(
-                    "windowed benchmark covering snapshot replacement failed: {error}"
-                ));
-                return Step::Finish;
-            }
-            window.refresh();
-            self.snapshot_replacement_submitted_at = Some(submitted_at);
-            return Step::Continue;
+            return self.step_after_replay(window, cx);
         }
         let publication = match self.worker.publish_delta(self.previous_sequence) {
             Ok(Some(publication)) => publication,
@@ -286,6 +313,95 @@ impl BenchmarkDriver {
         self.iteration += 1;
         self.submitted_at = Instant::now();
         Step::Continue
+    }
+
+    fn step_after_replay(&mut self, window: &mut Window, cx: &mut App) -> Step {
+        if self.snapshot_replacement_first_pixel_nanos.is_some() {
+            if self.interaction_iterations >= INTERACTION_SAMPLES {
+                if let Err(error) = self.drain_interaction_commands() {
+                    self.failure = Some(error);
+                }
+                return Step::Finish;
+            }
+            if let Err(error) = self.sample_interactions(cx) {
+                self.failure = Some(error);
+                return Step::Finish;
+            }
+            window.refresh();
+            return Step::Continue;
+        }
+        let Some(snapshot) = self.replacement_snapshot.take() else {
+            return Step::Finish;
+        };
+        let submitted_at = Instant::now();
+        if let Err(error) = self
+            .chart
+            .update(cx, |chart, _| chart.load_replay(&snapshot))
+        {
+            self.failure = Some(format!(
+                "windowed benchmark covering snapshot replacement failed: {error}"
+            ));
+            return Step::Finish;
+        }
+        window.refresh();
+        self.snapshot_replacement_submitted_at = Some(submitted_at);
+        Step::Continue
+    }
+
+    fn sample_interactions(&mut self, cx: &mut App) -> Result<(), String> {
+        if self.interaction_iterations > 0 {
+            self.drain_interaction_commands()?;
+        }
+        let instrument_index = usize::from(self.interaction_iterations.is_multiple_of(2));
+        self.terminal.update(cx, |terminal, _| {
+            terminal.chrome_selection = instrument_index;
+        });
+        self.symbol_input.update(cx, |_, input_cx| {
+            input_cx.emit(InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            });
+        });
+        self.symbol_input
+            .update(cx, |_, input_cx| input_cx.emit(InputEvent::Change));
+        let interval = if self.interaction_iterations.is_multiple_of(2) {
+            ChartInterval::Minute5
+        } else {
+            ChartInterval::Minute15
+        };
+        let selected = self.terminal.update(cx, |terminal, terminal_cx| {
+            terminal.select_interval(interval, terminal_cx)
+        });
+        if !selected {
+            return Err("windowed benchmark timeframe handler rejected fixture selection".into());
+        }
+        self.interaction_iterations += 1;
+        Ok(())
+    }
+
+    fn drain_interaction_commands(&self) -> Result<(), String> {
+        let mut commands = 0;
+        loop {
+            match self.interaction_commands.try_recv() {
+                Ok(MarketWorkerCommand::CoinbaseSelect(_)) => commands += 1,
+                Ok(_) => {
+                    return Err(
+                        "windowed benchmark interaction emitted an unexpected worker command"
+                            .into(),
+                    );
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    return Err("windowed benchmark interaction command sink disconnected".into());
+                }
+            }
+        }
+        if commands != 2 {
+            return Err(format!(
+                "windowed benchmark expected symbol and timeframe commands, observed {commands}"
+            ));
+        }
+        Ok(())
     }
 
     fn observe_chart_before_submission(&mut self, cx: &mut App) -> ChartBridgeMetrics {
@@ -334,7 +450,7 @@ impl Render for WindowedBenchmarkApp {
 
 fn schedule_frame(
     driver: Rc<RefCell<BenchmarkDriver>>,
-    outcome: Rc<RefCell<Option<Result<(), String>>>>,
+    outcome: BenchmarkOutcome,
     window: &mut Window,
     _cx: &mut App,
 ) {
@@ -348,7 +464,8 @@ fn schedule_frame(
         if finished {
             #[cfg(target_os = "windows")]
             driver.borrow_mut().finish_composition();
-            let result = write_report(&mut driver.borrow_mut()).map_err(|error| error.to_string());
+            let result =
+                write_report(&mut driver.borrow_mut(), cx).map_err(|error| error.to_string());
             if let Err(error) = &result {
                 eprintln!("windowed benchmark report failed: {error}");
             }
@@ -627,14 +744,29 @@ fn chart_queue_evidence(driver: &BenchmarkDriver) -> Result<ChartQueueEvidence, 
 
 fn foreground_duration_evidence(
     driver: &BenchmarkDriver,
+    cx: &App,
 ) -> Result<ForegroundDurationEvidence, String> {
+    let interactions = &driver.terminal.read(cx).foreground_interactions;
+    let interaction_counts = [
+        interactions.symbol_input_change.len(),
+        interactions.symbol_input_submit.len(),
+        interactions.instrument_selection.len(),
+        interactions.interval_selection.len(),
+    ];
     if driver.chart_snapshot_installation_nanos.is_empty()
         || driver.frame_scheduling_nanos.is_empty()
+        || interaction_counts
+            .iter()
+            .any(|samples| *samples != INTERACTION_SAMPLES)
     {
         return Err(format!(
-            "windowed benchmark foreground timing missing: snapshot_installations={} frame_schedules={}",
+            "windowed benchmark foreground timing missing: snapshot_installations={} frame_schedules={} input_change={} input_submit={} instrument={} interval={}",
             driver.chart_snapshot_installation_nanos.len(),
-            driver.frame_scheduling_nanos.len()
+            driver.frame_scheduling_nanos.len(),
+            interaction_counts[0],
+            interaction_counts[1],
+            interaction_counts[2],
+            interaction_counts[3],
         ));
     }
     Ok(ForegroundDurationEvidence {
@@ -644,22 +776,30 @@ fn foreground_duration_evidence(
         ),
         frame_scheduling_samples: driver.frame_scheduling_nanos.len(),
         frame_scheduling: duration_latency_evidence(&driver.frame_scheduling_nanos),
+        symbol_input_change_samples: interaction_counts[0],
+        symbol_input_change: duration_latency_evidence(&interactions.symbol_input_change),
+        symbol_input_submit_samples: interaction_counts[1],
+        symbol_input_submit: duration_latency_evidence(&interactions.symbol_input_submit),
+        instrument_selection_samples: interaction_counts[2],
+        instrument_selection: duration_latency_evidence(&interactions.instrument_selection),
+        interval_selection_samples: interaction_counts[3],
+        interval_selection: duration_latency_evidence(&interactions.interval_selection),
     })
 }
 
-fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
+fn write_report(driver: &mut BenchmarkDriver, cx: &App) -> Result<(), Box<dyn Error>> {
     if let Some(failure) = driver.failure.take() {
         return Err(failure.into());
     }
     driver.memory.sample()?;
     let observed_growth_bytes = driver.memory.observed_growth_bytes();
     let chart_queue = chart_queue_evidence(driver)?;
-    let foreground_duration = foreground_duration_evidence(driver)?;
+    let foreground_duration = foreground_duration_evidence(driver, cx)?;
     #[cfg(target_os = "windows")]
     let windows_dwm_composition = windows_composition_evidence(driver);
     let report = WindowedBenchmarkReport {
-        schema_version: 7,
-        evidence_scope: "windowed_first_pixel_snapshot_replacement_replay_memory_queue_foreground_and_native_compositor_timeline",
+        schema_version: 8,
+        evidence_scope: "windowed_first_pixel_snapshot_replacement_replay_memory_queue_production_interaction_handlers_and_native_compositor_timeline",
         source_revision: env::var("GITHUB_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty()),
@@ -715,13 +855,15 @@ fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
             "single_named_display_profile",
             "disconnected_fixture_data_source",
             "window_output_attribution_by_compositor_placement",
+            "interaction_handlers_use_a_bounded_disconnected_command_sink",
+            "tab_switch_unmeasured_because_the_current_terminal_has_no_tab_surface",
         ],
     };
     let mut encoded = serde_json::to_vec_pretty(&report)?;
     encoded.push(b'\n');
     fs::write(&driver.report_path, encoded)?;
     println!(
-        "windowed_chart_latency=completed first_pixel_ns={} snapshot_replacement_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} snapshot_installation_ns={} frame_schedule_p99_ns={} process_memory_growth_bytes={} chart_queue_before={} chart_queue_after={} chart_queue_overflows={} report={}",
+        "windowed_chart_latency=completed first_pixel_ns={} snapshot_replacement_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} snapshot_installation_ns={} frame_schedule_p99_ns={} input_change_p99_ns={} input_submit_p99_ns={} instrument_selection_p99_ns={} interval_selection_p99_ns={} process_memory_growth_bytes={} chart_queue_before={} chart_queue_after={} chart_queue_overflows={} report={}",
         report.first_pixel_nanos,
         report.snapshot_replacement_first_pixel_nanos,
         driver.samples.len(),
@@ -731,6 +873,10 @@ fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
             .chart_snapshot_installation
             .maximum,
         report.foreground_duration.frame_scheduling.p99,
+        report.foreground_duration.symbol_input_change.p99,
+        report.foreground_duration.symbol_input_submit.p99,
+        report.foreground_duration.instrument_selection.p99,
+        report.foreground_duration.interval_selection.p99,
         report.process_memory_bytes.observed_growth,
         report.chart_queue.maximum_pending_before_submission,
         report.chart_queue.maximum_pending_after_submission,
@@ -756,6 +902,121 @@ fn clear_report_path(report_path: &Path) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn benchmark_coinbase_product(base: &str) -> CoinbaseSpotProduct {
+    CoinbaseSpotProduct {
+        product_id: format!("{base}-USD"),
+        instrument_id: format!("instrument:coinbase:{}:usd", base.to_ascii_lowercase()),
+        display_symbol: format!("{base}/USD"),
+        base_currency: base.to_string(),
+        quote_currency: "USD".to_string(),
+        price_scale: 2,
+        quantity_scale: 8,
+    }
+}
+
+fn benchmark_root(
+    setup: BenchmarkSetup,
+    outcome: BenchmarkOutcome,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<gpui_component::Root> {
+    let BenchmarkSetup {
+        memory,
+        worker,
+        replacement_snapshot,
+        previous_sequence,
+        snapshot,
+        report_path,
+        interaction_worker,
+        interaction_commands,
+        message_sender,
+        coinbase_products,
+        interaction_startup,
+    } = setup;
+    let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
+    let symbol_input = cx.new(|cx| InputState::new(window, cx));
+    let indicator_input = cx.new(|cx| InputState::new(window, cx));
+    let terminal_symbol_input = symbol_input.clone();
+    let terminal = cx.new(move |cx| {
+        TerminalApp::new(
+            cx,
+            interaction_startup,
+            interaction_worker,
+            Some(terminal_symbol_input),
+            indicator_input,
+        )
+    });
+    terminal.update(cx, |terminal, _| {
+        terminal.coinbase_products = coinbase_products.into();
+    });
+    subscribe_symbol_input(Some(symbol_input.clone()), &terminal, window, cx);
+    #[cfg(target_os = "windows")]
+    let (composition_probe, initial_composition_flush_succeeded, composition_samples) =
+        match WindowsCompositionProbe::new() {
+            Ok(probe) => {
+                let flushed = probe.flush().is_ok();
+                let samples = probe.sample().into_iter().collect();
+                (Some(probe), flushed, samples)
+            }
+            Err(_) => (None, false, Vec::new()),
+        };
+    let driver = Rc::new(RefCell::new(BenchmarkDriver {
+        chart: chart.clone(),
+        terminal,
+        symbol_input,
+        worker,
+        _message_sender: message_sender,
+        interaction_commands,
+        replacement_snapshot: Some(replacement_snapshot),
+        previous_sequence,
+        iteration: 0,
+        submitted_at: Instant::now(),
+        last_callback_at: Instant::now(),
+        samples: Vec::with_capacity(MEASURED_FRAMES),
+        report_path,
+        opened_at: Instant::now(),
+        first_pixel_nanos: None,
+        snapshot_replacement_submitted_at: None,
+        snapshot_replacement_first_pixel_nanos: None,
+        memory,
+        maximum_pending_before_submission: 0,
+        maximum_pending_after_submission: 0,
+        chart_queue_overflows: 0,
+        chart_snapshot_installation_nanos: Vec::with_capacity(1),
+        frame_scheduling_nanos: Vec::with_capacity(
+            WARMUP_FRAMES + MEASURED_FRAMES + INTERACTION_SAMPLES + 3,
+        ),
+        interaction_iterations: 0,
+        failure: None,
+        #[cfg(target_os = "windows")]
+        composition_probe,
+        #[cfg(target_os = "windows")]
+        composition_samples,
+        #[cfg(target_os = "windows")]
+        initial_composition_flush_succeeded,
+        #[cfg(target_os = "windows")]
+        final_composition_flush_succeeded: false,
+    }));
+    schedule_frame(driver, outcome, window, cx);
+    cx.new(|cx| gpui_component::Root::new(cx.new(|_| WindowedBenchmarkApp { chart }), window, cx))
+}
+
+fn run_application(setup: BenchmarkSetup, outcome: BenchmarkOutcome) {
+    application().run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        let bounds = Bounds::centered(None, size(px(1_280.0), px(820.0)), cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            move |window, cx| benchmark_root(setup, outcome, window, cx),
+        )
+        .expect("the windowed benchmark window opens");
+        cx.activate(true);
+    });
+}
+
 /// Runs the windowed benchmark and exits the process when measurement completes.
 pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     clear_report_path(report_path)?;
@@ -779,70 +1040,43 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
         )?;
     let previous_sequence = bootstrap.snapshot.stream().last_sequence();
     let (snapshot, report_path) = (bootstrap.snapshot, report_path.to_path_buf());
-    application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        let bounds = Bounds::centered(None, size(px(1_280.0), px(820.0)), cx);
-        let window_outcome = Rc::clone(&application_outcome);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
-                #[cfg(target_os = "windows")]
-                let (composition_probe, initial_composition_flush_succeeded, composition_samples) =
-                    match WindowsCompositionProbe::new() {
-                        Ok(probe) => {
-                            let flushed = probe.flush().is_ok();
-                            let samples = probe.sample().into_iter().collect();
-                            (Some(probe), flushed, samples)
-                        }
-                        Err(_) => (None, false, Vec::new()),
-                    };
-                let driver = Rc::new(RefCell::new(BenchmarkDriver {
-                    chart: chart.clone(),
-                    worker,
-                    replacement_snapshot: Some(replacement_snapshot),
-                    previous_sequence,
-                    iteration: 0,
-                    submitted_at: Instant::now(),
-                    last_callback_at: Instant::now(),
-                    samples: Vec::with_capacity(MEASURED_FRAMES),
-                    report_path,
-                    opened_at: Instant::now(),
-                    first_pixel_nanos: None,
-                    snapshot_replacement_submitted_at: None,
-                    snapshot_replacement_first_pixel_nanos: None,
-                    memory,
-                    maximum_pending_before_submission: 0,
-                    maximum_pending_after_submission: 0,
-                    chart_queue_overflows: 0,
-                    chart_snapshot_installation_nanos: Vec::with_capacity(1),
-                    frame_scheduling_nanos: Vec::with_capacity(WARMUP_FRAMES + MEASURED_FRAMES + 2),
-                    failure: None,
-                    #[cfg(target_os = "windows")]
-                    composition_probe,
-                    #[cfg(target_os = "windows")]
-                    composition_samples,
-                    #[cfg(target_os = "windows")]
-                    initial_composition_flush_succeeded,
-                    #[cfg(target_os = "windows")]
-                    final_composition_flush_succeeded: false,
-                }));
-                schedule_frame(driver, window_outcome, window, cx);
-                cx.new(|cx| {
-                    gpui_component::Root::new(
-                        cx.new(|_| WindowedBenchmarkApp { chart }),
-                        window,
-                        cx,
-                    )
-                })
-            },
-        )
-        .expect("the windowed benchmark window opens");
-        cx.activate(true);
-    });
+    let (interaction_command_sender, interaction_commands) =
+        sync_channel(INTERACTION_COMMAND_CAPACITY);
+    let (message_sender, message_receiver) = market_worker_channel(NonZeroUsize::MIN);
+    let (shutdown_sender, shutdown_receiver) = channel();
+    shutdown_sender.send(())?;
+    let interaction_worker = MarketDataWorker::from_channels(
+        interaction_command_sender,
+        message_receiver,
+        shutdown_receiver,
+        None,
+        Some(Arc::new(AtomicU64::new(0))),
+    );
+    let coinbase_products = [
+        benchmark_coinbase_product("BTC"),
+        benchmark_coinbase_product("ETH"),
+    ];
+    let interaction_startup = MarketWorkerStartup::Loading(Box::new(CoinbaseWorkerStartup {
+        coinbase_product: coinbase_products[0].clone(),
+        subscription_id: "benchmark-interaction".to_string(),
+        worker_label: "bounded disconnected benchmark sink".to_string(),
+    }));
+    run_application(
+        BenchmarkSetup {
+            memory,
+            worker,
+            replacement_snapshot,
+            previous_sequence,
+            snapshot,
+            report_path,
+            interaction_worker,
+            interaction_commands,
+            message_sender,
+            coinbase_products,
+            interaction_startup,
+        },
+        application_outcome,
+    );
     let result = outcome
         .borrow_mut()
         .take()
