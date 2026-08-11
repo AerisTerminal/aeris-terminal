@@ -43,6 +43,18 @@ pub fn native_installation_token() -> Result<Zeroizing<Vec<u8>>, String> {
     load_or_create_installation_token(&vault)
 }
 
+/// Authenticates to the existing resident engine and requests complete shutdown.
+///
+/// This never starts an absent engine and is blocking, so callers must keep it
+/// away from presentation threads.
+///
+/// # Errors
+/// Returns an error when credentials, connection, authentication, or shutdown fail.
+pub fn shutdown_running_engine() -> Result<(), String> {
+    let token = native_installation_token()?;
+    EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())?.shutdown_engine()
+}
+
 /// Loads or creates the installation credential in a supplied credential vault.
 ///
 /// # Errors

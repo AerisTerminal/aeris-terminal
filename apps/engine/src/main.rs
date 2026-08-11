@@ -18,7 +18,9 @@ use axiusflow_engine::{
     EngineShutdown, EngineState, MarketService, bind_listener, default_engine_state_root,
     serve_client_with_market_and_shutdown,
 };
-use axiusflow_local_engine_client::{ENGINE_SOCKET_NAME, EngineClient, native_installation_token};
+use axiusflow_local_engine_client::{
+    ENGINE_SOCKET_NAME, native_installation_token, shutdown_running_engine,
+};
 use interprocess::local_socket::{ListenerNonblockingMode, traits::Listener as _};
 
 fn main() {
@@ -53,11 +55,6 @@ fn parse_command(mut arguments: impl Iterator<Item = OsString>) -> Result<Engine
         }
         _ => Err("usage: axiusflow_engine [--shutdown]".to_string()),
     }
-}
-
-fn shutdown_running_engine() -> Result<(), String> {
-    let token = native_installation_token()?;
-    EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())?.shutdown_engine()
 }
 
 fn run() -> Result<(), String> {

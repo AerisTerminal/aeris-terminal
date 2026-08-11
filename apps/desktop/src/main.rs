@@ -32,8 +32,8 @@ use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::WindowControlArea;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
-    KeyBinding, KeyDownEvent, MouseButton, Render, Window, WindowBounds, WindowOptions, actions,
-    div, prelude::*, px, rgb, size,
+    KeyBinding, KeyDownEvent, MouseButton, Render, Task, WeakEntity, Window, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
@@ -48,13 +48,15 @@ use gpui_component::{
 use gpui_platform::application;
 use resident_market_worker::{
     ChartState, DesktopMarketGeneration, EngineSeriesRequest, MarketDataWorker,
-    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerStartup,
-    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
+    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
+    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
+    UiDiagnosticsFeedback,
 };
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
 use std::{
     borrow::Cow,
+    cell::RefCell,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -130,6 +132,87 @@ const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DesktopLifetimeMode {
+    #[default]
+    KeepEngineWarm,
+    ExitWithDesktop,
+}
+
+fn finish_desktop_shutdown(
+    mode: DesktopLifetimeMode,
+    detach_failed: bool,
+    shutdown_engine: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let shutdown_result = if mode == DesktopLifetimeMode::ExitWithDesktop {
+        shutdown_engine()
+    } else {
+        Ok(())
+    };
+    match (detach_failed, shutdown_result) {
+        (false, Ok(())) => Ok(()),
+        (true, Ok(())) => {
+            Err("desktop market worker did not detach before its deadline".to_string())
+        }
+        (false, Err(error)) => Err(error),
+        (true, Err(error)) => Err(format!(
+            "desktop market worker detach expired; engine shutdown failed: {error}"
+        )),
+    }
+}
+
+#[derive(Clone)]
+struct DesktopLifecycle {
+    mode: DesktopLifetimeMode,
+    retirements: Rc<RefCell<Vec<Task<bool>>>>,
+    terminals: Rc<RefCell<Vec<WeakEntity<TerminalApp>>>>,
+}
+
+impl DesktopLifecycle {
+    fn new(mode: DesktopLifetimeMode) -> Self {
+        Self {
+            mode,
+            retirements: Rc::new(RefCell::new(Vec::new())),
+            terminals: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn register_terminal(&self, terminal: &Entity<TerminalApp>) {
+        self.terminals.borrow_mut().push(terminal.downgrade());
+    }
+
+    fn retire_market_worker(&self, retirement: MarketWorkerRetirement, cx: &App) {
+        self.retirements.borrow_mut().push(
+            cx.background_executor()
+                .spawn(async move { retirement.wait() }),
+        );
+    }
+
+    fn quit(&self, cx: &mut App) -> Task<Result<(), String>> {
+        let terminals = self.terminals.borrow_mut().drain(..).collect::<Vec<_>>();
+        for terminal in terminals {
+            terminal
+                .update(cx, |terminal, terminal_cx| {
+                    terminal.retire_market_worker(terminal_cx);
+                })
+                .ok();
+        }
+        let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
+        let mode = self.mode;
+        cx.background_executor().spawn(async move {
+            let mut detach_failed = false;
+            for retirement in retirements {
+                if !retirement.await {
+                    detach_failed = true;
+                }
+            }
+            finish_desktop_shutdown(mode, detach_failed, || {
+                axiusflow_local_engine_client::shutdown_running_engine()
+            })
+        })
+    }
+}
 
 actions!(
     axiusflow,
@@ -268,6 +351,7 @@ struct TerminalApp {
     subscription_id: String,
     bridge_label: String,
     market_worker: MarketDataWorker,
+    lifecycle: DesktopLifecycle,
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
@@ -761,6 +845,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
         startup: MarketWorkerStartup,
         market_worker: MarketDataWorker,
+        lifecycle: DesktopLifecycle,
         symbol_input: Option<Entity<InputState>>,
         indicator_input: Entity<InputState>,
     ) -> Self {
@@ -800,6 +885,7 @@ impl TerminalApp {
             subscription_id,
             bridge_label,
             market_worker,
+            lifecycle,
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
@@ -850,6 +936,17 @@ impl TerminalApp {
             })
             .detach();
         app
+    }
+
+    fn retire_market_worker(&mut self, cx: &App) {
+        if let Some(retirement) = self.market_worker.begin_retirement() {
+            self.lifecycle.retire_market_worker(retirement, cx);
+        }
+    }
+
+    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.retire_market_worker(cx);
+        window.remove_window();
     }
 
     fn available_intervals(&self) -> &'static [ChartInterval] {
@@ -1054,7 +1151,7 @@ impl TerminalApp {
         if let Some(command) =
             fullscreen_escape_command(event.keystroke.key.as_str(), window.is_fullscreen())
         {
-            command.execute(window);
+            command.execute(window, cx);
             cx.stop_propagation();
             return;
         }
@@ -2291,14 +2388,14 @@ impl Render for TerminalApp {
             .track_focus(&self.chrome_focus)
             .on_key_down(cx.listener(Self::on_terminal_key_down))
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
-            .on_action(|_: &ZoomWindow, window, _| {
-                WindowCommand::MaximizeOrRestore.execute(window);
+            .on_action(|_: &ZoomWindow, window, cx| {
+                WindowCommand::MaximizeOrRestore.execute(window, cx);
             })
             .on_action(move |_: &ToggleFullscreen, window, cx| {
                 window.toggle_fullscreen();
                 fullscreen_focus.focus(window, cx);
             })
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(cx.listener(Self::close_window))
             .bg(gpui_color(theme.colors.background))
             .text_color(gpui_color(theme.colors.foreground))
             .child(header)
@@ -2889,13 +2986,13 @@ enum WindowCommand {
 }
 
 impl WindowCommand {
-    fn execute(self, window: &mut Window) {
+    fn execute(self, window: &mut Window, cx: &mut App) {
         match self {
             Self::Minimize => window.minimize_window(),
             Self::MaximizeOrRestore if window.is_fullscreen() => window.toggle_fullscreen(),
             Self::MaximizeOrRestore => window.zoom_window(),
             Self::ToggleFullscreen => window.toggle_fullscreen(),
-            Self::Close => window.remove_window(),
+            Self::Close => window.dispatch_action(Box::new(CloseWindow), cx),
         }
     }
 }
@@ -3075,7 +3172,7 @@ fn windows_caption_button(
         .when(manual, |button| {
             button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.prevent_default();
-                command.execute(window);
+                command.execute(window, cx);
                 cx.stop_propagation();
             })
         })
@@ -4035,6 +4132,7 @@ fn subscribe_indicator_input(
 fn terminal_root(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
+    lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
@@ -4043,8 +4141,24 @@ fn terminal_root(
     let indicator_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
     let indicator_search_input = indicator_input.clone();
+    let terminal_lifecycle = lifecycle.clone();
     let terminal = cx.new(move |cx| {
-        TerminalApp::new(cx, bootstrap, market_worker, symbol_input, indicator_input)
+        TerminalApp::new(
+            cx,
+            bootstrap,
+            market_worker,
+            terminal_lifecycle,
+            symbol_input,
+            indicator_input,
+        )
+    });
+    lifecycle.register_terminal(&terminal);
+    let closing_terminal = terminal.clone();
+    window.on_window_should_close(cx, move |_, cx| {
+        closing_terminal.update(cx, |terminal, terminal_cx| {
+            terminal.retire_market_worker(terminal_cx);
+        });
+        true
     });
     subscribe_symbol_input(search_input, &terminal, window, cx);
     subscribe_indicator_input(&indicator_search_input, &terminal, window, cx);
@@ -4057,10 +4171,27 @@ fn terminal_root(
     root
 }
 
-fn configured_market_workers()
--> Result<Option<Vec<(MarketWorkerStartup, MarketDataWorker)>>, String> {
+struct ConfiguredDesktop {
+    market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    lifetime_mode: DesktopLifetimeMode,
+}
+
+fn split_lifetime_mode(
+    first: Option<std::ffi::OsString>,
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> (DesktopLifetimeMode, Option<std::ffi::OsString>) {
+    if first.as_deref() == Some(std::ffi::OsStr::new("--exit-with-desktop")) {
+        (DesktopLifetimeMode::ExitWithDesktop, arguments.next())
+    } else {
+        (DesktopLifetimeMode::KeepEngineWarm, first)
+    }
+}
+
+fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let mut arguments = std::env::args_os().skip(1);
-    let worker = if let Some(argument) = arguments.next() {
+    let first = arguments.next();
+    let (lifetime_mode, command) = split_lifetime_mode(first, &mut arguments);
+    let market_workers = if let Some(argument) = command {
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
             let report_path = arguments.next().ok_or_else(|| {
@@ -4099,18 +4230,23 @@ fn configured_market_workers()
     } else {
         vec![resident_market_worker::start()?]
     };
-    Ok(Some(worker))
+    Ok(Some(ConfiguredDesktop {
+        market_workers,
+        lifetime_mode,
+    }))
 }
 
 fn main() {
-    let market_workers = match configured_market_workers() {
-        Ok(Some(workers)) => workers,
+    let configured = match configured_market_workers() {
+        Ok(Some(configured)) => configured,
         Ok(None) => return,
         Err(error) => {
             eprintln!("Axiusflow market worker could not start: {error}");
             std::process::exit(1);
         }
     };
+    let lifecycle = DesktopLifecycle::new(configured.lifetime_mode);
+    let market_workers = configured.market_workers;
     application()
         .with_assets(assets::DesktopAssets)
         .run(move |cx: &mut App| {
@@ -4128,11 +4264,28 @@ fn main() {
                 KeyBinding::new("alt-f4", CloseWindow, None),
             ]);
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
+            let quit_lifecycle = lifecycle.clone();
+            cx.on_app_quit(move |cx| {
+                let quit = quit_lifecycle.quit(cx);
+                async move {
+                    if let Err(error) = quit.await {
+                        eprintln!("Axiusflow desktop shutdown failed: {error}");
+                    }
+                }
+            })
+            .detach();
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
             for (window_index, (bootstrap, market_worker)) in market_workers.into_iter().enumerate()
             {
                 let options = desktop_window_options(window_index, cx);
+                let window_lifecycle = lifecycle.clone();
                 cx.open_window(options, move |window, cx| {
-                    terminal_root(bootstrap, market_worker, window, cx)
+                    terminal_root(bootstrap, market_worker, &window_lifecycle, window, cx)
                 })
                 .expect("the Axiusflow terminal window opens");
             }
@@ -4143,20 +4296,47 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState, HeaderControls,
-        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-        RithmicSessionRetirement, SidePanel, TerminalProvider, WindowCommand,
-        bounded_status_detail, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
-        connection_presentation, default_rithmic_contract_index, fullscreen_escape_command,
+        CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState,
+        DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand, RithmicReadyAction,
+        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
+        TerminalProvider, WindowCommand, bounded_status_detail, catalog_rejection_domain,
+        chart_status_detail, chart_surface_notice, connection_presentation,
+        default_rithmic_contract_index, finish_desktop_shutdown, fullscreen_escape_command,
         gpui_color, instrument_selector_label, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop,
+        should_apply_rithmic_worker_stop, split_lifetime_mode,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
     use axiusflow_design_system::ThemeColor;
     use axiusflow_local_engine_protocol::ProviderInstrumentSummary;
     use axiusflow_observability::FeedConnectionState;
+    use std::{cell::Cell, ffi::OsString};
+
+    #[test]
+    fn exit_with_desktop_is_an_explicit_per_launch_policy() {
+        let mut remaining = vec![OsString::from("--multi-chart")].into_iter();
+        let (mode, command) =
+            split_lifetime_mode(Some(OsString::from("--exit-with-desktop")), &mut remaining);
+        assert_eq!(mode, DesktopLifetimeMode::ExitWithDesktop);
+        assert_eq!(command, Some(OsString::from("--multi-chart")));
+
+        let mut empty = Vec::<OsString>::new().into_iter();
+        let (mode, command) = split_lifetime_mode(None, &mut empty);
+        assert_eq!(mode, DesktopLifetimeMode::KeepEngineWarm);
+        assert_eq!(command, None);
+    }
+
+    #[test]
+    fn exit_with_desktop_still_requests_engine_shutdown_after_detach_expiry() {
+        let shutdown_called = Cell::new(false);
+        let result = finish_desktop_shutdown(DesktopLifetimeMode::ExitWithDesktop, true, || {
+            shutdown_called.set(true);
+            Ok(())
+        });
+        assert!(shutdown_called.get());
+        assert!(result.is_err());
+    }
 
     #[cfg(feature = "diagnostics")]
     #[test]

@@ -45,7 +45,7 @@ use std::{
 };
 
 use crate::readiness_conformance::ProcessMemoryProbe;
-use crate::{TerminalApp, subscribe_symbol_input};
+use crate::{DesktopLifecycle, DesktopLifetimeMode, TerminalApp, subscribe_symbol_input};
 
 const SNAPSHOT_BARS: usize = 256;
 const REPLACEMENT_SNAPSHOT_BARS: usize = 600;
@@ -942,6 +942,7 @@ fn benchmark_root(
             cx,
             interaction_startup,
             interaction_worker,
+            DesktopLifecycle::new(DesktopLifetimeMode::KeepEngineWarm),
             Some(terminal_symbol_input),
             indicator_input,
         )

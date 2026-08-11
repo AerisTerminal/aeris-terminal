@@ -1103,7 +1103,7 @@ fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> NonZeroU64 {
 pub struct MarketDataWorker {
     commands: Option<SyncSender<MarketWorkerCommand>>,
     messages: Option<MarketWorkerReceiver>,
-    shutdown_complete: Receiver<()>,
+    shutdown_complete: Option<Receiver<()>>,
     connected: bool,
     ui_diagnostics: Option<UiDiagnosticsSender>,
     coinbase_sequence: Option<Arc<AtomicU64>>,
@@ -1121,7 +1121,7 @@ impl MarketDataWorker {
         Self {
             commands: Some(commands),
             messages: Some(messages),
-            shutdown_complete,
+            shutdown_complete: Some(shutdown_complete),
             connected: true,
             ui_diagnostics,
             coinbase_sequence,
@@ -1350,32 +1350,58 @@ impl MarketDataWorker {
         self.connected = false;
     }
 
-    fn begin_shutdown(&mut self) {
+    /// Begins worker retirement without waiting for the background client to detach.
+    ///
+    /// The returned acknowledgement owns the bounded wait and may therefore only be
+    /// consumed away from the GPUI thread.
+    #[must_use]
+    pub fn begin_retirement(&mut self) -> Option<MarketWorkerRetirement> {
+        if self.commands.is_none() && self.messages.is_none() {
+            return None;
+        }
         if let Some(commands) = self.commands.take() {
             let _ = commands.try_send(MarketWorkerCommand::Shutdown);
             drop(commands);
         }
         drop(self.messages.take());
         self.connected = false;
+        self.shutdown_complete
+            .take()
+            .map(|shutdown_complete| MarketWorkerRetirement { shutdown_complete })
     }
 
     #[cfg(test)]
     pub fn shutdown_and_wait(&mut self) -> bool {
-        self.begin_shutdown();
-        !matches!(
-            self.shutdown_complete
-                .recv_timeout(CONFIRMED_SHUTDOWN_TIMEOUT),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        )
+        self.begin_retirement()
+            .is_none_or(|retirement| retirement.wait_for(CONFIRMED_SHUTDOWN_TIMEOUT))
     }
 }
 
 impl Drop for MarketDataWorker {
     fn drop(&mut self) {
-        if self.commands.is_some() || self.messages.is_some() {
-            self.begin_shutdown();
-            let _ = self.shutdown_complete.recv_timeout(SHUTDOWN_TIMEOUT);
+        if let Some(retirement) = self.begin_retirement() {
+            let _ = retirement.wait();
         }
+    }
+}
+
+/// Completion acknowledgement for one retiring desktop market-client worker.
+pub struct MarketWorkerRetirement {
+    shutdown_complete: Receiver<()>,
+}
+
+impl MarketWorkerRetirement {
+    /// Waits for the worker to detach within the desktop shutdown budget.
+    #[must_use]
+    pub fn wait(self) -> bool {
+        self.wait_for(SHUTDOWN_TIMEOUT)
+    }
+
+    fn wait_for(self, timeout: Duration) -> bool {
+        !matches!(
+            self.shutdown_complete.recv_timeout(timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        )
     }
 }
 
@@ -1496,6 +1522,7 @@ mod tests {
             mpsc,
         },
         thread,
+        time::Duration,
     };
 
     #[test]
@@ -1534,6 +1561,39 @@ mod tests {
         ));
 
         assert!(acknowledged.load(Ordering::Acquire));
+        worker_thread.join().expect("worker exits");
+    }
+
+    #[test]
+    fn explicit_retirement_moves_the_wait_off_the_caller() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let worker_thread = thread::spawn(move || {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::Shutdown)
+            ));
+            observed_tx.send(()).expect("retirement is observed");
+            release_rx.recv().expect("test releases acknowledgement");
+            shutdown_tx
+                .send(())
+                .expect("shutdown acknowledgement sends");
+        });
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
+
+        let retirement = worker
+            .begin_retirement()
+            .expect("active worker produces a retirement acknowledgement");
+        observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retirement begins without waiting for acknowledgement");
+        release_tx.send(()).expect("release worker acknowledgement");
+        assert!(retirement.wait());
+        assert!(worker.begin_retirement().is_none());
         worker_thread.join().expect("worker exits");
     }
 

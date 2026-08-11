@@ -1,8 +1,8 @@
 pub(super) use axiusflow_desktop::market_worker::{
     ChartState, DesktopMarketGeneration, EngineSeriesRequest, MarketDataWorker,
     MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
-    MarketWorkerSender, MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand,
-    ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
+    MarketWorkerRetirement, MarketWorkerSender, MarketWorkerStartup, PendingUiDiagnostics,
+    ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
 };
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
