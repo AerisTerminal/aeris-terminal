@@ -21,6 +21,12 @@ fn payloads() -> Vec<envelope::Payload> {
     payloads
 }
 
+#[test]
+fn markets_live_resource_mode_has_a_stable_wire_value() {
+    assert_eq!(ResourceMode::MarketsLive as i32, 4);
+    assert_eq!(ResourceMode::try_from(4), Ok(ResourceMode::MarketsLive));
+}
+
 fn workspace_payloads() -> Vec<envelope::Payload> {
     vec![
         envelope::Payload::ClientHello(ClientHello {

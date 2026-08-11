@@ -22,6 +22,8 @@ pub enum ResourceMode {
     Constrained = 2,
     /// Offline suspension.
     OfflineSuspended = 3,
+    /// Warm background engine with selected market sessions kept live.
+    MarketsLive = 4,
 }
 
 /// Machine-readable local engine fault classification.

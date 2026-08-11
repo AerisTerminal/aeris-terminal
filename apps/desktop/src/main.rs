@@ -23,7 +23,7 @@ use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_local_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
-    SearchProviderInstruments, SelectProviderInstrument,
+    ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
@@ -137,7 +137,17 @@ const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
 enum DesktopLifetimeMode {
     #[default]
     KeepEngineWarm,
+    KeepMarketsLive,
     ExitWithDesktop,
+}
+
+impl DesktopLifetimeMode {
+    const fn engine_resource_mode(self) -> ResourceMode {
+        match self {
+            Self::KeepMarketsLive => ResourceMode::MarketsLive,
+            Self::KeepEngineWarm | Self::ExitWithDesktop => ResourceMode::Warm,
+        }
+    }
 }
 
 fn finish_desktop_shutdown(
@@ -4182,9 +4192,18 @@ fn split_lifetime_mode(
 ) -> (DesktopLifetimeMode, Option<std::ffi::OsString>) {
     if first.as_deref() == Some(std::ffi::OsStr::new("--exit-with-desktop")) {
         (DesktopLifetimeMode::ExitWithDesktop, arguments.next())
+    } else if first.as_deref() == Some(std::ffi::OsStr::new("--keep-markets-live")) {
+        (DesktopLifetimeMode::KeepMarketsLive, arguments.next())
     } else {
         (DesktopLifetimeMode::KeepEngineWarm, first)
     }
+}
+
+fn configure_engine_resource_mode(mode: DesktopLifetimeMode) -> Result<(), String> {
+    let executable = axiusflow_local_engine_client::sibling_engine_executable()?;
+    axiusflow_local_engine_client::connect_or_start_engine(&executable)?
+        .set_engine_resource_mode(mode.engine_resource_mode())?;
+    Ok(())
 }
 
 fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
@@ -4216,18 +4235,21 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
+            configure_engine_resource_mode(lifetime_mode)?;
             vec![resident_market_worker::start_rithmic()?]
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
                 std::process::exit(2);
             }
+            configure_engine_resource_mode(lifetime_mode)?;
             engine_market_worker::start_multi_chart()?
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
         }
     } else {
+        configure_engine_resource_mode(lifetime_mode)?;
         vec![resident_market_worker::start()?]
     };
     Ok(Some(ConfiguredDesktop {
@@ -4309,21 +4331,29 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
     use axiusflow_design_system::ThemeColor;
-    use axiusflow_local_engine_protocol::ProviderInstrumentSummary;
+    use axiusflow_local_engine_protocol::{ProviderInstrumentSummary, ResourceMode};
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};
 
     #[test]
-    fn exit_with_desktop_is_an_explicit_per_launch_policy() {
+    fn desktop_lifetime_modes_are_explicit_per_launch_policies() {
         let mut remaining = vec![OsString::from("--multi-chart")].into_iter();
         let (mode, command) =
             split_lifetime_mode(Some(OsString::from("--exit-with-desktop")), &mut remaining);
         assert_eq!(mode, DesktopLifetimeMode::ExitWithDesktop);
         assert_eq!(command, Some(OsString::from("--multi-chart")));
 
+        let mut remaining = vec![OsString::from("--rithmic-test")].into_iter();
+        let (mode, command) =
+            split_lifetime_mode(Some(OsString::from("--keep-markets-live")), &mut remaining);
+        assert_eq!(mode, DesktopLifetimeMode::KeepMarketsLive);
+        assert_eq!(mode.engine_resource_mode(), ResourceMode::MarketsLive);
+        assert_eq!(command, Some(OsString::from("--rithmic-test")));
+
         let mut empty = Vec::<OsString>::new().into_iter();
         let (mode, command) = split_lifetime_mode(None, &mut empty);
         assert_eq!(mode, DesktopLifetimeMode::KeepEngineWarm);
+        assert_eq!(mode.engine_resource_mode(), ResourceMode::Warm);
         assert_eq!(command, None);
     }
 

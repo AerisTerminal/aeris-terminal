@@ -763,6 +763,12 @@ fn serve_authenticated_messages(
                     }))?;
                     continue;
                 };
+                if let Some(market) = market
+                    && let Err(error) = market.set_resource_mode(mode)
+                {
+                    send_market_fault(connection, error)?;
+                    continue;
+                }
                 connection.send(envelope::Payload::WorkspaceState(
                     state.set_resource_mode(mode),
                 ))?;

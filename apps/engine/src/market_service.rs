@@ -26,8 +26,9 @@ use axiusflow_local_engine_protocol::{
     OrderBookLevel as IpcOrderBookLevel, OrderBookSnapshot as IpcOrderBookSnapshot,
     OrderBookState as IpcOrderBookState, PersistenceState, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSelection,
-    ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-    SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
+    ProviderState, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
+    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
+    envelope,
 };
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
@@ -85,6 +86,7 @@ impl Drop for MarketRuntime {
 }
 
 enum Command {
+    SetResourceMode(ResourceMode, Reply<()>),
     Attach(ClientId, Reply<()>),
     Detach(ClientId, Reply<()>),
     Register(ConsumerIdentity, Reply<()>),
@@ -1004,6 +1006,14 @@ impl MarketService {
         self.request(|reply| Ok(Command::Detach(id(client_id).map(ClientId)?, reply)))
     }
 
+    /// Applies the engine-owned background market retention policy.
+    ///
+    /// # Errors
+    /// Returns an error when the coordinator is unavailable.
+    pub fn set_resource_mode(&self, mode: ResourceMode) -> Result<(), String> {
+        self.request(|reply| Ok(Command::SetResourceMode(mode, reply)))
+    }
+
     /// Registers one market consumer owned by an attached client.
     ///
     /// # Errors
@@ -1401,6 +1411,7 @@ fn run_coordinator(
         rithmic_realtime_control: channels.rithmic_realtime_control,
         rithmic_catalog_control: channels.rithmic_catalog_control,
         realtime_stop,
+        resource_mode: ResourceMode::Warm,
         attached: BTreeSet::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeSet::new(),
@@ -1467,6 +1478,7 @@ struct Coordinator<'a> {
     rithmic_realtime_control: Option<&'a SyncSender<RithmicRealtimeControl>>,
     rithmic_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
     realtime_stop: &'a Arc<AtomicBool>,
+    resource_mode: ResourceMode,
     attached: BTreeSet<ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
@@ -1493,6 +1505,10 @@ impl Coordinator<'_> {
 
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::SetResourceMode(mode, reply) => {
+                self.apply_resource_mode(mode);
+                let _ = reply.send(Ok(()));
+            }
             Command::Attach(client_id, reply) => {
                 self.handle_attach(client_id, &reply);
             }
@@ -1500,8 +1516,7 @@ impl Coordinator<'_> {
                 self.attached.remove(&client_id);
                 self.remove_client_events(client_id);
                 self.engine.detach_client(client_id);
-                self.prune_unused_live_series();
-                self.stop_realtime_if_idle();
+                self.release_unused_live_market_data();
                 let _ = reply.send(Ok(()));
             }
             Command::Register(identity, reply) => {
@@ -1523,8 +1538,7 @@ impl Coordinator<'_> {
                     self.events.remove(&consumer_id);
                     self.remove_waiter(consumer_id);
                     self.engine.remove_consumer(consumer_id);
-                    self.prune_unused_live_series();
-                    self.stop_realtime_if_idle();
+                    self.release_unused_live_market_data();
                 });
                 let _ = reply.send(result);
             }
@@ -1599,6 +1613,11 @@ impl Coordinator<'_> {
             .then_some(())
             .ok_or_else(|| "client identity is already attached".to_string());
         let _ = reply.send(result);
+    }
+
+    fn apply_resource_mode(&mut self, mode: ResourceMode) {
+        self.resource_mode = mode;
+        self.release_unused_live_market_data();
     }
 
     fn handle_catalog_command(
@@ -3049,6 +3068,9 @@ impl Coordinator<'_> {
             .map(|(series, _)| series.clone())
             .collect::<Vec<_>>();
         self.pending.retain(|_, waiters| !waiters.is_empty());
+        if self.resource_mode == ResourceMode::MarketsLive {
+            return;
+        }
         for series in unobserved {
             if series.provider_id != "rithmic" {
                 continue;
@@ -3071,9 +3093,28 @@ impl Coordinator<'_> {
                     .and_then(|demand| demand.series.clone())
             })
             .collect::<BTreeSet<_>>();
+        for series in self
+            .rithmic_live
+            .keys()
+            .filter(|series| !demanded.contains(*series))
+        {
+            for ((active, _), stop) in &self.history_cancellations {
+                if active == series {
+                    stop.store(true, Ordering::Release);
+                }
+            }
+        }
         self.live.retain(|series, _| demanded.contains(series));
         self.rithmic_live
             .retain(|series, _| demanded.contains(series));
+    }
+
+    fn release_unused_live_market_data(&mut self) {
+        if self.resource_mode == ResourceMode::MarketsLive {
+            return;
+        }
+        self.prune_unused_live_series();
+        self.stop_realtime_if_idle();
     }
 
     fn stop_realtime_if_idle(&mut self) {
@@ -3564,6 +3605,7 @@ mod tests {
             rithmic_realtime_control: None,
             rithmic_catalog_control: None,
             realtime_stop,
+            resource_mode: ResourceMode::Warm,
             attached: BTreeSet::new(),
             pending: BTreeMap::from([(
                 series.clone(),
@@ -4954,6 +4996,94 @@ mod tests {
                 .0
                 .get(),
             2
+        );
+    }
+
+    #[test]
+    fn markets_live_retains_and_advances_the_hot_series_without_ui_consumers() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        harness.service.attach(1).expect("client attaches");
+        harness
+            .service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        harness
+            .service
+            .set_demand(1, 1, 1, &btc())
+            .expect("history demand is accepted");
+        poll_until(
+            &harness.service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if !snapshot.forming),
+        );
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("realtime generation starts")
+                .0
+                .get(),
+            1
+        );
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("realtime connects");
+        harness
+            .service
+            .set_resource_mode(ResourceMode::MarketsLive)
+            .expect("markets-live mode applies");
+        harness.service.detach(1).expect("desktop detaches");
+        assert!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "markets-live mode retains the provider session"
+        );
+
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 3)))
+            .expect("detached live trade arrives");
+
+        harness.service.attach(2).expect("new desktop attaches");
+        harness
+            .service
+            .register_consumer(2, 1, 2)
+            .expect("new consumer registers");
+        harness
+            .service
+            .set_demand(2, 2, 1, &btc())
+            .expect("hot-series demand is accepted");
+        let hot = poll_until(
+            &harness.service,
+            2,
+            2,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.forming),
+        );
+        assert!(matches!(
+            hot,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.bars.last().is_some_and(|bar| bar.close == 200)
+        ));
+        assert_eq!(harness.history_fetches.load(Ordering::Acquire), 1);
+
+        harness.service.detach(2).expect("new desktop detaches");
+        harness
+            .service
+            .set_resource_mode(ResourceMode::Warm)
+            .expect("warm mode applies");
+        assert_eq!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_secs(1))
+                .expect("warm mode releases realtime")
+                .0
+                .get(),
+            1
         );
     }
 
