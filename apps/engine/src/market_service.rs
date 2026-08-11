@@ -1249,7 +1249,10 @@ impl Coordinator<'_> {
                     {
                         fail_waiters(&mut self.events, waiters, detail);
                     }
-                } else if let Err(detail) = self.enqueue_history(series, provider_generation)
+                } else if self
+                    .enqueue_local_history(series, provider_generation)
+                    .is_err()
+                    && let Err(detail) = self.enqueue_history(series, provider_generation)
                     && let Some(waiters) = self.pending.remove(series)
                 {
                     fail_waiters(&mut self.events, waiters, detail);
@@ -1353,12 +1356,17 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         result: Result<Option<StoredHistory>, String>,
     ) {
-        if generation != self.coinbase_provider_generation() {
+        if self
+            .engine
+            .provider_status(&series.provider_id)
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
             return;
         }
         match result {
             Ok(Some(stored)) if !stored.bars.is_empty() => {
-                let Ok(profile) = coinbase_series_profile(series) else {
+                let Ok((price_scale, quantity_scale)) = self.series_precision(series) else {
                     return;
                 };
                 let persistence = if stored.durable {
@@ -1369,8 +1377,8 @@ impl Coordinator<'_> {
                 if let Ok(publications) = self.engine.install_history(
                     generation,
                     series,
-                    profile.price_scale,
-                    profile.quantity_scale,
+                    price_scale,
+                    quantity_scale,
                     stored.bars,
                 ) {
                     self.local_loaded.insert((series.clone(), generation));
@@ -1443,6 +1451,31 @@ impl Coordinator<'_> {
                     return Err("Rithmic engine session is stale".to_string());
                 }
                 Ok(generation)
+            }
+            _ => Err("resident engine market provider is unsupported".to_string()),
+        }
+    }
+
+    fn series_precision(&self, series: &BarSeriesKey) -> Result<(u8, u8), String> {
+        match series.provider_id.as_str() {
+            "coinbase" => {
+                let profile = coinbase_series_profile(series)?;
+                Ok((profile.price_scale, profile.quantity_scale))
+            }
+            "rithmic" => {
+                let installed = self
+                    .catalog
+                    .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                    .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+                if installed.entitlement_id != series.entitlement_id {
+                    return Err("Rithmic series entitlement is inconsistent".to_string());
+                }
+                Ok((
+                    u8::try_from(installed.price_scale)
+                        .map_err(|_| "Rithmic price scale is invalid".to_string())?,
+                    u8::try_from(installed.quantity_scale)
+                        .map_err(|_| "Rithmic quantity scale is invalid".to_string())?,
+                ))
             }
             _ => Err("resident engine market provider is unsupported".to_string()),
         }
@@ -1586,11 +1619,7 @@ impl Coordinator<'_> {
                 return;
             }
         };
-        let persistence = if series.provider_id == "coinbase" {
-            PersistenceState::Pending
-        } else {
-            PersistenceState::NotRequested
-        };
+        let persistence = PersistenceState::Pending;
         for publication in publications {
             if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                 publish_state(
@@ -1602,21 +1631,19 @@ impl Coordinator<'_> {
                 );
             }
         }
-        if series.provider_id == "coinbase" {
-            match self.storage.try_send(StorageRequest::Persist(
-                series.clone(),
-                generation,
-                bars.clone(),
-                false,
-            )) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                    self.broadcast_persistence_for(
-                        series,
-                        PersistenceState::Degraded,
-                        Some("Local history persistence is unavailable"),
-                    );
-                }
+        match self.storage.try_send(StorageRequest::Persist(
+            series.clone(),
+            generation,
+            bars.clone(),
+            false,
+        )) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                self.broadcast_persistence_for(
+                    series,
+                    PersistenceState::Degraded,
+                    Some("Local history persistence is unavailable"),
+                );
             }
         }
         if let Some(live) = self.live.get_mut(series) {
@@ -3076,6 +3103,107 @@ mod tests {
             storage_rx.try_recv(),
             Ok(StorageRequest::Persist(ref persisted, current, ref bars, false))
                 if persisted == &series && current == generation && bars == &[history_bar()]
+        ));
+    }
+
+    #[test]
+    fn retained_rithmic_history_uses_installed_precision_and_is_persisted_after_repair() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = ProviderGeneration(id(7).expect("provider generation"));
+        engine
+            .begin_provider_session("rithmic", generation)
+            .expect("Rithmic generation begins");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let series = BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            period: BarPeriod::tick(100).expect("tick cadence"),
+            definition_version: 1,
+        };
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let installed = provider_instrument(7, 1);
+        coordinator.catalog.insert(
+            (installed.provider.clone(), installed.instrument_id.clone()),
+            installed,
+        );
+        let local = MarketBar {
+            exchange_timestamp_unix_nanos: 60_123_456_789,
+            close: 99,
+            ..history_bar()
+        };
+        coordinator.local_history_completed(
+            &series,
+            generation,
+            Ok(Some(StoredHistory {
+                bars: vec![local],
+                derived: false,
+                durable: true,
+            })),
+        );
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+                if snapshot.provider_generation == 7
+                    && snapshot.price_scale == 2
+                    && snapshot.quantity_scale == 0
+                    && snapshot.bars[0].exchange_timestamp_unix_nanos == 60_123_456_789
+        ));
+        assert!(history_rx.try_recv().is_ok());
+
+        let repaired = MarketBar {
+            exchange_timestamp_seconds: 61,
+            exchange_timestamp_unix_nanos: 61_987_654_321,
+            ..history_bar()
+        };
+        coordinator.history_completed(
+            &series,
+            generation,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: vec![repaired],
+            }),
+        );
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Persist(ref persisted, current, ref bars, false))
+                if persisted == &series && current == generation && bars == &[repaired]
+        ));
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Ready as i32
+                    && state.persistence == PersistenceState::Pending as i32
         ));
     }
 
