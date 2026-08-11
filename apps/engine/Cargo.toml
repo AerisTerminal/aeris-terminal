@@ -20,5 +20,8 @@ getrandom.workspace = true
 interprocess.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+sysinfo.workspace = true
+
 [lints]
 workspace = true

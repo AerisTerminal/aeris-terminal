@@ -958,6 +958,7 @@ mod tests {
     };
 
     use interprocess::local_socket::traits::Listener as _;
+    use sysinfo::{Pid, ProcessesToUpdate, System};
 
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
     use axiusflow_local_engine_client::EngineClient;
@@ -1016,6 +1017,14 @@ mod tests {
             }
         }
         percentiles(timings)
+    }
+
+    fn process_memory(system: &mut System, pid: Pid) -> u64 {
+        system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+        system
+            .process(pid)
+            .expect("benchmark process remains observable")
+            .memory()
     }
 
     #[cfg(debug_assertions)]
@@ -1259,16 +1268,33 @@ mod tests {
     #[ignore = "release-only local engine performance evidence"]
     fn release_cached_demand_ipc_and_multi_consumer_performance() {
         require_release_profile();
+        let pid = sysinfo::get_current_pid().expect("benchmark process id is available");
+        let mut system = System::new();
+        let memory_baseline = process_memory(&mut system, pid);
         let market =
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let memory_engine_started = process_memory(&mut system, pid);
         let series = cached_series(BTC_INSTRUMENT, 60);
         prime_cached_switch_series(&market);
         let direct = measure_direct_demand(&market, &series);
+        let memory_direct = process_memory(&mut system, pid);
         let (ipc, timeframe, symbol, multi) = measure_ipc_demand(&market, &series);
+        let memory_ipc = process_memory(&mut system, pid);
         let attach = measure_ipc_attach(&market);
+        let memory_current = process_memory(&mut system, pid);
+        let memory_high_water = [
+            memory_baseline,
+            memory_engine_started,
+            memory_direct,
+            memory_ipc,
+            memory_current,
+        ]
+        .into_iter()
+        .max()
+        .expect("memory sample set is not empty");
 
         println!(
-            "AXIUSFLOW_ENGINE_PERFORMANCE schema=2 samples={} warmups={} bars=350 direct_demand_snapshot_p50_ns={} direct_demand_snapshot_p95_ns={} direct_demand_snapshot_p99_ns={} ipc_demand_snapshot_p50_ns={} ipc_demand_snapshot_p95_ns={} ipc_demand_snapshot_p99_ns={} ipc_timeframe_switch_p50_ns={} ipc_timeframe_switch_p95_ns={} ipc_timeframe_switch_p99_ns={} ipc_symbol_switch_p50_ns={} ipc_symbol_switch_p95_ns={} ipc_symbol_switch_p99_ns={} ipc_attach_restore_p50_ns={} ipc_attach_restore_p95_ns={} ipc_attach_restore_p99_ns={} multi_consumers={} multi_samples={} ipc_multi_batch_p50_ns={} ipc_multi_batch_p95_ns={} ipc_multi_batch_p99_ns={} ipc_multi_per_consumer_p50_ns={}",
+            "AXIUSFLOW_ENGINE_PERFORMANCE schema=3 samples={} warmups={} bars=350 direct_demand_snapshot_p50_ns={} direct_demand_snapshot_p95_ns={} direct_demand_snapshot_p99_ns={} ipc_demand_snapshot_p50_ns={} ipc_demand_snapshot_p95_ns={} ipc_demand_snapshot_p99_ns={} ipc_timeframe_switch_p50_ns={} ipc_timeframe_switch_p95_ns={} ipc_timeframe_switch_p99_ns={} ipc_symbol_switch_p50_ns={} ipc_symbol_switch_p95_ns={} ipc_symbol_switch_p99_ns={} ipc_attach_restore_p50_ns={} ipc_attach_restore_p95_ns={} ipc_attach_restore_p99_ns={} multi_consumers={} multi_samples={} ipc_multi_batch_p50_ns={} ipc_multi_batch_p95_ns={} ipc_multi_batch_p99_ns={} ipc_multi_per_consumer_p50_ns={} process_memory_baseline_bytes={} process_memory_engine_started_bytes={} process_memory_direct_bytes={} process_memory_ipc_multi_bytes={} process_memory_current_bytes={} process_memory_sampled_high_water_bytes={} process_memory_sampled_growth_bytes={} process_memory_workload_growth_bytes={}",
             MEASURED_SAMPLES,
             WARMUP_SAMPLES,
             direct.p50,
@@ -1291,7 +1317,20 @@ mod tests {
             multi.p50,
             multi.p95,
             multi.p99,
-            multi.p50 / u128::from(MULTI_CONSUMERS)
+            multi.p50 / u128::from(MULTI_CONSUMERS),
+            memory_baseline,
+            memory_engine_started,
+            memory_direct,
+            memory_ipc,
+            memory_current,
+            memory_high_water,
+            memory_high_water.saturating_sub(memory_baseline),
+            memory_high_water.saturating_sub(memory_engine_started)
+        );
+        assert!(memory_baseline > 0, "process memory baseline is observable");
+        assert!(
+            memory_high_water >= memory_current,
+            "sampled memory high-water contains the final sample"
         );
         assert_local_interaction_target("cached IPC demand-to-snapshot", ipc);
         assert_local_interaction_target("cached timeframe switch", timeframe);

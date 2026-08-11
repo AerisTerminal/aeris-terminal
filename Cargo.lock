@@ -765,6 +765,7 @@ dependencies = [
  "axiusflow_rithmic_protocol_adapter",
  "getrandom 0.4.3",
  "interprocess",
+ "sysinfo",
  "zeroize",
 ]
 
