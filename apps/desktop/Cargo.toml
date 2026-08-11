@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-diagnostics = []
+diagnostics = ["axiusflow_chart_integration/diagnostics"]
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }

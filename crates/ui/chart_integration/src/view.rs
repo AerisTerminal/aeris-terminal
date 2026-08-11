@@ -26,6 +26,8 @@ use origin_render_gpui::backend::measure_text;
 use origin_render_gpui::{GpuiChartRenderer, OriginViewport, PreparedOriginFrame};
 use std::collections::HashSet;
 use std::fmt;
+#[cfg(feature = "diagnostics")]
+use std::time::Instant;
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
@@ -185,6 +187,8 @@ pub struct OriginChartView {
     locked_drawings: HashSet<DrawingId>,
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
+    #[cfg(feature = "diagnostics")]
+    last_snapshot_installation_nanos: Option<u64>,
 }
 
 fn apply_platform_theme(
@@ -264,6 +268,8 @@ impl OriginChartView {
             locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
+            #[cfg(feature = "diagnostics")]
+            last_snapshot_installation_nanos: None,
         }
     }
 
@@ -324,6 +330,8 @@ impl OriginChartView {
             locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
+            #[cfg(feature = "diagnostics")]
+            last_snapshot_installation_nanos: None,
         }
     }
 
@@ -333,6 +341,8 @@ impl OriginChartView {
     ///
     /// Returns an error if the snapshot cannot establish resumable sequence state.
     pub fn load_replay(&mut self, replay: &ReplaySnapshot) -> Result<(), ReplayValidationError> {
+        #[cfg(feature = "diagnostics")]
+        let snapshot_install_started = Instant::now();
         if let Some(bridge) = &mut self.data_bridge {
             bridge.install_snapshot(replay)?;
         } else {
@@ -346,6 +356,12 @@ impl OriginChartView {
         self.price_divisor = replay_price_divisor(replay);
         self.invalidate_series_frame();
         self.fitted = false;
+        #[cfg(feature = "diagnostics")]
+        {
+            self.last_snapshot_installation_nanos = Some(
+                u64::try_from(snapshot_install_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            );
+        }
         Ok(())
     }
 
@@ -629,6 +645,12 @@ impl OriginChartView {
             .map_or_else(ChartBridgeMetrics::default, ChartDataBridge::metrics)
     }
 
+    /// Takes the most recent foreground duration for installing one queued snapshot.
+    #[cfg(feature = "diagnostics")]
+    pub fn take_snapshot_installation_nanos(&mut self) -> Option<u64> {
+        self.last_snapshot_installation_nanos.take()
+    }
+
     /// Offers recovery to a bounded worker queue and marks dispatch only after acceptance.
     ///
     /// # Errors
@@ -693,6 +715,8 @@ impl OriginChartView {
         };
         match bridge.drain_merged() {
             Ok(Some(update)) if update.mutates_series() => {
+                #[cfg(feature = "diagnostics")]
+                let snapshot_install_started = update.snapshot().map(|_| Instant::now());
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
                 }
@@ -704,6 +728,11 @@ impl OriginChartView {
                     &update,
                 );
                 self.invalidate_series_frame();
+                #[cfg(feature = "diagnostics")]
+                if let Some(started) = snapshot_install_started {
+                    self.last_snapshot_installation_nanos =
+                        Some(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -1233,6 +1262,45 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn snapshot_installation_records_queued_and_direct_foreground_durations() {
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 64 })
+            .expect("fixture validates");
+        let replacement = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 65 })
+            .expect("replacement fixture validates")
+            .try_with_publication_generation(
+                replay.evidence().publication_generation.saturating_add(1),
+            )
+            .expect("replacement generation validates");
+        let mut chart = OriginChartView::with_replay(&replay);
+
+        assert!(
+            chart
+                .try_queue_replay_update(ReplayStreamUpdate::Snapshot(replacement))
+                .is_ok()
+        );
+        chart.apply_pending_data();
+
+        assert!(chart.take_snapshot_installation_nanos().is_some());
+        assert_eq!(chart.take_snapshot_installation_nanos(), None);
+
+        let direct_replacement = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 66 })
+            .expect("direct replacement fixture validates")
+            .try_with_publication_generation(
+                replay.evidence().publication_generation.saturating_add(2),
+            )
+            .expect("direct replacement generation validates");
+        chart
+            .load_replay(&direct_replacement)
+            .expect("direct replacement installs");
+        assert!(chart.take_snapshot_installation_nanos().is_some());
+        assert_eq!(chart.take_snapshot_installation_nanos(), None);
     }
 
     #[test]

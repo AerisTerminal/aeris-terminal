@@ -1,18 +1,17 @@
 //! Windowed replay-to-frame-callback benchmark (`S1-13` and Stage E evidence path).
 //!
 //! Drives deterministic replay deltas through the real GPUI window one update per
-//! frame and measures update-to-next-frame latency, callback cadence, process
-//! working-set growth, and chart-queue occupancy from GPUI's `on_next_frame`
-//! callbacks against the display profile reported by [`NativeDisplayProbe`].
+//! frame and measures update-to-next-frame latency, covering-snapshot installation,
+//! frame registration, callback cadence, process working-set growth, and chart-queue
+//! occupancy from GPUI's `on_next_frame` callbacks against the display profile
+//! reported by [`NativeDisplayProbe`].
 //! Renderer submission is genuinely performed through a native GPUI window. These
 //! callbacks run after the prior render but do not prove physical scanout, and the
 //! report says so.
 
-use axiusflow_application::{ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate};
-use axiusflow_chart_integration::OriginChartView;
-use axiusflow_coinbase_market_adapter::{CoinbaseInterval, aggregate_coinbase_bars};
+use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay, ReplaySnapshot};
+use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
 use axiusflow_desktop::market_worker::FixtureMarketWorker;
-use axiusflow_market_data::BarDefinition;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
 use axiusflow_platform_runtime::{WindowsCompositionProbe, WindowsCompositionTiming};
@@ -35,6 +34,7 @@ use std::{
 use crate::readiness_conformance::ProcessMemoryProbe;
 
 const SNAPSHOT_BARS: usize = 256;
+const REPLACEMENT_SNAPSHOT_BARS: usize = 600;
 const WARMUP_FRAMES: usize = 32;
 const MEASURED_FRAMES: usize = 256;
 
@@ -97,7 +97,7 @@ struct WindowsCompositionEvidence {
 #[derive(Serialize)]
 struct LatencyTargets {
     warm_first_pixel_met: bool,
-    timeframe_switch_met: bool,
+    snapshot_replacement_met: bool,
 }
 
 #[derive(Serialize)]
@@ -119,6 +119,14 @@ struct ChartQueueEvidence {
 }
 
 #[derive(Serialize)]
+struct ForegroundDurationEvidence {
+    chart_snapshot_installation_samples: usize,
+    chart_snapshot_installation: LatencyEvidence,
+    frame_scheduling_samples: usize,
+    frame_scheduling: LatencyEvidence,
+}
+
+#[derive(Serialize)]
 struct WindowedBenchmarkReport {
     schema_version: u32,
     evidence_scope: &'static str,
@@ -128,12 +136,13 @@ struct WindowedBenchmarkReport {
     measured_frames: usize,
     updates_published: usize,
     first_pixel_nanos: u64,
-    timeframe_switch_first_pixel_nanos: u64,
+    snapshot_replacement_first_pixel_nanos: u64,
     latency_targets: LatencyTargets,
     update_to_frame_callback: LatencyEvidence,
     frame_callback_interval: LatencyEvidence,
     process_memory_bytes: ProcessMemoryBytes,
     chart_queue: ChartQueueEvidence,
+    foreground_duration: ForegroundDurationEvidence,
     renderer_submission_performed: bool,
     compositor_presentation_evidence: &'static str,
     #[cfg(target_os = "windows")]
@@ -152,7 +161,7 @@ struct FrameSample {
 struct BenchmarkDriver {
     chart: Entity<OriginChartView>,
     worker: FixtureMarketWorker,
-    timeframe_snapshot: Option<ReplaySnapshot>,
+    replacement_snapshot: Option<ReplaySnapshot>,
     previous_sequence: u64,
     iteration: usize,
     submitted_at: Instant,
@@ -161,12 +170,15 @@ struct BenchmarkDriver {
     report_path: PathBuf,
     opened_at: Instant,
     first_pixel_nanos: Option<u64>,
-    timeframe_switch_submitted_at: Option<Instant>,
-    timeframe_switch_first_pixel_nanos: Option<u64>,
+    snapshot_replacement_submitted_at: Option<Instant>,
+    snapshot_replacement_first_pixel_nanos: Option<u64>,
     memory: ProcessMemoryProbe,
     maximum_pending_before_submission: usize,
     maximum_pending_after_submission: usize,
     chart_queue_overflows: u64,
+    chart_snapshot_installation_nanos: Vec<u64>,
+    frame_scheduling_nanos: Vec<u64>,
+    failure: Option<String>,
     #[cfg(target_os = "windows")]
     composition_probe: Option<WindowsCompositionProbe>,
     #[cfg(target_os = "windows")]
@@ -185,7 +197,7 @@ enum Step {
 impl BenchmarkDriver {
     fn step(&mut self, window: &mut Window, cx: &mut App) -> Step {
         let callback_at = Instant::now();
-        let pending_before_submission = self.chart.read(cx).replay_bridge_metrics();
+        let pending_before_submission = self.observe_chart_before_submission(cx);
         self.maximum_pending_before_submission = self
             .maximum_pending_before_submission
             .max(pending_before_submission.queued_updates);
@@ -200,8 +212,8 @@ impl BenchmarkDriver {
             )
             .unwrap_or(u64::MAX)
         });
-        if let Some(submitted_at) = self.timeframe_switch_submitted_at.take() {
-            self.timeframe_switch_first_pixel_nanos = Some(
+        if let Some(submitted_at) = self.snapshot_replacement_submitted_at.take() {
+            self.snapshot_replacement_first_pixel_nanos = Some(
                 u64::try_from(
                     callback_at
                         .saturating_duration_since(submitted_at)
@@ -230,27 +242,24 @@ impl BenchmarkDriver {
         }
         self.last_callback_at = callback_at;
         if self.samples.len() >= MEASURED_FRAMES {
-            if self.timeframe_switch_first_pixel_nanos.is_some() {
+            if self.snapshot_replacement_first_pixel_nanos.is_some() {
                 return Step::Finish;
             }
-            let Some(snapshot) = self.timeframe_snapshot.take() else {
+            let Some(snapshot) = self.replacement_snapshot.take() else {
                 return Step::Finish;
             };
-            let metrics = self.chart.update(cx, |chart, _| {
-                if chart
-                    .try_queue_replay_update(ReplayStreamUpdate::Snapshot(snapshot))
-                    .is_err()
-                {
-                    eprintln!("windowed benchmark timeframe snapshot queue overflowed");
-                }
-                chart.replay_bridge_metrics()
-            });
-            self.maximum_pending_after_submission = self
-                .maximum_pending_after_submission
-                .max(metrics.queued_updates);
-            self.chart_queue_overflows = self.chart_queue_overflows.max(metrics.queue_overflows);
+            let submitted_at = Instant::now();
+            if let Err(error) = self
+                .chart
+                .update(cx, |chart, _| chart.load_replay(&snapshot))
+            {
+                self.failure = Some(format!(
+                    "windowed benchmark covering snapshot replacement failed: {error}"
+                ));
+                return Step::Finish;
+            }
             window.refresh();
-            self.timeframe_switch_submitted_at = Some(Instant::now());
+            self.snapshot_replacement_submitted_at = Some(submitted_at);
             return Step::Continue;
         }
         let publication = match self.worker.publish_delta(self.previous_sequence) {
@@ -277,6 +286,19 @@ impl BenchmarkDriver {
         self.iteration += 1;
         self.submitted_at = Instant::now();
         Step::Continue
+    }
+
+    fn observe_chart_before_submission(&mut self, cx: &mut App) -> ChartBridgeMetrics {
+        let (metrics, snapshot_installation_nanos) = self.chart.update(cx, |chart, _| {
+            (
+                chart.replay_bridge_metrics(),
+                chart.take_snapshot_installation_nanos(),
+            )
+        });
+        if let Some(elapsed_nanos) = snapshot_installation_nanos {
+            self.chart_snapshot_installation_nanos.push(elapsed_nanos);
+        }
+        metrics
     }
 
     #[cfg(target_os = "windows")]
@@ -316,6 +338,8 @@ fn schedule_frame(
     window: &mut Window,
     _cx: &mut App,
 ) {
+    let scheduling_started = Instant::now();
+    let scheduling_driver = Rc::clone(&driver);
     window.on_next_frame(move |window, cx| {
         let finished = {
             let mut borrowed = driver.borrow_mut();
@@ -334,6 +358,14 @@ fn schedule_frame(
         }
         schedule_frame(Rc::clone(&driver), Rc::clone(&outcome), window, cx);
     });
+    scheduling_driver
+        .borrow_mut()
+        .frame_scheduling_nanos
+        .push(elapsed_nanos(scheduling_started));
+}
+
+fn elapsed_nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn percentile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
@@ -346,6 +378,18 @@ fn percentile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
 
 fn latency_evidence(samples: &[FrameSample], select: fn(&FrameSample) -> u64) -> LatencyEvidence {
     let mut values: Vec<u64> = samples.iter().map(select).collect();
+    values.sort_unstable();
+    LatencyEvidence {
+        p50: percentile(&values, 50, 100),
+        p95: percentile(&values, 95, 100),
+        p99: percentile(&values, 99, 100),
+        p99_9: percentile(&values, 999, 1_000),
+        maximum: values.last().copied().unwrap_or(0),
+    }
+}
+
+fn duration_latency_evidence(samples: &[u64]) -> LatencyEvidence {
+    let mut values = samples.to_vec();
     values.sort_unstable();
     LatencyEvidence {
         p50: percentile(&values, 50, 100),
@@ -559,26 +603,63 @@ const fn native_probe_name() -> &'static str {
     "unavailable"
 }
 
-fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
-    driver.memory.sample()?;
-    let observed_growth_bytes = driver.memory.observed_growth_bytes();
-    let queue_drained_between_frames = driver.maximum_pending_before_submission == 0;
+fn chart_queue_evidence(driver: &BenchmarkDriver) -> Result<ChartQueueEvidence, String> {
+    let drained_between_frames = driver.maximum_pending_before_submission == 0;
     let one_update_per_frame = driver.maximum_pending_after_submission <= 1;
-    let no_queue_overflow = driver.chart_queue_overflows == 0;
-    if !queue_drained_between_frames || !one_update_per_frame || !no_queue_overflow {
+    let no_overflow = driver.chart_queue_overflows == 0;
+    if !drained_between_frames || !one_update_per_frame || !no_overflow {
         return Err(format!(
             "windowed benchmark chart-queue bound failed: before={} after={} overflows={}",
             driver.maximum_pending_before_submission,
             driver.maximum_pending_after_submission,
             driver.chart_queue_overflows
-        )
-        .into());
+        ));
     }
+    Ok(ChartQueueEvidence {
+        maximum_pending_before_submission: driver.maximum_pending_before_submission,
+        maximum_pending_after_submission: driver.maximum_pending_after_submission,
+        overflows: driver.chart_queue_overflows,
+        drained_between_frames,
+        one_update_per_frame,
+        no_overflow,
+    })
+}
+
+fn foreground_duration_evidence(
+    driver: &BenchmarkDriver,
+) -> Result<ForegroundDurationEvidence, String> {
+    if driver.chart_snapshot_installation_nanos.is_empty()
+        || driver.frame_scheduling_nanos.is_empty()
+    {
+        return Err(format!(
+            "windowed benchmark foreground timing missing: snapshot_installations={} frame_schedules={}",
+            driver.chart_snapshot_installation_nanos.len(),
+            driver.frame_scheduling_nanos.len()
+        ));
+    }
+    Ok(ForegroundDurationEvidence {
+        chart_snapshot_installation_samples: driver.chart_snapshot_installation_nanos.len(),
+        chart_snapshot_installation: duration_latency_evidence(
+            &driver.chart_snapshot_installation_nanos,
+        ),
+        frame_scheduling_samples: driver.frame_scheduling_nanos.len(),
+        frame_scheduling: duration_latency_evidence(&driver.frame_scheduling_nanos),
+    })
+}
+
+fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
+    if let Some(failure) = driver.failure.take() {
+        return Err(failure.into());
+    }
+    driver.memory.sample()?;
+    let observed_growth_bytes = driver.memory.observed_growth_bytes();
+    let chart_queue = chart_queue_evidence(driver)?;
+    let foreground_duration = foreground_duration_evidence(driver)?;
     #[cfg(target_os = "windows")]
     let windows_dwm_composition = windows_composition_evidence(driver);
     let report = WindowedBenchmarkReport {
-        schema_version: 6,
-        evidence_scope: "windowed_first_pixel_timeframe_switch_replay_memory_queue_and_native_compositor_timeline",
+        schema_version: 7,
+        evidence_scope: "windowed_first_pixel_snapshot_replacement_replay_memory_queue_foreground_and_native_compositor_timeline",
         source_revision: env::var("GITHUB_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty()),
@@ -587,15 +668,15 @@ fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
         measured_frames: driver.samples.len(),
         updates_published: driver.iteration,
         first_pixel_nanos: driver.first_pixel_nanos.unwrap_or(u64::MAX),
-        timeframe_switch_first_pixel_nanos: driver
-            .timeframe_switch_first_pixel_nanos
+        snapshot_replacement_first_pixel_nanos: driver
+            .snapshot_replacement_first_pixel_nanos
             .unwrap_or(u64::MAX),
         latency_targets: LatencyTargets {
             warm_first_pixel_met: driver
                 .first_pixel_nanos
                 .is_some_and(|value| value < 1_000_000_000),
-            timeframe_switch_met: driver
-                .timeframe_switch_first_pixel_nanos
+            snapshot_replacement_met: driver
+                .snapshot_replacement_first_pixel_nanos
                 .is_some_and(|value| value < 1_000_000_000),
         },
         update_to_frame_callback: latency_evidence(&driver.samples, |sample| {
@@ -610,14 +691,8 @@ fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
             observed_high_water: driver.memory.high_water_bytes(),
             observed_growth: observed_growth_bytes,
         },
-        chart_queue: ChartQueueEvidence {
-            maximum_pending_before_submission: driver.maximum_pending_before_submission,
-            maximum_pending_after_submission: driver.maximum_pending_after_submission,
-            overflows: driver.chart_queue_overflows,
-            drained_between_frames: queue_drained_between_frames,
-            one_update_per_frame,
-            no_overflow: no_queue_overflow,
-        },
+        chart_queue,
+        foreground_duration,
         renderer_submission_performed: true,
         #[cfg(target_os = "windows")]
         compositor_presentation_evidence: if windows_dwm_composition.timeline_observation
@@ -646,11 +721,16 @@ fn write_report(driver: &mut BenchmarkDriver) -> Result<(), Box<dyn Error>> {
     encoded.push(b'\n');
     fs::write(&driver.report_path, encoded)?;
     println!(
-        "windowed_chart_latency=completed first_pixel_ns={} timeframe_switch_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} process_memory_growth_bytes={} chart_queue_before={} chart_queue_after={} chart_queue_overflows={} report={}",
+        "windowed_chart_latency=completed first_pixel_ns={} snapshot_replacement_first_pixel_ns={} measured_frames={} update_to_frame_callback_p50_ns={} snapshot_installation_ns={} frame_schedule_p99_ns={} process_memory_growth_bytes={} chart_queue_before={} chart_queue_after={} chart_queue_overflows={} report={}",
         report.first_pixel_nanos,
-        report.timeframe_switch_first_pixel_nanos,
+        report.snapshot_replacement_first_pixel_nanos,
         driver.samples.len(),
         report.update_to_frame_callback.p50,
+        report
+            .foreground_duration
+            .chart_snapshot_installation
+            .maximum,
+        report.foreground_duration.frame_scheduling.p99,
         report.process_memory_bytes.observed_growth,
         report.chart_queue.maximum_pending_before_submission,
         report.chart_queue.maximum_pending_after_submission,
@@ -686,28 +766,17 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     let bootstrap = worker
         .publish_snapshot(SNAPSHOT_BARS)
         .map_err(std::io::Error::other)?;
-    let source_items = bootstrap.snapshot.stream().items();
-    let source_bars: Vec<_> = source_items.iter().map(|item| *item.value()).collect();
-    let (timeframe_bars, _) = aggregate_coinbase_bars(&source_bars, CoinbaseInterval::Minute5)
-        .map_err(Box::<dyn Error>::from)?;
-    let timeframe_snapshot = ReplaySnapshot::try_new(
-        bootstrap.snapshot.instrument().clone(),
-        ReplayProvenance::EmbeddedFixture,
-        BarDefinition {
-            definition_id: "coinbase_5m_ohlcv_v1".to_string(),
-            version: 1,
-            interval_seconds: 300,
-            trades_per_bar: None,
-        },
-        timeframe_bars,
-    )?
-    .try_with_publication_generation(
-        bootstrap
-            .snapshot
-            .evidence()
-            .publication_generation
-            .saturating_add(1),
-    )?;
+    let replacement_snapshot = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay {
+            bar_count: REPLACEMENT_SNAPSHOT_BARS,
+        })?
+        .try_with_publication_generation(
+            bootstrap
+                .snapshot
+                .evidence()
+                .publication_generation
+                .saturating_add(1),
+        )?;
     let previous_sequence = bootstrap.snapshot.stream().last_sequence();
     let (snapshot, report_path) = (bootstrap.snapshot, report_path.to_path_buf());
     application().run(move |cx: &mut App| {
@@ -734,7 +803,7 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                 let driver = Rc::new(RefCell::new(BenchmarkDriver {
                     chart: chart.clone(),
                     worker,
-                    timeframe_snapshot: Some(timeframe_snapshot),
+                    replacement_snapshot: Some(replacement_snapshot),
                     previous_sequence,
                     iteration: 0,
                     submitted_at: Instant::now(),
@@ -743,12 +812,15 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
                     report_path,
                     opened_at: Instant::now(),
                     first_pixel_nanos: None,
-                    timeframe_switch_submitted_at: None,
-                    timeframe_switch_first_pixel_nanos: None,
+                    snapshot_replacement_submitted_at: None,
+                    snapshot_replacement_first_pixel_nanos: None,
                     memory,
                     maximum_pending_before_submission: 0,
                     maximum_pending_after_submission: 0,
                     chart_queue_overflows: 0,
+                    chart_snapshot_installation_nanos: Vec::with_capacity(1),
+                    frame_scheduling_nanos: Vec::with_capacity(WARMUP_FRAMES + MEASURED_FRAMES + 2),
+                    failure: None,
                     #[cfg(target_os = "windows")]
                     composition_probe,
                     #[cfg(target_os = "windows")]
