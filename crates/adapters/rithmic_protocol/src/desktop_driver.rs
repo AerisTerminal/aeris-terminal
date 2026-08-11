@@ -10,10 +10,10 @@ use crate::{
     SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
 };
 use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, ConnectTrigger, DesktopMarketWorker, DesktopMarketWorkerError,
-    DesktopProviderState, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
-    ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent, RecoveryReason,
-    SessionGeneration,
+    AuthenticationState, ConnectTrigger, DesktopMarketWorkerError, DesktopProviderError,
+    DesktopProviderRuntime, DesktopProviderState, InstrumentDescriptor, NetworkEvent,
+    ProviderEnvironment, ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
+    RecoveryReason, SessionGeneration,
 };
 use axiusflow_market_data::{
     AggressorSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
@@ -1442,16 +1442,19 @@ impl RithmicRetryScheduler {
     /// # Errors
     ///
     /// Returns a shared runtime state, vault, or driver error.
-    pub fn retry_due<T: Clone, V: CredentialVault>(
+    pub fn retry_due<V: CredentialVault>(
         &mut self,
-        worker: &mut DesktopMarketWorker<T, V, RithmicProviderDriver>,
+        worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
         now: Instant,
     ) -> Result<Option<SessionGeneration>, DesktopMarketWorkerError> {
-        let state = worker.provider_state()?;
+        let state = worker.state()?;
         if !self.take_due(state, now) {
             return Ok(None);
         }
-        worker.connect(ConnectTrigger::Retry).map(Some)
+        worker
+            .connect(ConnectTrigger::Retry)
+            .map(Some)
+            .map_err(Into::into)
     }
 
     fn take_due(&mut self, state: DesktopProviderState, now: Instant) -> bool {
@@ -1489,13 +1492,13 @@ pub enum RithmicEnvironmentEvent {
 /// # Errors
 ///
 /// Returns a redacted source, lifecycle, vault, driver, or history-retirement failure.
-pub fn apply_rithmic_environment_event<T: Clone, V: CredentialVault>(
-    worker: &mut DesktopMarketWorker<T, V, RithmicProviderDriver>,
+pub fn apply_rithmic_environment_event<V: CredentialVault>(
+    worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     event: RithmicEnvironmentEvent,
 ) -> Result<Option<SessionGeneration>, RithmicDesktopEventError> {
-    if !worker.callback_source_matches(|driver| driver.owns_events(events))? {
+    if !worker.driver_matches(|driver| driver.owns_events(events))? {
         return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
     }
     retries.clear();
@@ -1570,24 +1573,30 @@ impl From<DesktopMarketWorkerError> for RithmicDesktopEventError {
     }
 }
 
+impl From<DesktopProviderError> for RithmicDesktopEventError {
+    fn from(error: DesktopProviderError) -> Self {
+        Self::Runtime(error.into())
+    }
+}
+
 /// Applies at most one generation-fenced semantic callback.
 ///
 /// # Errors
 ///
 /// Returns a redacted source, event-shape, or lifecycle failure.
-pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
-    worker: &mut DesktopMarketWorker<T, V, RithmicProviderDriver>,
+pub fn try_recv_rithmic_event<V: CredentialVault>(
+    worker: &mut DesktopProviderRuntime<V, RithmicProviderDriver>,
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     now: Instant,
 ) -> Result<Option<AppliedRithmicEvent>, RithmicDesktopEventError> {
-    if !worker.callback_source_matches(|driver| driver.owns_events(events))? {
+    if !worker.driver_matches(|driver| driver.owns_events(events))? {
         return Err(DesktopMarketWorkerError::CallbackSourceMismatch.into());
     }
     let Some(callback) = events.try_recv() else {
         return Ok(None);
     };
-    match worker.provider_state()? {
+    match worker.state()? {
         DesktopProviderState::Connecting { generation, .. }
         | DesktopProviderState::Streaming { generation }
             if generation == callback.generation => {}
@@ -1602,7 +1611,7 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
             retries.established();
         }
         ProviderSessionEvent::Market { generation, event } => {
-            worker.ensure_streaming_generation(*generation)?;
+            ensure_streaming_generation(worker, *generation)?;
             let message_timestamp = match event {
                 MarketEvent::Trade(trade) => trade.metadata.timestamps.exchange_unix_nanos,
                 MarketEvent::Quote(quote) => quote.metadata.timestamps.provider_unix_nanos,
@@ -1614,7 +1623,7 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
             worker.record_market_event_diagnostics(*generation, event, message_timestamp)?;
         }
         ProviderSessionEvent::Heartbeat { generation, .. } => {
-            worker.ensure_streaming_generation(*generation)?;
+            ensure_streaming_generation(worker, *generation)?;
             worker.record_heartbeat_diagnostics(*generation)?;
         }
         ProviderSessionEvent::Invalidated {
@@ -1647,6 +1656,19 @@ pub fn try_recv_rithmic_event<T: Clone, V: CredentialVault>(
         | ProviderSessionEvent::Stopped => {}
     }
     Ok(Some(AppliedRithmicEvent::Semantic(callback.event)))
+}
+
+fn ensure_streaming_generation<V: CredentialVault>(
+    worker: &DesktopProviderRuntime<V, RithmicProviderDriver>,
+    generation: SessionGeneration,
+) -> Result<(), RithmicDesktopEventError> {
+    match worker.state()? {
+        DesktopProviderState::Streaming { generation: active } if active == generation => Ok(()),
+        DesktopProviderState::Streaming { .. } => {
+            Err(DesktopMarketWorkerError::HandoffGenerationMismatch.into())
+        }
+        _ => Err(DesktopMarketWorkerError::ProviderNotStreaming.into()),
+    }
 }
 
 fn direct_session_task() -> Arc<SessionTask> {
@@ -2798,16 +2820,12 @@ mod tests {
         MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, OrderBookSides, OrderBookUpdate,
         OrderBookUpdateKind, QuoteUpdate, TradeUpdate,
     };
-    use axiusflow_desktop_history::HistoryWorkerConfig;
-    use axiusflow_desktop_provider_runtime::{DesktopMarketWorkerConfig, DesktopProviderConfig};
-    use axiusflow_desktop_storage::CatalogKey;
+    use axiusflow_desktop_provider_runtime::DesktopProviderConfig;
     use axiusflow_market_data::{BookSide, DepthDelta};
     use std::{
-        fs,
         io::Read,
         net::{TcpListener, TcpStream},
         num::NonZeroU64,
-        path::PathBuf,
         sync::Barrier,
         thread,
     };
@@ -3189,55 +3207,21 @@ mod tests {
 
     fn open_worker(
         driver: RithmicProviderDriver,
-    ) -> (
-        DesktopMarketWorker<u64, MemoryVault, RithmicProviderDriver>,
-        PathBuf,
-    ) {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time follows Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "axiusflow-rithmic-driver-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir(&root).expect("history root creates");
-        let ui_thread = thread::spawn(|| thread::current().id())
-            .join()
-            .expect("UI thread identity is captured");
+    ) -> DesktopProviderRuntime<MemoryVault, RithmicProviderDriver> {
         let encoded = credentials();
-        let worker = DesktopMarketWorker::try_open(
+        DesktopProviderRuntime::try_new(
             MemoryVault(encoded.as_bytes().to_vec()),
             driver,
             RITHMIC_TEST_VAULT_KEY,
-            &root,
-            CatalogKey::try_new("catalog-key-v1".to_string(), [0x52; 32])
-                .expect("catalog key validates"),
-            ui_thread,
-            DesktopMarketWorkerConfig {
-                provider: DesktopProviderConfig::new(
-                    nonzero(16),
-                    nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES),
-                )
+            DesktopProviderConfig::new(nonzero(16), nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
                 .with_diagnostics(RithmicProviderConfig::environment(), None)
                 .expect("diagnostics identity validates"),
-                history: HistoryWorkerConfig {
-                    maximum_cache_entries: nonzero(2),
-                    maximum_decoded_bytes: nonzero(1_024),
-                    maximum_charts: nonzero(2),
-                    maximum_segment_read_bytes: nonzero(1_024),
-                    maximum_buffered_live: nonzero(2),
-                    maximum_handoffs: nonzero(2),
-                },
-                maximum_catalog_entries: 2,
-            },
         )
-        .expect("market worker opens");
-        (worker, root)
+        .expect("provider runtime opens")
     }
 
     fn wait_applied(
-        worker: &mut DesktopMarketWorker<u64, MemoryVault, RithmicProviderDriver>,
+        worker: &mut DesktopProviderRuntime<MemoryVault, RithmicProviderDriver>,
         events: &RithmicProviderEvents,
         retries: &mut RithmicRetryScheduler,
         now: Instant,
@@ -3291,7 +3275,7 @@ mod tests {
             callback_limits(16, 64 * 1_024),
             diagnostic_market_task(),
         );
-        let (mut worker, root) = open_worker(driver);
+        let mut worker = open_worker(driver);
         let mut retries = RithmicRetryScheduler::default();
         let active = worker
             .connect(ConnectTrigger::Initial)
@@ -3325,7 +3309,6 @@ mod tests {
 
         worker.stop().expect("diagnostic session stops cleanly");
         drop(worker);
-        fs::remove_dir_all(root).expect("history fixture removes");
     }
 
     #[test]
@@ -4174,7 +4157,7 @@ mod tests {
             callback_limits(8, 64 * 1_024),
             runtime_task(),
         );
-        let (mut worker, root) = open_worker(driver);
+        let mut worker = open_worker(driver);
         let mut retries = RithmicRetryScheduler::default();
         let first = worker
             .connect(ConnectTrigger::Initial)
@@ -4205,7 +4188,7 @@ mod tests {
             }) if generation == first
         ));
         assert_eq!(
-            worker.provider_state().expect("state reads"),
+            worker.state().expect("state reads"),
             DesktopProviderState::Streaming { generation: first }
         );
 
@@ -4221,7 +4204,7 @@ mod tests {
             Duration::from_millis(250)
         );
         assert_eq!(
-            worker.provider_state().expect("state reads"),
+            worker.state().expect("state reads"),
             DesktopProviderState::RecoveryRequired {
                 generation: Some(first),
                 reason: RecoveryReason::TransportInvalid,
@@ -4253,14 +4236,13 @@ mod tests {
             let _ = wait_applied(&mut worker, &events, &mut retries, ticket.due_at);
         }
         assert_eq!(
-            worker.provider_state().expect("state reads"),
+            worker.state().expect("state reads"),
             DesktopProviderState::RecoveryRequired {
                 generation: Some(second),
                 reason: RecoveryReason::TransportInvalid,
             }
         );
         drop(worker);
-        fs::remove_dir_all(root).expect("history fixture removes");
     }
 
     #[test]
@@ -4270,7 +4252,7 @@ mod tests {
             callback_limits(16, 64 * 1_024),
             stable_runtime_task(),
         );
-        let (mut worker, root) = open_worker(driver);
+        let mut worker = open_worker(driver);
         let mut retries = RithmicRetryScheduler::default();
         let first = worker
             .request_connection()
@@ -4281,7 +4263,7 @@ mod tests {
             let _ = wait_applied(&mut worker, &events, &mut retries, now);
         }
         assert_eq!(
-            worker.provider_state().expect("state reads"),
+            worker.state().expect("state reads"),
             DesktopProviderState::Streaming { generation: first }
         );
         retries.record_invalid(
@@ -4305,7 +4287,7 @@ mod tests {
         assert_eq!(events.try_recv(), None);
         assert_eq!(events.try_recv_catalog(), None);
         assert_eq!(
-            worker.provider_state().expect("state reads"),
+            worker.state().expect("state reads"),
             DesktopProviderState::NetworkUnavailable
         );
 
@@ -4343,7 +4325,6 @@ mod tests {
         assert!(third > second);
 
         drop(worker);
-        fs::remove_dir_all(root).expect("history fixture removes");
     }
 
     #[test]
@@ -4353,7 +4334,7 @@ mod tests {
             callback_limits(16, 64 * 1_024),
             stable_runtime_task(),
         );
-        let (mut worker, root) = open_worker(driver);
+        let mut worker = open_worker(driver);
         let mut retries = RithmicRetryScheduler::default();
         apply_rithmic_environment_event(
             &mut worker,
@@ -4369,7 +4350,7 @@ mod tests {
             None
         );
         assert_eq!(
-            worker.provider_state().expect("state reads"),
+            worker.state().expect("state reads"),
             DesktopProviderState::NetworkUnavailable
         );
         let restored_generation = apply_rithmic_environment_event(
@@ -4383,7 +4364,6 @@ mod tests {
         assert_eq!(restored_generation, generation(1));
 
         drop(worker);
-        fs::remove_dir_all(root).expect("history fixture removes");
     }
 
     #[test]

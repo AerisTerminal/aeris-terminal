@@ -100,7 +100,7 @@ This production slice supports BTC-USD and ETH-USD history plus realtime at 1m, 
 
 `ProviderSessionDriver` is the shared live-session boundary implemented by Coinbase and Rithmic. `ProviderHistoryAdapter` is the shared paginated-history boundary. Authentication, transport framing, provider limits, product/catalog translation, and provider-specific recovery remain inside the adapters; downstream history, storage, engine, and UI code consumes canonical identities and values.
 
-`desktop_market_runtime` temporarily remains the shared UI mailbox/model contract and owns only the direct Rithmic test runtime. Its obsolete direct Coinbase coordinator, history, persistence, conformance, and smoke-command path have been deleted. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, and paging. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second market-state owner.
+`desktop_market_runtime` temporarily remains the shared UI mailbox/model contract and owns only the direct Rithmic test runtime. Its obsolete direct Coinbase coordinator, history, persistence, conformance, and smoke-command path have been deleted. The remaining Rithmic worker now composes the provider lifecycle directly and no longer opens the unused desktop history/cache/store; its actual provider history task remains desktop-owned until Phase 7. Provider adapters stop at venue authentication, sockets, wire parsing, catalog translation, venue continuity, rate limits, and paging. The chart bridge retains consumer-side stale and discontinuity rejection as defense in depth, not as a second market-state owner.
 
 The path is local by construction. Provider credentials stay on the user's machine, provider traffic terminates in a local worker, and durable history is stored under the user's local data root. No remote Axiusflow service, licensing gateway, or network chart service exists in the product architecture.
 
@@ -128,7 +128,7 @@ The durable identity includes resolution and source revision, so native and deri
 - One bounded engine realtime worker owns the Coinbase WebSocket. Its generation-fenced events enter a bounded queue; queue overflow, sequence invalidation, or disconnect forces explicit recovery and a covering history repair.
 - The coordinator stores at most the latest provider state, snapshot, and series state per consumer. Covering snapshots may conflate; provider deltas are not silently discarded.
 - The bounded desktop engine-client worker interleaves commands with 16 ms market-event polling and application-model conversion, never provider execution or canonical market state.
-- The direct Rithmic test worker retains legacy provider-session and storage ownership until Phase 7.
+- The direct Rithmic test worker retains legacy provider-session and provider-history ownership until Phase 7, but has no local storage access.
 - Blocking history and storage work stays off GPUI and communicates through bounded channels.
 - Selection generations make obsolete symbol and timeframe results stale; stale work cannot overwrite the new selection.
 - The desktop command boundary coalesces selection changes to the newest state until the bounded provider-worker mailbox accepts it; queue pressure must never silently discard the active selection.

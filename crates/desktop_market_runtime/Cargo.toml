@@ -9,9 +9,7 @@ publish.workspace = true
 [dependencies]
 axiusflow_application = { path = "../application" }
 axiusflow_coinbase_market_adapter = { path = "../adapters/coinbase_market" }
-axiusflow_desktop_history = { path = "../desktop_history" }
 axiusflow_desktop_provider_runtime = { path = "../desktop_provider_runtime" }
-axiusflow_desktop_storage = { path = "../desktop_storage" }
 axiusflow_instruments = { path = "../domain/instruments" }
 axiusflow_market_data = { path = "../domain/market_data" }
 axiusflow_market_protocol_adapter = { path = "../adapters/market_protocol" }
@@ -20,7 +18,6 @@ axiusflow_platform_runtime = { path = "../platform_runtime" }
 axiusflow_provider_history = { path = "../provider_history" }
 axiusflow_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 axiusflow_terminal_ui = { path = "../ui/terminal_ui", default-features = false }
-getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

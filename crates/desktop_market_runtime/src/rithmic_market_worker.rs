@@ -11,23 +11,19 @@ use crate::{
         RithmicRuntimeStateEvidence,
     },
 };
-use axiusflow_application::ProvenancedMarketBar;
-use axiusflow_desktop_history::HistoryWorkerConfig;
 use axiusflow_desktop_market_runtime::market_worker::{
     MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerStartup,
     market_worker_channel,
 };
 use axiusflow_desktop_provider_runtime::{
-    AuthenticationState, DesktopMarketWorker, DesktopMarketWorkerConfig, DesktopProviderConfig,
-    ProviderInvalidationReason, ProviderSessionEvent,
+    AuthenticationState, DesktopProviderConfig, DesktopProviderRuntime, ProviderInvalidationReason,
+    ProviderSessionEvent,
 };
-use axiusflow_desktop_storage::CatalogKey;
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_platform_runtime::{
-    CredentialVault, NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent,
-    PowerEvent,
+    NativeCredentialVault, NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
 };
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
@@ -45,10 +41,9 @@ use std::{
         atomic::{AtomicU8, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     },
-    thread::{self, ThreadId},
+    thread,
     time::{Duration, Instant},
 };
-use zeroize::{Zeroize, Zeroizing};
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
@@ -59,13 +54,11 @@ const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const MAXIMUM_DEPTH: usize = 256;
 const IDLE_WAIT: Duration = Duration::from_millis(50);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
-const CATALOG_KEY_ID: &str = "rithmic-test-history-catalog-key-v1";
 const MAXIMUM_BUFFERED_HISTORY_TRADES: usize = 4_096;
 const NETWORK_MONITOR_FAILED: u8 = 1;
 const POWER_MONITOR_FAILED: u8 = 2;
 
-type RithmicWorker =
-    DesktopMarketWorker<ProvenancedMarketBar, NativeCredentialVault, RithmicProviderDriver>;
+type RithmicWorker = DesktopProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
 type RithmicEvents = axiusflow_rithmic_protocol_adapter::RithmicProviderEvents;
 
 #[derive(Clone, Copy)]
@@ -162,8 +155,6 @@ impl RithmicRuntimeState {
 /// # Errors
 /// Returns a redacted configuration, credential, storage, monitor, or worker-start failure.
 pub fn start(
-    history_root: PathBuf,
-    ui_thread: ThreadId,
     detailed_diagnostics: bool,
     native_transition_report: Option<PathBuf>,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
@@ -172,8 +163,6 @@ pub fn start(
         run(
             &message_tx,
             &command_rx,
-            history_root,
-            ui_thread,
             detailed_diagnostics,
             native_transition_report,
         );
@@ -208,8 +197,6 @@ fn spawn_worker(
 fn run(
     messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
     commands: &Receiver<MarketWorkerCommand>,
-    history_root: PathBuf,
-    ui_thread: ThreadId,
     detailed_diagnostics: bool,
     native_transition_report: Option<PathBuf>,
 ) {
@@ -255,7 +242,7 @@ fn run(
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = wake_tx.try_send(());
     });
-    let opened = open_worker(history_root, ui_thread, detailed_diagnostics, wake);
+    let opened = open_worker(detailed_diagnostics, wake);
     let Ok((worker, events)) = opened else {
         send_connection(
             messages,
@@ -1011,18 +998,11 @@ fn publish_trade(
 }
 
 fn open_worker(
-    history_root: PathBuf,
-    ui_thread: ThreadId,
     detailed_diagnostics: bool,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<(RithmicWorker, RithmicEvents), String> {
-    std::fs::create_dir_all(&history_root)
-        .map_err(|_| "Rithmic history directory is unavailable".to_string())?;
     let credential_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
         .map_err(|_| "native credential vault unavailable".to_string())?;
-    let key_vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
-        .map_err(|_| "native key vault unavailable".to_string())?;
-    let catalog_key = load_catalog_key(&key_vault)?;
     let provider = RithmicProviderConfig::try_new(
         "Axiusflow",
         env!("CARGO_PKG_VERSION"),
@@ -1046,32 +1026,13 @@ fn open_worker(
                     .then_some(NonZeroU64::new(10_000_000_000).unwrap_or(NonZeroU64::MIN)),
             )
             .map_err(|_| "Rithmic diagnostics configuration is invalid".to_string())?;
-    let mut worker = DesktopMarketWorker::try_open(
+    let worker = DesktopProviderRuntime::try_new(
         credential_vault,
         driver,
         RITHMIC_TEST_VAULT_KEY,
-        history_root,
-        catalog_key,
-        ui_thread,
-        DesktopMarketWorkerConfig {
-            provider: provider_config,
-            history: HistoryWorkerConfig {
-                maximum_cache_entries: nonzero(2),
-                maximum_decoded_bytes: nonzero(2 * 1024 * 1024),
-                maximum_charts: nonzero(1),
-                maximum_segment_read_bytes: nonzero(1024 * 1024),
-                maximum_buffered_live: nonzero(512),
-                maximum_handoffs: nonzero(1),
-            },
-            maximum_catalog_entries: 64,
-        },
+        provider_config,
     )
-    .map_err(|_| "Rithmic desktop runtime is unavailable".to_string())?;
-    worker
-        .enforce_derived_history_quota(
-            axiusflow_desktop_storage::DEFAULT_DERIVED_PAYLOAD_QUOTA_BYTES,
-        )
-        .map_err(|_| "Rithmic derived-data maintenance failed".to_string())?;
+    .map_err(|_| "Rithmic provider runtime is unavailable".to_string())?;
     Ok((worker, events))
 }
 
@@ -1168,7 +1129,7 @@ fn reduce_event(
 fn active_generation(
     worker: &RithmicWorker,
 ) -> Result<Option<axiusflow_desktop_provider_runtime::SessionGeneration>, ()> {
-    match worker.provider_state().map_err(|_| ())? {
+    match worker.state().map_err(|_| ())? {
         axiusflow_desktop_provider_runtime::DesktopProviderState::Connecting {
             generation, ..
         }
@@ -1277,30 +1238,6 @@ fn wait_for_shutdown(commands: &Receiver<MarketWorkerCommand>) {
             break;
         }
     }
-}
-
-fn load_catalog_key(vault: &NativeCredentialVault) -> Result<CatalogKey, String> {
-    let bytes = load_or_create_key(vault, CATALOG_KEY_ID)?;
-    CatalogKey::try_new(CATALOG_KEY_ID.to_string(), bytes)
-        .map_err(|_| "Rithmic catalog key is invalid".to_string())
-}
-
-fn load_or_create_key(vault: &NativeCredentialVault, key_id: &str) -> Result<[u8; 32], String> {
-    if let Some(mut stored) = vault
-        .load(key_id)
-        .map_err(|_| "native key vault is unavailable".to_string())?
-    {
-        let result = <[u8; 32]>::try_from(stored.as_slice())
-            .map_err(|_| "native catalog key has an invalid length".to_string());
-        stored.zeroize();
-        return result;
-    }
-    let mut generated = Zeroizing::new([0_u8; 32]);
-    getrandom::fill(generated.as_mut()).map_err(|_| "catalog key generation failed".to_string())?;
-    vault
-        .store(key_id, generated.as_ref())
-        .map_err(|_| "native key vault is unavailable".to_string())?;
-    Ok(*generated)
 }
 
 fn nonzero(value: usize) -> NonZeroUsize {

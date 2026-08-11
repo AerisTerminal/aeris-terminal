@@ -739,9 +739,7 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_application",
  "axiusflow_coinbase_market_adapter",
- "axiusflow_desktop_history",
  "axiusflow_desktop_provider_runtime",
- "axiusflow_desktop_storage",
  "axiusflow_instruments",
  "axiusflow_market_data",
  "axiusflow_market_protocol_adapter",
@@ -750,7 +748,6 @@ dependencies = [
  "axiusflow_provider_history",
  "axiusflow_rithmic_protocol_adapter",
  "axiusflow_terminal_ui",
- "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sha2 0.10.9",

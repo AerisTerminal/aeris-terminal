@@ -1362,7 +1362,11 @@ where
         Ok(())
     }
 
-    pub(crate) fn driver_matches(
+    /// Verifies adapter callback ownership without exposing the driver.
+    ///
+    /// # Errors
+    /// Returns an error for wrong-thread access.
+    pub fn driver_matches(
         &self,
         predicate: impl FnOnce(&D) -> bool,
     ) -> Result<bool, DesktopProviderError> {
