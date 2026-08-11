@@ -10,7 +10,7 @@ use axiusflow_desktop_provider_runtime::{
     DesktopProviderConfig, DesktopProviderRuntime, InstrumentDescriptor, ProviderSessionEvent,
 };
 use axiusflow_local_engine_protocol::InstallProviderInstrument;
-use axiusflow_market_data::{MarketEvent, MarketTrade};
+use axiusflow_market_data::{DepthSnapshot, MarketEvent, MarketTrade};
 use axiusflow_platform_runtime::NativeCredentialVault;
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, RITHMIC_TEST_VAULT_KEY,
@@ -32,6 +32,7 @@ pub(crate) enum RithmicRealtimeEvent {
     Connecting(u64),
     Connected(u64),
     Trade(u64, MarketTrade),
+    Depth(u64, DepthSnapshot),
     Heartbeat(u64),
     Recovering(u64),
     Disconnected(u64),
@@ -116,10 +117,19 @@ fn run_selection(
                         let _ = publications.send(RithmicRealtimeEvent::Connected(generation));
                     }
                     ProviderSessionEvent::Market {
-                        event: MarketEvent::Trade(trade),
+                        event: MarketEvent::Trade(mut trade),
                         ..
                     } => {
+                        trade.metadata.session_generation = generation;
                         let _ = publications.send(RithmicRealtimeEvent::Trade(generation, trade));
+                    }
+                    ProviderSessionEvent::Market {
+                        event: MarketEvent::DepthSnapshot(mut snapshot),
+                        ..
+                    } => {
+                        snapshot.metadata.session_generation = generation;
+                        let _ =
+                            publications.send(RithmicRealtimeEvent::Depth(generation, snapshot));
                     }
                     ProviderSessionEvent::Heartbeat { .. } => {
                         let _ = publications.send(RithmicRealtimeEvent::Heartbeat(generation));
@@ -196,7 +206,7 @@ fn open_runtime(
             entitlement_id: selected.entitlement_id.clone(),
             trades: true,
             quotes: false,
-            order_book: false,
+            order_book: true,
         }],
     )
     .map_err(|_| "Rithmic live provider configuration is invalid".to_string())?;

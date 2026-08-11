@@ -12,10 +12,15 @@ use axiusflow_local_engine_client::{
     EngineClient, connect_or_start_engine, sibling_engine_executable,
 };
 use axiusflow_local_engine_protocol::{
-    DemandError, InstallProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
-    SeriesSnapshot, envelope,
+    DemandError, InstallProviderInstrument, OrderBookSnapshot as IpcOrderBookSnapshot,
+    OrderBookState as IpcOrderBookState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    envelope,
 };
-use axiusflow_market_data::{BarDefinition, ChartAggregation, ChartInterval, MarketBar};
+use axiusflow_market_data::{
+    BarDefinition, ChartAggregation, ChartInterval, DepthLevel, MarketBar, OrderBookPublication,
+    OrderBookRecoveryReason, OrderBookState,
+};
+use axiusflow_terminal_ui::{DomFrame, DomSelection, ReadOnlyDom};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
@@ -30,6 +35,7 @@ use std::{
 use crate::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
+const MAXIMUM_DOM_LEVELS: usize = 20;
 const HISTORY_COMMAND_CAPACITY: usize = 1;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_TIMEOUT: Duration = Duration::from_secs(35);
@@ -66,6 +72,27 @@ struct LatestHistoryResult {
     value: Mutex<Option<RithmicHistoryResult>>,
 }
 
+#[derive(Default)]
+struct LatestDomFrame {
+    value: Mutex<Option<DomFrame>>,
+}
+
+impl LatestDomFrame {
+    fn publish(&self, frame: DomFrame) {
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frame);
+    }
+
+    fn take(&self) -> Option<DomFrame> {
+        self.value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
 impl LatestHistoryResult {
     fn publish(&self, result: RithmicHistoryResult) {
         *self
@@ -85,6 +112,7 @@ impl LatestHistoryResult {
 pub(crate) struct RithmicHistoryTask {
     commands: Option<SyncSender<HistoryCommand>>,
     results: Arc<LatestHistoryResult>,
+    dom: Arc<LatestDomFrame>,
     active: Option<(NonZeroUsize, NonZeroUsize, Arc<AtomicBool>)>,
     handle: Option<JoinHandle<()>>,
 }
@@ -93,14 +121,17 @@ impl RithmicHistoryTask {
     pub(crate) fn start() -> Result<Self, String> {
         let (command_tx, command_rx) = mpsc::sync_channel(HISTORY_COMMAND_CAPACITY);
         let results = Arc::new(LatestHistoryResult::default());
+        let dom = Arc::new(LatestDomFrame::default());
         let worker_results = Arc::clone(&results);
+        let worker_dom = Arc::clone(&dom);
         let handle = thread::Builder::new()
             .name("axiusflow-rithmic-engine-history-client".to_string())
-            .spawn(move || run_history_worker(&command_rx, &worker_results))
+            .spawn(move || run_history_worker(&command_rx, &worker_results, &worker_dom))
             .map_err(|_| "Rithmic engine history client is unavailable".to_string())?;
         Ok(Self {
             commands: Some(command_tx),
             results,
+            dom,
             active: None,
             handle: Some(handle),
         })
@@ -160,6 +191,10 @@ impl RithmicHistoryTask {
         Some(result)
     }
 
+    pub(crate) fn try_recv_dom(&self) -> Option<DomFrame> {
+        self.dom.take()
+    }
+
     pub(crate) fn cancel(&mut self) {
         if let Some((_, _, stop)) = self.active.take() {
             stop.store(true, Ordering::Release);
@@ -187,6 +222,11 @@ struct EngineHistorySession {
     consumer_id: u64,
 }
 
+enum EngineUpdate {
+    History(Box<MarketWorkerBootstrap>),
+    Dom(DomFrame),
+}
+
 impl EngineHistorySession {
     fn connect() -> Result<Self, String> {
         let executable = sibling_engine_executable()?;
@@ -205,7 +245,11 @@ impl EngineHistorySession {
         })
     }
 
-    fn fetch(&mut self, request: &HistoryFetchRequest) -> Result<MarketWorkerBootstrap, String> {
+    fn fetch(
+        &mut self,
+        request: &HistoryFetchRequest,
+        dom: &LatestDomFrame,
+    ) -> Result<MarketWorkerBootstrap, String> {
         let series = engine_series_key(request)?;
         self.client
             .install_provider_instrument(engine_instrument(&request.instrument)?)?;
@@ -224,18 +268,21 @@ impl EngineHistorySession {
                 self.reset_consumer()?;
                 return Err("Rithmic engine history request timed out".to_string());
             }
-            let Some(bootstrap) = self.poll_update(request)? else {
+            let Some(update) = self.poll_update(request)? else {
                 thread::sleep(POLL_INTERVAL);
                 continue;
             };
-            return Ok(bootstrap);
+            match update {
+                EngineUpdate::History(bootstrap) => return Ok(*bootstrap),
+                EngineUpdate::Dom(frame) => dom.publish(frame),
+            }
         }
     }
 
     fn poll_update(
         &mut self,
         request: &HistoryFetchRequest,
-    ) -> Result<Option<MarketWorkerBootstrap>, String> {
+    ) -> Result<Option<EngineUpdate>, String> {
         let series = engine_series_key(request)?;
         let Some(event) = self.client.poll_market_event(self.consumer_id)? else {
             return Ok(None);
@@ -249,7 +296,10 @@ impl EngineHistorySession {
                 {
                     return Err("Rithmic engine snapshot identity mismatched".to_string());
                 }
-                bootstrap_from_snapshot(request, &snapshot).map(Some)
+                bootstrap_from_snapshot(request, &snapshot)
+                    .map(Box::new)
+                    .map(EngineUpdate::History)
+                    .map(Some)
             }
             envelope::Payload::SeriesState(state) => {
                 if state.consumer_id != self.consumer_id
@@ -275,6 +325,14 @@ impl EngineHistorySession {
                 }
             }
             envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+            envelope::Payload::OrderBookSnapshot(snapshot) => {
+                if snapshot.consumer_id != self.consumer_id {
+                    return Err("Rithmic engine order-book consumer mismatched".to_string());
+                }
+                dom_from_snapshot(request, &snapshot)
+                    .map(EngineUpdate::Dom)
+                    .map(Some)
+            }
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             envelope::Payload::ProviderState(_) | envelope::Payload::MarketEventIdle(_) => Ok(None),
             _ => Err("Rithmic engine returned an unexpected history event".to_string()),
@@ -298,17 +356,21 @@ impl Drop for EngineHistorySession {
     }
 }
 
-fn run_history_worker(commands: &Receiver<HistoryCommand>, results: &LatestHistoryResult) {
+fn run_history_worker(
+    commands: &Receiver<HistoryCommand>,
+    results: &LatestHistoryResult,
+    dom: &LatestDomFrame,
+) {
     let mut session: Option<EngineHistorySession> = None;
     let mut active_request: Option<HistoryFetchRequest> = None;
     loop {
         match commands.recv_timeout(POLL_INTERVAL) {
             Ok(HistoryCommand::Fetch(request)) => {
                 let result = if let Some(active) = session.as_mut() {
-                    active.fetch(&request)
+                    active.fetch(&request, dom)
                 } else {
                     EngineHistorySession::connect().and_then(|mut active| {
-                        let result = active.fetch(&request);
+                        let result = active.fetch(&request, dom);
                         session = Some(active);
                         result
                     })
@@ -338,9 +400,10 @@ fn run_history_worker(commands: &Receiver<HistoryCommand>, results: &LatestHisto
                     continue;
                 };
                 match active.poll_update(request) {
-                    Ok(Some(bootstrap)) => {
-                        publish_history_result(results, request, Ok(bootstrap));
+                    Ok(Some(EngineUpdate::History(bootstrap))) => {
+                        publish_history_result(results, request, Ok(*bootstrap));
                     }
+                    Ok(Some(EngineUpdate::Dom(frame))) => dom.publish(frame),
                     Ok(None) => {}
                     Err(error) => {
                         publish_history_result(results, request, Err(error));
@@ -534,6 +597,110 @@ fn provenanced_engine_bars(
         .collect()
 }
 
+fn dom_from_snapshot(
+    request: &HistoryFetchRequest,
+    snapshot: &IpcOrderBookSnapshot,
+) -> Result<DomFrame, String> {
+    let expected_generation = u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX);
+    let expected_selection = u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX);
+    if snapshot.consumer_id == 0
+        || snapshot.generation != expected_generation
+        || snapshot.provider != "rithmic"
+        || snapshot.instrument_id != request.instrument.descriptor.instrument_id
+        || snapshot.entitlement_id != request.instrument.entitlement_id
+        || snapshot.provider_generation < request.instrument.session_generation
+        || snapshot.selection_generation != expected_selection
+        || snapshot.bids.len() > MAXIMUM_DOM_LEVELS
+        || snapshot.asks.len() > MAXIMUM_DOM_LEVELS
+    {
+        return Err("Rithmic engine order-book identity is invalid".to_string());
+    }
+    let state = match IpcOrderBookState::try_from(snapshot.state)
+        .map_err(|_| "Rithmic engine order-book state is invalid".to_string())?
+    {
+        IpcOrderBookState::Unspecified => {
+            return Err("Rithmic engine order-book state is unspecified".to_string());
+        }
+        IpcOrderBookState::AwaitingSnapshot => {
+            OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot)
+        }
+        IpcOrderBookState::Ready => OrderBookState::Ready,
+        IpcOrderBookState::Stale => OrderBookState::Stale,
+        IpcOrderBookState::SequenceGap => {
+            OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
+        }
+        IpcOrderBookState::CrossedBook => {
+            OrderBookState::Recovering(OrderBookRecoveryReason::CrossedBook)
+        }
+        IpcOrderBookState::InvalidUpdate => {
+            OrderBookState::Recovering(OrderBookRecoveryReason::InvalidUpdate)
+        }
+    };
+    let bids = ipc_depth_levels(&snapshot.bids, true)?;
+    let asks = ipc_depth_levels(&snapshot.asks, false)?;
+    if bids
+        .first()
+        .zip(asks.first())
+        .is_some_and(|(bid, ask)| bid.price >= ask.price)
+    {
+        return Err("Rithmic engine order book is crossed".to_string());
+    }
+    let publication = OrderBookPublication {
+        provider_id: snapshot.provider.clone(),
+        instrument_id: snapshot.instrument_id.clone(),
+        entitlement_id: snapshot.entitlement_id.clone(),
+        session_generation: snapshot.provider_generation,
+        revision: snapshot.revision,
+        source_watermark: snapshot.source_watermark,
+        bids,
+        asks,
+        state,
+    };
+    let selection = DomSelection {
+        provider_id: snapshot.provider.clone(),
+        instrument_id: snapshot.instrument_id.clone(),
+        entitlement_id: snapshot.entitlement_id.clone(),
+        session_generation: snapshot.provider_generation,
+        selection_generation: snapshot.selection_generation,
+        precision: InstrumentPrecision::try_new(
+            request.instrument.descriptor.price_scale,
+            request.instrument.descriptor.quantity_scale,
+        )
+        .map_err(|error| error.to_string())?,
+    };
+    ReadOnlyDom::project_publication(&selection, &publication)
+        .ok_or_else(|| "Rithmic engine order-book publication is stale".to_string())
+}
+
+fn ipc_depth_levels(
+    levels: &[axiusflow_local_engine_protocol::OrderBookLevel],
+    bids: bool,
+) -> Result<Vec<DepthLevel>, String> {
+    let mut previous = None;
+    let mut converted = Vec::with_capacity(levels.len());
+    for level in levels {
+        if level.price <= 0 || level.quantity <= 0 {
+            return Err("Rithmic engine order-book level is invalid".to_string());
+        }
+        if previous.is_some_and(|previous| {
+            if bids {
+                level.price >= previous
+            } else {
+                level.price <= previous
+            }
+        }) {
+            return Err("Rithmic engine order-book levels are unordered".to_string());
+        }
+        previous = Some(level.price);
+        converted.push(DepthLevel {
+            price: level.price,
+            quantity: level.quantity,
+            order_count: level.order_count,
+        });
+    }
+    Ok(converted)
+}
+
 fn demand_error(error: &DemandError) -> String {
     format!("{} failed: {}", error.stage, error.detail)
 }
@@ -565,7 +732,7 @@ pub(crate) fn history_message(result: RithmicHistoryResult) -> MarketWorkerMessa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_local_engine_protocol::MarketBar as IpcMarketBar;
+    use axiusflow_local_engine_protocol::{MarketBar as IpcMarketBar, OrderBookLevel};
 
     fn nonzero(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test generation is non-zero")
@@ -645,6 +812,54 @@ mod tests {
         assert_eq!(
             bootstrap.snapshot.bars()[0].provenance().producer,
             "axiusflow_engine"
+        );
+    }
+
+    #[test]
+    fn engine_order_book_projects_without_desktop_reconstruction() {
+        let request = request(RithmicSeries::Minute1);
+        let frame = dom_from_snapshot(
+            &request,
+            &IpcOrderBookSnapshot {
+                consumer_id: 5,
+                generation: 3,
+                provider: "rithmic".to_string(),
+                instrument_id: request.instrument.descriptor.instrument_id.clone(),
+                entitlement_id: request.instrument.entitlement_id.clone(),
+                provider_generation: 8,
+                selection_generation: 2,
+                revision: 4,
+                source_watermark: 11,
+                state: IpcOrderBookState::Ready as i32,
+                bids: vec![OrderBookLevel {
+                    price: 2_000_000,
+                    quantity: 7,
+                    order_count: Some(3),
+                }],
+                asks: vec![OrderBookLevel {
+                    price: 2_000_025,
+                    quantity: 4,
+                    order_count: Some(2),
+                }],
+            },
+        )
+        .expect("engine book projects");
+        assert_eq!(frame.session_generation, 8);
+        assert_eq!(frame.selection_generation, 2);
+        assert_eq!(frame.source_watermark, 11);
+        assert_eq!(
+            frame.rows[0]
+                .bid
+                .as_ref()
+                .map(|level| level.price_text.as_str()),
+            Some("20000.00")
+        );
+        assert_eq!(
+            frame.rows[0]
+                .ask
+                .as_ref()
+                .map(|level| level.relative_size_bps),
+            Some(5_714)
         );
     }
 

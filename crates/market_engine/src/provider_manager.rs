@@ -15,6 +15,7 @@ pub enum ProviderHealth {
 pub struct ProviderCapabilities {
     pub historical_bars: bool,
     pub realtime_bars: bool,
+    pub order_book: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

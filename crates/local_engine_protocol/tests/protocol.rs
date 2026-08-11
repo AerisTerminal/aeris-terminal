@@ -3,12 +3,12 @@ use std::num::NonZeroUsize;
 use axiusflow_local_engine_protocol::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
     EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
-    MAX_FRAME_BYTES, MarketBar, MarketEventIdle, PROTOCOL_VERSION, PersistenceState,
-    PollMarketEvent, ProtocolError, ProviderConnectionState, ProviderState, RegisterConsumer,
-    RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesCadence, SeriesDemand, SeriesKey,
-    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode,
-    SetSelection, SetViewport, SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand,
-    WorkspaceState, encode_envelope, envelope,
+    MAX_FRAME_BYTES, MarketBar, MarketEventIdle, OrderBookLevel, OrderBookSnapshot, OrderBookState,
+    PROTOCOL_VERSION, PersistenceState, PollMarketEvent, ProtocolError, ProviderConnectionState,
+    ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SeriesCadence,
+    SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate,
+    SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, ShutdownEngine, ViewportDemand,
+    VisibilityDemand, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -99,7 +99,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
         close: 105,
         volume: 7,
     };
-    vec![
+    let mut payloads = vec![
         envelope::Payload::AttachClient(AttachClient { client_id: 11 }),
         envelope::Payload::DetachClient(DetachClient { client_id: 11 }),
         envelope::Payload::RegisterConsumer(RegisterConsumer {
@@ -170,7 +170,34 @@ fn market_payloads() -> Vec<envelope::Payload> {
             stage: "provider_history".into(),
             detail: "request timed out".into(),
         }),
-    ]
+    ];
+    payloads.push(order_book_payload());
+    payloads
+}
+
+fn order_book_payload() -> envelope::Payload {
+    envelope::Payload::OrderBookSnapshot(OrderBookSnapshot {
+        consumer_id: 13,
+        generation: 14,
+        provider: "rithmic".into(),
+        instrument_id: "rithmic:CME:MNQU6".into(),
+        entitlement_id: "rithmic-test:CME:MNQU6".into(),
+        provider_generation: 2,
+        selection_generation: 3,
+        revision: 4,
+        source_watermark: 5,
+        state: OrderBookState::Ready as i32,
+        bids: vec![OrderBookLevel {
+            price: 20_000,
+            quantity: 7,
+            order_count: Some(3),
+        }],
+        asks: vec![OrderBookLevel {
+            price: 20_025,
+            quantity: 4,
+            order_count: None,
+        }],
+    })
 }
 
 fn wrap(payload: envelope::Payload) -> Envelope {

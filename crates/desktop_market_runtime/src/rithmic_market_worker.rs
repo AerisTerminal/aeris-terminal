@@ -19,7 +19,6 @@ use axiusflow_desktop_provider_runtime::{
     AuthenticationState, DesktopProviderConfig, DesktopProviderRuntime, ProviderInvalidationReason,
     ProviderSessionEvent,
 };
-use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::MarketEvent;
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_platform_runtime::{
@@ -31,7 +30,6 @@ use axiusflow_rithmic_protocol_adapter::{
     RithmicEnvironmentEvent, RithmicProviderConfig, RithmicProviderDriver, RithmicRetryScheduler,
     RithmicSessionLimits, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
-use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use std::{
     collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
@@ -115,7 +113,6 @@ struct RithmicRuntimeState {
     pending_live_request: Option<RithmicSeriesRequest>,
     buffered_history_trades: VecDeque<axiusflow_market_data::MarketTrade>,
     history_trade_overflow: bool,
-    dom: ReadOnlyDom,
 }
 
 impl RithmicRuntimeState {
@@ -128,7 +125,6 @@ impl RithmicRuntimeState {
             pending_live_request: None,
             buffered_history_trades: VecDeque::with_capacity(MAXIMUM_BUFFERED_HISTORY_TRADES),
             history_trade_overflow: false,
-            dom: ReadOnlyDom::new(nonzero(20)),
         }
     }
 
@@ -145,7 +141,7 @@ impl RithmicRuntimeState {
             pending_live_request: EvidenceFlag::from(self.pending_live_request.is_some()),
             buffered_history_trades: self.buffered_history_trades.len(),
             history_trade_overflow: EvidenceFlag::from(self.history_trade_overflow),
-            depth_selection_installed: EvidenceFlag::from(self.dom.selection().is_some()),
+            depth_selection_installed: EvidenceFlag::from(self.installed_instrument.is_some()),
         }
     }
 }
@@ -328,6 +324,7 @@ fn run_connected(
             &mut state,
             transitions.capture,
         );
+        publish_engine_dom(messages, &state);
         if let Some(result) = state
             .history
             .as_mut()
@@ -348,9 +345,7 @@ fn run_connected(
             );
         }
         observe_capture_runtime(transitions.capture, &worker, &state);
-        if let Ok(Some(snapshot)) = worker.try_diagnostics_snapshot() {
-            let _ = messages.send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)));
-        }
+        publish_diagnostics(messages, &mut worker);
         let wait = retries.ticket().map_or(IDLE_WAIT, |ticket| {
             ticket
                 .due_at
@@ -379,6 +374,28 @@ fn run_connected(
             "Rithmic Test session stop was not confirmed"
         },
     );
+}
+
+fn publish_engine_dom(
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
+    state: &RithmicRuntimeState,
+) {
+    if let Some(frame) = state
+        .history
+        .as_ref()
+        .and_then(RithmicHistoryTask::try_recv_dom)
+    {
+        let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+    }
+}
+
+fn publish_diagnostics(
+    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
+    worker: &mut RithmicWorker,
+) {
+    if let Ok(Some(snapshot)) = worker.try_diagnostics_snapshot() {
+        let _ = messages.send(MarketWorkerMessage::Diagnostics(Box::new(snapshot)));
+    }
 }
 
 fn apply_initial_network_state(
@@ -603,7 +620,6 @@ fn reset_live_state(state: &mut RithmicRuntimeState) {
     state.pending_live_request = None;
     state.buffered_history_trades.clear();
     state.history_trade_overflow = false;
-    state.dom.clear();
 }
 
 fn apply_history_result(
@@ -799,9 +815,6 @@ fn drain_events(
                     instrument,
                     entitlement_id,
                 );
-                if let Some(frame) = state.dom.frame() {
-                    let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-                }
             }
             let _ = messages.send(MarketWorkerMessage::RithmicCatalog(callback.event));
         }
@@ -825,12 +838,8 @@ fn drain_events(
                     state.pending_live_request = None;
                     state.buffered_history_trades.clear();
                     state.history_trade_overflow = false;
-                    if let Some(frame) = state.dom.mark_stale() {
-                        let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-                    }
                 }
                 publish_live_chart(messages, &event, state);
-                publish_dom(messages, &event, &mut state.dom);
                 publish_event(messages, &event, &mut state.selection_installed);
             }
             Ok(None) => break,
@@ -867,18 +876,6 @@ fn install_catalog_selection(
         descriptor: instrument.clone(),
         entitlement_id: entitlement_id.to_string(),
     });
-    if let Ok(precision) =
-        InstrumentPrecision::try_new(instrument.price_scale, instrument.quantity_scale)
-    {
-        state.dom.select(DomSelection {
-            provider_id: "rithmic".to_string(),
-            instrument_id: instrument.instrument_id.clone(),
-            entitlement_id: entitlement_id.to_string(),
-            session_generation: session_generation.get(),
-            selection_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
-            precision,
-        });
-    }
 }
 
 fn observe_capture_runtime(
@@ -908,27 +905,6 @@ fn apply_capture(
     if failed {
         eprintln!("native transition evidence checkpoint failed");
         *transition_capture = None;
-    }
-}
-
-fn publish_dom(
-    messages: &axiusflow_desktop_market_runtime::market_worker::MarketWorkerSender,
-    event: &AppliedRithmicEvent,
-    dom: &mut ReadOnlyDom,
-) {
-    let AppliedRithmicEvent::Semantic(ProviderSessionEvent::Market { event, .. }) = event else {
-        return;
-    };
-    match dom.apply_event(event) {
-        Ok(DomUpdateOutcome::Published(frame) | DomUpdateOutcome::RecoveryRequired(frame, _)) => {
-            let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-        }
-        Ok(DomUpdateOutcome::Ignored) => {}
-        Err(_) => {
-            if let Some(frame) = dom.frame() {
-                let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-            }
-        }
     }
 }
 
@@ -1252,9 +1228,7 @@ fn nonzero(value: usize) -> NonZeroUsize {
 mod tests {
     use super::*;
     use axiusflow_desktop_provider_runtime::{ProviderEnvironment, SessionGeneration};
-    use axiusflow_market_data::{
-        AggressorSide, DepthLevel, DepthSnapshot, EventMetadata, MarketTrade, QualifiedTimestamp,
-    };
+    use axiusflow_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 
     fn generation() -> SessionGeneration {
         SessionGeneration::new(NonZeroU64::MIN)
@@ -1365,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn delayed_selection_uses_one_entitlement_for_history_and_depth() {
+    fn delayed_selection_preserves_the_engine_entitlement_identity() {
         let entitlement_id = "rithmic-test:CME-Delayed:MNQU6";
         let instrument = axiusflow_desktop_provider_runtime::InstrumentDescriptor {
             instrument_id: "rithmic:CME:MNQU6".to_string(),
@@ -1391,40 +1365,9 @@ mod tests {
         assert_eq!(installed.descriptor.venue_id, "CME");
         assert_eq!(installed.entitlement_id, entitlement_id);
         assert_eq!(
-            state
-                .dom
-                .selection()
-                .map(|selection| selection.entitlement_id.as_str()),
-            Some(entitlement_id)
+            state.evidence().depth_selection_installed,
+            EvidenceFlag::from(true)
         );
-        let outcome = state
-            .dom
-            .apply_event(&MarketEvent::DepthSnapshot(DepthSnapshot {
-                metadata: EventMetadata {
-                    provider_id: "rithmic".to_string(),
-                    instrument_id: instrument.instrument_id,
-                    entitlement_id: entitlement_id.to_string(),
-                    source_sequence: 1,
-                    session_generation: generation().get(),
-                    timestamps: QualifiedTimestamp {
-                        exchange_unix_nanos: None,
-                        provider_unix_nanos: None,
-                        received_unix_nanos: 1,
-                    },
-                },
-                bids: vec![DepthLevel {
-                    price: 2_000_000,
-                    quantity: 2,
-                    order_count: Some(1),
-                }],
-                asks: vec![DepthLevel {
-                    price: 2_000_025,
-                    quantity: 3,
-                    order_count: Some(1),
-                }],
-            }))
-            .expect("matching delayed-entitlement depth validates");
-        assert!(matches!(outcome, DomUpdateOutcome::Published(_)));
     }
 
     #[test]

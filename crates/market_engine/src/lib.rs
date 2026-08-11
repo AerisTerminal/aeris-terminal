@@ -502,6 +502,7 @@ mod tests {
                 ProviderCapabilities {
                     historical_bars: true,
                     realtime_bars: true,
+                    order_book: false,
                 },
             )
             .expect("provider registers");

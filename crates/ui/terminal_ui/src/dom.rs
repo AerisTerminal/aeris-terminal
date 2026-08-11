@@ -135,6 +135,24 @@ impl ReadOnlyDom {
             .map(|_| self.project(&self.book.publication()))
     }
 
+    /// Projects an authoritative engine-owned book image without reconstructing
+    /// another candidate order book in the desktop process.
+    #[must_use]
+    pub fn project_publication(
+        selection: &DomSelection,
+        publication: &OrderBookPublication,
+    ) -> Option<DomFrame> {
+        if !publication.provider_id.is_empty()
+            && (selection.provider_id != publication.provider_id
+                || selection.instrument_id != publication.instrument_id
+                || selection.entitlement_id != publication.entitlement_id
+                || selection.session_generation != publication.session_generation)
+        {
+            return None;
+        }
+        Some(project_publication(selection, publication))
+    }
+
     fn project_outcome(&self, outcome: OrderBookApplyOutcome) -> DomUpdateOutcome {
         match outcome {
             OrderBookApplyOutcome::Published(publication) => {
@@ -152,46 +170,50 @@ impl ReadOnlyDom {
             .selection
             .as_ref()
             .expect("DOM projection requires an active selection");
-        let maximum_quantity = publication
-            .bids
-            .iter()
-            .chain(&publication.asks)
-            .map(|level| level.quantity)
-            .max()
-            .unwrap_or(0);
-        let row_count = publication.bids.len().max(publication.asks.len());
-        let mut rows = Vec::with_capacity(row_count);
-        for index in 0..row_count {
-            rows.push(DomRow {
-                bid: publication.bids.get(index).map(|level| {
-                    project_level(
-                        *level,
-                        selection.precision.price_scale(),
-                        selection.precision.quantity_scale(),
-                        maximum_quantity,
-                    )
-                }),
-                ask: publication.asks.get(index).map(|level| {
-                    project_level(
-                        *level,
-                        selection.precision.price_scale(),
-                        selection.precision.quantity_scale(),
-                        maximum_quantity,
-                    )
-                }),
-            });
-        }
-        DomFrame {
-            provider_id: selection.provider_id.clone(),
-            instrument_id: selection.instrument_id.clone(),
-            entitlement_id: selection.entitlement_id.clone(),
-            session_generation: selection.session_generation,
-            selection_generation: selection.selection_generation,
-            revision: publication.revision,
-            source_watermark: publication.source_watermark,
-            state: publication.state,
-            rows,
-        }
+        project_publication(selection, publication)
+    }
+}
+
+fn project_publication(selection: &DomSelection, publication: &OrderBookPublication) -> DomFrame {
+    let maximum_quantity = publication
+        .bids
+        .iter()
+        .chain(&publication.asks)
+        .map(|level| level.quantity)
+        .max()
+        .unwrap_or(0);
+    let row_count = publication.bids.len().max(publication.asks.len());
+    let mut rows = Vec::with_capacity(row_count);
+    for index in 0..row_count {
+        rows.push(DomRow {
+            bid: publication.bids.get(index).map(|level| {
+                project_level(
+                    *level,
+                    selection.precision.price_scale(),
+                    selection.precision.quantity_scale(),
+                    maximum_quantity,
+                )
+            }),
+            ask: publication.asks.get(index).map(|level| {
+                project_level(
+                    *level,
+                    selection.precision.price_scale(),
+                    selection.precision.quantity_scale(),
+                    maximum_quantity,
+                )
+            }),
+        });
+    }
+    DomFrame {
+        provider_id: selection.provider_id.clone(),
+        instrument_id: selection.instrument_id.clone(),
+        entitlement_id: selection.entitlement_id.clone(),
+        session_generation: selection.session_generation,
+        selection_generation: selection.selection_generation,
+        revision: publication.revision,
+        source_watermark: publication.source_watermark,
+        state: publication.state,
+        rows,
     }
 }
 

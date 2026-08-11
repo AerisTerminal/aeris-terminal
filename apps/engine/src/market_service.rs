@@ -23,10 +23,15 @@ use axiusflow_coinbase_market_adapter::{
 };
 use axiusflow_local_engine_protocol::{
     DemandError, EngineFaultCode, InstallProviderInstrument, MarketBar as IpcMarketBar,
-    PersistenceState, ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey,
-    SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState, envelope,
+    OrderBookLevel as IpcOrderBookLevel, OrderBookSnapshot as IpcOrderBookSnapshot,
+    OrderBookState as IpcOrderBookState, PersistenceState, ProviderConnectionState, ProviderState,
+    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
+    envelope,
 };
-use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar, MarketTrade};
+use axiusflow_market_data::{
+    BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
+    OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState as CanonicalOrderBookState,
+};
 use axiusflow_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, EngineError, GenerationId, MarketEngine,
     MarketEngineConfig, ProviderCapabilities, ProviderGeneration, ProviderHealth, Viewport,
@@ -51,6 +56,7 @@ const HISTORY_BARS_PER_SERIES: usize = 350;
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
+const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 20;
 const COINBASE_PROVIDER_GENERATION: u64 = 1;
 
 type Reply<T> = SyncSender<Result<T, String>>;
@@ -125,6 +131,7 @@ struct ConsumerEvents {
     snapshot: Option<envelope::Payload>,
     series_state: Option<envelope::Payload>,
     demand_error: Option<envelope::Payload>,
+    order_book: Option<envelope::Payload>,
 }
 
 impl ConsumerEvents {
@@ -134,6 +141,23 @@ impl ConsumerEvents {
             .or_else(|| self.snapshot.take())
             .or_else(|| self.series_state.take())
             .or_else(|| self.demand_error.take())
+            .or_else(|| self.order_book.take())
+    }
+}
+
+struct RithmicOrderBook {
+    instrument: InstallProviderInstrument,
+    book: OrderBook,
+}
+
+impl RithmicOrderBook {
+    fn new(instrument: InstallProviderInstrument) -> Self {
+        Self {
+            instrument,
+            book: OrderBook::new(
+                NonZeroUsize::new(MAXIMUM_PUBLISHED_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
+            ),
+        }
     }
 }
 
@@ -1185,6 +1209,7 @@ fn run_coordinator(
         events: BTreeMap::new(),
         live: BTreeMap::new(),
         rithmic_live: BTreeMap::new(),
+        rithmic_order_books: BTreeMap::new(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
@@ -1233,6 +1258,7 @@ struct Coordinator<'a> {
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
     rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
+    rithmic_order_books: BTreeMap<String, RithmicOrderBook>,
     catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     catalog_sessions: BTreeMap<String, u64>,
     catalog_selections: BTreeMap<String, u64>,
@@ -1417,7 +1443,14 @@ impl Coordinator<'_> {
             self.catalog_selections.remove(&provider);
         }
         self.catalog_selections
-            .insert(provider, instrument.selection_generation);
+            .insert(provider.clone(), instrument.selection_generation);
+        if provider == "rithmic" {
+            self.rithmic_order_books.clear();
+            self.rithmic_order_books.insert(
+                instrument.instrument_id.clone(),
+                RithmicOrderBook::new(instrument.clone()),
+            );
+        }
         self.catalog.insert(key, instrument);
         Ok(())
     }
@@ -1475,6 +1508,7 @@ impl Coordinator<'_> {
             let _ = reply.send(Err(error));
             return;
         }
+        self.publish_order_book_to_consumer(waiter.consumer_id);
         if let Some(publication) = publication {
             let seeded = series.provider_id != "coinbase"
                 || self.live.get_mut(series).is_none_or(|live| {
@@ -2090,6 +2124,9 @@ impl Coordinator<'_> {
             RithmicRealtimeEvent::Trade(generation, trade) => {
                 self.rithmic_trade(generation, &trade);
             }
+            RithmicRealtimeEvent::Depth(generation, snapshot) => {
+                self.rithmic_depth(generation, &snapshot);
+            }
             RithmicRealtimeEvent::Recovering(generation)
             | RithmicRealtimeEvent::Disconnected(generation) => {
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
@@ -2212,6 +2249,42 @@ impl Coordinator<'_> {
         }
     }
 
+    fn rithmic_depth(&mut self, generation: u64, snapshot: &DepthSnapshot) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("rithmic")
+            .and_then(|status| status.generation)
+            != Some(generation)
+            || snapshot.metadata.provider_id != "rithmic"
+            || snapshot.metadata.session_generation != generation.0.get()
+        {
+            return;
+        }
+        let instrument_id = snapshot.metadata.instrument_id.clone();
+        let should_publish = self
+            .rithmic_order_books
+            .get_mut(&instrument_id)
+            .filter(|order_book| {
+                order_book.instrument.entitlement_id == snapshot.metadata.entitlement_id
+            })
+            .is_some_and(|order_book| {
+                matches!(
+                    order_book.book.install_snapshot(snapshot),
+                    Ok(OrderBookApplyOutcome::Published(_)
+                        | OrderBookApplyOutcome::RecoveryRequired(_))
+                ) || matches!(
+                    order_book.book.state(),
+                    CanonicalOrderBookState::Recovering(_)
+                )
+            });
+        if should_publish {
+            self.broadcast_rithmic_order_book(&instrument_id);
+        }
+    }
+
     fn rithmic_recovering(&mut self, generation: u64, detail: &'static str) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
@@ -2234,6 +2307,64 @@ impl Coordinator<'_> {
         );
         for live in self.rithmic_live.values_mut() {
             live.connected = false;
+        }
+        let stale_books = self
+            .rithmic_order_books
+            .iter_mut()
+            .filter_map(|(instrument_id, order_book)| {
+                order_book.book.mark_stale();
+                matches!(order_book.book.state(), CanonicalOrderBookState::Stale)
+                    .then(|| instrument_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for instrument_id in stale_books {
+            self.broadcast_rithmic_order_book(&instrument_id);
+        }
+    }
+
+    fn publish_order_book_to_consumer(&mut self, consumer_id: ConsumerId) {
+        let Some(demand) = self.engine.current_demand(consumer_id) else {
+            return;
+        };
+        let Some(series) = demand.series.as_ref() else {
+            return;
+        };
+        let Some(generation) = demand.generation else {
+            return;
+        };
+        if series.provider_id != "rithmic" {
+            return;
+        }
+        let Some(order_book) = self.rithmic_order_books.get(&series.instrument_id) else {
+            return;
+        };
+        if order_book.instrument.entitlement_id != series.entitlement_id {
+            return;
+        }
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.order_book = Some(order_book_snapshot(consumer_id, generation, order_book));
+        }
+    }
+
+    fn broadcast_rithmic_order_book(&mut self, instrument_id: &str) {
+        let consumers = self
+            .events
+            .keys()
+            .filter_map(|consumer_id| {
+                let demand = self.engine.current_demand(*consumer_id)?;
+                let generation = demand.generation?;
+                let series = demand.series.as_ref()?;
+                (series.provider_id == "rithmic" && series.instrument_id == instrument_id)
+                    .then_some((*consumer_id, generation))
+            })
+            .collect::<Vec<_>>();
+        let Some(order_book) = self.rithmic_order_books.get(instrument_id) else {
+            return;
+        };
+        for (consumer_id, generation) in consumers {
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                events.order_book = Some(order_book_snapshot(consumer_id, generation, order_book));
+            }
         }
     }
 
@@ -2655,6 +2786,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
             ProviderCapabilities {
                 historical_bars: true,
                 realtime_bars: true,
+                order_book: false,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -2672,6 +2804,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
             ProviderCapabilities {
                 historical_bars: true,
                 realtime_bars: true,
+                order_book: true,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -2755,6 +2888,63 @@ fn snapshot_message(
         publication_generation: publication.publication_generation,
         forming: publication.snapshot.forming,
     })
+}
+
+fn order_book_snapshot(
+    consumer_id: ConsumerId,
+    generation: GenerationId,
+    order_book: &RithmicOrderBook,
+) -> envelope::Payload {
+    let publication = order_book.book.publication();
+    let provider_generation = if publication.session_generation == 0 {
+        order_book.instrument.session_generation
+    } else {
+        publication.session_generation
+    };
+    envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
+        consumer_id: consumer_id.0.get(),
+        generation: generation.0.get(),
+        provider: order_book.instrument.provider.clone(),
+        instrument_id: order_book.instrument.instrument_id.clone(),
+        entitlement_id: order_book.instrument.entitlement_id.clone(),
+        provider_generation,
+        selection_generation: order_book.instrument.selection_generation,
+        revision: publication.revision,
+        source_watermark: publication.source_watermark,
+        state: ipc_order_book_state(publication.state) as i32,
+        bids: ipc_order_book_levels(&publication.bids),
+        asks: ipc_order_book_levels(&publication.asks),
+    })
+}
+
+fn ipc_order_book_levels(levels: &[DepthLevel]) -> Vec<IpcOrderBookLevel> {
+    levels
+        .iter()
+        .map(|level| IpcOrderBookLevel {
+            price: level.price,
+            quantity: level.quantity,
+            order_count: level.order_count,
+        })
+        .collect()
+}
+
+const fn ipc_order_book_state(state: CanonicalOrderBookState) -> IpcOrderBookState {
+    match state {
+        CanonicalOrderBookState::Ready => IpcOrderBookState::Ready,
+        CanonicalOrderBookState::Stale => IpcOrderBookState::Stale,
+        CanonicalOrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot) => {
+            IpcOrderBookState::AwaitingSnapshot
+        }
+        CanonicalOrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap) => {
+            IpcOrderBookState::SequenceGap
+        }
+        CanonicalOrderBookState::Recovering(OrderBookRecoveryReason::CrossedBook) => {
+            IpcOrderBookState::CrossedBook
+        }
+        CanonicalOrderBookState::Recovering(OrderBookRecoveryReason::InvalidUpdate) => {
+            IpcOrderBookState::InvalidUpdate
+        }
+    }
 }
 
 fn series_state(
@@ -3010,6 +3200,7 @@ mod tests {
             events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
             live: BTreeMap::new(),
             rithmic_live: BTreeMap::new(),
+            rithmic_order_books: BTreeMap::new(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             catalog_selections: BTreeMap::new(),
@@ -3132,6 +3323,97 @@ mod tests {
             tick.accept_trade(&rithmic_trade(4, 2, 60_700_000_000, 122))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rithmic_depth_is_reconstructed_once_and_published_as_a_conflated_engine_book() {
+        let consumer_id = ConsumerId(id(9).expect("consumer"));
+        let client_id = ClientId(id(7).expect("client"));
+        let series = BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            period: BarPeriod::time(60).expect("period"),
+            definition_version: 1,
+        };
+        let mut engine = configured_engine().expect("engine");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id,
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(3).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &stop,
+            consumer_id,
+            &series,
+        );
+        coordinator
+            .install_provider_instrument(provider_instrument(7, 2))
+            .expect("instrument installs");
+        coordinator.rithmic_depth(
+            7,
+            &DepthSnapshot {
+                metadata: EventMetadata {
+                    provider_id: "rithmic".to_string(),
+                    instrument_id: series.instrument_id.clone(),
+                    entitlement_id: series.entitlement_id.clone(),
+                    source_sequence: 11,
+                    session_generation: 7,
+                    timestamps: QualifiedTimestamp {
+                        exchange_unix_nanos: Some(20),
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 21,
+                    },
+                },
+                bids: vec![DepthLevel {
+                    price: 20_000,
+                    quantity: 7,
+                    order_count: Some(3),
+                }],
+                asks: vec![DepthLevel {
+                    price: 20_025,
+                    quantity: 4,
+                    order_count: Some(2),
+                }],
+            },
+        );
+
+        let envelope::Payload::OrderBookSnapshot(snapshot) = coordinator
+            .events
+            .get_mut(&consumer_id)
+            .and_then(ConsumerEvents::pop)
+            .expect("book publishes")
+        else {
+            panic!("engine must publish the order book");
+        };
+        assert_eq!(snapshot.consumer_id, 9);
+        assert_eq!(snapshot.generation, 3);
+        assert_eq!(snapshot.provider_generation, 7);
+        assert_eq!(snapshot.selection_generation, 2);
+        assert_eq!(snapshot.source_watermark, 11);
+        assert_eq!(snapshot.state, IpcOrderBookState::Ready as i32);
+        assert_eq!(snapshot.bids[0].quantity, 7);
+        assert_eq!(snapshot.asks[0].price, 20_025);
     }
 
     #[test]

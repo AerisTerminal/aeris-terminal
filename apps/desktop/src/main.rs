@@ -353,7 +353,7 @@ impl RithmicSessionRetirement {
 }
 
 fn rithmic_production_subscription() -> Result<RithmicReadOnlySubscription, RithmicCommandError> {
-    RithmicReadOnlySubscription::try_new(false, true, true)
+    RithmicReadOnlySubscription::try_new(false, true, false)
 }
 
 const fn should_apply_rithmic_worker_stop(
@@ -4279,10 +4279,10 @@ mod tests {
     }
 
     #[test]
-    fn production_rithmic_selection_leaves_chart_trades_to_the_resident_engine() {
+    fn production_rithmic_selection_leaves_trades_and_depth_to_the_resident_engine() {
         assert_eq!(
             rithmic_production_subscription(),
-            RithmicReadOnlySubscription::try_new(false, true, true)
+            RithmicReadOnlySubscription::try_new(false, true, false)
         );
         assert_ne!(
             rithmic_production_subscription(),

@@ -572,6 +572,59 @@ pub struct ProviderState {
     pub detail: Option<String>,
 }
 
+/// Recoverability state of one engine-owned order book.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum OrderBookState {
+    Unspecified = 0,
+    AwaitingSnapshot = 1,
+    Ready = 2,
+    Stale = 3,
+    SequenceGap = 4,
+    CrossedBook = 5,
+    InvalidUpdate = 6,
+}
+
+/// One fixed-point level in a bounded engine-owned order-book image.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct OrderBookLevel {
+    #[prost(sint64, tag = "1")]
+    pub price: i64,
+    #[prost(sint64, tag = "2")]
+    pub quantity: i64,
+    #[prost(uint32, optional, tag = "3")]
+    pub order_count: Option<u32>,
+}
+
+/// Latest conflated top-N image of one authoritative engine-owned order book.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct OrderBookSnapshot {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub generation: u64,
+    #[prost(string, tag = "3")]
+    pub provider: String,
+    #[prost(string, tag = "4")]
+    pub instrument_id: String,
+    #[prost(string, tag = "5")]
+    pub entitlement_id: String,
+    #[prost(uint64, tag = "6")]
+    pub provider_generation: u64,
+    #[prost(uint64, tag = "7")]
+    pub selection_generation: u64,
+    #[prost(uint64, tag = "8")]
+    pub revision: u64,
+    #[prost(uint64, tag = "9")]
+    pub source_watermark: u64,
+    #[prost(enumeration = "OrderBookState", tag = "10")]
+    pub state: i32,
+    #[prost(message, repeated, tag = "11")]
+    pub bids: Vec<OrderBookLevel>,
+    #[prost(message, repeated, tag = "12")]
+    pub asks: Vec<OrderBookLevel>,
+}
+
 /// Stage-specific terminal or degraded result for one demand.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct DemandError {
@@ -624,7 +677,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -718,5 +771,8 @@ pub mod envelope {
         /// Accepted provider-neutral instrument install. Tag 42.
         #[prost(message, tag = "42")]
         ProviderInstrumentInstalled(super::ProviderInstrumentInstalled),
+        /// Conflated engine-owned order-book image. Tag 43.
+        #[prost(message, tag = "43")]
+        OrderBookSnapshot(super::OrderBookSnapshot),
     }
 }

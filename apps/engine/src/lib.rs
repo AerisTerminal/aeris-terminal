@@ -999,7 +999,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut snapshot_received = false;
         let mut ready_received = false;
-        while !snapshot_received || !ready_received {
+        let mut order_book_received = false;
+        while !snapshot_received || !ready_received || !order_book_received {
             if let Some(event) = client.poll_market_event(1).expect("poll market event") {
                 match event {
                     envelope::Payload::SeriesSnapshot(snapshot) => {
@@ -1012,6 +1013,17 @@ mod tests {
                         ready_received = state.generation == 1
                             && state.state
                                 == axiusflow_local_engine_protocol::SeriesLoadState::Ready as i32;
+                    }
+                    envelope::Payload::OrderBookSnapshot(snapshot) => {
+                        order_book_received = snapshot.consumer_id == 1
+                            && snapshot.generation == 1
+                            && snapshot.provider_generation == 7
+                            && snapshot.selection_generation == 9
+                            && snapshot.state
+                                == axiusflow_local_engine_protocol::OrderBookState::AwaitingSnapshot
+                                    as i32
+                            && snapshot.bids.is_empty()
+                            && snapshot.asks.is_empty();
                     }
                     _ => {}
                 }
