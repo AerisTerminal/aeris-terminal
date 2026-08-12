@@ -33,16 +33,16 @@ rust-version = "1.97.1"
 version = "0.1.0"
 
 [workspace.dependencies]
-base64 = { version = "=0.23.0", default-features = false, features = ["std"] }
+base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 display-info = "=0.5.9"
 getrandom = "=0.4.3"
-interprocess = { version = "=2.4.2", default-features = false }
+interprocess = { version = "=2.4.3", default-features = false }
 keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.43"
 serde_json = "=1.0.151"
-webpki-roots = "=1.0.5"
+webpki-roots = "=1.0.9"
 sha2 = "=0.10.9"
 sysinfo = { version = "=0.31.4", default-features = false, features = ["system"] }
 wayland-client = { version = "=0.31.15", default-features = false, features = ["dlopen"] }
@@ -55,20 +55,20 @@ tungstenite = { version = "=0.30.0", default-features = false, features = [
     "handshake",
     "rustls-tls-webpki-roots",
 ] }
-ureq = { version = "=3.3.0", default-features = false, features = ["rustls", "json"] }
-zbus = { version = "=5.18.0", default-features = false, features = ["async-io", "blocking-api"] }
+ureq = { version = "=3.4.0", default-features = false, features = ["rustls", "json"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = { version = "=1.9.0", default-features = false }
-rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 prost = "=0.14.4"
-rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
+rcgen = { version = "=0.14.9", default-features = false, features = ["ring"] }
 rpassword = "=7.5.4"
 hmac = "=0.12.1"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland", "x11"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704", version = "=0.5.2" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704", version = "=0.5.1" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f2f0f563292114fecf55fb8ab92a97e14989dbd0", version = "=0.5.2" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f2f0f563292114fecf55fb8ab92a97e14989dbd0", version = "=0.5.1" }
 gpui-hugeicons = { version = "=0.1.0", default-features = false }
 origin_engine = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0" }
 origin_render = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0" }
