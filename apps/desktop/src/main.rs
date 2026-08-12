@@ -2269,6 +2269,7 @@ fn timeframe_overlay_content(
         .v_flex()
         .p_2()
         .gap_1()
+        .text_color(gpui_color(colors.text_secondary))
         .children(
             intervals
                 .iter()
@@ -2291,11 +2292,13 @@ fn timeframe_overlay_content(
                         })
                         .when(keyboard_selection == index, |row| {
                             row.bg(gpui_color(colors.interactive_neutral_active_bg))
+                                .text_color(gpui_color(colors.interactive_neutral_active_fg))
                         })
                         .when(!pending, |row| {
                             row.cursor_pointer()
                                 .hover(|row| {
                                     row.bg(gpui_color(colors.interactive_neutral_hover_bg))
+                                        .text_color(gpui_color(colors.interactive_neutral_hover_fg))
                                 })
                                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                     row_app.update(cx, |app, app_cx| {
@@ -2848,7 +2851,7 @@ fn drawing_toolbar_button(
         .rounded(px(f32::from(
             chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
         )));
-    chrome_button_style(button, theme, selected, true, true)
+    chrome_button_style(button, theme, selected, true)
 }
 
 fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
@@ -2881,13 +2884,18 @@ fn side_panel_header(
             "close_side_panel",
             "Close side panel",
             button_activation(
-                Button::new("close_side_panel")
-                    .icon(header_icon(HugeIcon::CancelIcon01))
-                    .compact()
-                    .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-                    .size(px(chart_chrome::CHART_CONTROL_SIZE))
-                    .border_0()
-                    .cursor_pointer(),
+                chrome_button_style(
+                    Button::new("close_side_panel")
+                        .icon(header_icon(HugeIcon::CancelIcon01))
+                        .compact()
+                        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+                        .size(px(chart_chrome::CHART_CONTROL_SIZE))
+                        .border_0()
+                        .cursor_pointer(),
+                    theme,
+                    false,
+                    true,
+                ),
                 true,
                 move |_, cx| {
                     app.update(cx, TerminalApp::close_side_panel);
@@ -3118,7 +3126,6 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             "\u{e921}",
             WindowControlArea::Min,
             WindowCommand::Minimize,
-            fullscreen,
             false,
             theme,
         ))
@@ -3127,7 +3134,6 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             maximize.1,
             WindowControlArea::Max,
             WindowCommand::MaximizeOrRestore,
-            fullscreen,
             false,
             theme,
         ))
@@ -3136,7 +3142,6 @@ fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl Into
             "\u{e8bb}",
             WindowControlArea::Close,
             WindowCommand::Close,
-            fullscreen,
             true,
             theme,
         ))
@@ -3148,7 +3153,6 @@ fn windows_caption_button(
     glyph: &'static str,
     area: WindowControlArea,
     command: WindowCommand,
-    manual: bool,
     close: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
@@ -3170,7 +3174,7 @@ fn windows_caption_button(
     let active_foreground = if close {
         gpui::white().opacity(0.8)
     } else {
-        gpui_color(theme.colors.icon_active)
+        gpui_color(theme.colors.foreground)
     };
 
     div()
@@ -3184,16 +3188,14 @@ fn windows_caption_button(
         .content_center()
         .occlude()
         .text_size(px(10.0))
-        .text_color(gpui_color(theme.colors.icon_active))
+        .text_color(gpui_color(theme.colors.text_secondary))
         .hover(move |style| style.bg(hover).text_color(hover_foreground))
         .active(move |style| style.bg(active).text_color(active_foreground))
         .window_control_area(area)
-        .when(manual, |button| {
-            button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.prevent_default();
-                command.execute(window, cx);
-                cx.stop_propagation();
-            })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.prevent_default();
+            command.execute(window, cx);
+            cx.stop_propagation();
         })
         .child(glyph)
 }
@@ -3399,7 +3401,7 @@ fn indicator_selector(
         "indicator_selector",
         "Indicators",
         button_activation(
-            chrome_button_style(trigger, theme, false, false, enabled),
+            chrome_button_style(trigger, theme, false, enabled),
             enabled,
             move |window, cx| {
                 app.update(cx, |app, app_cx| {
@@ -3444,8 +3446,12 @@ fn indicator_dialog_content(
                 .cursor_pointer()
                 .when(keyboard_selection == index, |row| {
                     row.bg(gpui_color(colors.interactive_neutral_active_bg))
+                        .text_color(gpui_color(colors.interactive_neutral_active_fg))
                 })
-                .hover(|row| row.bg(gpui_color(colors.interactive_neutral_hover_bg)))
+                .hover(|row| {
+                    row.bg(gpui_color(colors.interactive_neutral_hover_bg))
+                        .text_color(gpui_color(colors.interactive_neutral_hover_fg))
+                })
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     let added = row_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
                     if added {
@@ -3475,12 +3481,17 @@ fn indicator_dialog_content(
                         ),
                 )
                 .child(button_activation(
-                    Button::new(("add_indicator", index))
-                        .icon(header_icon(HugeIcon::AddIcon01))
-                        .border_0()
-                        .compact()
-                        .cursor_pointer()
-                        .tab_stop(false),
+                    chrome_button_style(
+                        Button::new(("add_indicator", index))
+                            .icon(header_icon(HugeIcon::AddIcon01))
+                            .border_0()
+                            .compact()
+                            .cursor_pointer()
+                            .tab_stop(false),
+                        theme,
+                        false,
+                        true,
+                    ),
                     true,
                     move |window, cx| {
                         let added = add_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
@@ -3624,10 +3635,14 @@ fn instrument_dialog_content(
                 .text_sm()
                 .when(state.keyboard_selection == index || checked, |row| {
                     row.bg(gpui_color(colors.interactive_neutral_active_bg))
+                        .text_color(gpui_color(colors.interactive_neutral_active_fg))
                 })
                 .when(!state.selection_pending, |row| {
                     row.cursor_pointer()
-                        .hover(|row| row.bg(gpui_color(colors.interactive_neutral_hover_bg)))
+                        .hover(|row| {
+                            row.bg(gpui_color(colors.interactive_neutral_hover_bg))
+                                .text_color(gpui_color(colors.interactive_neutral_hover_fg))
+                        })
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             let dispatched = app
                                 .update(cx, |app, cx| app.select_instrument(selection.clone(), cx));
@@ -3696,7 +3711,7 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .w(px(720.0))
         .bg(gpui_color(colors.surface_primary))
-        .text_color(gpui_color(colors.foreground))
+        .text_color(gpui_color(colors.text_secondary))
 }
 
 fn chrome_menu_scroll_body() -> Div {
@@ -3746,7 +3761,7 @@ fn panel_toggle(
     chrome_tooltip(
         state.id,
         state.tooltip,
-        chrome_button_style(button, theme, state.selected, false, state.enabled),
+        chrome_button_style(button, theme, state.selected, state.enabled),
     )
 }
 
@@ -3767,7 +3782,7 @@ fn theme_toggle(app: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoEl
     chrome_tooltip(
         "theme_toggle",
         format!("Switch to {} theme", next.label()),
-        chrome_button_style(button, theme, false, false, true),
+        chrome_button_style(button, theme, false, true),
     )
 }
 
@@ -3820,7 +3835,7 @@ fn series_selector(
         "series_selector",
         "Select chart timeframe",
         button_activation(
-            chrome_button_style(button, theme, false, false, enabled),
+            chrome_button_style(button, theme, false, enabled),
             enabled && !pending,
             move |window, cx| {
                 app.update(cx, |app, app_cx| {
@@ -3835,27 +3850,35 @@ fn chrome_button_style(
     button: Button,
     theme: &AxiusflowTheme,
     selected: bool,
-    muted_when_idle: bool,
     enabled: bool,
 ) -> Button {
     let colors = theme.colors;
-    let idle = if !enabled {
-        colors.text_unavailable
-    } else if muted_when_idle {
-        colors.icon_color
-    } else {
-        colors.foreground
-    };
     button
         .selected(selected)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .border_0()
-        .text_color(gpui_color(idle))
+        .text_color(gpui_color(chrome_control_foreground(
+            &colors, selected, enabled,
+        )))
         .when(selected, |button| {
             button
                 .bg(gpui_color(colors.interactive_neutral_active_bg))
                 .text_color(gpui_color(colors.interactive_neutral_active_fg))
         })
+}
+
+fn chrome_control_foreground(
+    colors: &axiusflow_design_system::ThemeColors,
+    selected: bool,
+    enabled: bool,
+) -> ThemeColor {
+    if !enabled {
+        colors.text_unavailable
+    } else if selected {
+        colors.interactive_neutral_active_fg
+    } else {
+        colors.text_secondary
+    }
 }
 
 fn button_activation(
@@ -4339,15 +4362,16 @@ mod tests {
         DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand, RithmicReadyAction,
         RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
         TerminalProvider, WindowCommand, bounded_status_detail, catalog_rejection_domain,
-        chart_status_detail, chart_surface_notice, connection_presentation,
-        default_rithmic_contract_index, finish_desktop_shutdown, fullscreen_escape_command,
-        gpui_color, instrument_selector_label, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop, split_lifetime_mode, window_controls_visible,
+        chart_status_detail, chart_surface_notice, chrome_control_foreground,
+        connection_presentation, default_rithmic_contract_index, finish_desktop_shutdown,
+        fullscreen_escape_command, gpui_color, instrument_selector_label, publication_chart_state,
+        reconciled_bridge_state, reconnect_contract_index, rithmic_ready_action,
+        series_selector_label, should_apply_rithmic_worker_stop, split_lifetime_mode,
+        window_controls_visible,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-    use axiusflow_design_system::ThemeColor;
+    use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
     use axiusflow_local_engine_protocol::{ProviderInstrumentSummary, ResourceMode};
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};
@@ -4428,6 +4452,23 @@ mod tests {
     fn fullscreen_hides_native_window_controls() {
         assert!(!window_controls_visible(true));
         assert!(window_controls_visible(false));
+    }
+
+    #[test]
+    fn chrome_controls_use_secondary_until_selected_or_disabled() {
+        let colors = AxiusflowTheme::light().colors;
+        assert_eq!(
+            chrome_control_foreground(&colors, false, true),
+            colors.text_secondary
+        );
+        assert_eq!(
+            chrome_control_foreground(&colors, true, true),
+            colors.interactive_neutral_active_fg
+        );
+        assert_eq!(
+            chrome_control_foreground(&colors, false, false),
+            colors.text_unavailable
+        );
     }
 
     #[test]
