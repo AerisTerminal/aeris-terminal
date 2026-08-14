@@ -4016,7 +4016,7 @@ Evidence (2026-08-14): `apps/desktop/Cargo.toml` no longer depends on `coinbase_
 
 # 123. ENGINE CARGO CONSTRAINT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 `apps/engine/Cargo.toml` owns backend composition.
 
@@ -4031,11 +4031,13 @@ It may depend on:
 - observability,
 - engine protocol.
 
+Evidence (2026-08-14): `apps/engine/Cargo.toml` is the backend composition root and directly owns both provider adapters, canonical market data, `market_engine`, encrypted desktop storage, provider history, platform runtime, local engine protocol/client support, IPC transport, randomness, and secret zeroization. It has no GPUI, chart-integration, terminal-UI, or design-system dependency. The mandatory workspace test gate includes a manifest regression that fails if required engine composition edges disappear or UI edges appear.
+
 ---
 
 # 124. PROVIDER ADAPTER CONSTRAINT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Adapters may depend on:
 
@@ -4046,11 +4048,13 @@ Adapters may depend on:
 
 They may not depend on UI.
 
+Evidence (2026-08-14): the unused Coinbase adapter production dependency on `desktop_storage` was removed from its manifest and lockfile entry. Coinbase and Rithmic production dependencies are now limited to canonical market data, provider-history contracts, platform/observability primitives, and provider wire/network/security libraries. Their storage/history conformance fixtures remain dev-only, neither adapter depends on UI, and a deterministic dependency-direction test parses only each production dependency table to prevent storage or UI regression.
+
 ---
 
 # 125. NO CROSS-LAYER CONVENIENCE IMPORTS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Do not bypass architecture because importing a lower-level type is convenient.
 
@@ -4059,6 +4063,8 @@ If GPUI needs information:
 add it to a proper engine publication/application model.
 
 Do not import Rithmic structs into GPUI.
+
+Evidence (2026-08-14): presentation manifests contain no Coinbase or Rithmic adapter dependency, chart integration contains neither adapter, and repository source inspection finds no provider-adapter crate import in the desktop or UI crates. Coinbase presentation uses the provider-neutral `InstallProviderInstrument` engine-protocol descriptor; Rithmic presentation types are app-local UI state built from provider-neutral protocol publications rather than adapter structs. Cargo therefore rejects a new cross-layer provider import unless the forbidden dependency is deliberately reintroduced, which the dependency-direction regression tests also reject.
 
 ---
 

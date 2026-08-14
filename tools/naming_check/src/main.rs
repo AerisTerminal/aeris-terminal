@@ -133,6 +133,15 @@ mod tests {
         }
     }
 
+    fn production_dependencies(relative: &str) -> String {
+        manifest(relative)
+            .split_once("[dependencies]")
+            .map(|(_, dependencies)| dependencies)
+            .and_then(|dependencies| dependencies.split("\n[").next())
+            .unwrap_or_else(|| panic!("{relative} must contain a dependencies table"))
+            .to_string()
+    }
+
     #[test]
     fn cargo_dependency_direction_excludes_ui_from_backend_layers() {
         let ui = [
@@ -173,6 +182,28 @@ mod tests {
                 "axiusflow_market_engine",
             ],
         );
+    }
+
+    #[test]
+    fn provider_adapters_exclude_storage_and_ui_from_production_dependencies() {
+        for relative in [
+            "crates/adapters/coinbase_market/Cargo.toml",
+            "crates/adapters/rithmic_protocol/Cargo.toml",
+        ] {
+            let dependencies = production_dependencies(relative);
+            for forbidden in [
+                "axiusflow_desktop_storage",
+                "axiusflow_desktop_history",
+                "axiusflow_chart_integration",
+                "axiusflow_terminal_ui",
+                "gpui",
+            ] {
+                assert!(
+                    !dependencies.contains(forbidden),
+                    "{relative} production dependencies must not contain {forbidden}"
+                );
+            }
+        }
     }
 
     #[test]

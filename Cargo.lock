@@ -679,7 +679,6 @@ name = "axiusflow_coinbase_market_adapter"
 version = "0.1.0"
 dependencies = [
  "axiusflow_desktop_history",
- "axiusflow_desktop_storage",
  "axiusflow_market_data",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
