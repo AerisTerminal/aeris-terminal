@@ -10,7 +10,6 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_local_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
     SearchProviderInstruments, SelectProviderInstrument,
@@ -96,7 +95,7 @@ pub enum MarketWorkerStartup {
 }
 
 pub struct CoinbaseWorkerStartup {
-    pub coinbase_product: CoinbaseSpotProduct,
+    pub coinbase_product: InstallProviderInstrument,
     pub subscription_id: String,
     pub worker_label: String,
 }
@@ -154,7 +153,7 @@ pub enum MarketWorkerMessage {
     CoinbaseSwitchMarker {
         sequence: u64,
     },
-    CoinbaseCatalog(Result<Vec<CoinbaseSpotProduct>, String>),
+    CoinbaseCatalog(Result<Vec<InstallProviderInstrument>, String>),
     CoinbaseDom(DomFrame),
     ChartViewport {
         start_unix_nanos: i64,
@@ -908,7 +907,7 @@ pub enum MarketWorkerCommand {
 #[derive(Clone, Debug)]
 pub struct CoinbaseSelectionRequest {
     pub sequence: u64,
-    pub product: CoinbaseSpotProduct,
+    pub product: InstallProviderInstrument,
     pub interval: ChartInterval,
 }
 
@@ -1134,7 +1133,7 @@ impl MarketDataWorker {
     /// Returns the request when the command mailbox is full or disconnected.
     pub fn try_select_coinbase(
         &self,
-        product: CoinbaseSpotProduct,
+        product: InstallProviderInstrument,
         interval: ChartInterval,
     ) -> Result<u64, TrySendError<Box<CoinbaseSelectionRequest>>> {
         let (Some(commands), Some(sequence)) =

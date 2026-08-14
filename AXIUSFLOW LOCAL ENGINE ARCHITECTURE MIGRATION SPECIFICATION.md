@@ -3912,7 +3912,7 @@ Respect the repository rule against document sprawl.
 
 # 120. `AGENTS.md`
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Update `AGENTS.md` with enforceable rules for future coding agents.
 
@@ -3934,11 +3934,13 @@ At minimum include:
 14. Replaced code must be deleted.
 15. Compile success is not runtime success.
 
+Evidence (2026-08-14): `AGENTS.md` now contains an enforceable market-architecture guardrail section covering GPUI blocking/provider/storage exclusions, provider-neutral desktop types, single `MarketEngine` demand ownership, shared provider runtimes, stable sessions across presentation changes, memory-before-persistence publication, generation fencing, bounded Loading/recovery, one runtime/IPC path, crate/trait justification, deletion of replaced code, and runtime verification beyond compilation.
+
 ---
 
 # 121. CARGO DEPENDENCY RULES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Final dependency direction conceptually:
 
@@ -3979,11 +3981,13 @@ desktop UI → rithmic_protocol
 desktop UI → coinbase_market
 ```
 
+Evidence (2026-08-14): the remaining desktop imports of the Coinbase adapter and provider-history implementation were removed. Coinbase presentation now uses the existing provider-neutral `InstallProviderInstrument` protocol descriptor, including its exact entitlement identity, and desktop readiness evidence drives the application-owned gap/resnapshot model instead of a provider-history coordinator. Three deterministic `axiusflow_naming_check` tests inspect the authoritative manifests and reject UI dependencies from backend/domain/storage/adapters, provider adapters from chart integration, backend implementation crates from the desktop, or loss of the engine backend composition boundary.
+
 ---
 
 # 122. DESKTOP CARGO CONSTRAINT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 `apps/desktop/Cargo.toml` should not directly depend on:
 
@@ -4005,6 +4009,8 @@ Final desktop dependencies should primarily be:
 - engine protocol/client support,
 - Origin chart integration,
 - platform runtime where needed.
+
+Evidence (2026-08-14): `apps/desktop/Cargo.toml` no longer depends on `coinbase_market` or `provider_history` and has none of the forbidden Rithmic adapter, storage, history, or `market_engine` dependencies. Its shipping and diagnostics paths compile through application/domain models, local engine protocol/client support, observability, platform runtime, UI crates, GPUI, and Origin integration. The manifest constraint is covered by the workspace dependency-direction regression test.
 
 ---
 

@@ -106,3 +106,101 @@ fn is_snake_case(name: &str) -> bool {
 fn relative_to(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    fn repository_root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("naming check remains under tools/naming_check")
+    }
+
+    fn manifest(relative: &str) -> String {
+        fs::read_to_string(repository_root().join(relative))
+            .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
+    }
+
+    fn assert_excludes(relative: &str, forbidden: &[&str]) {
+        let contents = manifest(relative);
+        for dependency in forbidden {
+            assert!(
+                !contents.contains(dependency),
+                "{relative} must not depend on {dependency}"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_dependency_direction_excludes_ui_from_backend_layers() {
+        let ui = [
+            "gpui",
+            "axiusflow_chart_integration",
+            "axiusflow_terminal_ui",
+        ];
+        for relative in [
+            "crates/market_engine/Cargo.toml",
+            "crates/domain/instruments/Cargo.toml",
+            "crates/domain/market_data/Cargo.toml",
+            "crates/desktop_storage/Cargo.toml",
+            "crates/desktop_history/Cargo.toml",
+            "crates/adapters/coinbase_market/Cargo.toml",
+            "crates/adapters/rithmic_protocol/Cargo.toml",
+        ] {
+            assert_excludes(relative, &ui);
+        }
+        assert_excludes(
+            "crates/ui/chart_integration/Cargo.toml",
+            &[
+                "axiusflow_coinbase_market_adapter",
+                "axiusflow_rithmic_protocol_adapter",
+            ],
+        );
+    }
+
+    #[test]
+    fn desktop_manifest_excludes_backend_implementation_crates() {
+        assert_excludes(
+            "apps/desktop/Cargo.toml",
+            &[
+                "axiusflow_coinbase_market_adapter",
+                "axiusflow_rithmic_protocol_adapter",
+                "axiusflow_provider_history",
+                "axiusflow_desktop_storage",
+                "axiusflow_desktop_history",
+                "axiusflow_market_engine",
+            ],
+        );
+    }
+
+    #[test]
+    fn engine_manifest_owns_backend_composition_without_ui() {
+        let contents = manifest("apps/engine/Cargo.toml");
+        for dependency in [
+            "axiusflow_coinbase_market_adapter",
+            "axiusflow_rithmic_protocol_adapter",
+            "axiusflow_desktop_storage",
+            "axiusflow_market_engine",
+            "axiusflow_provider_history",
+            "axiusflow_platform_runtime",
+            "axiusflow_local_engine_protocol",
+        ] {
+            assert!(
+                contents.contains(dependency),
+                "apps/engine/Cargo.toml must compose {dependency}"
+            );
+        }
+        for forbidden in [
+            "gpui",
+            "axiusflow_chart_integration",
+            "axiusflow_terminal_ui",
+        ] {
+            assert!(
+                !contents.contains(forbidden),
+                "apps/engine/Cargo.toml must not depend on {forbidden}"
+            );
+        }
+    }
+}

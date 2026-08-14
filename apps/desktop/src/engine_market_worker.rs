@@ -11,7 +11,6 @@ use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_coinbase_market_adapter::{CoinbaseSpotProduct, ENTITLEMENT_CLASS};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -19,8 +18,8 @@ use axiusflow_local_engine_client::{
     EngineClient, connect_or_start_engine, sibling_engine_executable,
 };
 use axiusflow_local_engine_protocol::{
-    DemandError, EngineFaultCode, ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey,
-    SeriesLoadState, SeriesSnapshot, envelope,
+    DemandError, EngineFaultCode, InstallProviderInstrument, ProviderConnectionState,
+    ProviderState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, envelope,
 };
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
@@ -76,7 +75,7 @@ struct WorkerEndpoint {
 }
 
 fn start_group(
-    configurations: Vec<(u64, CoinbaseSpotProduct)>,
+    configurations: Vec<(u64, InstallProviderInstrument)>,
 ) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let client_id = random_identity()?;
     let mut workers = Vec::with_capacity(configurations.len());
@@ -140,7 +139,7 @@ fn start_group(
 
 fn run_workers(
     client_id: u64,
-    endpoints: &mut [(u64, CoinbaseSpotProduct, WorkerEndpoint)],
+    endpoints: &mut [(u64, InstallProviderInstrument, WorkerEndpoint)],
 ) -> Result<(), String> {
     for (_, _, endpoint) in endpoints.iter() {
         let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
@@ -167,7 +166,7 @@ fn run_workers(
 fn run_attached_workers(
     client: &mut EngineClient,
     client_id: u64,
-    endpoints: &mut [(u64, CoinbaseSpotProduct, WorkerEndpoint)],
+    endpoints: &mut [(u64, InstallProviderInstrument, WorkerEndpoint)],
 ) -> Result<(), String> {
     for (workspace_id, product, endpoint) in endpoints.iter_mut() {
         client.register_consumer(client_id, *workspace_id, endpoint.consumer_id)?;
@@ -467,18 +466,15 @@ fn send_recovery(
     model: &mut MarketBarClientModel,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
+    let product = coinbase_products()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
     let result = request_snapshot(
         client,
         consumer_id,
         active_generation,
-        SeriesKey {
-            provider: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            cadence_value: 60,
-            definition_revision: 1,
-            entitlement_id: ENTITLEMENT_CLASS.to_string(),
-            cadence: SeriesCadence::FixedSeconds as i32,
-        },
+        series_key(&product, ChartInterval::Minute1)?,
         model,
         messages,
     )
@@ -518,7 +514,6 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .clone()
         .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
     if series.provider != "coinbase"
-        || series.entitlement_id != ENTITLEMENT_CLASS
         || SeriesCadence::try_from(series.cadence) != Ok(SeriesCadence::FixedSeconds)
     {
         return Err("engine Coinbase snapshot identity is invalid".to_string());
@@ -531,6 +526,9 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .into_iter()
         .find(|product| product.instrument_id == series.instrument_id)
         .ok_or_else(|| "engine snapshot instrument is unsupported".to_string())?;
+    if series.entitlement_id != product.entitlement_id {
+        return Err("engine Coinbase snapshot entitlement is invalid".to_string());
+    }
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
@@ -584,7 +582,7 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
                         snapshot.consumer_id, snapshot.generation
                     ),
                     causation_id: String::new(),
-                    entitlement_revision: ENTITLEMENT_CLASS.to_string(),
+                    entitlement_revision: series.entitlement_id.clone(),
                     session_generation: snapshot.provider_generation,
                     source_id: series.provider.clone(),
                     source_sequence: bar.source_sequence,
@@ -612,12 +610,18 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
     .map_err(|error| error.to_string())
 }
 
-fn series_key(product: &CoinbaseSpotProduct, interval: ChartInterval) -> Result<SeriesKey, String> {
+fn series_key(
+    product: &InstallProviderInstrument,
+    interval: ChartInterval,
+) -> Result<SeriesKey, String> {
     let supported_product = coinbase_products().into_iter().any(|supported| {
-        product.product_id == supported.product_id
+        product.provider == supported.provider
+            && product.provider_symbol == supported.provider_symbol
             && product.instrument_id == supported.instrument_id
+            && product.venue_id == supported.venue_id
             && product.price_scale == supported.price_scale
             && product.quantity_scale == supported.quantity_scale
+            && product.entitlement_id == supported.entitlement_id
     });
     if !supported_product
         || !matches!(
@@ -643,22 +647,25 @@ fn series_key(product: &CoinbaseSpotProduct, interval: ChartInterval) -> Result<
             _ => unreachable!("supported intervals were validated above"),
         },
         definition_revision: 1,
-        entitlement_id: ENTITLEMENT_CLASS.to_string(),
+        entitlement_id: product.entitlement_id.clone(),
         cadence: SeriesCadence::FixedSeconds as i32,
     })
 }
 
-fn coinbase_products() -> Vec<CoinbaseSpotProduct> {
+fn coinbase_products() -> Vec<InstallProviderInstrument> {
     [("BTC", "btc"), ("ETH", "eth")]
         .into_iter()
-        .map(|(base, canonical)| CoinbaseSpotProduct {
-            product_id: format!("{base}-USD"),
+        .map(|(base, canonical)| InstallProviderInstrument {
+            provider: "coinbase".to_string(),
+            session_generation: 1,
+            selection_generation: 1,
             instrument_id: format!("instrument:coinbase:{canonical}:usd"),
+            provider_symbol: format!("{base}-USD"),
             display_symbol: format!("{base}/USD"),
-            base_currency: base.to_string(),
-            quote_currency: "USD".to_string(),
+            venue_id: "coinbase".to_string(),
             price_scale: 2,
             quantity_scale: 8,
+            entitlement_id: "crypto_public_realtime".to_string(),
         })
         .collect()
 }
@@ -778,5 +785,12 @@ mod tests {
                 assert_eq!(series.instrument_id, product.instrument_id);
             }
         }
+    }
+
+    #[test]
+    fn coinbase_series_keys_reject_conflicting_provider_metadata() {
+        let mut product = coinbase_products().remove(0);
+        product.provider = "rithmic".to_string();
+        assert!(series_key(&product, ChartInterval::Minute1).is_err());
     }
 }

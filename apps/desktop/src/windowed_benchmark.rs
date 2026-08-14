@@ -12,11 +12,11 @@
 
 use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay, ReplaySnapshot};
 use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
-use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_desktop::market_worker::{
     CoinbaseWorkerStartup, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
     MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
 };
+use axiusflow_local_engine_protocol::InstallProviderInstrument;
 use axiusflow_market_data::ChartInterval;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
@@ -235,7 +235,7 @@ struct BenchmarkSetup {
     interaction_worker: MarketDataWorker,
     interaction_commands: Receiver<MarketWorkerCommand>,
     message_sender: MarketWorkerSender,
-    coinbase_products: [CoinbaseSpotProduct; 2],
+    coinbase_products: [InstallProviderInstrument; 2],
     interaction_startup: MarketWorkerStartup,
 }
 
@@ -902,15 +902,18 @@ fn clear_report_path(report_path: &Path) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn benchmark_coinbase_product(base: &str) -> CoinbaseSpotProduct {
-    CoinbaseSpotProduct {
-        product_id: format!("{base}-USD"),
+fn benchmark_coinbase_product(base: &str) -> InstallProviderInstrument {
+    InstallProviderInstrument {
+        provider: "coinbase".to_string(),
+        session_generation: 1,
+        selection_generation: 1,
         instrument_id: format!("instrument:coinbase:{}:usd", base.to_ascii_lowercase()),
+        provider_symbol: format!("{base}-USD"),
         display_symbol: format!("{base}/USD"),
-        base_currency: base.to_string(),
-        quote_currency: "USD".to_string(),
+        venue_id: "coinbase".to_string(),
         price_scale: 2,
         quantity_scale: 8,
+        entitlement_id: "crypto_public_realtime".to_string(),
     }
 }
 

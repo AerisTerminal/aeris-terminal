@@ -3,7 +3,8 @@
 use crate::frame_poll_gate::FramePollGate;
 
 use axiusflow_application::{
-    MarketBarClientModel, MarketBarModelOutcome, ReplaySnapshot, ReplayStreamUpdate,
+    EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
+    ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason,
 };
 use axiusflow_desktop::market_worker::{
     FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
@@ -14,16 +15,13 @@ use axiusflow_market_data::{
     BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
     OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
-use axiusflow_provider_history::{
-    HandoffCoordinator, HandoffState, SequencedHistory, VerifiedHistorySnapshot,
-};
 use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 use serde::Serialize;
 use std::{
     error::Error,
     fs,
     io::Write,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -342,25 +340,28 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
         .is_err()
         && model.current_generation() == before.as_ref();
 
-    let mut history = HandoffCoordinator::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
-    history.install_snapshot(history_snapshot(1, 2)?)?;
-    history.require_snapshot_after(1, 2);
-    let stale_history_snapshot_rejected =
-        history.install_snapshot(history_snapshot(1, 2)?).is_err()
-            && matches!(
-                history.state(),
-                HandoffState::SnapshotRequired {
-                    minimum_generation: 1,
-                    minimum_watermark: 2
-                }
-            );
-    history.install_snapshot(history_snapshot(2, 2)?)?;
+    let source = EmbeddedReplaySource;
+    let initial_history = source.load_snapshot(LoadEmbeddedReplay { bar_count: 2 })?;
+    let mut history = MarketBarClientModel::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    history.apply_update(ReplayStreamUpdate::Snapshot(initial_history.clone()))?;
+    let gap = source
+        .load_delta(3)?
+        .ok_or("embedded history fixture has no gap delta")?;
+    let gap_outcome = history.apply_update(ReplayStreamUpdate::Delta(gap))?;
+    let before_stale = history.current_generation().cloned();
+    let stale_history_snapshot_rejected = history
+        .apply_update(ReplayStreamUpdate::Snapshot(initial_history))
+        .is_err()
+        && history.current_generation() == before_stale.as_ref();
+    let replacement_history = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 4 })?
+        .try_with_publication_generation(2)?;
     let newer_history_snapshot_recovers = matches!(
-        history.state(),
-        HandoffState::Live {
-            generation: 2,
-            last_sequence: 2
-        }
+        history.apply_update(ReplayStreamUpdate::Snapshot(replacement_history))?,
+        MarketBarModelOutcome::Published(generation)
+            if matches!(gap_outcome, MarketBarModelOutcome::ResnapshotRequired(
+                ResnapshotReason::SequenceGap
+            )) && generation.sequence_range().1 == 4
     );
 
     let maximum_levels = NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN);
@@ -403,24 +404,23 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
 }
 
 fn collect_history_gap_evidence() -> Result<HistoryGapRecoveryEvidence, Box<dyn Error>> {
-    let mut history = HandoffCoordinator::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
-    history.install_snapshot(history_snapshot(1, 2)?)?;
-    let gap_result = history.push_live(sequenced_history(4));
-    let history_gap_requires_snapshot = gap_result.is_err()
-        && matches!(
-            history.state(),
-            HandoffState::SnapshotRequired {
-                minimum_generation: 1,
-                minimum_watermark: 4
-            }
-        );
-    history.install_snapshot(history_snapshot(2, 4)?)?;
+    let source = EmbeddedReplaySource;
+    let initial = source.load_snapshot(LoadEmbeddedReplay { bar_count: 2 })?;
+    let mut history = MarketBarClientModel::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    history.apply_update(ReplayStreamUpdate::Snapshot(initial))?;
+    let gap = source
+        .load_delta(3)?
+        .ok_or("embedded history fixture has no gap delta")?;
+    let history_gap_requires_snapshot = matches!(
+        history.apply_update(ReplayStreamUpdate::Delta(gap))?,
+        MarketBarModelOutcome::ResnapshotRequired(ResnapshotReason::SequenceGap)
+    );
+    let replacement = source
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 4 })?
+        .try_with_publication_generation(2)?;
     let history_covering_snapshot_recovers = matches!(
-        history.state(),
-        HandoffState::Live {
-            generation: 2,
-            last_sequence: 4
-        }
+        history.apply_update(ReplayStreamUpdate::Snapshot(replacement))?,
+        MarketBarModelOutcome::Published(generation) if generation.sequence_range().1 == 4
     );
     Ok(HistoryGapRecoveryEvidence {
         history_gap_requires_snapshot,
@@ -456,24 +456,6 @@ fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Erro
         depth_gap_clears_book,
         depth_covering_snapshot_recovers,
     })
-}
-
-fn sequenced_history(sequence: u64) -> SequencedHistory<u64> {
-    SequencedHistory {
-        sequence: NonZeroU64::new(sequence).unwrap_or(NonZeroU64::MIN),
-        value: sequence,
-    }
-}
-
-fn history_snapshot(
-    generation: u64,
-    watermark: u64,
-) -> Result<VerifiedHistorySnapshot<u64>, Box<dyn Error>> {
-    let items = (1..=watermark).map(sequenced_history).collect();
-    Ok(VerifiedHistorySnapshot::try_new(
-        NonZeroU64::new(generation).unwrap_or(NonZeroU64::MIN),
-        items,
-    )?)
 }
 
 fn depth_metadata(sequence: u64) -> EventMetadata {
@@ -850,42 +832,32 @@ mod tests {
         BURST_UPDATES, ENDURANCE_QUALIFICATION_DURATION, EnduranceCompletionState,
         EnduranceCounters, EnduranceEvidenceSnapshot, FramePollGate, ProcessMemoryProbe,
         collect_endurance_with_checkpoints, collect_evidence, collect_gap_recovery_evidence,
-        collect_generation_fencing_evidence, endurance_evidence,
+        collect_generation_fencing_evidence, collect_history_gap_evidence, endurance_evidence,
         write_endurance_evidence_atomically,
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn run_provider_neutral_handoff_scenario(provider: &str) {
-        let mut handoff = axiusflow_provider_history::HandoffCoordinator::new(
-            std::num::NonZeroUsize::new(8).unwrap_or(std::num::NonZeroUsize::MIN),
-        );
-        handoff
-            .install_snapshot(super::history_snapshot(1, 2).expect("covering snapshot builds"))
+        let recovery = collect_history_gap_evidence()
             .unwrap_or_else(|error| panic!("{provider} hydration failed: {error}"));
         assert!(
-            handoff.push_live(super::sequenced_history(4)).is_err(),
+            recovery.history_gap_requires_snapshot,
             "{provider} must latch a sequence gap"
         );
         assert!(
-            handoff
-                .install_snapshot(
-                    super::history_snapshot(1, 4).expect("stale covering snapshot builds")
-                )
-                .is_err(),
-            "{provider} must reject a stale session"
+            recovery.history_covering_snapshot_recovers,
+            "{provider} must recover from a covering snapshot"
         );
-        handoff
-            .install_snapshot(
-                super::history_snapshot(2, 4).expect("replacement covering snapshot builds"),
-            )
-            .unwrap_or_else(|error| panic!("{provider} recovery failed: {error}"));
-        assert!(matches!(
-            handoff.state(),
-            axiusflow_provider_history::HandoffState::Live {
-                generation: 2,
-                last_sequence: 4
-            }
-        ));
+        let fencing = collect_generation_fencing_evidence()
+            .unwrap_or_else(|error| panic!("{provider} fencing failed: {error}"));
+        assert!(
+            fencing.history.stale_history_snapshot_rejected,
+            "{provider} must reject stale history"
+        );
+        assert!(
+            fencing.history.newer_history_snapshot_recovers,
+            "{provider} must accept newer covering history"
+        );
     }
 
     #[test]

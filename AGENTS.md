@@ -55,6 +55,24 @@ Ponytail governs unnecessary complexity. It must never simplify away trading cor
 - Do not add a dependency without checking the workspace first and justifying its runtime, binary-size, maintenance, and supply-chain cost.
 - Do not weaken tests, silence lints, discard errors, or use `unwrap`/`expect` outside tests and unavoidable process-startup invariants merely to pass a gate.
 
+## Market architecture guardrails
+
+1. GPUI performs no provider, persistent-history, blocking network, disk, process, or shutdown work.
+2. The desktop does not import provider adapters, provider-history implementations, storage implementations, or `market_engine` directly.
+3. Provider-specific types stop at adapter boundaries; desktop presentation consumes application/domain models and provider-neutral engine protocol messages.
+4. `MarketEngine` is the single market-demand owner.
+5. Never create provider sessions per chart. Shared demand and subscriptions are keyed in the resident engine.
+6. Never create runtimes per chart; process and worker ownership stays bounded and explicit.
+7. Symbol, timeframe, viewport, tab, or layout changes do not recreate a provider session merely because presentation changed.
+8. Valid in-memory visualization data publishes before persistence and remains usable when persistence fails.
+9. Stale client, consumer, selection, series, provider, entitlement, or publication generations never mutate current chart state.
+10. Loading and recovery states are bounded and terminally resolve to usable data, an explicit retry/recovery state, or an actionable error.
+11. There is one production runtime and IPC path. Do not add compatibility or duplicate backend paths.
+12. A new crate requires a concrete ownership boundary and documented dependency-direction justification.
+13. A new trait requires real polymorphism, a platform/provider boundary, or a necessary test seam.
+14. Delete replaced code, dependencies, exports, tests, and tooling in the same change.
+15. Compilation is not runtime proof; verify the real streaming, persistence, IPC, lifecycle, and native-window path affected by the change.
+
 ## Bug-fix workflow
 
 1. Reproduce the failure or establish an observable failing invariant.

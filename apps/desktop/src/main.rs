@@ -19,7 +19,6 @@ use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
 };
-use axiusflow_coinbase_market_adapter::CoinbaseSpotProduct;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_local_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
@@ -379,13 +378,13 @@ struct TerminalApp {
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
-    coinbase_products: Vec<CoinbaseSpotProduct>,
-    coinbase_product: Option<CoinbaseSpotProduct>,
+    coinbase_products: Vec<InstallProviderInstrument>,
+    coinbase_product: Option<InstallProviderInstrument>,
     coinbase_switch: CoinbaseSwitchState,
     coinbase_interval: ChartInterval,
     coinbase_catalog: CoinbaseCatalogState,
     coinbase_pending_interval: Option<ChartInterval>,
-    coinbase_pending_product: Option<CoinbaseSpotProduct>,
+    coinbase_pending_product: Option<InstallProviderInstrument>,
     coinbase_pending_sequence: Option<u64>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
@@ -551,7 +550,7 @@ fn observe_chart(chart: Option<&Entity<OriginChartView>>, cx: &mut Context<Termi
 #[derive(Clone)]
 enum InstrumentMenuSelection {
     Rithmic(usize),
-    Coinbase(CoinbaseSpotProduct),
+    Coinbase(InstallProviderInstrument),
 }
 
 #[derive(Clone)]
@@ -808,7 +807,7 @@ struct TerminalStartupState {
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
     provider: TerminalProvider,
-    coinbase_product: Option<CoinbaseSpotProduct>,
+    coinbase_product: Option<InstallProviderInstrument>,
 }
 
 fn terminal_startup_state(
@@ -1028,16 +1027,15 @@ impl TerminalApp {
                 .iter()
                 .filter(|product| {
                     query.is_empty()
-                        || product.product_id.contains(&query)
+                        || product.provider_symbol.contains(&query)
                         || product.display_symbol.contains(&query)
-                        || product.base_currency.contains(&query)
+                        || product.instrument_id.contains(&query)
                 })
                 .map(|product| InstrumentMenuEntry {
                     symbol: product.display_symbol.clone(),
-                    checked: self
-                        .coinbase_product
-                        .as_ref()
-                        .is_some_and(|selected| selected.product_id == product.product_id),
+                    checked: self.coinbase_product.as_ref().is_some_and(|selected| {
+                        selected.provider_symbol == product.provider_symbol
+                    }),
                     selection: InstrumentMenuSelection::Coinbase(product.clone()),
                 })
                 .collect();
@@ -1070,7 +1068,7 @@ impl TerminalApp {
                 if self
                     .coinbase_product
                     .as_ref()
-                    .is_some_and(|selected| selected.product_id == product.product_id)
+                    .is_some_and(|selected| selected.provider_symbol == product.provider_symbol)
                     && self.coinbase_pending_product.is_none()
                 {
                     return true;
@@ -1078,7 +1076,7 @@ impl TerminalApp {
                 if self
                     .coinbase_pending_product
                     .as_ref()
-                    .is_some_and(|pending| pending.product_id == product.product_id)
+                    .is_some_and(|pending| pending.provider_symbol == product.provider_symbol)
                 {
                     return true;
                 }
@@ -1099,8 +1097,9 @@ impl TerminalApp {
                 self.coinbase_switch = CoinbaseSwitchState::Pending;
                 self.symbol_selection_pending = true;
                 self.chart_state = ChartState::Loading;
-                self.chart_state_message = format!("Loading {} market history", product.product_id);
-                self.symbol_message = format!("Switching to {}", product.product_id);
+                self.chart_state_message =
+                    format!("Loading {} market history", product.provider_symbol);
+                self.symbol_message = format!("Switching to {}", product.provider_symbol);
                 cx.notify();
                 true
             }
@@ -1288,7 +1287,7 @@ impl TerminalApp {
                 self.symbol_selection_pending = false;
                 self.symbol_message = self.coinbase_product.as_ref().map_or_else(
                     || "Coinbase market ready".to_string(),
-                    |product| format!("{} · Coinbase spot", product.product_id),
+                    |product| format!("{} · Coinbase spot", product.provider_symbol),
                 );
                 self.connection_state = Some(FeedConnectionState::Streaming);
                 self.connection_message = Some("Coinbase market data is current".to_string());
