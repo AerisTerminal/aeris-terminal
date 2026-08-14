@@ -4372,6 +4372,7 @@ mod tests {
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
     use axiusflow_local_engine_protocol::{ProviderInstrumentSummary, ResourceMode};
+    use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};
 
@@ -4542,7 +4543,7 @@ mod tests {
         let target = RithmicReconnectTarget {
             symbol: "MNQU6".to_string(),
             exchange: "CME".to_string(),
-            series: crate::rithmic_history::RithmicSeries::Minute5,
+            series: crate::rithmic_history::RithmicSeries::from(ChartInterval::Minute5),
         };
         assert_eq!(reconnect_contract_index(&results, &target), Some(1));
         let missing = RithmicReconnectTarget {
@@ -4628,7 +4629,7 @@ mod tests {
         let reconnect = RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
             symbol: "MNQU6".to_string(),
             exchange: "CME".to_string(),
-            series: crate::rithmic_history::RithmicSeries::Minute5,
+            series: crate::rithmic_history::RithmicSeries::from(ChartInterval::Minute5),
         });
         assert_eq!(
             rithmic_ready_action(
@@ -4845,7 +4846,9 @@ mod tests {
         assert_eq!(
             series_selector_label(
                 Some(crate::rithmic_history::RithmicSeries::Minute1),
-                Some(crate::rithmic_history::RithmicSeries::Minute5),
+                Some(crate::rithmic_history::RithmicSeries::from(
+                    ChartInterval::Minute5,
+                )),
             ),
             "1m"
         );

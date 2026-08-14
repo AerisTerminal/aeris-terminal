@@ -110,6 +110,7 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fs,
         path::{Path, PathBuf},
     };
@@ -165,6 +166,50 @@ mod tests {
             );
         }
         files
+    }
+
+    fn relative_string(path: &Path) -> String {
+        path.strip_prefix(repository_root())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn is_dedicated_test_or_benchmark(path: &Path) -> bool {
+        path.components().any(|component| {
+            let component = component.as_os_str();
+            component == "tests" || component == "benches"
+        }) || path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.ends_with("_tests"))
+    }
+
+    fn production_prefix(contents: &str) -> &str {
+        for (index, _) in contents.match_indices("#[cfg(test)]") {
+            let after_attribute = &contents[index + "#[cfg(test)]".len()..];
+            let declaration = after_attribute
+                .trim_start_matches(['\r', '\n'])
+                .lines()
+                .next()
+                .unwrap_or_default();
+            if declaration.starts_with("mod ") && declaration.ends_with(" {") {
+                return &contents[..index];
+            }
+        }
+        contents
+    }
+
+    fn declared_trait_name(line: &str) -> Option<&str> {
+        let line = line.trim();
+        let declaration = line
+            .strip_prefix("trait ")
+            .or_else(|| line.strip_prefix("pub trait "))
+            .or_else(|| line.strip_prefix("pub(crate) trait "))?;
+        declaration
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .next()
+            .filter(|name| !name.is_empty())
     }
 
     fn assert_excludes(relative: &str, forbidden: &[&str]) {
@@ -366,6 +411,95 @@ mod tests {
                 assert!(
                     !contents.contains(placeholder),
                     "{} contains placeholder macro {placeholder}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn platform_rust_source_upper_bound_stays_within_soft_budget() {
+        let line_count = production_rust_sources()
+            .into_iter()
+            .filter(|path| !is_dedicated_test_or_benchmark(path))
+            .map(|path| {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+                production_prefix(&contents).lines().count()
+            })
+            .sum::<usize>();
+
+        assert!(
+            line_count <= 65_000,
+            "platform Rust source upper bound is {line_count} lines, above the 65,000-line soft review threshold"
+        );
+    }
+
+    #[test]
+    fn dead_code_suppressions_remain_at_external_decode_boundaries() {
+        let allowed = BTreeSet::from([
+            "crates/adapters/coinbase_market/src/messages.rs",
+            "crates/adapters/rithmic_protocol/src/lib.rs",
+        ]);
+
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            if production_prefix(&contents).contains("#[allow(dead_code") {
+                let relative = relative_string(&path);
+                assert!(
+                    allowed.contains(relative.as_str()),
+                    "{relative} suppresses dead-code analysis outside an external decode boundary"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_traits_remain_justified_boundaries() {
+        let mut actual = BTreeSet::new();
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let relative = relative_string(&path);
+            for name in production_prefix(&contents)
+                .lines()
+                .filter_map(declared_trait_name)
+            {
+                actual.insert(format!("{relative}::{name}"));
+            }
+        }
+
+        let expected = BTreeSet::from([
+            "apps/engine/src/market_service.rs::HistorySource".to_string(),
+            "apps/engine/src/market_service.rs::RealtimeSource".to_string(),
+            "crates/adapters/coinbase_market/src/history.rs::CoinbaseHistoryTransport".to_string(),
+            "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
+                .to_string(),
+            "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
+                .to_string(),
+            "crates/desktop_history/src/worker.rs::HistoryDecoder".to_string(),
+            "crates/desktop_storage/src/model.rs::KeyRevocationEvidence".to_string(),
+            "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
+            "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
+            "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
+        ]);
+
+        assert_eq!(
+            actual, expected,
+            "production traits require a provider, platform, security, or test-substitution boundary"
+        );
+    }
+
+    #[test]
+    fn production_market_queues_exclude_unbounded_channels() {
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            for forbidden in ["mpsc::channel(", "unbounded(", "unbounded_channel("] {
+                assert!(
+                    !production_prefix(&contents).contains(forbidden),
+                    "{} contains unbounded queue constructor {forbidden}",
                     path.display()
                 );
             }

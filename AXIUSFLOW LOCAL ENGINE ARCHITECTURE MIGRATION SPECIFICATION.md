@@ -3052,7 +3052,9 @@ Internal work uses threads/tasks/modules.
 
 # 87. CODE SIZE / COMPLEXITY BUDGET
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the platform contains 52,390 raw source lines before terminal inline test modules across `apps/` and `crates/`. This conservative upper bound still counts test-only helper items outside those modules, comments, and blank lines while excluding dedicated tests, benchmarks, Origin, vendor material, and generated protobuf output. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
 
 Current platform-side code is too large relative to working functionality.
 
@@ -3096,7 +3098,9 @@ If the migration adds 20,000 new lines while leaving all old runtime code intact
 
 # 88. DELETE DEAD CODE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the audit deleted the desktop Rithmic wrapper's unused interval-seconds conversion, 13 redundant named interval constants, test-only interval list, and broad dead-code suppression; tests now enumerate the canonical `ChartInterval` inventory directly. The remaining dead-code suppressions are confined by conformance test to external Coinbase decode fields and generated Rithmic protobuf bindings. All-target Clippy rejects ordinary unused private code, while existing conformance checks reject retired runtime crates, duplicate authorities, placeholder modules, and obsolete backend dependencies.
 
 Once a migrated path is proven:
 
@@ -3169,7 +3173,9 @@ After cutover the old owner must be removed.
 
 # 91. TRAIT POLICY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): production has exactly ten traits. Four are real provider transport/session boundaries (`ProviderHistoryAdapter`, Coinbase and Rithmic history transports, and `ProviderSessionDriver`); two are engine history/realtime deterministic substitution seams; three isolate native credential-vault, credential-backend, and key-revocation security boundaries; and one substitutes bounded history decoding. All other ownership remains concrete. A repository conformance allowlist fails when a trait is added, removed, or moved without an explicit boundary review.
 
 Do not add traits merely because "clean architecture uses interfaces."
 
@@ -3210,7 +3216,9 @@ without an actual dependency reason.
 
 # 93. LOCK POLICY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): every production synchronous mutex was traced to its owner and acquisition path. Workspace state is serialized by `EngineState`; market worker handles are locked only to transfer shutdown ownership; desktop locks protect bounded mailboxes, coalescing state, result slots, and a polled waker; the credential vault serializes native credential access; and Rithmic locks isolate socket abort, callback, catalog, timing, and command slots. Guards are released before wakeups, joins, socket work, or another lock; no synchronous guard crosses `.await`; provider and coordinator progress never requires a desktop-held lock; and the market coordinator uses message ownership instead of shared locking.
 
 Audit all shared locks.
 
@@ -3230,7 +3238,9 @@ Avoid nested lock graphs.
 
 # 94. QUEUE POLICY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): `ARCHITECTURE.md` now inventories every production queue family with producer, consumer, capacity, full behavior, conflation, resynchronization, and control priority. Engine command/history/storage/catalog lanes are bounded at 64/8/16/64 items; realtime lanes are 2,048 events with a 4,096-item history handoff; Rithmic callbacks are bounded by 256 items and 8 MiB; provider environment/session commands are eight; desktop publication/command lanes are 32/32 and 32/8; chart publication is 64; history and lifecycle rendezvous are one. Data producers use nonblocking or bounded submission, loss of correctness-critical data invalidates the generation and requires covering recovery, semantic presentation slots alone conflate, and independent control/cancellation lanes prevent drain deadlock. A production-source conformance scan rejects unbounded channel constructors.
 
 Every queue documents:
 

@@ -1,45 +1,13 @@
-use axiusflow_market_data::{ChartAggregation, ChartInterval};
+use axiusflow_market_data::ChartInterval;
 use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicSeries(ChartInterval);
 
 #[allow(non_upper_case_globals)]
-#[allow(dead_code)]
 impl RithmicSeries {
     pub(crate) const Tick: Self = Self(ChartInterval::Tick100);
     pub(crate) const Minute1: Self = Self(ChartInterval::Minute1);
-    pub(crate) const Minute3: Self = Self(ChartInterval::Minute3);
-    pub(crate) const Minute5: Self = Self(ChartInterval::Minute5);
-    pub(crate) const Minute15: Self = Self(ChartInterval::Minute15);
-    pub(crate) const Minute30: Self = Self(ChartInterval::Minute30);
-    pub(crate) const Hour1: Self = Self(ChartInterval::Hour1);
-    pub(crate) const Hour2: Self = Self(ChartInterval::Hour2);
-    pub(crate) const Hour4: Self = Self(ChartInterval::Hour4);
-    pub(crate) const Hour8: Self = Self(ChartInterval::Hour8);
-    pub(crate) const Hour12: Self = Self(ChartInterval::Hour12);
-    pub(crate) const Daily: Self = Self(ChartInterval::Day1);
-    pub(crate) const Day3: Self = Self(ChartInterval::Day3);
-    pub(crate) const Week1: Self = Self(ChartInterval::Week1);
-    pub(crate) const Month1: Self = Self(ChartInterval::Month1);
-
-    pub(crate) const ALL: [Self; 15] = [
-        Self::Tick,
-        Self::Minute1,
-        Self::Minute3,
-        Self::Minute5,
-        Self::Minute15,
-        Self::Minute30,
-        Self::Hour1,
-        Self::Hour2,
-        Self::Hour4,
-        Self::Hour8,
-        Self::Hour12,
-        Self::Daily,
-        Self::Day3,
-        Self::Week1,
-        Self::Month1,
-    ];
 
     pub(crate) const fn label(self) -> &'static str {
         self.0.label()
@@ -51,14 +19,6 @@ impl RithmicSeries {
 
     pub(crate) fn supports_native_history(self) -> bool {
         self.0.rithmic_aggregation().is_some()
-    }
-
-    pub(crate) fn interval_seconds(self) -> Option<u64> {
-        match self.interval().aggregation() {
-            ChartAggregation::FixedSeconds(seconds) => Some(u64::from(seconds.get())),
-            ChartAggregation::CalendarMonth => Some(30 * 24 * 60 * 60),
-            ChartAggregation::Trades(_) => None,
-        }
     }
 }
 
@@ -136,6 +96,7 @@ impl RithmicSeriesBrowser {
 #[cfg(test)]
 mod tests {
     use super::{RithmicSeries, RithmicSeriesBrowser};
+    use axiusflow_market_data::ChartInterval;
     use std::num::NonZeroUsize;
 
     #[test]
@@ -144,13 +105,13 @@ mod tests {
         let selection = NonZeroUsize::MIN;
         let first = browser.select(selection, RithmicSeries::Minute1);
         assert_eq!(browser.pending(), Some(first));
-        let second = browser.select(selection, RithmicSeries::Minute5);
+        let second = browser.select(selection, RithmicSeries::from(ChartInterval::Minute5));
         assert_eq!(browser.pending(), Some(second));
         assert!(!browser.accept(first.selection_generation, first.series_generation));
         assert!(browser.accept(second.selection_generation, second.series_generation));
         let replacement = browser.select(
             NonZeroUsize::new(2).expect("selection generation is nonzero"),
-            RithmicSeries::Daily,
+            RithmicSeries::from(ChartInterval::Day1),
         );
         assert!(!browser.accept(second.selection_generation, second.series_generation));
         assert!(browser.accept(

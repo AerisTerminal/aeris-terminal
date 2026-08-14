@@ -757,7 +757,8 @@ mod tests {
 
     #[test]
     fn engine_series_keys_cover_every_rithmic_interval() {
-        for series in RithmicSeries::ALL {
+        for interval in ChartInterval::ALL {
+            let series = RithmicSeries::from(interval);
             let key = engine_series_key(&request(series)).expect("series key validates");
             assert_eq!(key.provider, "rithmic");
             assert_eq!(key.definition_revision, 1);
