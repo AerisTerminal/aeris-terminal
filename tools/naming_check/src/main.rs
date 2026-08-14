@@ -238,6 +238,34 @@ mod tests {
     }
 
     #[test]
+    fn local_ipc_manifests_exclude_public_server_dependencies() {
+        for relative in [
+            "apps/engine/Cargo.toml",
+            "crates/local_engine_client/Cargo.toml",
+            "crates/local_engine_protocol/Cargo.toml",
+        ] {
+            assert_excludes(
+                relative,
+                &["actix", "axum", "hyper", "rocket", "tonic", "warp"],
+            );
+        }
+        for relative in [
+            "apps/engine/Cargo.toml",
+            "crates/local_engine_client/Cargo.toml",
+        ] {
+            let contents = manifest(relative);
+            assert!(
+                contents.contains("interprocess"),
+                "{relative} must use platform-local IPC"
+            );
+            assert!(
+                contents.contains("axiusflow_local_engine_protocol"),
+                "{relative} must use the versioned local protocol"
+            );
+        }
+    }
+
+    #[test]
     fn provider_adapters_exclude_storage_and_ui_from_production_dependencies() {
         for relative in [
             "crates/adapters/coinbase_market/Cargo.toml",

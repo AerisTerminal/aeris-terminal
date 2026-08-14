@@ -2137,7 +2137,9 @@ It must run off the GPUI foreground thread where blocking operations are involve
 
 # 51. IPC MUST BE LOCAL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): desktop and the per-user engine communicate only through `interprocess` platform-local sockets at one fixed local endpoint; the engine binds one exclusive listener and exposes no TCP listener, HTTP route, REST API, or Docker-network dependency. Every frame carries strict protocol v10 and bounded protobuf framing, incompatible versions fail closed, and the first message must authenticate with the 32-byte installation credential loaded from native credential storage. Provider credentials never enter the local protocol. Mandatory manifest tests require the engine/client local transport and versioned protocol dependencies and reject public-server frameworks.
 
 The engine is not an internet server.
 
@@ -2159,7 +2161,9 @@ It must not expose provider credentials.
 
 # 52. IPC CONTROL PLANE MUST NOT BE STARVED
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): market data is not pushed into the control channel. Each client session reads explicit commands and writes at most one requested response, while the resident coordinator drains each provider-event source under a fixed budget and then handles one bounded control command. Full history queues fail demand explicitly instead of blocking the coordinator; realtime overflow closes and advances the provider generation for covering recovery. An authenticated two-client regression leaves one market client dormant with pending state while a second client receives an acknowledged resource-mode change, registers independent demand, and receives its snapshot.
 
 Control messages include:
 
@@ -2186,7 +2190,9 @@ from reaching the engine.
 
 # 53. IPC PUBLICATION BACKPRESSURE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the engine stores at most one latest provider state, covering series snapshot, series state, demand error, conflated authoritative order-book image, catalog search and catalog selection per consumer. Polling removes one semantic slot at a time; newer covering or presentation state replaces older pending state without an outbound push queue. Provider sequence and book reconstruction complete before the latest depth image enters that slot, and any provider/realtime queue loss forces generation recovery rather than silently dropping correctness-critical deltas. Desktop publication adds its own bounded generation-aware mailbox with explicit overflow fencing and covering resnapshot semantics.
 
 Use bounded publication.
 
@@ -2220,7 +2226,9 @@ UI display publications may be coalesced only after the engine has built correct
 
 # 54. SLOW DESKTOP MUST NOT BLOCK ENGINE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the engine never waits for GPUI to consume unsolicited market data because IPC publication is pull-based and retained in fixed semantic slots. Provider history, realtime, storage and coordinator workers have independent bounded channels and lifecycles. A deterministic slow-consumer regression leaves one consumer completely unread during a 32-trade live burst, proves another consumer receives the final trade and immediately changes visibility and generation, then proves the slow consumer has at most seven pending events and receives the latest covering snapshot rather than an event backlog.
 
 If GPUI stops reading IPC temporarily:
 
@@ -3204,7 +3212,9 @@ No bounded queue may create deadlock by blocking the only task capable of draini
 
 # 95. PROVIDER THREAD MUST NEVER BLOCK ON UI
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): provider adapters and engine workers have no UI dependency or GPUI handle. Coinbase realtime uses bounded nonblocking event submission and terminates the generation on overflow; Rithmic callbacks use bounded byte/item queues, generation fencing and explicit recovery. Provider heartbeats and socket progress run on provider-owned workers, history and persistence use separate workers, the coordinator only writes conflated in-memory consumer slots, and desktop polling occurs through independent client-session threads. Slow-consumer, realtime-overflow, storage-failure and full-history-queue regressions prove UI inactivity and downstream pressure cannot become an indefinite provider wait.
 
 Provider read loops may not wait for:
 

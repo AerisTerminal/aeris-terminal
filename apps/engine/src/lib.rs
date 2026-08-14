@@ -1610,6 +1610,70 @@ mod tests {
     }
 
     #[test]
+    fn dormant_market_client_does_not_starve_another_clients_control() {
+        let socket_name = socket_name("independent-control");
+        let listener = bind_listener(&socket_name).expect("bind independent control endpoint");
+        let token = [23_u8; 32];
+        let state = EngineState::default();
+        let server_state = state.clone();
+        let market =
+            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let server_market = market.clone();
+        let server = thread::spawn(move || {
+            let mut sessions = Vec::new();
+            for _ in 0..2 {
+                let stream = listener.accept().expect("accept local client");
+                let state = server_state.clone();
+                let market = server_market.clone();
+                sessions.push(thread::spawn(move || {
+                    serve_client_with_market(stream, &token, 29, &state, &market)
+                        .expect("serve local client");
+                }));
+            }
+            for session in sessions {
+                session.join().expect("join local client session");
+            }
+        });
+
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        let mut dormant =
+            EngineClient::connect(&socket_name, &token).expect("connect dormant market client");
+        dormant.attach_client(31).expect("dormant client attaches");
+        dormant
+            .register_consumer(31, 1, 201)
+            .expect("dormant consumer registers");
+        dormant
+            .set_series_demand(201, 1, series.clone())
+            .expect("dormant demand succeeds");
+        dormant
+            .restore_workspace()
+            .expect("dormant demand synchronization fence");
+
+        let mut control =
+            EngineClient::connect(&socket_name, &token).expect("connect independent control");
+        let interactive = control
+            .set_engine_resource_mode(ResourceMode::Interactive)
+            .expect("independent control remains responsive");
+        assert_eq!(interactive.resource_mode, ResourceMode::Interactive as i32);
+        control.attach_client(32).expect("second client attaches");
+        control
+            .register_consumer(32, 1, 202)
+            .expect("second consumer registers");
+        control
+            .set_series_demand(202, 1, series.clone())
+            .expect("second demand succeeds");
+        poll_ipc_snapshot(&mut control, 202, 1, &series);
+
+        drop(control);
+        drop(dormant);
+        server.join().expect("join independent control server");
+        assert_eq!(
+            state.workspace().resource_mode,
+            ResourceMode::Interactive as i32
+        );
+    }
+
+    #[test]
     fn authenticated_market_demand_crosses_ipc_and_returns_engine_snapshot() {
         let socket_name = socket_name("market");
         let listener = bind_listener(&socket_name).expect("bind market endpoint");

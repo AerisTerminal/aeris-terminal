@@ -4454,6 +4454,87 @@ mod tests {
     }
 
     #[test]
+    fn slow_consumer_conflates_live_state_without_blocking_control() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        attach_fixture_consumers(&harness);
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("shared realtime generation starts")
+                .0
+                .get(),
+            1
+        );
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("connect fixture");
+        assert!(matches!(
+            poll_until(&harness.service, 2, 2, |event| matches!(
+                event,
+                envelope::Payload::ProviderState(state)
+                    if state.state == ProviderConnectionState::Online as i32
+            )),
+            envelope::Payload::ProviderState(state) if state.generation == 1
+        ));
+
+        for sequence in 1..=32 {
+            let price = if sequence == 32 { "3.00" } else { "2.00" };
+            harness
+                .actions
+                .send(FixtureRealtimeAction::Trade(trade(2, price, sequence)))
+                .expect("live trade enters the bounded provider queue");
+        }
+        assert!(matches!(
+            poll_until(&harness.service, 2, 2, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot)
+                    if snapshot.forming
+                        && snapshot.bars.last().is_some_and(|bar| bar.close == 300)
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.provider_generation == 1
+        ));
+
+        harness
+            .service
+            .set_visibility(2, 2, false)
+            .expect("control command remains responsive");
+        harness
+            .service
+            .set_demand(2, 2, 2, &btc())
+            .expect("new demand remains responsive");
+        assert!(matches!(
+            poll_until(&harness.service, 2, 2, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.bars.last().is_some_and(|bar| bar.close == 300)
+        ));
+
+        let mut pending = 0;
+        let mut latest_snapshot = false;
+        while let Some(event) = harness
+            .service
+            .poll_event(1, 1)
+            .expect("slow consumer polls after the burst")
+        {
+            pending += 1;
+            assert!(pending <= 7, "consumer publication state remains bounded");
+            if let envelope::Payload::SeriesSnapshot(snapshot) = event {
+                latest_snapshot =
+                    snapshot.forming && snapshot.bars.last().is_some_and(|bar| bar.close == 300);
+            }
+        }
+        assert!(
+            latest_snapshot,
+            "slow consumer receives the latest covering state"
+        );
+    }
+
+    #[test]
     fn storage_failure_degrades_persistence_without_hiding_provider_history() {
         let service = MarketService::start_with_sources(
             FixtureHistory {
