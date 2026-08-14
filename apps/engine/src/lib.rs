@@ -1522,6 +1522,94 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_remove_consumer_keeps_another_chart_live() {
+        let socket_name = socket_name("remove-consumer");
+        let listener = bind_listener(&socket_name).expect("bind consumer cleanup endpoint");
+        let token = [17_u8; 32];
+        let market =
+            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let server_market = market.clone();
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept consumer cleanup client");
+            serve_client_with_market(stream, &token, 21, &EngineState::default(), &server_market)
+                .expect("serve consumer cleanup client");
+        });
+
+        let mut client =
+            EngineClient::connect(&socket_name, &token).expect("connect consumer cleanup client");
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        client.attach_client(21).expect("IPC client attaches");
+        for consumer_id in [101, 102] {
+            client
+                .register_consumer(21, 1, consumer_id)
+                .expect("chart consumer registers");
+            client
+                .set_series_demand(consumer_id, 1, series.clone())
+                .expect("chart demand succeeds");
+            poll_ipc_snapshot(&mut client, consumer_id, 1, &series);
+        }
+
+        client
+            .remove_market_consumer(101)
+            .expect("first chart consumer removes");
+        client
+            .restore_workspace()
+            .expect("consumer removal synchronization fence");
+        assert!(
+            market.poll_event(21, 101).is_err(),
+            "removed chart publication is unavailable"
+        );
+
+        client
+            .set_series_demand(102, 2, series.clone())
+            .expect("remaining chart demand succeeds");
+        poll_ipc_snapshot(&mut client, 102, 2, &series);
+
+        drop(client);
+        server.join().expect("join consumer cleanup server");
+    }
+
+    #[test]
+    fn authenticated_connection_drop_retires_detached_client_consumers() {
+        let socket_name = socket_name("disconnect-cleanup");
+        let listener = bind_listener(&socket_name).expect("bind disconnect cleanup endpoint");
+        let token = [19_u8; 32];
+        let market =
+            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let server_market = market.clone();
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept disconnect cleanup client");
+            serve_client_with_market(stream, &token, 23, &EngineState::default(), &server_market)
+                .expect("serve disconnect cleanup client");
+        });
+
+        let mut client =
+            EngineClient::connect(&socket_name, &token).expect("connect disconnect cleanup client");
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        client.attach_client(23).expect("IPC client attaches");
+        client
+            .register_consumer(23, 1, 103)
+            .expect("chart consumer registers");
+        client
+            .set_series_demand(103, 1, series.clone())
+            .expect("chart demand succeeds");
+        poll_ipc_snapshot(&mut client, 103, 1, &series);
+
+        drop(client);
+        server.join().expect("join disconnected client server");
+
+        assert!(
+            market.poll_event(23, 103).is_err(),
+            "disconnect removes detached publication state"
+        );
+        market.attach(23).expect("client identity can reattach");
+        market
+            .register_consumer(23, 1, 103)
+            .expect("detached consumer identity was fully retired");
+        market.detach(23).expect("reattached client detaches");
+    }
+
+    #[test]
     fn authenticated_market_demand_crosses_ipc_and_returns_engine_snapshot() {
         let socket_name = socket_name("market");
         let listener = bind_listener(&socket_name).expect("bind market endpoint");

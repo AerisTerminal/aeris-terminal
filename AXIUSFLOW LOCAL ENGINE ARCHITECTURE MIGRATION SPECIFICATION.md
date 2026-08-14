@@ -4070,7 +4070,9 @@ Evidence (2026-08-14): presentation manifests contain no Coinbase or Rithmic ada
 
 # 126. FAIL FAST ON ARCHITECTURAL VIOLATIONS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): Cargo manifests encode the runtime dependency direction, and the mandatory workspace test gate now reads those manifests to reject UI dependencies in backend/domain/storage/provider layers, provider implementations in chart integration or desktop, storage/UI dependencies in provider adapters, and UI dependencies or missing backend composition in the resident engine. Illegal Rust imports therefore fail at compile time, while manifest-level regression tests fail before an architectural dependency can silently enter an allowed crate.
 
 Where practical, enforce boundaries using Cargo dependencies.
 
@@ -4080,7 +4082,9 @@ A compiler error caused by illegal dependency direction is preferable to a comme
 
 # 127. CONSUMER CLEANUP
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): authenticated protocol-v10 `RemoveConsumer` reaches the resident coordinator owner, which removes only the authorized consumer's pending history waiter, conflated publication, and demand before releasing only live data no longer shared. Deterministic regressions prove an active Rithmic replay is cancelled when its final consumer is removed, twenty charts share one provider generation while a removed chart cannot poll and another continues receiving live updates, and the real local-socket client can remove Chart A while Chart B immediately submits a newer generation and receives its covering snapshot.
 
 When a chart closes:
 
@@ -4113,7 +4117,9 @@ Do not globally reset MarketEngine.
 
 # 129. UI RESTART
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): every authenticated engine session records its attached client identity. Local-socket EOF and framing failures leave the receive loop through one cleanup boundary that synchronously detaches that client before the server session returns. Detach removes only that client's pending waiters, publication state, and demand registry entries, then releases unused live work according to the active resource policy. An end-to-end abrupt-drop regression receives a real engine snapshot, drops the client without `DetachClient` or `Goodbye`, waits for the server session to finish, proves the old publication is unavailable, and re-registers the same identity successfully; lower-level ownership coverage proves another client's consumers remain intact.
 
 If desktop crashes or is killed while warm engine remains:
 
