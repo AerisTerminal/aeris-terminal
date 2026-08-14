@@ -200,6 +200,8 @@ History and live data meet at one explicit handoff boundary:
 4. Buffer or sequence live events during hydration.
 5. Admit only live events newer than the accepted history boundary.
 
+Series readiness and persistence are independent protocol axes. An exact memory hit publishes immediately; compatible in-memory or retained local history may publish a generation-fenced `Partial` covering snapshot before provider repair; provider completion installs and publishes `Ready` while asynchronous encrypted persistence is still `Pending`; and persistence failure changes that axis to `Degraded` without removing usable memory state. Provider failure with no usable history terminates the demand as stage-specific `Failed` plus `DemandError`, while newer consumer generations supersede and fence obsolete work. Coinbase derivation uses canonical one-minute bars only to build supported coarser intervals, never the reverse. Coinbase and Rithmic live handoffs buffer bounded generation-fenced events until covering history establishes continuity, then admit only events newer than the accepted boundary and enter `Live`; overflow, gaps, or conflicts force covering recovery.
+
 Prices and quantities use fixed-point or provider-exact representations. Floating-point conversion is a presentation concern and must not become the source of stored or transmitted truth.
 
 ## Concurrency and backpressure

@@ -1259,7 +1259,9 @@ This must remain short and easy to trace.
 
 # 27. PERSISTENCE IS NOT A FIRST-PIXEL GATE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): provider and retained-history results are validated and installed into `MarketEngine` before the coordinator submits a bounded asynchronous `StorageRequest::Persist`. Consumers receive the covering snapshot with `Ready/PersistenceState::Pending` before persistence completion; a full or disconnected storage queue immediately changes only the independent persistence axis to `Degraded`. A deterministic storage-failure regression receives the valid snapshot, observes `Ready/Degraded`, then re-demands the same series from memory without another provider fetch.
 
 This is one of the most important changes.
 
@@ -1330,7 +1332,9 @@ Future actual order state may require stronger transactional guarantees and is o
 
 # 28. HISTORY STATE MACHINE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): protocol v10 carries generation- and series-qualified `SeriesLoadState::{Empty, Resolving, Partial, Ready, Live, Failed, Superseded}` independently from `PersistenceState::{NotRequested, Pending, Durable, Degraded}`. The coordinator publishes `Resolving` before asynchronous disk/provider work, `Partial` for usable retained or derived history, `Ready` for covering history, `Live` only after handoff, and stage-specific `Failed` plus `DemandError` when no usable history remains. New consumer generations atomically supersede old work and stale completions cannot publish. A controlled regression holds provider history after `Resolving`, releases an explicit failure, and proves the same demand terminates as `Failed` with retryable `provider_history` context.
 
 Replace ambiguous loading booleans with explicit state.
 
@@ -1372,7 +1376,9 @@ A cancellation cannot leave it pending forever.
 
 # 29. PROGRESSIVE PUBLICATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): an exact memory hit publishes immediately. Compatible in-memory minutes and retained local/derived history install and publish a usable `Partial` covering snapshot before provider repair is queued; successful repair replaces it with the validated covering `Ready` snapshot, while repair failure leaves the partial snapshot usable. The deterministic retained-history regression observes local close `99` before provider work, retains it through provider failure, then observes repaired close `105`; compatible hot/cold derivation and repeated cache-hit tests cover the other progressive lookup levels.
 
 The user should see useful data as soon as it exists.
 
@@ -1484,7 +1490,9 @@ If a provider has native bar subscriptions, that is an adapter optimization, not
 
 # 32. TIMEFRAME DERIVATION RULE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): Coinbase hot and cold derivation accept only a supported target wider than one minute and always select the exact canonical one-minute series as their source; tick, session, week, month, one-minute, unsupported, or non-divisible targets bypass derivation and proceed to retained/provider lookup. A black-box regression first caches five-minute history, requests one-minute history, proves no generation-2 snapshot exists before provider completion, and verifies the one-minute request reaches the provider. Existing reciprocal coverage proves one-minute data derives and caches 5m/15m/1h only in the valid direction.
 
 Never derive finer data from coarser data.
 
@@ -1582,7 +1590,9 @@ Historical bars remain immutable unless corrections occur.
 
 # 35. HISTORY/LIVE HANDOFF
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the engine establishes shared realtime demand before history completes. Coinbase and Rithmic retain generation-fenced bounded live buffers while history is unresolved; history installation establishes the exact canonical sequence/time boundary, seeds the provider-owned aggregator, applies only admissible buffered trades, publishes a covering snapshot, and then enters `Live`. Buffer overflow, a gap, conflicting history, stale generation, or invalid continuation forces covering recovery instead of applying an uncertain tail. Deterministic Coinbase reconnect and Rithmic fixed/tick handoff tests prove completed history remains immutable, the forming tail continues exactly, stale overlap is discarded, gaps fail closed, and consumers survive recovery without reconstruction.
 
 History and realtime must be coordinated explicitly.
 
@@ -2337,7 +2347,9 @@ Do not expose its API to GPUI.
 
 # 59. STORAGE FAILURE SEMANTICS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): `SeriesState` reports market readiness and persistence as separate protocol fields. Read, queue, encryption, segment, or catalog failures are reduced to bounded non-sensitive degraded detail at the engine boundary; they do not remove a validated in-memory publication or convert `Ready`/`Partial` into indefinite loading. The storage-failure regression proves `Ready/Degraded` remains immediately reusable from the engine cache without a second provider request, while encrypted-store lifecycle tests separately prove corruption quarantine and failure isolation.
 
 Storage errors must be explicit.
 

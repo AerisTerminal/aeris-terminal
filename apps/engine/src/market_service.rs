@@ -3576,6 +3576,11 @@ mod tests {
         release: Receiver<()>,
     }
 
+    struct ControlledHistoryFailure {
+        started: SyncSender<()>,
+        release: Receiver<()>,
+    }
+
     struct BlockingRithmicHistory {
         started: SyncSender<()>,
         cancelled: SyncSender<()>,
@@ -4118,6 +4123,18 @@ mod tests {
         }
     }
 
+    impl HistorySource for ControlledHistoryFailure {
+        fn fetch(&mut self, _request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+            self.started
+                .send(())
+                .map_err(|_| "history failure observer disconnected".to_string())?;
+            self.release
+                .recv()
+                .map_err(|_| "history failure release disconnected".to_string())?;
+            Err("fixture provider history failed".to_string())
+        }
+    }
+
     impl HistorySource for BlockingRithmicHistory {
         fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
             self.started
@@ -4536,10 +4553,11 @@ mod tests {
 
     #[test]
     fn storage_failure_degrades_persistence_without_hiding_provider_history() {
+        let fetches = Arc::new(AtomicUsize::new(0));
         let service = MarketService::start_with_sources(
             FixtureHistory {
                 bars: vec![history_bar()],
-                fetches: None,
+                fetches: Some(Arc::clone(&fetches)),
             },
             None,
             Some(Err("fixture storage failure".to_string())),
@@ -4569,6 +4587,22 @@ mod tests {
                 if state.state == SeriesLoadState::Ready as i32
                     && state.persistence == PersistenceState::Degraded as i32
         ));
+        service
+            .set_demand(1, 1, 2, &btc())
+            .expect("degraded persistence does not invalidate memory");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == 2 && snapshot.bars[0].close == 105
+        ));
+        assert_eq!(
+            fetches.load(Ordering::Acquire),
+            1,
+            "usable in-memory history avoids another provider request"
+        );
     }
 
     #[test]
@@ -4626,6 +4660,11 @@ mod tests {
                 if state.state == SeriesLoadState::Partial as i32
                     && state.persistence == PersistenceState::Durable as i32
         ));
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+                if snapshot.bars[0].close == 99
+        ));
         assert!(
             history_rx.try_recv().is_ok(),
             "provider repair is queued after local publication"
@@ -4652,6 +4691,11 @@ mod tests {
             Some(envelope::Payload::SeriesState(ref state))
                 if state.state == SeriesLoadState::Ready as i32
                     && state.persistence == PersistenceState::Pending as i32
+        ));
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+                if snapshot.bars[0].close == 105
         ));
         assert!(matches!(
             storage_rx.try_recv(),
@@ -4883,6 +4927,116 @@ mod tests {
             envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 3
         ));
         assert_eq!(fetches.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn finer_history_never_derives_from_a_coarser_cached_series() {
+        let (requested_tx, requested_rx) = mpsc::sync_channel(2);
+        let (release_tx, release_rx) = mpsc::sync_channel(2);
+        let service = MarketService::start_with_source(SwitchingHistory {
+            requested: requested_tx,
+            release: release_rx,
+        })
+        .expect("directional history service starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        let five_minute = selected_series("instrument:coinbase:btc:usd", 300);
+        service
+            .set_demand(1, 1, 1, &five_minute)
+            .expect("coarse history demand starts");
+        assert_eq!(
+            requested_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("coarse provider request starts"),
+            internal_series(&five_minute).expect("coarse series")
+        );
+        release_tx.send(()).expect("coarse history completes");
+        poll_until(
+            &service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1),
+        );
+
+        service
+            .set_demand(1, 1, 2, &btc())
+            .expect("finer history demand starts");
+        assert_eq!(
+            requested_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("finer demand reaches the provider"),
+            internal_series(&btc()).expect("finer series")
+        );
+        while let Some(event) = service.poll_event(1, 1).expect("pending event polls") {
+            assert!(
+                !matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2),
+                "coarser cached data must not synthesize a finer snapshot"
+            );
+        }
+        release_tx.send(()).expect("finer history completes");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.series == Some(btc()) && snapshot.generation == 2
+        ));
+    }
+
+    #[test]
+    fn provider_history_failure_resolves_to_explicit_terminal_state() {
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let service = MarketService::start_with_source(ControlledHistoryFailure {
+            started: started_tx,
+            release: release_rx,
+        })
+        .expect("failing history service starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("history demand is accepted asynchronously");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("provider history starts");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesState(state)
+                    if state.state == SeriesLoadState::Resolving as i32
+            )),
+            envelope::Payload::SeriesState(state)
+                if state.generation == 1
+                    && state.series == Some(btc())
+                    && state.persistence == PersistenceState::NotRequested as i32
+        ));
+        release_tx.send(()).expect("provider failure released");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesState(state)
+                    if state.state == SeriesLoadState::Failed as i32
+            )),
+            envelope::Payload::SeriesState(state)
+                if state.generation == 1
+                    && state.detail.as_deref() == Some("Coinbase historical bars are unavailable")
+        ));
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::DemandError(_)
+            )),
+            envelope::Payload::DemandError(error)
+                if error.generation == 1
+                    && error.stage == "provider_history"
+                    && error.code == EngineFaultCode::Retryable as i32
+        ));
     }
 
     #[test]
