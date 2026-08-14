@@ -1784,7 +1784,6 @@ impl Coordinator<'_> {
             .set_series_demand(waiter.consumer_id, waiter.generation, series)
             .map_err(|error| error.to_string())?;
         self.remove_waiter(waiter.consumer_id);
-        self.prune_unused_live_series();
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             events.snapshot = None;
             events.series_state = None;
@@ -1814,7 +1813,10 @@ impl Coordinator<'_> {
                     return;
                 }
             };
-        if let Err(error) = self.ensure_realtime(series) {
+        let realtime = self.ensure_realtime(series);
+        self.prune_unused_live_series();
+        self.stop_realtime_if_idle();
+        if let Err(error) = realtime {
             let _ = reply.send(Err(error));
             return;
         }
@@ -1944,23 +1946,36 @@ impl Coordinator<'_> {
                 );
             }
         }
+        self.enqueue_persistence(
+            series,
+            generation,
+            bars,
+            true,
+            "Derived history persistence is unavailable",
+        );
+        Ok(true)
+    }
+
+    fn enqueue_persistence(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        bars: Vec<MarketBar>,
+        derived: bool,
+        unavailable: &'static str,
+    ) {
         if self
             .storage
             .try_send(StorageRequest::Persist(
                 series.clone(),
                 generation,
                 bars,
-                true,
+                derived,
             ))
             .is_err()
         {
-            self.broadcast_persistence_for(
-                series,
-                PersistenceState::Degraded,
-                Some("Derived history persistence is unavailable"),
-            );
+            self.broadcast_persistence_for(series, PersistenceState::Degraded, Some(unavailable));
         }
-        Ok(true)
     }
 
     fn enqueue_local_history(
@@ -2251,7 +2266,8 @@ impl Coordinator<'_> {
     ) {
         let key = (series.clone(), generation);
         self.history_inflight.remove(&key);
-        self.history_cancellations.remove(&key);
+        let stop = self.history_cancellations.remove(&key);
+        let cancelled = stop.is_some_and(|stop| stop.load(Ordering::Acquire));
         let current = self
             .engine
             .provider_status(&series.provider_id)
@@ -2266,7 +2282,9 @@ impl Coordinator<'_> {
             return;
         }
         let Ok(snapshot) = result else {
-            self.history_failed(series, generation);
+            if !cancelled {
+                self.history_failed(series, generation);
+            }
             return;
         };
         let bars = snapshot.bars;
@@ -2289,33 +2307,24 @@ impl Coordinator<'_> {
                 return;
             }
         };
-        let persistence = PersistenceState::Pending;
         for publication in publications {
             if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                 publish_state(
                     events,
                     &publication,
                     SeriesLoadState::Ready,
-                    persistence,
+                    PersistenceState::Pending,
                     None,
                 );
             }
         }
-        match self.storage.try_send(StorageRequest::Persist(
-            series.clone(),
+        self.enqueue_persistence(
+            series,
             generation,
             bars.clone(),
             false,
-        )) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                self.broadcast_persistence_for(
-                    series,
-                    PersistenceState::Degraded,
-                    Some("Local history persistence is unavailable"),
-                );
-            }
-        }
+            "Local history persistence is unavailable",
+        );
         if let Some(live) = self.rithmic_live.get_mut(series)
             && live
                 .seed(snapshot.price_scale, snapshot.quantity_scale, &bars)
@@ -3125,9 +3134,6 @@ impl Coordinator<'_> {
         self.local_history_deadlines
             .retain(|(series, _), _| !unobserved.contains(series));
         for series in unobserved {
-            if series.provider_id != "rithmic" {
-                continue;
-            }
             for ((active, _), stop) in &self.history_cancellations {
                 if active == &series {
                     stop.store(true, Ordering::Release);
@@ -3171,7 +3177,7 @@ impl Coordinator<'_> {
     }
 
     fn stop_realtime_if_idle(&mut self) {
-        if !self.events.is_empty() || !self.realtime_started {
+        if !self.live.is_empty() || !self.realtime_started {
             return;
         }
         self.realtime_stop.store(true, Ordering::Release);
@@ -3627,6 +3633,13 @@ mod tests {
     struct SwitchingHistory {
         requested: SyncSender<BarSeriesKey>,
         release: Receiver<()>,
+    }
+
+    struct DelayedCancellationHistory {
+        started: SyncSender<BarSeriesKey>,
+        cancellation_observed: SyncSender<()>,
+        release_cancellation: Receiver<()>,
+        block_first: bool,
     }
 
     struct ControlledHistoryFailure {
@@ -4177,6 +4190,41 @@ mod tests {
         }
     }
 
+    impl HistorySource for DelayedCancellationHistory {
+        fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+            self.started
+                .send(request.series.clone())
+                .map_err(|_| "history start observer disconnected".to_string())?;
+            if std::mem::take(&mut self.block_first) {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !request.stop.load(Ordering::Acquire) {
+                    if Instant::now() >= deadline {
+                        return Err("superseded history was not cancelled".to_string());
+                    }
+                    thread::yield_now();
+                }
+                self.cancellation_observed
+                    .send(())
+                    .map_err(|_| "cancellation observer disconnected".to_string())?;
+                self.release_cancellation
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|_| "cancellation release timed out".to_string())?;
+                return Err("superseded history was cancelled".to_string());
+            }
+            let profile = coinbase_series_profile(&request.series)?;
+            Ok(HistorySnapshot {
+                price_scale: profile.price_scale,
+                quantity_scale: profile.quantity_scale,
+                bars: vec![MarketBar {
+                    exchange_timestamp_seconds: i64::from(profile.interval_seconds),
+                    exchange_timestamp_unix_nanos: i64::from(profile.interval_seconds)
+                        * 1_000_000_000,
+                    ..history_bar()
+                }],
+            })
+        }
+    }
+
     impl HistorySource for ControlledHistoryFailure {
         fn fetch(&mut self, _request: &HistoryRequest) -> Result<HistorySnapshot, String> {
             self.started
@@ -4522,6 +4570,52 @@ mod tests {
             harness.generations.try_recv(),
             Err(TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn shared_realtime_stops_at_last_market_reference_with_idle_consumer() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        attach_fixture_consumers(&harness);
+        harness
+            .service
+            .register_consumer(2, 1, 3)
+            .expect("unrelated idle consumer registers");
+        assert_eq!(harness.history_fetches.load(Ordering::Acquire), 1);
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("one shared realtime generation starts")
+                .0
+                .get(),
+            1
+        );
+
+        harness
+            .service
+            .remove_consumer(1, 1)
+            .expect("first market reference closes");
+        assert!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "the remaining market reference retains realtime"
+        );
+        harness
+            .service
+            .remove_consumer(2, 2)
+            .expect("last market reference closes");
+        assert_eq!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_secs(1))
+                .expect("last market reference releases realtime")
+                .0
+                .get(),
+            1
+        );
     }
 
     #[test]
@@ -5417,6 +5511,87 @@ mod tests {
                     "obsolete history reached the active consumer"
                 );
             }
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn newer_demand_cancels_history_without_waiting_for_cleanup() {
+        let (started_tx, started_rx) = mpsc::sync_channel(2);
+        let (cancellation_tx, cancellation_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let service = MarketService::start_with_source(DelayedCancellationHistory {
+            started: started_tx,
+            cancellation_observed: cancellation_tx,
+            release_cancellation: release_rx,
+            block_first: true,
+        })
+        .expect("cancellation fixture starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .set_demand(1, 1, 1, &btc())
+            .expect("first history demand starts");
+        assert_eq!(
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first history fetch starts"),
+            internal_series(&btc()).expect("first internal series")
+        );
+
+        let eth = selected_series("instrument:coinbase:eth:usd", 60);
+        let switched_service = service.clone();
+        let (switched_tx, switched_rx) = mpsc::sync_channel(1);
+        let switcher = thread::spawn(move || {
+            let result = switched_service.set_demand(1, 1, 2, &eth);
+            let _ = switched_tx.send(result);
+        });
+        cancellation_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("obsolete history observes cancellation");
+        match switched_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(Ok(())) => {}
+            result => {
+                let _ = release_tx.send(());
+                let _ = switcher.join();
+                panic!("new demand did not supersede old cleanup: {result:?}");
+            }
+        }
+        release_tx
+            .send(())
+            .expect("obsolete history cleanup completes");
+        switcher.join().expect("demand switch thread joins");
+        assert_eq!(
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("new history fetch starts"),
+            internal_series(&selected_series("instrument:coinbase:eth:usd", 60))
+                .expect("new internal series")
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(event) = service.poll_event(1, 1).expect("consumer polls") {
+                assert!(
+                    !matches!(&event, envelope::Payload::ProviderState(state)
+                        if state.state == ProviderConnectionState::Recovering as i32),
+                    "intentional cancellation must not report provider recovery"
+                );
+                if matches!(&event, envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == 2
+                    && snapshot.series.as_ref().is_some_and(|series| {
+                        series.instrument_id == "instrument:coinbase:eth:usd"
+                    }))
+                {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new history publication timed out"
+            );
             thread::yield_now();
         }
     }

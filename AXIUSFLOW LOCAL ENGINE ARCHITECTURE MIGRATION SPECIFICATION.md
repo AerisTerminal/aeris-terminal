@@ -980,7 +980,9 @@ The implementation must not reconnect to Rithmic simply because a second ES char
 
 # 20. SUBSCRIPTION REFERENCE COUNTING
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): `MarketEngine` owns the bounded consumer-demand registry and publishes one immutable canonical series to every matching consumer, while the resident coordinator owns one Coinbase realtime worker and canonical handoffs keyed by `BarSeriesKey`. Twenty-chart and symbol/timeframe regressions prove one upstream generation is shared. The last-reference regression proves removing one of two matching consumers retains realtime, removing the last market consumer releases it even while an unrelated idle consumer remains registered, and the explicit markets-live policy alone may retain a detached hot handoff.
 
 `SubscriptionRegistry` owns shared upstream demand.
 
@@ -1029,7 +1031,9 @@ Only release the upstream subscription when no remaining consumer or hot-set pol
 
 # 21. CHART GENERATIONS ARE PER CONSUMER
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): `DemandRegistry` stores an independent `GenerationId` under each stable `ConsumerId`; `set_series_demand` makes a strictly newer generation authoritative synchronously, clears the prior publication, and rejects stale or conflicting equal-generation updates. Every state and snapshot carries consumer, generation, and series identity. Core and coordinator regressions prove late history remains cacheable but cannot publish to a replacement demand, rapid churn publishes only generation 7, and generation 2 becomes authoritative while generation 1 cleanup is deliberately held open.
 
 Each chart has a generation.
 
@@ -1075,7 +1079,9 @@ A stale result must never overwrite a newer chart.
 
 # 22. CANCELLATION MUST NOT BLOCK NEW WORK
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): replacement demand first updates the authoritative generation, then removes the old waiter and sets the existing atomic cancellation token for every now-unobserved Coinbase or Rithmic history request without waiting or joining. The bounded replacement path proceeds immediately; a cancelled failure is retired silently instead of being misreported as provider recovery, while any late successful canonical result remains generation-fenced. A deterministic regression holds obsolete cleanup blocked after it observes cancellation and proves the newer demand has already returned successfully before cleanup is released and publishes only generation 2.
 
 This is non-negotiable.
 
@@ -1117,7 +1123,9 @@ Cancellation is not allowed to create a serialization barrier between user selec
 
 # 23. ENGINE COORDINATOR MUST REMAIN RESPONSIVE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the process-owned coordinator performs only bounded state transitions, nonblocking submissions, fixed-budget realtime/catalog drains, publication, and one command per tick. Blocking Coinbase and Rithmic history, realtime/provider I/O, catalog work, and storage execute on separate named workers and report completions through bounded channels. Deterministic delayed-cancellation, slow-consumer, cross-provider cancellation, queue-saturation, consumer-removal, and shutdown tests prove new demand and control remain serviceable while provider work is active or blocked.
 
 Do not write a coordinator loop equivalent to:
 
@@ -1148,7 +1156,9 @@ The owner remains responsive.
 
 # 24. ONE ENGINE ASYNC RUNTIME
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): Axiusflow uses the specification's allowed alternative execution mechanism rather than adding Tokio: one process-owned, reference-counted `MarketRuntime` is constructed with the resident `MarketService` and owns the single coordinator plus bounded named provider/history/storage workers for its full lifetime. Every `MarketService` clone shares that runtime. The engine manifest has no async-runtime or GPUI dependency, the desktop has no `block_on`, and charts create only consumer identities and background IPC endpoints—not provider or per-request runtimes.
 
 `axiusflow_engine` should own one long-lived asynchronous runtime/process execution environment.
 
@@ -1168,7 +1178,9 @@ GPUI should not have to know whether provider code uses Tokio or another mechani
 
 # 25. THREAD/EXECUTOR RESPONSIBILITIES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): GPUI owns input, presentation models, render preparation, and completed-snapshot installation. Blocking authenticated IPC runs on named desktop background workers. The engine coordinator exclusively owns demand, generations, live-handoff references, resource policy, bounded incremental handoff updates, and publication; named provider workers own network/authentication/heartbeat/reconnect work; separate history workers own blocking fetch/decode and provider historical transformation; and the bounded local-history worker owns encryption and disk I/O. Dependency-direction conformance prevents provider/storage implementations from entering the desktop, and responsiveness regressions exercise selection, visibility, removal, provider failure, and shutdown without synchronous GPUI work.
 
 Conceptually:
 
