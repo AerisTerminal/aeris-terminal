@@ -138,8 +138,28 @@ mod tests {
             .split_once("[dependencies]")
             .map(|(_, dependencies)| dependencies)
             .and_then(|dependencies| dependencies.split("\n[").next())
-            .unwrap_or_else(|| panic!("{relative} must contain a dependencies table"))
+            .unwrap_or_default()
             .to_string()
+    }
+
+    fn assert_dependencies_are(relative: &str, allowed: &[&str]) {
+        for line in production_dependencies(relative)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let (dependency, _) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("invalid dependency in {relative}: {line}"));
+            let dependency = dependency.trim();
+            let dependency = dependency
+                .split_once('.')
+                .map_or(dependency, |(name, _)| name);
+            assert!(
+                allowed.contains(&dependency),
+                "{relative} production dependency {dependency} is outside the pure core"
+            );
+        }
     }
 
     #[test]
@@ -175,6 +195,8 @@ mod tests {
             "apps/desktop/Cargo.toml",
             &[
                 "axiusflow_coinbase_market_adapter",
+                "axiusflow_desktop_market_runtime",
+                "axiusflow_desktop_provider_runtime",
                 "axiusflow_rithmic_protocol_adapter",
                 "axiusflow_provider_history",
                 "axiusflow_desktop_storage",
@@ -182,6 +204,37 @@ mod tests {
                 "axiusflow_market_engine",
             ],
         );
+    }
+
+    #[test]
+    fn market_core_manifests_exclude_ipc_and_runtime_dependencies() {
+        assert_dependencies_are(
+            "crates/application/Cargo.toml",
+            &["axiusflow_instruments", "axiusflow_market_data", "sha2"],
+        );
+        assert_dependencies_are(
+            "crates/market_engine/Cargo.toml",
+            &["axiusflow_market_data"],
+        );
+        assert_dependencies_are("crates/domain/instruments/Cargo.toml", &[]);
+        assert_dependencies_are("crates/domain/market_data/Cargo.toml", &[]);
+    }
+
+    #[test]
+    fn retired_runtime_wrappers_do_not_reenter_the_workspace() {
+        for relative in [
+            "Cargo.toml",
+            "apps/desktop/Cargo.toml",
+            "apps/engine/Cargo.toml",
+        ] {
+            assert_excludes(
+                relative,
+                &[
+                    "axiusflow_desktop_market_runtime",
+                    "axiusflow_desktop_provider_runtime",
+                ],
+            );
+        }
     }
 
     #[test]

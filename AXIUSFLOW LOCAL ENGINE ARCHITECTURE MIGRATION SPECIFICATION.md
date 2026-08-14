@@ -4906,7 +4906,9 @@ But when runtime behavior genuinely differs between providers, expose that diffe
 
 # 157. PROVIDER NETWORK MUST BE REPLACEABLE IN TESTS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): the production coordinator exposes only two private provider-owner seams, `HistorySource` and `RealtimeSource`; the Rithmic adapter separately substitutes its real provider-session driver, history transport and credential-vault boundaries and uses local TLS fixtures for wire behavior. Deterministic sources drive immediate and delayed history, failure, cancellation, queue saturation, retained-history repair, realtime start/disconnect/reconnect, queue overflow and generation restart through production owners. Provider adapter, provider-history, engine, authenticated IPC, and desktop model tests additionally cover stale and duplicate data, out-of-order/gapped sequences, explicit empty history, depth gaps, and covering recovery. The mandatory workspace suite requires no live Internet, Rithmic credentials, CME entitlement, or provider timing; credentialed Rithmic checks remain separate smoke binaries.
 
 MarketEngine correctness must not depend on live internet access.
 
@@ -4962,7 +4964,9 @@ real provider smoke
 
 # 158. NO IPC INSIDE THE ENGINE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): protobuf framing and local sockets terminate at the authenticated `apps/engine` server boundary. The coordinator, `MarketEngine`, history/storage/realtime workers, aggregators, and provider adapters communicate through owned values, direct calls, immutable `Arc` snapshots, and bounded standard-library channels; no internal message is serialized and there is no HTTP or local-service hop. `market_engine`, application, and domain manifests contain no engine protocol, transport, interprocess, protobuf, or async-runtime dependency, and mandatory manifest regressions reject those dependencies.
 
 The desktop↔engine process boundary is the IPC boundary.
 
@@ -4998,7 +5002,9 @@ The process boundary already provides isolation.
 
 # 159. PURE FUNCTIONS MUST REMAIN PURE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): interval bucketing and aggregation, fixed-point conversion, coverage planning, sequence validation, cache-key construction, page validation, canonical provider conversion, and IPC projection remain ordinary deterministic functions/modules with direct unit or conformance tests. Application, domain, and `market_engine` own no runtime, IPC, transport, thread, or async dependency, enforced by Cargo direction and mandatory manifest tests. Workers exist only around independently blocking provider, persistence, process, and UI lifecycle boundaries.
 
 Not every operation needs:
 
@@ -5050,7 +5056,9 @@ Math and transformations should remain easy to test.
 
 # 160. NO MAGIC GLOBAL MARKET STATE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): repository-wide source inspection finds no mutable static `MarketEngine`, provider manager, subscription registry, or desktop market client. Bootstrap explicitly constructs `EngineState` and one process-owned `MarketService`; its coordinator exclusively owns the `MarketEngine`, provider generations, consumer demand, canonical series, publications, live handoffs, catalog and order book. Desktop workers own their clients and presentation mailboxes through scoped handles. Remaining production statics are immutable interval metadata, a serialized native-credential access lock, and bounded DNS/HTTP utility singletons; none owns market demand, provider generations, subscriptions, series, or publications.
 
 Do not introduce a process-global mutable singleton as a shortcut during migration.
 
@@ -5074,7 +5082,9 @@ One engine process does NOT mean one uncontrolled global variable.
 
 # 161. WRAPPER COLLAPSE RULE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-14): the obsolete `application::stream_runtime`, `desktop_market_runtime`, `desktop_provider_runtime`, Rithmic desktop driver, duplicate provider event bridge, and market-protocol conversion chain are deleted. The surviving layers each own a present responsibility: adapters own provider wire behavior, the resident coordinator owns lifecycle and policy, `MarketEngine` owns canonical demand/state, authenticated IPC owns the process boundary, desktop bridges validate/project engine publications, and GPUI owns presentation. Mandatory manifest regressions prevent both deleted desktop runtime crates from re-entering the workspace or either application manifest.
 
 Every runtime layer must justify its existence by at least one real responsibility:
 
