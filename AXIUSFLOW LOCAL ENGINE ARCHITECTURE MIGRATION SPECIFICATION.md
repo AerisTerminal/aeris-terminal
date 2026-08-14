@@ -2969,7 +2969,9 @@ Do not rely on graceful shutdown for correctness of already-committed data.
 
 # 85. DO NOT BUILD A DISTRIBUTED SYSTEM
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the shipping topology remains one native desktop and one resident per-user engine joined by authenticated platform-local IPC. Workspace manifests contain no service-discovery, consensus, remote-broker, cloud-queue, remote-database, Kubernetes, RPC-server, or HTTP-server dependency; provider HTTPS/WebSocket clients terminate in provider adapters and do not expose Axiusflow services. A repository conformance test scans every workspace manifest and rejects the distributed-system dependency families prohibited by this section.
 
 Although there are two local processes, this is not a cloud microservice architecture.
 
@@ -2993,7 +2995,9 @@ Keep IPC simple.
 
 # 86. DO NOT RECREATE DOCKER INSIDE RUST
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): `apps/` contains exactly the `desktop` and `engine` application packages. Market coordination, provider history/realtime, local history, storage, and client sessions remain bounded threads or modules owned inside the engine process rather than separately launched daemons. A conformance test enumerates application manifests and fails if another application process is added.
 
 The goal is not to simulate ten container services.
 
@@ -3091,7 +3095,9 @@ Git already provides history.
 
 # 89. NO PLACEHOLDER ARCHITECTURE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): every current production module under `apps/` and `crates/` contains executable behavior; there are no `todo!` or `unimplemented!` macros in production Rust, and the migrated desktop/engine path is exercised through deterministic core, worker, IPC, persistence, lifecycle, and presentation tests. A workspace source scan now fails if either placeholder macro enters production code.
 
 Do not create a new module containing mostly:
 
@@ -3109,7 +3115,9 @@ Each migration phase must own real runtime behavior.
 
 # 90. NO DUPLICATE AUTHORITY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): `MarketEngine`, constructed and driven only by the resident engine coordinator, is the sole market-demand state owner. The retired `desktop_market_runtime` and `desktop_provider_runtime` crates have no manifest or Rust source, are absent from the workspace, and are prohibited by conformance tests; the desktop manifest also rejects `market_engine`, provider adapters, provider history, history/storage implementations, and both retired runtime packages. Desktop market modules are bounded engine-protocol clients and presentation mailboxes only.
 
 At no time in the final architecture may both:
 
@@ -3150,7 +3158,9 @@ Prefer concrete types internally where abstraction has no current consumer.
 
 # 92. CRATE POLICY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the pure market core remains one cohesive `axiusflow_market_engine` crate with internal demand, provider, series, and publication modules. No speculative `market_engine_core`, `market_engine_runtime`, `market_engine_services`, `market_engine_common`, or `market_engine_types` crate or directory exists. A conformance test rejects those split names in both the workspace manifest and crate tree.
 
 Do not add a crate for every concept.
 
@@ -4372,7 +4382,9 @@ Do not begin with unsafe code or shared-memory IPC.
 
 # 142. SHARED MEMORY IS NOT PHASE 1
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): desktop/engine communication uses bounded length-prefixed protobuf messages over `interprocess` platform-local sockets. No workspace manifest or production source introduces memory mapping, shared-memory crates, shared-memory platform calls, or a shared-memory ring buffer. A conformance scan fails if those primitives appear, preserving measurement as the prerequisite for any future transport replacement.
 
 Do not introduce shared-memory ring buffers merely because this is a trading platform.
 

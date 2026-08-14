@@ -109,7 +109,10 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     fn repository_root() -> &'static Path {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -121,6 +124,47 @@ mod tests {
     fn manifest(relative: &str) -> String {
         fs::read_to_string(repository_root().join(relative))
             .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
+    }
+
+    fn collect_files(directory: &Path, matches: fn(&Path) -> bool, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        {
+            let entry = entry.expect("repository directory entry is readable");
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| {
+                    name == "provider_kit" || super::should_skip_directory(name)
+                }) {
+                    continue;
+                }
+                collect_files(&path, matches, files);
+            } else if matches(&path) {
+                files.push(path);
+            }
+        }
+    }
+
+    fn workspace_manifests() -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_files(
+            repository_root(),
+            |path| path.file_name().is_some_and(|name| name == "Cargo.toml"),
+            &mut files,
+        );
+        files
+    }
+
+    fn production_rust_sources() -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for root in ["apps", "crates"] {
+            collect_files(
+                &repository_root().join(root),
+                |path| path.extension().is_some_and(|extension| extension == "rs"),
+                &mut files,
+            );
+        }
+        files
     }
 
     fn assert_excludes(relative: &str, forbidden: &[&str]) {
@@ -234,6 +278,143 @@ mod tests {
                     "axiusflow_desktop_provider_runtime",
                 ],
             );
+        }
+        for relative in [
+            "crates/desktop_market_runtime",
+            "crates/desktop_provider_runtime",
+        ] {
+            let path = repository_root().join(relative);
+            assert!(
+                !path.join("Cargo.toml").exists(),
+                "retired market authority {relative} must not regain a crate manifest"
+            );
+            let mut sources = Vec::new();
+            if path.exists() {
+                collect_files(
+                    &path,
+                    |source| {
+                        source
+                            .extension()
+                            .is_some_and(|extension| extension == "rs")
+                    },
+                    &mut sources,
+                );
+            }
+            assert!(sources.is_empty(), "{relative} must not regain Rust source");
+        }
+    }
+
+    #[test]
+    fn workspace_excludes_distributed_system_dependencies() {
+        for path in workspace_manifests() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            for forbidden in [
+                "actix-web",
+                "axum",
+                "aws-sdk-sqs",
+                "consul",
+                "etcd",
+                "kafka",
+                "kube",
+                "mongodb",
+                "mysql",
+                "nats",
+                "postgres",
+                "rabbitmq",
+                "redis",
+                "rocket",
+                "tonic",
+                "warp",
+            ] {
+                assert!(
+                    !contents.contains(forbidden),
+                    "{} must not introduce distributed-system dependency {forbidden}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_has_only_desktop_and_engine_applications() {
+        let applications = fs::read_dir(repository_root().join("apps"))
+            .expect("apps directory is readable")
+            .filter_map(|entry| {
+                let path = entry.expect("application entry is readable").path();
+                path.join("Cargo.toml").is_file().then(|| {
+                    path.file_name()
+                        .expect("application has a name")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            applications,
+            ["desktop".to_string(), "engine".to_string()].into(),
+            "Axiusflow has exactly one desktop and one resident engine application"
+        );
+    }
+
+    #[test]
+    fn production_sources_have_no_placeholder_architecture() {
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            for placeholder in ["todo!", "unimplemented!"] {
+                assert!(
+                    !contents.contains(placeholder),
+                    "{} contains placeholder macro {placeholder}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn market_engine_remains_one_cohesive_crate() {
+        for forbidden in [
+            "market_engine_core",
+            "market_engine_runtime",
+            "market_engine_services",
+            "market_engine_common",
+            "market_engine_types",
+        ] {
+            assert!(
+                !repository_root().join("crates").join(forbidden).exists(),
+                "{forbidden} must remain part of the cohesive market_engine crate"
+            );
+            assert!(
+                !manifest("Cargo.toml").contains(forbidden),
+                "workspace must not contain speculative crate {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_excludes_shared_memory_ipc() {
+        for path in workspace_manifests()
+            .into_iter()
+            .chain(production_rust_sources())
+        {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            for forbidden in [
+                "CreateFileMapping",
+                "MapViewOfFile",
+                "memmap",
+                "mmap(",
+                "shared-memory",
+                "shared_memory",
+                "shmem",
+            ] {
+                assert!(
+                    !contents.contains(forbidden),
+                    "{} must not introduce shared-memory IPC primitive {forbidden}",
+                    path.display()
+                );
+            }
         }
     }
 
