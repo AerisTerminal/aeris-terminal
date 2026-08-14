@@ -1628,7 +1628,9 @@ Historical and realtime state must be distinct.
 
 # 36. PROVIDER CONNECTION STATE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): protocol v10 defines and transports generation-qualified `ProviderConnectionState::{Disconnected, Connecting, Online, Recovering, Failed}`, while `MarketEngine` independently retains the matching provider health and active session generation. Coinbase and Rithmic coordinator transitions update that authoritative state; stale generations are ignored, reconnect advances generation, and series readiness remains a separate `SeriesLoadState`. Deterministic regressions observe `Connecting → Online`, `Online → Recovering`, and a newer-generation recovery without ambiguous streaming booleans, including connection and live progress while persistence is degraded.
 
 Use explicit provider connection state.
 
@@ -2453,7 +2455,9 @@ chart_install
 
 # 62. NO HIDDEN INFINITE LOADING
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): each accepted consumer generation immediately receives `Resolving` or an in-memory `Ready` publication. Bounded local/provider queues either accept work or publish a stage-specific failure; a local-history read that has not completed within two seconds degrades persistence and starts provider repair; provider transports use explicit deadlines/cancellation; usable retained history terminates as `Partial` when repair fails; successful history reaches `Ready/Live`; and a newer generation fences obsolete completion. Deterministic regressions prove a stalled local read falls back to provider repair while a late valid result remains usable, and a controlled provider failure after `Resolving` publishes `Failed` plus retryable `DemandError`. Desktop workers consume these generation-qualified engine states and do not own a competing history-loading state machine.
 
 Every consumer demand must eventually publish a state.
 
@@ -3251,7 +3255,9 @@ Provider heartbeat/protocol progress must remain independent.
 
 # 96. STORAGE WRITER MUST NOT BLOCK PROVIDER
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the engine owns one separate bounded storage worker. The coordinator uses nonblocking `try_send` for reads and persistence, publishes valid memory state before persistence, and reports full, disconnected, failed, or two-second-stalled storage as `PersistenceState::Degraded`; provider workers never wait for the storage queue or GPUI. A stalled-read regression proves provider repair begins without waiting for the disk worker and a late valid local result remains usable. A failed-storage realtime regression observes `Ready/Degraded`, then provider `Connecting → Online`, series `Live`, and a newer forming snapshot from a live trade, proving provider progress and chart memory remain independent of disk health.
 
 Storage is downstream.
 
@@ -3266,7 +3272,9 @@ If disk becomes slow:
 
 # 97. TEST ENGINE WITHOUT GPUI
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the engine manifest has no GPUI/UI dependency and its complete deterministic suite runs headlessly. E1 is covered by fixture history through canonical `MarketEngine` installation and IPC snapshot tests. E2 is covered by 1m→5m/15m/1h compatible derivation, cache reuse, and one shared realtime-session tests. E3/E4 are covered by BTC→ETH→BTC and rapid symbol/timeframe churn with stale-generation rejection. E5 is covered by failed-storage snapshots that remain reusable and live. E6 is covered by controlled provider failure reaching explicit `Failed` plus stage-specific `DemandError`. No desktop process or native window is launched by these scenarios.
 
 The entire market engine must be testable without launching the desktop.
 
@@ -3554,7 +3562,9 @@ A provider taking 500 ms does not justify another 500 ms of local orchestration.
 
 # 106. CURRENT `history.install_failed` REGRESSION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the obsolete desktop Coinbase owner has been removed, and its failure invariant now has a resident-engine regression at the owning boundary. With a deterministic valid provider response and an unavailable `LocalHistoryStore`, canonical memory installation publishes the expected covering snapshot, reports `Ready/PersistenceState::Degraded`, and serves a newer consumer generation from the same in-memory series without another provider fetch. A companion realtime regression advances that degraded series to `Live`, so storage failure cannot recreate `history.install_failed` or indefinite chart loading.
 
 Before retiring the current Coinbase path, create a regression reproducer.
 

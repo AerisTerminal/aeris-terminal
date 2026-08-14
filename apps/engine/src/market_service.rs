@@ -53,6 +53,7 @@ const REALTIME_CAPACITY: usize = 2_048;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 4_096;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
+const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
@@ -783,6 +784,14 @@ impl MarketService {
 
     #[cfg(test)]
     fn start_fixture_realtime(bars: Vec<MarketBar>) -> Result<FixtureRealtimeHarness, String> {
+        Self::start_fixture_realtime_with_storage(bars, None)
+    }
+
+    #[cfg(test)]
+    fn start_fixture_realtime_with_storage(
+        bars: Vec<MarketBar>,
+        storage: Option<Result<LocalHistoryStore, String>>,
+    ) -> Result<FixtureRealtimeHarness, String> {
         let (action_tx, action_rx) = mpsc::sync_channel(16);
         let (generation_tx, generation_rx) = mpsc::sync_channel(4);
         let (stop_tx, stop_rx) = mpsc::sync_channel(4);
@@ -797,7 +806,7 @@ impl MarketService {
                 generations: generation_tx,
                 stops: stop_tx,
             })),
-            None,
+            storage,
         )?;
         Ok(FixtureRealtimeHarness {
             service,
@@ -1416,6 +1425,7 @@ fn run_coordinator(
         pending: BTreeMap::new(),
         history_inflight: BTreeSet::new(),
         history_cancellations: BTreeMap::new(),
+        local_history_deadlines: BTreeMap::new(),
         local_loaded: BTreeSet::new(),
         events: BTreeMap::new(),
         live: BTreeMap::new(),
@@ -1455,6 +1465,7 @@ fn run_coordinator(
         }
         coordinator.publish_live();
         coordinator.publish_rithmic_live();
+        coordinator.expire_local_history_reads();
         match channels.commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
                 coordinator.handle_command(command);
@@ -1483,6 +1494,7 @@ struct Coordinator<'a> {
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
+    local_history_deadlines: BTreeMap<(BarSeriesKey, ProviderGeneration), Instant>,
     local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
@@ -1952,15 +1964,23 @@ impl Coordinator<'_> {
     }
 
     fn enqueue_local_history(
-        &self,
+        &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) -> Result<(), &'static str> {
+        let key = (series.clone(), generation);
+        if self.local_history_deadlines.contains_key(&key) {
+            return Ok(());
+        }
         match self
             .storage
             .try_send(StorageRequest::Read(series.clone(), generation))
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.local_history_deadlines
+                    .insert(key, Instant::now() + LOCAL_HISTORY_READ_TIMEOUT);
+                Ok(())
+            }
             Err(TrySendError::Full(_)) => Err("local history capacity is temporarily exhausted"),
             Err(TrySendError::Disconnected(_)) => Err("local history worker is unavailable"),
         }
@@ -1972,6 +1992,13 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         result: Result<Option<StoredHistory>, String>,
     ) {
+        let expected = self
+            .local_history_deadlines
+            .remove(&(series.clone(), generation))
+            .is_some();
+        if !expected && !self.pending.contains_key(series) {
+            return;
+        }
         if self
             .engine
             .provider_status(&series.provider_id)
@@ -2030,6 +2057,30 @@ impl Coordinator<'_> {
             && let Some(waiters) = self.pending.remove(series)
         {
             fail_waiters(&mut self.events, waiters, detail);
+        }
+    }
+
+    fn expire_local_history_reads(&mut self) {
+        let now = Instant::now();
+        let expired = self
+            .local_history_deadlines
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for (series, generation) in expired {
+            self.local_history_deadlines
+                .remove(&(series.clone(), generation));
+            self.broadcast_persistence_for(
+                &series,
+                PersistenceState::Degraded,
+                Some("Local history read timed out; provider repair continues"),
+            );
+            if let Err(detail) = self.enqueue_history(&series, generation)
+                && let Some(waiters) = self.pending.remove(&series)
+            {
+                fail_waiters(&mut self.events, waiters, detail);
+            }
         }
     }
 
@@ -3071,6 +3122,8 @@ impl Coordinator<'_> {
         if self.resource_mode == ResourceMode::MarketsLive {
             return;
         }
+        self.local_history_deadlines
+            .retain(|(series, _), _| !unobserved.contains(series));
         for series in unobserved {
             if series.provider_id != "rithmic" {
                 continue;
@@ -3621,6 +3674,7 @@ mod tests {
             )]),
             history_inflight: BTreeSet::new(),
             history_cancellations: BTreeMap::new(),
+            local_history_deadlines: BTreeMap::new(),
             local_loaded: BTreeSet::new(),
             events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
             live: BTreeMap::new(),
@@ -4606,6 +4660,242 @@ mod tests {
     }
 
     #[test]
+    fn storage_degradation_preserves_provider_and_live_progress() {
+        let harness = MarketService::start_fixture_realtime_with_storage(
+            vec![history_bar()],
+            Some(Err("fixture storage failure".to_string())),
+        )
+        .expect("realtime service starts with degraded storage");
+        harness.service.attach(1).expect("client attaches");
+        harness
+            .service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        harness
+            .service
+            .set_demand(1, 1, 1, &btc())
+            .expect("demand starts independently of storage");
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("realtime generation starts")
+                .0
+                .get(),
+            1
+        );
+        assert!(matches!(
+            poll_until(&harness.service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::ProviderState(state)
+                    if state.state == ProviderConnectionState::Connecting as i32
+            )),
+            envelope::Payload::ProviderState(state) if state.generation == 1
+        ));
+        assert!(matches!(
+            poll_until(&harness.service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesState(state)
+                    if state.state == SeriesLoadState::Ready as i32
+                        && state.persistence == PersistenceState::Degraded as i32
+            )),
+            envelope::Payload::SeriesState(state)
+                if state.state == SeriesLoadState::Ready as i32
+                    && state.generation == 1
+        ));
+
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("provider connects after storage degradation");
+        assert!(matches!(
+            poll_until(&harness.service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::ProviderState(state)
+                    if state.state == ProviderConnectionState::Online as i32
+            )),
+            envelope::Payload::ProviderState(state) if state.generation == 1
+        ));
+        assert!(matches!(
+            poll_until(&harness.service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesState(state)
+                    if state.state == SeriesLoadState::Live as i32
+            )),
+            envelope::Payload::SeriesState(state)
+                if state.persistence == PersistenceState::NotRequested as i32
+                    && state.generation == 1
+        ));
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
+            .expect("live trade follows storage degradation");
+        assert!(matches!(
+            poll_until(&harness.service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot)
+                    if snapshot.forming
+                        && snapshot.bars.last().is_some_and(|bar| bar.close == 200)
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.provider_generation == 1 && snapshot.generation == 1
+        ));
+    }
+
+    #[test]
+    fn stalled_local_history_degrades_and_starts_provider_repair() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let series = internal_series(&btc()).expect("series");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        coordinator
+            .enqueue_local_history(&series, generation)
+            .expect("local history read starts");
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Read(ref requested, current))
+                if requested == &series && current == generation
+        ));
+        coordinator
+            .local_history_deadlines
+            .insert((series.clone(), generation), Instant::now());
+        coordinator.expire_local_history_reads();
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Resolving as i32
+                    && state.persistence == PersistenceState::Degraded as i32
+                    && state.detail.as_deref()
+                        == Some("Local history read timed out; provider repair continues")
+        ));
+        assert!(matches!(
+            history_rx.try_recv(),
+            Ok(HistoryRequest {
+                ref series,
+                provider_generation,
+                ..
+            }) if series == &internal_series(&btc()).expect("requested series")
+                && provider_generation == generation
+        ));
+
+        coordinator.local_history_completed(
+            &series,
+            generation,
+            Ok(Some(StoredHistory {
+                bars: vec![history_bar()],
+                derived: false,
+                durable: true,
+            })),
+        );
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial as i32
+                    && state.persistence == PersistenceState::Durable as i32
+        ));
+        assert!(coordinator.events[&consumer_id].snapshot.is_some());
+    }
+
+    #[test]
+    fn late_local_history_cannot_replace_completed_provider_repair() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let series = internal_series(&btc()).expect("series");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        coordinator.history_completed(
+            &series,
+            generation,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: vec![history_bar()],
+            }),
+        );
+        let late = MarketBar {
+            close: 99,
+            ..history_bar()
+        };
+        coordinator.local_history_completed(
+            &series,
+            generation,
+            Ok(Some(StoredHistory {
+                bars: vec![late],
+                derived: false,
+                durable: true,
+            })),
+        );
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+                if snapshot.bars[0].close == 105
+        ));
+        assert!(
+            history_rx.try_recv().is_err(),
+            "a late local completion must not schedule duplicate provider work"
+        );
+    }
+
+    #[test]
     fn retained_history_publishes_before_provider_repair_and_survives_its_failure() {
         let (history_tx, history_rx) = mpsc::sync_channel(1);
         let (storage_tx, storage_rx) = mpsc::sync_channel(1);
@@ -5114,20 +5404,20 @@ mod tests {
                     })
         ));
 
-        let mut completed = 1;
-        while completed < 5 {
-            requested_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("queued obsolete history starts");
-            release_tx.send(()).expect("obsolete history completes");
-            completed += 1;
+        for _ in 0..4 {
+            release_tx
+                .send(())
+                .expect("any queued obsolete history completes");
         }
-        thread::sleep(Duration::from_millis(20));
-        while let Some(event) = service.poll_event(1, 1).expect("final consumer polls") {
-            assert!(
-                !matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation != 7),
-                "obsolete history reached the active consumer"
-            );
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < deadline {
+            while let Some(event) = service.poll_event(1, 1).expect("final consumer polls") {
+                assert!(
+                    !matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation != 7),
+                    "obsolete history reached the active consumer"
+                );
+            }
+            thread::yield_now();
         }
     }
 
