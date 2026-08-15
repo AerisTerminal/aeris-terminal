@@ -109,12 +109,8 @@ impl SeriesStore {
                 }
                 if realtime {
                     validate_realtime_transition(current, price_scale, quantity_scale, &bars)?;
-                } else if bars.last().map(|bar| bar.source_sequence)
-                    <= current.bars.last().map(|bar| bar.source_sequence)
-                {
-                    return Err(EngineError::ConflictingSeriesGeneration(
-                        provider_generation,
-                    ));
+                } else {
+                    validate_history_transition(current, &bars)?;
                 }
             }
         } else if self.series.len() == self.maximum_series.get() {
@@ -178,6 +174,62 @@ impl SeriesStore {
     pub(crate) fn approximate_bytes(&self) -> usize {
         self.total_bars.saturating_mul(size_of::<MarketBar>())
     }
+}
+
+fn validate_history_transition(
+    current: &SeriesSnapshot,
+    bars: &[MarketBar],
+) -> Result<(), EngineError> {
+    let current_first = current
+        .bars
+        .first()
+        .ok_or(EngineError::EmptySeries)?
+        .source_sequence;
+    let current_last = current
+        .bars
+        .last()
+        .ok_or(EngineError::EmptySeries)?
+        .source_sequence;
+    let new_first = bars
+        .first()
+        .ok_or(EngineError::EmptySeries)?
+        .source_sequence;
+    let new_last = bars.last().ok_or(EngineError::EmptySeries)?.source_sequence;
+    let minimum_last = if current.forming {
+        current_last.saturating_sub(1)
+    } else {
+        current_last.saturating_add(1)
+    };
+    if new_last < minimum_last
+        || new_first
+            > current_last
+                .checked_add(1)
+                .ok_or(EngineError::CapacityOverflow)?
+    {
+        return Err(EngineError::ConflictingSeriesGeneration(
+            current.provider_generation,
+        ));
+    }
+    for bar in bars {
+        if bar.source_sequence < current_first || bar.source_sequence > current_last {
+            continue;
+        }
+        let offset = bar
+            .source_sequence
+            .checked_sub(current_first)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(EngineError::CapacityOverflow)?;
+        let previous = current
+            .bars
+            .get(offset)
+            .ok_or(EngineError::CapacityOverflow)?;
+        if previous != bar && !(current.forming && bar.source_sequence == current_last) {
+            return Err(EngineError::ConflictingSeriesGeneration(
+                current.provider_generation,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_realtime_transition(

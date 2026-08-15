@@ -1522,6 +1522,33 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_engine_attach_precedes_market_provider_readiness() {
+        let socket_name = socket_name("attach-before-provider");
+        let listener = bind_listener(&socket_name).expect("bind pre-provider endpoint");
+        let token = [29_u8; 32];
+        let market = MarketService::start_fixture(fixture_history())
+            .expect("engine market owner starts without a realtime provider");
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept pre-provider client");
+            serve_client_with_market(stream, &token, 41, &EngineState::default(), &market)
+                .expect("serve pre-provider client");
+        });
+
+        let mut client =
+            EngineClient::connect(&socket_name, &token).expect("engine IPC is ready independently");
+        assert_eq!(client.ready().engine_epoch, 41);
+        client
+            .attach_client(41)
+            .expect("desktop attaches before provider readiness");
+        client
+            .restore_workspace()
+            .expect("attached client remains responsive without provider readiness");
+
+        drop(client);
+        server.join().expect("join pre-provider server");
+    }
+
+    #[test]
     fn authenticated_remove_consumer_keeps_another_chart_live() {
         let socket_name = socket_name("remove-consumer");
         let listener = bind_listener(&socket_name).expect("bind consumer cleanup endpoint");

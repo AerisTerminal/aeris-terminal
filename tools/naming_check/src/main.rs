@@ -507,6 +507,27 @@ mod tests {
     }
 
     #[test]
+    fn local_market_protocol_excludes_trading_execution_commands() {
+        let protocol = manifest("crates/local_engine_protocol/src/messages.rs");
+        for forbidden in [
+            "CancelOrder",
+            "ExecutionReport",
+            "FlattenPosition",
+            "OrderAction",
+            "OrderRequest",
+            "PlaceOrder",
+            "Position",
+            "ReplaceOrder",
+            "SubmitOrder",
+        ] {
+            assert!(
+                !protocol.contains(forbidden),
+                "market-data IPC must not add future execution message {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn market_engine_remains_one_cohesive_crate() {
         for forbidden in [
             "market_engine_core",

@@ -715,4 +715,48 @@ mod tests {
             Err(EngineError::ConflictingSeriesGeneration(_))
         ));
     }
+
+    #[test]
+    fn covering_history_may_replace_only_the_forming_tail() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("forming tail appends");
+        let completed = engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("covering history may remove the forming tail");
+        assert!(completed.is_empty());
+        let snapshot = engine
+            .series_snapshot(&btc)
+            .expect("history remains cached");
+        assert!(!snapshot.forming);
+        assert_eq!(snapshot.bars.len(), 2);
+
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("forming tail resumes");
+        let mut finalized = bars(3);
+        finalized[2].close = 106;
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, finalized)
+            .expect("covering history may finalize the forming tail");
+        let mut corrupted = bars(4);
+        corrupted[0].close = 106;
+        assert!(matches!(
+            engine.install_history(provider_generation(1), &btc, 2, 8, corrupted),
+            Err(EngineError::ConflictingSeriesGeneration(_))
+        ));
+        assert_eq!(
+            engine
+                .series_snapshot(&btc)
+                .expect("rejected repair preserves current history")
+                .bars[0]
+                .close,
+            105
+        );
+    }
 }

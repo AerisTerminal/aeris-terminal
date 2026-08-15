@@ -2576,15 +2576,12 @@ impl Coordinator<'_> {
             }
             let series = self.rithmic_live.keys().cloned().collect::<Vec<_>>();
             for selected in &series {
-                self.engine.invalidate_series(selected);
                 if let Some(live) = self.rithmic_live.get_mut(selected) {
                     live.reset(generation);
                 }
-                self.broadcast_series_resolution_for(
+                self.broadcast_series_recovery_for(
                     selected,
-                    SeriesLoadState::Resolving,
-                    PersistenceState::Durable,
-                    Some("Rithmic live session changed; covering history is reloading"),
+                    "Rithmic live session changed; covering history is reloading",
                 );
             }
             for selected in series {
@@ -2646,21 +2643,57 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let failed = self
-            .rithmic_live
-            .values_mut()
-            .filter(|live| live.generation == generation && live.connected)
-            .any(|live| live.accept_trade(trade).is_err());
-        if failed {
+        if trade.metadata.provider_id != "rithmic"
+            || trade.metadata.session_generation != generation.0.get()
+        {
             self.rithmic_recovering(
                 generation.0.get(),
-                "Rithmic live aggregation requires covering history",
+                "Rithmic live session identity requires recovery",
             );
             for live in self.rithmic_live.values_mut() {
                 live.history_ready = false;
                 live.dirty = false;
                 live.buffered.clear();
             }
+            return;
+        }
+        let failed = self
+            .rithmic_live
+            .iter_mut()
+            .filter(|(_, live)| {
+                live.generation == generation
+                    && live.connected
+                    && live.series.instrument_id == trade.metadata.instrument_id
+                    && live.series.entitlement_id == trade.metadata.entitlement_id
+            })
+            .filter_map(|(series, live)| live.accept_trade(trade).is_err().then(|| series.clone()))
+            .collect::<Vec<_>>();
+        for series in failed {
+            self.rithmic_series_recovering(
+                &series,
+                generation,
+                "Rithmic instrument aggregation requires covering history",
+            );
+        }
+    }
+
+    fn rithmic_series_recovering(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        detail: &str,
+    ) {
+        if let Some(live) = self.rithmic_live.get_mut(series) {
+            live.history_ready = false;
+            live.dirty = false;
+            live.buffered.clear();
+        }
+        self.broadcast_series_recovery_for(series, detail);
+        if !self
+            .history_inflight
+            .contains(&(series.clone(), generation))
+        {
+            let _ = self.enqueue_history(series, generation);
         }
     }
 
@@ -3048,8 +3081,15 @@ impl Coordinator<'_> {
             generation: generation.0.get(),
             detail: detail.map(str::to_string),
         });
-        for events in self.events.values_mut() {
-            events.provider = Some(payload.clone());
+        for (consumer_id, events) in &mut self.events {
+            if self
+                .engine
+                .current_demand(*consumer_id)
+                .and_then(|demand| demand.series.as_ref())
+                .is_some_and(|series| series.provider_id == "coinbase")
+            {
+                events.provider = Some(payload.clone());
+            }
         }
     }
 
@@ -3062,6 +3102,9 @@ impl Coordinator<'_> {
             else {
                 continue;
             };
+            if series.provider_id != "coinbase" {
+                continue;
+            }
             events.series_state = Some(series_state(
                 *consumer_id,
                 generation,
@@ -3090,6 +3133,41 @@ impl Coordinator<'_> {
                     None,
                 ));
             }
+        }
+    }
+
+    fn broadcast_series_recovery_for(&mut self, selected: &BarSeriesKey, detail: &str) {
+        let state = if self.engine.series_snapshot(selected).is_some() {
+            SeriesLoadState::Partial
+        } else {
+            SeriesLoadState::Resolving
+        };
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            if series != selected {
+                continue;
+            }
+            let persistence = match events.series_state.as_ref() {
+                Some(envelope::Payload::SeriesState(current)) => {
+                    PersistenceState::try_from(current.persistence)
+                        .unwrap_or(PersistenceState::NotRequested)
+                }
+                _ => PersistenceState::NotRequested,
+            };
+            events.series_state = Some(series_state_with_persistence(
+                *consumer_id,
+                generation,
+                ipc_series(series),
+                state,
+                persistence,
+                Some(detail.to_string()),
+            ));
         }
     }
 
@@ -3717,6 +3795,74 @@ mod tests {
             quantity_scale: 0,
             entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
         }
+    }
+
+    fn rithmic_series_key(instrument_id: &str, entitlement_id: &str) -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: instrument_id.to_string(),
+            entitlement_id: entitlement_id.to_string(),
+            period: BarPeriod::time(60).expect("minute cadence"),
+            definition_version: 1,
+        }
+    }
+
+    fn install_rithmic_test_series(
+        engine: &mut MarketEngine,
+        raw_consumer: u64,
+        generation: ProviderGeneration,
+        series: &BarSeriesKey,
+    ) -> axiusflow_market_engine::ConsumerPublication {
+        let consumer_id = ConsumerId(id(raw_consumer).expect("consumer"));
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                series,
+            )
+            .expect("demand installs");
+        engine
+            .install_history(generation, series, 2, 0, vec![history_bar()])
+            .expect("history installs")
+            .pop()
+            .expect("matching consumer receives history")
+    }
+
+    fn seeded_rithmic_live(
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> RithmicLiveHandoff {
+        let mut live = RithmicLiveHandoff::new(series, generation).expect("live cadence");
+        live.seed(2, 0, &[history_bar()])
+            .expect("history seeds handoff");
+        live.connected = true;
+        live
+    }
+
+    fn complete_rithmic_test_history(
+        coordinator: &mut Coordinator<'_>,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        coordinator.history_completed(
+            series,
+            generation,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: vec![history_bar()],
+            }),
+        );
     }
 
     fn rithmic_trade(sequence: u64, session: u64, nanos: i64, price: i64) -> MarketTrade {
@@ -5190,6 +5336,279 @@ mod tests {
     }
 
     #[test]
+    fn provider_state_and_live_readiness_are_scoped_to_matching_consumers() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let mut engine = configured_engine().expect("engine configures");
+        let rithmic_generation = ProviderGeneration(id(7).expect("Rithmic generation"));
+        engine
+            .begin_provider_session("rithmic", rithmic_generation)
+            .expect("Rithmic session begins");
+        let coinbase_consumer = ConsumerId(id(1).expect("Coinbase consumer"));
+        let rithmic_consumer = ConsumerId(id(2).expect("Rithmic consumer"));
+        let rithmic = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        for (consumer_id, series) in [
+            (coinbase_consumer, internal_series(&btc()).expect("BTC")),
+            (rithmic_consumer, rithmic.clone()),
+        ] {
+            engine
+                .register_consumer(
+                    ConsumerIdentity {
+                        client_id: ClientId(id(1).expect("client")),
+                        workspace_id: WorkspaceId(id(1).expect("workspace")),
+                        consumer_id,
+                    },
+                    true,
+                )
+                .expect("consumer registers");
+            engine
+                .set_series_demand(
+                    consumer_id,
+                    GenerationId(id(1).expect("generation")),
+                    &series,
+                )
+                .expect("series demand installs");
+        }
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            coinbase_consumer,
+            &internal_series(&btc()).expect("BTC series"),
+        );
+        coordinator
+            .events
+            .insert(rithmic_consumer, ConsumerEvents::default());
+
+        coordinator.broadcast_provider(
+            ProviderConnectionState::Recovering,
+            ProviderGeneration(NonZeroU64::MIN),
+            Some("Coinbase fixture recovery"),
+        );
+        coordinator.broadcast_series_state(SeriesLoadState::Live);
+        coordinator.broadcast_rithmic_provider(
+            ProviderConnectionState::Online,
+            rithmic_generation,
+            None,
+        );
+
+        assert!(matches!(
+            coordinator.events[&coinbase_consumer].provider,
+            Some(envelope::Payload::ProviderState(ref state))
+                if state.provider == "coinbase"
+                    && state.state == ProviderConnectionState::Recovering as i32
+        ));
+        assert!(matches!(
+            coordinator.events[&coinbase_consumer].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Live as i32
+                    && state.series.as_ref().is_some_and(|series| series.provider == "coinbase")
+        ));
+        assert!(matches!(
+            coordinator.events[&rithmic_consumer].provider,
+            Some(envelope::Payload::ProviderState(ref state))
+                if state.provider == "rithmic"
+                    && state.state == ProviderConnectionState::Online as i32
+        ));
+        assert!(
+            coordinator.events[&rithmic_consumer].series_state.is_none(),
+            "Coinbase readiness must not mutate a Rithmic series"
+        );
+    }
+
+    #[test]
+    fn rithmic_reconnect_retains_covering_history_until_repair_replaces_it() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = ProviderGeneration(id(7).expect("provider generation"));
+        let series = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        engine
+            .begin_provider_session("rithmic", generation)
+            .expect("Rithmic session begins");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let publication = engine
+            .install_history(generation, &series, 2, 0, vec![history_bar()])
+            .expect("history installs")
+            .pop()
+            .expect("consumer receives history");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        publish_state(
+            coordinator
+                .events
+                .get_mut(&consumer_id)
+                .expect("consumer events"),
+            &publication,
+            SeriesLoadState::Live,
+            PersistenceState::Durable,
+            None,
+        );
+        let mut live = RithmicLiveHandoff::new(&series, generation).expect("live cadence");
+        live.seed(2, 0, &[history_bar()])
+            .expect("history seeds live handoff");
+        live.connected = true;
+        coordinator.rithmic_live.insert(series.clone(), live);
+
+        coordinator.rithmic_connecting(8);
+
+        assert!(matches!(
+            coordinator.engine.series_snapshot(&series),
+            Some(snapshot) if snapshot.provider_generation == generation
+        ));
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+                if snapshot.provider_generation == generation.0.get()
+        ));
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial as i32
+                    && state.persistence == PersistenceState::Durable as i32
+        ));
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Read(ref requested, current))
+                if requested == &series && current.0.get() == 8
+        ));
+    }
+
+    #[test]
+    fn rithmic_instrument_failure_repairs_only_the_affected_series() {
+        let (history_tx, history_rx) = mpsc::sync_channel(2);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let mut engine = configured_engine().expect("engine configures");
+        let generation = ProviderGeneration(id(7).expect("provider generation"));
+        engine
+            .begin_provider_session("rithmic", generation)
+            .expect("Rithmic session begins");
+        engine
+            .set_provider_health("rithmic", generation, ProviderHealth::Online)
+            .expect("Rithmic is online");
+        let affected = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        let unaffected = rithmic_series_key("instrument:rithmic:CME:ESU6", "rithmic-test:CME:ESU6");
+        let publications = [
+            install_rithmic_test_series(&mut engine, 1, generation, &affected),
+            install_rithmic_test_series(&mut engine, 2, generation, &unaffected),
+        ];
+        let affected_consumer = ConsumerId(id(1).expect("affected consumer"));
+        let unaffected_consumer = ConsumerId(id(2).expect("unaffected consumer"));
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            affected_consumer,
+            &affected,
+        );
+        coordinator
+            .events
+            .insert(unaffected_consumer, ConsumerEvents::default());
+        for publication in &publications {
+            publish_state(
+                coordinator
+                    .events
+                    .get_mut(&publication.consumer_id)
+                    .expect("publication consumer exists"),
+                publication,
+                SeriesLoadState::Live,
+                PersistenceState::Durable,
+                None,
+            );
+        }
+        for series in [&affected, &unaffected] {
+            coordinator
+                .rithmic_live
+                .insert(series.clone(), seeded_rithmic_live(series, generation));
+        }
+        let first = rithmic_trade(1, 7, 121_000_000_000, 110);
+        coordinator.rithmic_trade(7, &first);
+        coordinator.publish_rithmic_live();
+        coordinator
+            .rithmic_live
+            .get_mut(&affected)
+            .expect("affected handoff")
+            .bars
+            .last_mut()
+            .expect("forming bar")
+            .volume = i64::MAX;
+
+        coordinator.rithmic_trade(7, &rithmic_trade(2, 7, 125_000_000_000, 111));
+
+        assert!(
+            !coordinator.rithmic_live[&affected].history_ready,
+            "affected instrument requires covering repair"
+        );
+        assert!(
+            coordinator.rithmic_live[&unaffected].history_ready,
+            "unrelated instrument remains live"
+        );
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .map(|status| status.health),
+            Some(ProviderHealth::Online),
+            "instrument-local failure does not degrade the provider session"
+        );
+        assert!(matches!(
+            coordinator.events[&affected_consumer].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial as i32
+        ));
+        assert!(matches!(
+            coordinator.events[&unaffected_consumer].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Live as i32
+        ));
+        assert!(matches!(
+            history_rx.try_recv(),
+            Ok(HistoryRequest { series, provider_generation, .. })
+                if series == affected && provider_generation == generation
+        ));
+        assert!(matches!(history_rx.try_recv(), Err(TryRecvError::Empty)));
+        complete_rithmic_test_history(&mut coordinator, &affected, generation);
+        assert!(
+            coordinator.rithmic_live[&affected].history_ready
+                && coordinator.rithmic_live[&unaffected].history_ready
+        );
+    }
+
+    #[test]
     fn later_consumers_reuse_one_engine_history_fetch() {
         let fetches = Arc::new(AtomicUsize::new(0));
         let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -5477,11 +5896,17 @@ mod tests {
                 .set_demand(1, 1, u64::try_from(index + 1).expect("generation"), series)
                 .expect("rapid demand is accepted");
         }
-        let first = requested_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("first history request starts");
-        assert_eq!(first, internal_series(&required[0]).expect("first series"));
-        release_tx.send(()).expect("first history completes");
+        let latest_series = internal_series(required.last().expect("latest demand"))
+            .expect("latest internal series");
+        loop {
+            let requested = requested_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("latest history request starts");
+            release_tx.send(()).expect("observed history completes");
+            if requested == latest_series {
+                break;
+            }
+        }
         let latest = poll_until(
             &service,
             1,
@@ -5642,7 +6067,8 @@ mod tests {
         );
         assert!(matches!(
             recovering,
-            envelope::Payload::ProviderState(state) if state.generation == 1
+            envelope::Payload::ProviderState(state)
+                if state.provider == "coinbase" && (1..=2).contains(&state.generation)
         ));
         assert_eq!(
             harness

@@ -3054,7 +3054,7 @@ Internal work uses threads/tasks/modules.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-15): the platform contains 52,390 raw source lines before terminal inline test modules across `apps/` and `crates/`. This conservative upper bound still counts test-only helper items outside those modules, comments, and blank lines while excluding dedicated tests, benchmarks, Origin, vendor material, and generated protobuf output. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
+Evidence (2026-08-15): the platform contains 52,520 raw source lines before terminal inline test modules across `apps/` and `crates/`. This conservative upper bound still counts test-only helper items outside those modules, comments, and blank lines while excluding dedicated tests, benchmarks, Origin, vendor material, and generated protobuf output. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
 
 Current platform-side code is too large relative to working functionality.
 
@@ -4216,7 +4216,9 @@ Do not freeze GPUI.
 
 # 131. PROVIDER RECONNECT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): Coinbase disconnect handling keeps both registered consumers and their covering history, publishes generation-qualified `Recovering`, repairs history, replays the bounded live suffix, and resumes a forming snapshot under the next provider generation without reconstructing desktop state. Rithmic now retains its prior engine snapshot as usable `Partial` state when a newer session starts, resets only the live handoff, requests generation-fenced local/provider covering repair, and replaces the retained snapshot only after validated history arrives. Deterministic regressions prove both paths, while adapter lifecycle tests prove reconnect uses a fresh fenced Rithmic session.
 
 Provider reconnect must not rebuild the entire desktop state.
 
@@ -4235,7 +4237,9 @@ Upon reconnect:
 
 # 132. ERROR LOCALIZATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): coordinator provider and provider-wide series publications are filtered by each consumer's current provider demand, so Coinbase recovery cannot mutate a Rithmic chart and Rithmic state cannot enter a Coinbase mailbox. A valid-identity Rithmic aggregation failure now marks only the affected instrument's cadence series `Partial`, retains its covering snapshots, and requests repair while unrelated instruments and the Rithmic provider remain `Online`; only malformed provider/session identity causes provider-wide recovery. Existing deterministic storage-failure regressions prove providers and live publication continue under `PersistenceState::Degraded`, and the native desktop/engine process boundary prevents chart-rendering failure from terminating market ownership.
 
 An error in Rithmic must not break Coinbase.
 
@@ -4273,7 +4277,9 @@ Retain source/provenance correctness.
 
 # 134. FUTURE TRADING EXECUTION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): the versioned local protocol exposes workspace, lifecycle, provider catalog/control, market demand, history/series, and order-book presentation messages only. It contains no place, submit, replace, cancel, flatten, position, execution-report, or other trading action, and no adapter or desktop path exposes execution. A repository conformance test rejects execution command names in the market-data IPC schema, preserving a future separate non-conflatable safety boundary instead of smuggling orders into presentation queues.
 
 Do not implement trade execution in this migration.
 
@@ -5557,7 +5563,9 @@ Provider controls always pass through EngineClient/IPC.
 
 # 172. ENGINE CLIENT MUST NOT WAIT FOR PROVIDER READINESS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): engine IPC readiness is emitted immediately after authenticated protocol handshake and before client attachment or any provider demand. A deterministic local-socket regression starts the engine market owner without a realtime provider, completes `EngineReady`, attaches a desktop client, and restores workspace state successfully. Provider sessions remain idle until engine-owned demand/control starts them, and their connecting, online, history, realtime, recovery, and failure states are later generation-qualified publications; none gates IPC attachment or locally available work.
 
 Starting/attaching the engine and connecting a market provider are different states.
 
@@ -5587,7 +5595,9 @@ One slow provider must not prevent locally available charts from another provide
 
 # 173. PROVIDER FAILURE ISOLATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-15): Coinbase and Rithmic have independent provider generations, health, history lanes, realtime handoffs, and provider-scoped consumer publication. A new cross-provider regression proves Coinbase recovery and `Live` transitions cannot alter a Rithmic consumer. A two-instrument Rithmic regression forces an exact fixed-point aggregation failure, observes only that instrument become `Partial` and enqueue covering repair, and proves the sibling stays `Live` while provider health remains `Online`; malformed provider/session identity remains the explicit provider-wide failure scope. Existing tests separately prove Rithmic history cancellation does not block Coinbase history, storage failure does not stop provider/live progress, and order-book gaps invalidate only the affected reconstructed book until a covering snapshot.
 
 A Rithmic failure must not globally degrade Coinbase.
 
