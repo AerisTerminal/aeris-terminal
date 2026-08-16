@@ -1,0 +1,212 @@
+@font-face {
+  font-family: "Inter";
+  src: url("./inter_400.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --font-sans: "Inter", sans-serif;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.321093 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.321093 0 0);
+
+  --primary: oklch(0.54375 0.191015 267.005);
+  --primary-foreground: oklch(0.97 0.014 254.604);
+  --primary-hover: oklch(0.483663 0.190265 267.018);
+
+  --muted: oklch(0.991063 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --disabled-foreground: oklch(0.74 0 0);
+  --accent: oklch(0.97 0 0);
+
+  --border: #f3f3f3;
+  --muted-border: #f5f5f5;
+  --input: oklch(0.991063 0 0);
+  --ring: oklch(0.708 0 0);
+  --overlay: oklch(0 0 0 / 50%);
+
+  --positive: #089981;
+  --negative: #f7525f;
+  --destructive: var(--negative);
+  --warning: oklch(0.768578 0.164801 70.108);
+
+  --radius-sm: 4px;
+  --radius-df: 6px;
+  --radius-lg: 999px;
+}
+
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #070a0f;
+  --foreground: oklch(0.985 0 0);
+  --card: #070a0f;
+  --card-foreground: oklch(0.985 0 0);
+
+  --primary: oklch(0.54375 0.191015 267.005);
+  --primary-foreground: oklch(0.97 0.014 254.604);
+  --primary-hover: oklch(0.603683 0.191341 267.047);
+
+  --muted: #0c1115;
+  --muted-foreground: #9da3aa;
+  --disabled-foreground: oklch(0.52 0 0);
+  --accent: #222224;
+
+  --border: #16191f;
+  --muted-border: #131519;
+  --input: #0c1115;
+  --ring: oklch(0.556 0 0);
+  --overlay: oklch(0 0 0 / 50%);
+
+  --positive: #089981;
+  --negative: #f7525f;
+  --destructive: var(--negative);
+  --warning: oklch(0.768578 0.164801 70.108);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  font-variant-ligatures: common-ligatures;
+  font-weight: 400;
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+  font: inherit;
+}
+
+button,
+[role="button"] {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 30%, transparent);
+}
+
+.button-primary,
+.button-outline,
+.button-ghost {
+  border-radius: var(--radius-df);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.button-primary {
+  border: 1px solid transparent;
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--primary-hover);
+}
+
+.button-outline {
+  border: 1px solid var(--muted-border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.button-outline:hover:not(:disabled):not([aria-disabled="true"]),
+.button-outline[aria-expanded="true"] {
+  background: var(--accent);
+}
+
+.button-ghost {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.button-ghost:hover:not(:disabled):not([aria-disabled="true"]),
+.button-ghost[aria-expanded="true"] {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+button:disabled,
+[role="button"][aria-disabled="true"] {
+  color: var(--disabled-foreground);
+  cursor: not-allowed;
+}
+
+.button-primary:disabled,
+.button-primary[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+input,
+select,
+textarea {
+  border: 1px solid var(--muted-border);
+  border-radius: var(--radius-df);
+  background: var(--input);
+  color: var(--foreground);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted-foreground);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  border-color: var(--primary);
+  outline-color: color-mix(in srgb, var(--primary) 25%, transparent);
+}
+
+* {
+  scrollbar-color: var(--muted-foreground) var(--card);
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--card);
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid var(--card);
+  border-radius: var(--radius-lg);
+  background: var(--muted-foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

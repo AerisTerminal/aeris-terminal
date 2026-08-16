@@ -131,13 +131,13 @@ fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoEl
         .border_b_1()
         .border_color(gpui_color(colors.border.with_alpha(0.55)))
         .text_sm()
-        .child(quantity_cell(row.bid.as_ref(), colors.profit, true))
+        .child(quantity_cell(row.bid.as_ref(), colors.positive, true))
         .child(
             div()
                 .w(px(PRICE_WIDTH))
                 .px_1()
                 .text_right()
-                .text_color(gpui_color(colors.profit))
+                .text_color(gpui_color(colors.positive))
                 .child(
                     row.bid
                         .as_ref()
@@ -148,14 +148,14 @@ fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoEl
             div()
                 .w(px(PRICE_WIDTH))
                 .px_1()
-                .text_color(gpui_color(colors.loss))
+                .text_color(gpui_color(colors.negative))
                 .child(
                     row.ask
                         .as_ref()
                         .map_or_else(String::new, |level| level.price_text.clone()),
                 ),
         )
-        .child(quantity_cell(row.ask.as_ref(), colors.loss, false))
+        .child(quantity_cell(row.ask.as_ref(), colors.negative, false))
 }
 
 fn quantity_cell(

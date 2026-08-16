@@ -189,7 +189,8 @@ A release Windows native-close run with an established engine exited the default
 
 ### UI
 
-- `crates/ui/design_system`: Axiusflow theme tokens.
+- `crates/ui/design_system`: the portable Nucleus `brand.css`, colocated Inter Regular asset, and
+  typed native light/dark mapping for the same canonical semantic tokens.
 - `crates/ui/terminal_ui`: reusable terminal and DOM presentation components.
 - `crates/ui/chart_integration`: the boundary between Axiusflow models/GPUI and Origin Charts.
 

@@ -198,9 +198,19 @@ fn apply_platform_theme(
     let colors = theme.colors;
     let surface = colors.background.css_value();
     let border = colors.border.css_value();
-    let axis_text = colors.chart_axis_text.css_value();
-    let crosshair = colors.chart_crosshair.css_value();
-    let separator_hover = colors.interactive_neutral_active_bg.css_value();
+    let axis_text = colors.foreground.css_value();
+    let crosshair = colors.muted_foreground.css_value();
+    let separator_hover = colors.accent.css_value();
+    let positive = colors.positive.css_value();
+    let negative = colors.negative.css_value();
+    for series in &mut engine.series {
+        series.up_color = Some(positive.clone());
+        series.down_color = Some(negative.clone());
+        series.wick_up_color = Some(positive.clone());
+        series.wick_down_color = Some(negative.clone());
+        series.border_up_color = Some(positive.clone());
+        series.border_down_color = Some(negative.clone());
+    }
     let patch = serde_json::json!({
         "layout": {
             "fontFamily": "Inter",
@@ -1315,28 +1325,28 @@ mod tests {
     }
 
     #[test]
-    fn platform_theme_owns_neutrals_while_origin_keeps_market_series_styling() {
+    fn platform_theme_owns_neutrals_and_market_series_semantics() {
         let chart = OriginChartView::empty();
         let series = &chart.engine.series[0];
 
         assert_eq!(
             chart.engine.options.get().layout.background.color,
-            "#141414"
+            "#070a0f"
         );
-        assert_eq!(chart.engine.options.get().layout.text_color, "#e3e3e3");
+        assert_eq!(chart.engine.options.get().layout.text_color, "#fafafa");
         assert_eq!(chart.engine.options.get().layout.font_family, "Inter");
-        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#1e1e1e");
+        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#16191f");
         assert_eq!(
             chart.engine.options.get().crosshair.vert_line.color,
-            "#2e2e2e"
+            "#9da3aa"
         );
         assert!(series.line_color.is_none());
-        assert!(series.up_color.is_none());
-        assert!(series.down_color.is_none());
-        assert!(series.wick_up_color.is_none());
-        assert!(series.wick_down_color.is_none());
-        assert!(series.border_up_color.is_none());
-        assert!(series.border_down_color.is_none());
+        assert_eq!(series.up_color.as_deref(), Some("#089981"));
+        assert_eq!(series.down_color.as_deref(), Some("#f7525f"));
+        assert_eq!(series.wick_up_color.as_deref(), Some("#089981"));
+        assert_eq!(series.wick_down_color.as_deref(), Some("#f7525f"));
+        assert_eq!(series.border_up_color.as_deref(), Some("#089981"));
+        assert_eq!(series.border_down_color.as_deref(), Some("#f7525f"));
     }
 
     #[test]
@@ -1387,23 +1397,23 @@ mod tests {
             chart.engine.options.get().layout.background.color,
             "#ffffff"
         );
-        assert_eq!(chart.engine.options.get().layout.text_color, "#404040");
+        assert_eq!(chart.engine.options.get().layout.text_color, "#333333");
         assert_eq!(chart.engine.options.get().layout.font_family, "Inter");
-        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#f5f5f5");
+        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#f3f3f3");
         assert_eq!(
             chart.engine.options.get().crosshair.vert_line.color,
-            "#9598a1"
+            "#737373"
         );
         chart
             .set_platform_theme(&AxiusflowTheme::dark())
             .expect("platform theme patch is valid");
         assert_eq!(
             chart.engine.options.get().layout.background.color,
-            "#141414"
+            "#070a0f"
         );
         assert_eq!(
             chart.engine.options.get().crosshair.vert_line.color,
-            "#2e2e2e"
+            "#9da3aa"
         );
         assert_eq!(
             chart

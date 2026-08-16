@@ -1,4 +1,4 @@
-//! Typed design-system contracts governed by `platform_design_system.md`.
+//! Typed native mapping of the portable Nucleus `brand.css` contract.
 //!
 //! Token source expressions and resolved sRGB values share one registry. The
 //! checked CSS manifest uses generated custom-property names, while painting
@@ -190,53 +190,24 @@ impl ColorToken {
 pub struct ThemeColors {
     pub background: ThemeColor,
     pub foreground: ThemeColor,
-    pub surface_primary: ThemeColor,
-    pub surface_secondary: ThemeColor,
-    pub surface_tertiary: ThemeColor,
-    pub surface_quaternary: ThemeColor,
     pub card: ThemeColor,
     pub card_foreground: ThemeColor,
-    pub popover: ThemeColor,
-    pub popover_foreground: ThemeColor,
     pub primary: ThemeColor,
-    pub primary_hover: ThemeColor,
-    pub primary_active: ThemeColor,
     pub primary_foreground: ThemeColor,
-    pub secondary: ThemeColor,
-    pub secondary_foreground: ThemeColor,
+    pub primary_hover: ThemeColor,
     pub muted: ThemeColor,
     pub muted_foreground: ThemeColor,
-    pub text_secondary: ThemeColor,
-    pub text_muted: ThemeColor,
-    pub text_placeholder: ThemeColor,
-    pub text_unavailable: ThemeColor,
-    pub icon_color: ThemeColor,
-    pub icon_active: ThemeColor,
+    pub disabled_foreground: ThemeColor,
     pub accent: ThemeColor,
-    pub accent_foreground: ThemeColor,
-    pub destructive: ThemeColor,
-    pub destructive_foreground: ThemeColor,
     pub border: ThemeColor,
-    pub border_secondary: ThemeColor,
+    pub muted_border: ThemeColor,
     pub input: ThemeColor,
-    pub input_surface: ThemeColor,
     pub ring: ThemeColor,
-    pub interactive_neutral_hover_bg: ThemeColor,
-    pub interactive_neutral_hover_fg: ThemeColor,
-    pub interactive_neutral_active_bg: ThemeColor,
-    pub interactive_neutral_active_fg: ThemeColor,
-    pub chart_palette: [ThemeColor; 5],
-    pub profit: ThemeColor,
-    pub loss: ThemeColor,
+    pub overlay: ThemeColor,
+    pub positive: ThemeColor,
+    pub negative: ThemeColor,
+    pub destructive: ThemeColor,
     pub warning: ThemeColor,
-    pub info: ThemeColor,
-    pub feature: ThemeColor,
-    pub chart_candle_up: ThemeColor,
-    pub chart_candle_down: ThemeColor,
-    pub chart_volume_up: ThemeColor,
-    pub chart_volume_down: ThemeColor,
-    pub chart_axis_text: ThemeColor,
-    pub chart_crosshair: ThemeColor,
 }
 
 /// A canonical logical length token.
@@ -309,200 +280,90 @@ impl AxiusflowTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
-    pub fn color_tokens(self) -> [ColorToken; 53] {
+    pub fn color_tokens(self) -> [ColorToken; 20] {
         let colors = self.colors;
         let dark = self.mode == ThemeMode::Dark;
         [
             ColorToken::new(
                 "background",
-                mode_source(dark, "#ffffff", "#141414"),
+                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
                 colors.background,
             ),
             ColorToken::new(
                 "foreground",
-                mode_source(dark, "#404040", "#e3e3e3"),
+                mode_source(dark, "oklch(0.321093 0 0)", "oklch(0.985 0 0)"),
                 colors.foreground,
             ),
             ColorToken::new(
-                "surface_primary",
-                "var(--background)",
-                colors.surface_primary,
-            ),
-            ColorToken::new(
-                "surface_secondary",
-                mode_source(dark, "#fcfcfc", "#1b1b1b"),
-                colors.surface_secondary,
-            ),
-            ColorToken::new(
-                "surface_tertiary",
-                "var(--surface_secondary)",
-                colors.surface_tertiary,
-            ),
-            ColorToken::new(
-                "surface_quaternary",
-                "var(--surface_secondary)",
-                colors.surface_quaternary,
-            ),
-            ColorToken::new(
                 "card",
-                mode_source(dark, "var(--surface_secondary)", "var(--surface_secondary)"),
+                mode_source(dark, "oklch(1 0 0)", "#070a0f"),
                 colors.card,
             ),
             ColorToken::new(
-                "card_foreground",
-                "var(--foreground)",
+                "card-foreground",
+                mode_source(dark, "oklch(0.321093 0 0)", "oklch(0.985 0 0)"),
                 colors.card_foreground,
             ),
-            ColorToken::new("popover", "var(--surface_secondary)", colors.popover),
+            ColorToken::new("primary", "oklch(0.54375 0.191015 267.005)", colors.primary),
             ColorToken::new(
-                "popover_foreground",
-                "var(--foreground)",
-                colors.popover_foreground,
+                "primary-foreground",
+                "oklch(0.97 0.014 254.604)",
+                colors.primary_foreground,
             ),
-            ColorToken::new("primary", "#3e63dd", colors.primary),
-            ColorToken::new("primary_hover", "#4269ea", colors.primary_hover),
-            ColorToken::new("primary_active", "#3a5dd0", colors.primary_active),
-            ColorToken::new("primary_foreground", "#fcfcfc", colors.primary_foreground),
-            ColorToken::new("secondary", "var(--surface_secondary)", colors.secondary),
             ColorToken::new(
-                "secondary_foreground",
-                "var(--foreground)",
-                colors.secondary_foreground,
+                "primary-hover",
+                mode_source(
+                    dark,
+                    "oklch(0.483663 0.190265 267.018)",
+                    "oklch(0.603683 0.191341 267.047)",
+                ),
+                colors.primary_hover,
             ),
-            ColorToken::new("muted", "var(--surface_secondary)", colors.muted),
             ColorToken::new(
-                "muted_foreground",
-                mode_source(dark, "#696969", "#a2a2a2"),
+                "muted",
+                mode_source(dark, "oklch(0.991063 0 0)", "#0c1115"),
+                colors.muted,
+            ),
+            ColorToken::new(
+                "muted-foreground",
+                mode_source(dark, "oklch(0.556 0 0)", "#9da3aa"),
                 colors.muted_foreground,
             ),
             ColorToken::new(
-                "text_secondary",
-                mode_source(dark, "#696969", "#a2a2a2"),
-                colors.text_secondary,
+                "disabled-foreground",
+                mode_source(dark, "oklch(0.74 0 0)", "oklch(0.52 0 0)"),
+                colors.disabled_foreground,
             ),
             ColorToken::new(
-                "text_muted",
-                mode_source(dark, "#dedede", "#424242"),
-                colors.text_muted,
-            ),
-            ColorToken::new(
-                "text_placeholder",
-                mode_source(dark, "#dedede", "#424242"),
-                colors.text_placeholder,
-            ),
-            ColorToken::new(
-                "text_unavailable",
-                mode_source(dark, "#dedede", "#424242"),
-                colors.text_unavailable,
-            ),
-            ColorToken::new(
-                "icon_color",
-                mode_source(dark, "#696969", "#a2a2a2"),
-                colors.icon_color,
-            ),
-            ColorToken::new(
-                "icon_active",
-                mode_source(dark, "#404040", "#e3e3e3"),
-                colors.icon_active,
-            ),
-            ColorToken::new("accent", "var(--surface_secondary)", colors.accent),
-            ColorToken::new(
-                "accent_foreground",
-                "var(--foreground)",
-                colors.accent_foreground,
-            ),
-            ColorToken::new(
-                "destructive",
-                mode_source(
-                    dark,
-                    "oklch(0.577 0.245 27.325)",
-                    "oklch(0.704 0.191 22.216)",
-                ),
-                colors.destructive,
-            ),
-            ColorToken::new(
-                "destructive_foreground",
-                "oklch(0.985 0 0)",
-                colors.destructive_foreground,
+                "accent",
+                mode_source(dark, "oklch(0.97 0 0)", "#222224"),
+                colors.accent,
             ),
             ColorToken::new(
                 "border",
-                mode_source(dark, "#f5f5f5", "#1e1e1e"),
+                mode_source(dark, "#f3f3f3", "#16191f"),
                 colors.border,
             ),
             ColorToken::new(
-                "border_secondary",
-                mode_source(dark, "#f3f3f3", "#242424"),
-                colors.border_secondary,
-            ),
-            ColorToken::new("input", "var(--border_secondary)", colors.input),
-            ColorToken::new(
-                "input_surface",
-                "var(--surface_secondary)",
-                colors.input_surface,
-            ),
-            ColorToken::new("ring", mode_source(dark, "#000000", "#ffffff"), colors.ring),
-            ColorToken::new(
-                "interactive_neutral_hover_bg",
-                mode_source(dark, "rgb(239 239 239 / 35%)", "rgb(97 97 97 / 20%)"),
-                colors.interactive_neutral_hover_bg,
+                "muted-border",
+                mode_source(dark, "#f5f5f5", "#131519"),
+                colors.muted_border,
             ),
             ColorToken::new(
-                "interactive_neutral_hover_fg",
-                "var(--icon_active)",
-                colors.interactive_neutral_hover_fg,
+                "input",
+                mode_source(dark, "oklch(0.991063 0 0)", "#0c1115"),
+                colors.input,
             ),
             ColorToken::new(
-                "interactive_neutral_active_bg",
-                mode_source(dark, "rgb(239 239 239 / 45%)", "rgb(97 97 97 / 26%)"),
-                colors.interactive_neutral_active_bg,
+                "ring",
+                mode_source(dark, "oklch(0.708 0 0)", "oklch(0.556 0 0)"),
+                colors.ring,
             ),
-            ColorToken::new(
-                "interactive_neutral_active_fg",
-                "var(--foreground)",
-                colors.interactive_neutral_active_fg,
-            ),
-            ColorToken::new("chart_1", "oklch(0.87 0 0)", colors.chart_palette[0]),
-            ColorToken::new("chart_2", "oklch(0.556 0 0)", colors.chart_palette[1]),
-            ColorToken::new("chart_3", "oklch(0.439 0 0)", colors.chart_palette[2]),
-            ColorToken::new("chart_4", "oklch(0.371 0 0)", colors.chart_palette[3]),
-            ColorToken::new("chart_5", "oklch(0.269 0 0)", colors.chart_palette[4]),
-            ColorToken::new("profit", "oklch(0.683 0.151 160.997)", colors.profit),
-            ColorToken::new("loss", "oklch(0.674 0.215 18.124)", colors.loss),
-            ColorToken::new("warning", "oklch(0.769 0.165 70.08)", colors.warning),
-            ColorToken::new("info", "oklch(0.555 0.245 266.681)", colors.info),
-            ColorToken::new("feature", "oklch(0.541 0.247 293.009)", colors.feature),
-            ColorToken::new("chart_candle_up", "var(--profit)", colors.chart_candle_up),
-            ColorToken::new("chart_candle_down", "var(--loss)", colors.chart_candle_down),
-            ColorToken::new(
-                "chart_volume_up",
-                mode_source(
-                    dark,
-                    "oklch(from var(--profit) l c h / 34%)",
-                    "oklch(from var(--profit) l c h / 32%)",
-                ),
-                colors.chart_volume_up,
-            ),
-            ColorToken::new(
-                "chart_volume_down",
-                mode_source(
-                    dark,
-                    "oklch(from var(--loss) l c h / 30%)",
-                    "oklch(from var(--loss) l c h / 28%)",
-                ),
-                colors.chart_volume_down,
-            ),
-            ColorToken::new(
-                "chart_axis_text",
-                "var(--foreground)",
-                colors.chart_axis_text,
-            ),
-            ColorToken::new(
-                "chart_crosshair",
-                mode_source(dark, "#9598a1", "#2e2e2e"),
-                colors.chart_crosshair,
-            ),
+            ColorToken::new("overlay", "oklch(0 0 0 / 50%)", colors.overlay),
+            ColorToken::new("positive", "#089981", colors.positive),
+            ColorToken::new("negative", "#f7525f", colors.negative),
+            ColorToken::new("destructive", "var(--negative)", colors.destructive),
+            ColorToken::new("warning", "oklch(0.768578 0.164801 70.108)", colors.warning),
         ]
     }
 }
@@ -522,135 +383,60 @@ const fn mode_source(
 }
 
 fn light_colors() -> ThemeColors {
-    foundational_colors(
-        ThemeMode::Light,
-        ThemeColor::from_rgb8(255, 255, 255),
-        ThemeColor::from_rgb8(64, 64, 64),
-        ThemeColor::from_rgb8(252, 252, 252),
-        ThemeColor::from_rgb8(105, 105, 105),
-        ThemeColor::from_rgb8(222, 222, 222),
-        ThemeColor::from_rgb8(105, 105, 105),
-        ThemeColor::from_rgb8(64, 64, 64),
-        ThemeColor::from_oklch(0.577, 0.245, 27.325),
-        ThemeColor::from_rgb8(245, 245, 245),
-        ThemeColor::from_rgb8(243, 243, 243),
-    )
-}
-
-fn dark_colors() -> ThemeColors {
-    foundational_colors(
-        ThemeMode::Dark,
-        ThemeColor::from_rgb8(20, 20, 20),
-        ThemeColor::from_rgb8(227, 227, 227),
-        ThemeColor::from_rgb8(27, 27, 27),
-        ThemeColor::from_rgb8(162, 162, 162),
-        ThemeColor::from_rgb8(66, 66, 66),
-        ThemeColor::from_rgb8(162, 162, 162),
-        ThemeColor::from_rgb8(227, 227, 227),
-        ThemeColor::from_oklch(0.704, 0.191, 22.216),
-        ThemeColor::from_rgb8(30, 30, 30),
-        ThemeColor::from_rgb8(36, 36, 36),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn foundational_colors(
-    mode: ThemeMode,
-    background: ThemeColor,
-    foreground: ThemeColor,
-    surface_secondary: ThemeColor,
-    text_secondary: ThemeColor,
-    text_muted: ThemeColor,
-    icon_color: ThemeColor,
-    icon_active: ThemeColor,
-    destructive: ThemeColor,
-    border: ThemeColor,
-    border_secondary: ThemeColor,
-) -> ThemeColors {
-    let primary = ThemeColor::from_rgb8(62, 99, 221);
-    let primary_hover = ThemeColor::from_rgb8(66, 105, 234);
-    let primary_active = ThemeColor::from_rgb8(58, 93, 208);
-    let primary_foreground = ThemeColor::from_rgb8(252, 252, 252);
-    let destructive_foreground = ThemeColor::from_oklch(0.985, 0.0, 0.0);
-    let profit = ThemeColor::from_oklch(0.683, 0.151, 160.997);
-    let loss = ThemeColor::from_oklch(0.674, 0.215, 18.124);
-    let volume_alpha = match mode {
-        ThemeMode::Light => (0.34, 0.30),
-        ThemeMode::Dark => (0.32, 0.28),
-    };
-    let (interactive_neutral_hover_bg, interactive_neutral_active_bg) = match mode {
-        ThemeMode::Light => (
-            ThemeColor::from_rgb8(239, 239, 239).with_alpha(0.35),
-            ThemeColor::from_rgb8(239, 239, 239).with_alpha(0.45),
-        ),
-        ThemeMode::Dark => (
-            ThemeColor::from_rgb8(97, 97, 97).with_alpha(0.20),
-            ThemeColor::from_rgb8(97, 97, 97).with_alpha(0.26),
-        ),
-    };
-
+    let background = ThemeColor::from_oklch(1.0, 0.0, 0.0);
+    let foreground = ThemeColor::from_oklch(0.321_093, 0.0, 0.0);
+    let muted = ThemeColor::from_oklch(0.991_063, 0.0, 0.0);
+    let negative = ThemeColor::from_rgb8(247, 82, 95);
     ThemeColors {
         background,
         foreground,
-        surface_primary: background,
-        surface_secondary,
-        surface_tertiary: surface_secondary,
-        surface_quaternary: surface_secondary,
-        card: surface_secondary,
+        card: background,
         card_foreground: foreground,
-        popover: surface_secondary,
-        popover_foreground: foreground,
-        primary,
-        primary_hover,
-        primary_active,
-        primary_foreground,
-        secondary: surface_secondary,
-        secondary_foreground: foreground,
-        muted: surface_secondary,
-        muted_foreground: text_secondary,
-        text_secondary,
-        text_muted,
-        text_placeholder: text_muted,
-        text_unavailable: text_muted,
-        icon_color,
-        icon_active,
-        accent: surface_secondary,
-        accent_foreground: foreground,
-        destructive,
-        destructive_foreground,
-        border,
-        border_secondary,
-        input: border_secondary,
-        input_surface: surface_secondary,
-        ring: match mode {
-            ThemeMode::Light => ThemeColor::from_rgb8(0, 0, 0),
-            ThemeMode::Dark => ThemeColor::from_rgb8(255, 255, 255),
-        },
-        interactive_neutral_hover_bg,
-        interactive_neutral_hover_fg: icon_active,
-        interactive_neutral_active_bg,
-        interactive_neutral_active_fg: foreground,
-        chart_palette: [
-            ThemeColor::from_oklch(0.87, 0.0, 0.0),
-            ThemeColor::from_oklch(0.556, 0.0, 0.0),
-            ThemeColor::from_oklch(0.439, 0.0, 0.0),
-            ThemeColor::from_oklch(0.371, 0.0, 0.0),
-            ThemeColor::from_oklch(0.269, 0.0, 0.0),
-        ],
-        profit,
-        loss,
-        warning: ThemeColor::from_oklch(0.769, 0.165, 70.08),
-        info: ThemeColor::from_oklch(0.555, 0.245, 266.681),
-        feature: ThemeColor::from_oklch(0.541, 0.247, 293.009),
-        chart_candle_up: profit,
-        chart_candle_down: loss,
-        chart_volume_up: profit.with_alpha(volume_alpha.0),
-        chart_volume_down: loss.with_alpha(volume_alpha.1),
-        chart_axis_text: foreground,
-        chart_crosshair: match mode {
-            ThemeMode::Light => ThemeColor::from_rgb8(149, 152, 161),
-            ThemeMode::Dark => ThemeColor::from_rgb8(46, 46, 46),
-        },
+        primary: ThemeColor::from_oklch(0.543_75, 0.191_015, 267.005),
+        primary_foreground: ThemeColor::from_oklch(0.97, 0.014, 254.604),
+        primary_hover: ThemeColor::from_oklch(0.483_663, 0.190_265, 267.018),
+        muted,
+        muted_foreground: ThemeColor::from_oklch(0.556, 0.0, 0.0),
+        disabled_foreground: ThemeColor::from_oklch(0.74, 0.0, 0.0),
+        accent: ThemeColor::from_oklch(0.97, 0.0, 0.0),
+        border: ThemeColor::from_rgb8(243, 243, 243),
+        muted_border: ThemeColor::from_rgb8(245, 245, 245),
+        input: muted,
+        ring: ThemeColor::from_oklch(0.708, 0.0, 0.0),
+        overlay: ThemeColor::from_rgb8(0, 0, 0).with_alpha(0.5),
+        positive: ThemeColor::from_rgb8(8, 153, 129),
+        negative,
+        destructive: negative,
+        warning: ThemeColor::from_oklch(0.768_578, 0.164_801, 70.108),
+    }
+}
+
+fn dark_colors() -> ThemeColors {
+    let background = ThemeColor::from_rgb8(7, 10, 15);
+    let foreground = ThemeColor::from_oklch(0.985, 0.0, 0.0);
+    let muted = ThemeColor::from_rgb8(12, 17, 21);
+    let negative = ThemeColor::from_rgb8(247, 82, 95);
+    ThemeColors {
+        background,
+        foreground,
+        card: background,
+        card_foreground: foreground,
+        primary: ThemeColor::from_oklch(0.543_75, 0.191_015, 267.005),
+        primary_foreground: ThemeColor::from_oklch(0.97, 0.014, 254.604),
+        primary_hover: ThemeColor::from_oklch(0.603_683, 0.191_341, 267.047),
+        muted,
+        muted_foreground: ThemeColor::from_rgb8(157, 163, 170),
+        disabled_foreground: ThemeColor::from_oklch(0.52, 0.0, 0.0),
+        accent: ThemeColor::from_rgb8(34, 34, 36),
+        border: ThemeColor::from_rgb8(22, 25, 31),
+        muted_border: ThemeColor::from_rgb8(19, 21, 25),
+        input: muted,
+        ring: ThemeColor::from_oklch(0.556, 0.0, 0.0),
+        overlay: ThemeColor::from_rgb8(0, 0, 0).with_alpha(0.5),
+        positive: ThemeColor::from_rgb8(8, 153, 129),
+        negative,
+        destructive: negative,
+        warning: ThemeColor::from_oklch(0.768_578, 0.164_801, 70.108),
     }
 }
 
@@ -667,9 +453,9 @@ impl RadiusToken {
     #[must_use]
     pub const fn canonical_identifier(self) -> &'static str {
         match self {
-            Self::Sm => "radius_sm",
-            Self::Default => "radius_default",
-            Self::Full => "radius_full",
+            Self::Sm => "radius-sm",
+            Self::Default => "radius-df",
+            Self::Full => "radius-lg",
         }
     }
 
@@ -703,117 +489,39 @@ mod tests {
     }
 
     #[test]
-    fn application_palettes_use_canonical_neutrals_and_keep_trading_semantics() {
+    fn native_palettes_match_the_nucleus_contract() {
         let light = AxiusflowTheme::light().colors;
         let dark = AxiusflowTheme::dark().colors;
 
-        assert_eq!(light.background, ThemeColor::from_rgb8(255, 255, 255));
-        assert_eq!(light.surface_primary, light.background);
-        assert_eq!(light.card, ThemeColor::from_rgb8(252, 252, 252));
-        assert_eq!(light.input_surface, ThemeColor::from_rgb8(252, 252, 252));
-        assert_eq!(light.foreground, ThemeColor::from_rgb8(64, 64, 64));
-        assert_eq!(light.text_secondary, ThemeColor::from_rgb8(105, 105, 105));
-        assert_eq!(light.text_muted, ThemeColor::from_rgb8(222, 222, 222));
-        assert_eq!(light.text_placeholder, light.text_muted);
-        assert_eq!(light.text_unavailable, light.text_muted);
-        assert_eq!(light.icon_color, ThemeColor::from_rgb8(105, 105, 105));
-        assert_eq!(light.icon_active, ThemeColor::from_rgb8(64, 64, 64));
-        assert_eq!(dark.background, ThemeColor::from_rgb8(20, 20, 20));
-        assert_eq!(dark.surface_primary, dark.background);
-        assert_eq!(dark.card, ThemeColor::from_rgb8(27, 27, 27));
-        assert_eq!(dark.border, ThemeColor::from_rgb8(30, 30, 30));
-        assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(36, 36, 36));
-        assert_eq!(dark.input, dark.border_secondary);
-        assert_eq!(dark.foreground, ThemeColor::from_rgb8(227, 227, 227));
-        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(162, 162, 162));
-        assert_eq!(dark.text_muted, ThemeColor::from_rgb8(66, 66, 66));
-        assert_eq!(dark.text_placeholder, ThemeColor::from_rgb8(66, 66, 66));
-        assert_eq!(dark.text_unavailable, ThemeColor::from_rgb8(66, 66, 66));
-        assert_eq!(dark.muted, ThemeColor::from_rgb8(27, 27, 27));
-        assert_eq!(dark.accent, ThemeColor::from_rgb8(27, 27, 27));
-        assert_eq!(dark.icon_color, ThemeColor::from_rgb8(162, 162, 162));
-        assert_eq!(dark.icon_active, ThemeColor::from_rgb8(227, 227, 227));
-        assert_eq!(dark.chart_axis_text, dark.foreground);
-        assert_eq!(light.chart_crosshair, ThemeColor::from_rgb8(149, 152, 161));
-        assert_eq!(dark.chart_crosshair, ThemeColor::from_rgb8(46, 46, 46));
-        assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
-        assert_eq!(dark.primary, ThemeColor::from_rgb8(62, 99, 221));
-        assert_eq!(dark.primary_hover, ThemeColor::from_rgb8(66, 105, 234));
-        assert_eq!(dark.primary_active, ThemeColor::from_rgb8(58, 93, 208));
-        assert_eq!(
-            dark.primary_foreground,
-            ThemeColor::from_rgb8(252, 252, 252)
-        );
-        assert!((light.interactive_neutral_active_bg.alpha() - 0.45).abs() < f32::EPSILON);
-        assert!((dark.interactive_neutral_active_bg.alpha() - 0.26).abs() < f32::EPSILON);
-        assert_eq!(light.ring, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(dark.ring, ThemeColor::from_rgb8(255, 255, 255));
-        assert_eq!(dark.profit, ThemeColor::from_oklch(0.683, 0.151, 160.997));
-        assert_eq!(dark.loss, ThemeColor::from_oklch(0.674, 0.215, 18.124));
-        assert_eq!(light.popover, light.card);
-        assert_eq!(dark.popover, dark.card);
-        assert_eq!(light.input_surface, light.card);
-        assert_eq!(dark.input_surface, dark.card);
-        assert_eq!(light.accent, light.muted);
-        assert_eq!(dark.accent, dark.muted);
-        assert_eq!(dark.chart_candle_up, dark.profit);
-        assert_eq!(dark.chart_candle_down, dark.loss);
-        assert!((light.chart_volume_up.alpha() - 0.34).abs() < f32::EPSILON);
-        assert!((dark.chart_volume_down.alpha() - 0.28).abs() < f32::EPSILON);
+        assert_eq!(light.background, ThemeColor::from_oklch(1.0, 0.0, 0.0));
+        assert_eq!(light.card, light.background);
+        assert_eq!(light.input, light.muted);
+        assert_eq!(dark.background, ThemeColor::from_rgb8(7, 10, 15));
+        assert_eq!(dark.card, dark.background);
+        assert_eq!(dark.muted, ThemeColor::from_rgb8(12, 17, 21));
+        assert_eq!(dark.input, dark.muted);
+        assert_eq!(dark.accent, ThemeColor::from_rgb8(34, 34, 36));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(22, 25, 31));
+        assert_eq!(dark.muted_border, ThemeColor::from_rgb8(19, 21, 25));
+        assert_eq!(light.positive, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(dark.negative, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(light.destructive, light.negative);
+        assert_eq!(dark.destructive, dark.negative);
+        assert!((light.overlay.alpha() - 0.5).abs() < f32::EPSILON);
+        assert!((dark.overlay.alpha() - 0.5).abs() < f32::EPSILON);
 
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
-        assert_eq!(token_source(&light_tokens, "background"), "#ffffff");
-        assert_eq!(token_source(&dark_tokens, "background"), "#141414");
+        assert_eq!(token_source(&light_tokens, "background"), "oklch(1 0 0)");
+        assert_eq!(token_source(&dark_tokens, "background"), "#070a0f");
+        assert_eq!(token_source(&dark_tokens, "card"), "#070a0f");
+        assert_eq!(token_source(&dark_tokens, "muted"), "#0c1115");
         assert_eq!(
-            token_source(&dark_tokens, "card"),
-            "var(--surface_secondary)"
+            token_source(&dark_tokens, "primary-hover"),
+            "oklch(0.603683 0.191341 267.047)"
         );
-        assert_eq!(token_source(&dark_tokens, "foreground"), "#e3e3e3");
-        assert_eq!(token_source(&dark_tokens, "text_muted"), "#424242");
-        assert_eq!(
-            token_source(&dark_tokens, "muted"),
-            "var(--surface_secondary)"
-        );
-        assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
-        assert_eq!(token_source(&dark_tokens, "primary_hover"), "#4269ea");
-        assert_eq!(token_source(&dark_tokens, "primary_active"), "#3a5dd0");
-        assert_eq!(token_source(&dark_tokens, "primary_foreground"), "#fcfcfc");
-        assert_eq!(token_source(&light_tokens, "ring"), "#000000");
-        assert_eq!(token_source(&dark_tokens, "ring"), "#ffffff");
-        assert_eq!(
-            token_source(&dark_tokens, "input_surface"),
-            "var(--surface_secondary)"
-        );
-        assert_eq!(token_source(&dark_tokens, "border_secondary"), "#242424");
-        assert_eq!(token_source(&light_tokens, "text_secondary"), "#696969");
-        assert_eq!(token_source(&light_tokens, "icon_color"), "#696969");
-        assert_eq!(token_source(&light_tokens, "icon_active"), "#404040");
-        assert_eq!(token_source(&dark_tokens, "icon_color"), "#a2a2a2");
-        assert_eq!(token_source(&dark_tokens, "icon_active"), "#e3e3e3");
-        assert_eq!(
-            token_source(&dark_tokens, "interactive_neutral_active_fg"),
-            "var(--foreground)"
-        );
-        assert_eq!(
-            token_source(&dark_tokens, "interactive_neutral_hover_bg"),
-            "rgb(97 97 97 / 20%)"
-        );
-        assert_eq!(
-            token_source(&dark_tokens, "chart_axis_text"),
-            "var(--foreground)"
-        );
-        assert_eq!(token_source(&dark_tokens, "chart_1"), "oklch(0.87 0 0)");
-    }
-
-    #[test]
-    fn interactive_foregrounds_follow_idle_hover_and_active_states() {
-        let light = AxiusflowTheme::light().colors;
-        let dark = AxiusflowTheme::dark().colors;
-        assert_eq!(light.interactive_neutral_hover_fg, light.icon_active);
-        assert_eq!(dark.interactive_neutral_hover_fg, dark.icon_active);
-        assert_eq!(light.interactive_neutral_active_fg, light.foreground);
-        assert_eq!(dark.interactive_neutral_active_fg, dark.foreground);
+        assert_eq!(token_source(&dark_tokens, "muted-border"), "#131519");
+        assert_eq!(token_source(&dark_tokens, "destructive"), "var(--negative)");
     }
 
     #[test]
@@ -821,23 +529,19 @@ mod tests {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
         assert_eq!(RadiusToken::Default.logical_pixels(), 6);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
-        assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius_sm");
+        assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius-sm");
+        assert_eq!(RadiusToken::Default.css_custom_property(), "--radius-df");
+        assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-lg");
         let theme = AxiusflowTheme::dark();
         assert_eq!(
             theme.dimensions.app_header_height.css_custom_property(),
             "--app_header_height"
         );
-        let candle_up = theme
-            .color_tokens()
-            .into_iter()
-            .find(|token| token.canonical_identifier == "chart_candle_up")
-            .expect("chart candle token exists");
-        assert_eq!(candle_up.css_custom_property(), "--chart_candle_up");
     }
 
     #[test]
     fn css_manifest_contains_every_rust_color_token_and_mode_value() {
-        let css = include_str!("../axiusflow_theme.css");
+        let css = include_str!("../brand.css");
 
         for theme in [AxiusflowTheme::light(), AxiusflowTheme::dark()] {
             for token in theme.color_tokens() {
@@ -851,6 +555,39 @@ mod tests {
                     "CSS manifest is missing `{declaration}`"
                 );
             }
+        }
+
+        for retired in [
+            "--surface_",
+            "--primary_",
+            "--card_",
+            "--muted_",
+            "--text_",
+            "--icon_",
+            "--border_",
+            "--chart_",
+            "--profit",
+            "--loss",
+            "--radius_",
+        ] {
+            assert!(!css.contains(retired), "retired token `{retired}` returned");
+        }
+    }
+
+    #[test]
+    fn css_manifest_carries_the_portable_interaction_contract() {
+        let css = include_str!("../brand.css");
+        for required in [
+            "--font-sans: \"Inter\", sans-serif;",
+            "font-synthesis: none;",
+            "font-weight: 400;",
+            "outline: 2px solid var(--ring);",
+            "outline-offset: 2px;",
+            "transition: background-color 150ms ease, color 150ms ease;",
+            "cursor: not-allowed;",
+            "@media (prefers-reduced-motion: reduce)",
+        ] {
+            assert!(css.contains(required), "CSS is missing `{required}`");
         }
     }
 }

@@ -30,9 +30,9 @@ use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 #[cfg(target_os = "windows")]
 use gpui::WindowControlArea;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
-    KeyBinding, KeyDownEvent, MouseButton, Render, Task, WeakEntity, Window, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Hsla, KeyBinding,
+    KeyDownEvent, MouseButton, Render, Task, WeakEntity, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
@@ -2245,7 +2245,7 @@ fn chrome_overlay_layer(
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_1()
                     .border_color(gpui_color(theme.colors.border))
-                    .bg(gpui_color(theme.colors.surface_primary))
+                    .bg(gpui_color(theme.colors.background))
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(panel),
@@ -2268,7 +2268,7 @@ fn timeframe_overlay_content(
         .v_flex()
         .p_2()
         .gap_1()
-        .text_color(gpui_color(colors.text_secondary))
+        .text_color(gpui_color(colors.muted_foreground))
         .children(
             intervals
                 .iter()
@@ -2286,18 +2286,18 @@ fn timeframe_overlay_content(
                         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                         .text_sm()
                         .when(selected == interval, |row| {
-                            row.bg(gpui_color(colors.interactive_neutral_active_bg))
-                                .text_color(gpui_color(colors.interactive_neutral_active_fg))
+                            row.bg(gpui_color(colors.accent))
+                                .text_color(gpui_color(colors.foreground))
                         })
                         .when(keyboard_selection == index, |row| {
-                            row.bg(gpui_color(colors.interactive_neutral_active_bg))
-                                .text_color(gpui_color(colors.interactive_neutral_active_fg))
+                            row.bg(gpui_color(colors.accent))
+                                .text_color(gpui_color(colors.foreground))
                         })
                         .when(!pending, |row| {
                             row.cursor_pointer()
                                 .hover(|row| {
-                                    row.bg(gpui_color(colors.interactive_neutral_hover_bg))
-                                        .text_color(gpui_color(colors.interactive_neutral_hover_fg))
+                                    row.bg(gpui_color(colors.accent))
+                                        .text_color(gpui_color(colors.foreground))
                                 })
                                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                     row_app.update(cx, |app, app_cx| {
@@ -2469,7 +2469,7 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
                 .size_full()
                 .v_flex()
                 .overflow_hidden()
-                .bg(gpui_color(colors.surface_primary))
+                .bg(gpui_color(colors.background))
                 .children(side_panel.map(|panel| side_panel_header(panel, app.clone(), theme)))
                 .child(
                     div()
@@ -2646,7 +2646,7 @@ fn drawing_toolbar(
         .overflow_hidden()
         .border_r_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface_primary))
+        .bg(gpui_color(colors.background))
         .child(
             div()
                 .v_flex()
@@ -2805,7 +2805,7 @@ fn drawing_toolbar_expander(
         .bottom_0()
         .border_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface_primary))
+        .bg(gpui_color(colors.background))
         .child(chrome_tooltip(
             "drawing_toolbar_expand",
             "Expand drawing toolbar",
@@ -2875,7 +2875,7 @@ fn side_panel_header(
         .border_l_1()
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface_primary))
+        .bg(gpui_color(colors.background))
         .text_xs()
         .text_color(gpui_color(colors.muted_foreground))
         .child(div().flex_1().child(panel.title().to_uppercase()))
@@ -2908,7 +2908,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
     let tone = match notice.tone {
         ChartNoticeTone::Muted => colors.muted_foreground,
         ChartNoticeTone::Warning => colors.warning,
-        ChartNoticeTone::Loss => colors.loss,
+        ChartNoticeTone::Loss => colors.negative,
     };
     let loading = notice.label == ChartState::Loading.label();
     let label = div()
@@ -3047,7 +3047,7 @@ fn terminal_header(
         .items_center()
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
-        .bg(gpui_color(theme.colors.surface_primary))
+        .bg(gpui_color(theme.colors.background))
         .child(
             div()
                 .h_full()
@@ -3056,15 +3056,7 @@ fn terminal_header(
                 .flex()
                 .items_center()
                 .overflow_x_hidden()
-                .child(
-                    div()
-                        .flex_none()
-                        .pl_4()
-                        .pr_2()
-                        .text_sm()
-                        .font_weight(FontWeight::BOLD)
-                        .child("Axiusflow"),
-                )
+                .child(div().flex_none().pl_4().pr_2().text_sm().child("Axiusflow"))
                 .child(controls)
                 .child(
                     div()
@@ -3082,7 +3074,7 @@ fn terminal_header(
         .h(px(theme.dimensions.app_header_height.logical_pixels))
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
-        .bg(gpui_color(theme.colors.surface_primary))
+        .bg(gpui_color(theme.colors.background))
         .child(
             div()
                 .h_full()
@@ -3091,15 +3083,7 @@ fn terminal_header(
                 .flex()
                 .items_center()
                 .overflow_x_hidden()
-                .child(
-                    div()
-                        .flex_none()
-                        .pl_4()
-                        .pr_2()
-                        .text_sm()
-                        .font_weight(FontWeight::BOLD)
-                        .child("Axiusflow"),
-                )
+                .child(div().flex_none().pl_4().pr_2().text_sm().child("Axiusflow"))
                 .child(controls)
                 .child(div().h_full().min_w(px(12.0)).flex_1()),
         )
@@ -3156,22 +3140,22 @@ fn windows_caption_button(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let hover = if close {
-        Hsla::from(rgb(0xe8_11_23))
+        gpui_color(theme.colors.negative)
     } else {
-        gpui_color(theme.colors.interactive_neutral_hover_bg)
+        gpui_color(theme.colors.accent)
     };
     let active = if close {
         hover.opacity(0.8)
     } else {
-        gpui_color(theme.colors.interactive_neutral_active_bg)
+        gpui_color(theme.colors.accent)
     };
     let hover_foreground = if close {
-        gpui::white()
+        gpui_color(theme.colors.primary_foreground)
     } else {
-        gpui_color(theme.colors.icon_active)
+        gpui_color(theme.colors.foreground)
     };
     let active_foreground = if close {
-        gpui::white().opacity(0.8)
+        gpui_color(theme.colors.primary_foreground).opacity(0.8)
     } else {
         gpui_color(theme.colors.foreground)
     };
@@ -3187,7 +3171,7 @@ fn windows_caption_button(
         .content_center()
         .occlude()
         .text_size(px(10.0))
-        .text_color(gpui_color(theme.colors.text_secondary))
+        .text_color(gpui_color(theme.colors.muted_foreground))
         .hover(move |style| style.bg(hover).text_color(hover_foreground))
         .active(move |style| style.bg(active).text_color(active_foreground))
         .window_control_area(area)
@@ -3341,7 +3325,7 @@ fn instrument_selector(
         .when(state.enabled, Button::cursor_pointer)
         .when(!state.enabled, Button::cursor_not_allowed);
     let trigger = trigger.when(!state.enabled, |trigger| {
-        trigger.text_color(gpui_color(theme.colors.text_unavailable))
+        trigger.text_color(gpui_color(theme.colors.disabled_foreground))
     });
     chrome_tooltip(
         "instrument_selector",
@@ -3444,12 +3428,12 @@ fn indicator_dialog_content(
                 )))
                 .cursor_pointer()
                 .when(keyboard_selection == index, |row| {
-                    row.bg(gpui_color(colors.interactive_neutral_active_bg))
-                        .text_color(gpui_color(colors.interactive_neutral_active_fg))
+                    row.bg(gpui_color(colors.accent))
+                        .text_color(gpui_color(colors.foreground))
                 })
                 .hover(|row| {
-                    row.bg(gpui_color(colors.interactive_neutral_hover_bg))
-                        .text_color(gpui_color(colors.interactive_neutral_hover_fg))
+                    row.bg(gpui_color(colors.accent))
+                        .text_color(gpui_color(colors.foreground))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     let added = row_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
@@ -3525,7 +3509,7 @@ fn indicator_status(
 ) -> (String, ThemeColor) {
     message.map_or_else(
         || ("OHLC-compatible".to_string(), colors.muted_foreground),
-        |message| (message.to_string(), colors.loss),
+        |message| (message.to_string(), colors.negative),
     )
 }
 
@@ -3633,14 +3617,14 @@ fn instrument_dialog_content(
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .text_sm()
                 .when(state.keyboard_selection == index || checked, |row| {
-                    row.bg(gpui_color(colors.interactive_neutral_active_bg))
-                        .text_color(gpui_color(colors.interactive_neutral_active_fg))
+                    row.bg(gpui_color(colors.accent))
+                        .text_color(gpui_color(colors.foreground))
                 })
                 .when(!state.selection_pending, |row| {
                     row.cursor_pointer()
                         .hover(|row| {
-                            row.bg(gpui_color(colors.interactive_neutral_hover_bg))
-                                .text_color(gpui_color(colors.interactive_neutral_hover_fg))
+                            row.bg(gpui_color(colors.accent))
+                                .text_color(gpui_color(colors.foreground))
                         })
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             let dispatched = app
@@ -3662,16 +3646,10 @@ fn instrument_dialog_content(
                         .items_center()
                         .justify_center()
                         .rounded_full()
-                        .bg(gpui_color(colors.surface_tertiary))
+                        .bg(gpui_color(colors.muted))
                         .child(header_icon(HugeIcon::ExchangeIcon01)),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(symbol),
-                )
+                .child(div().flex_1().text_sm().child(symbol))
                 .children(
                     checked
                         .then(|| header_icon(HugeIcon::CheckmarkCircleIcon01).into_any_element()),
@@ -3709,8 +3687,8 @@ fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTh
 fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .w(px(720.0))
-        .bg(gpui_color(colors.surface_primary))
-        .text_color(gpui_color(colors.text_secondary))
+        .bg(gpui_color(colors.background))
+        .text_color(gpui_color(colors.muted_foreground))
 }
 
 fn chrome_menu_scroll_body() -> Div {
@@ -3861,8 +3839,8 @@ fn chrome_button_style(
         )))
         .when(selected, |button| {
             button
-                .bg(gpui_color(colors.interactive_neutral_active_bg))
-                .text_color(gpui_color(colors.interactive_neutral_active_fg))
+                .bg(gpui_color(colors.accent))
+                .text_color(gpui_color(colors.primary))
         })
 }
 
@@ -3872,11 +3850,11 @@ fn chrome_control_foreground(
     enabled: bool,
 ) -> ThemeColor {
     if !enabled {
-        colors.text_unavailable
+        colors.disabled_foreground
     } else if selected {
-        colors.interactive_neutral_active_fg
+        colors.primary
     } else {
-        colors.text_secondary
+        colors.muted_foreground
     }
 }
 
@@ -3923,7 +3901,7 @@ fn connection_presentation(
     }
     if chart_state == ChartState::Error && state == FeedConnectionState::Streaming {
         return (format!("{provider} · Data error"), |theme| {
-            theme.colors.loss
+            theme.colors.negative
         });
     }
     if state == FeedConnectionState::Streaming && delayed {
@@ -3932,20 +3910,20 @@ fn connection_presentation(
         });
     }
     match state {
-        FeedConnectionState::Disconnected => ("Offline".to_string(), |theme| theme.colors.loss),
+        FeedConnectionState::Disconnected => ("Offline".to_string(), |theme| theme.colors.negative),
         FeedConnectionState::Discovering => (format!("{provider} · Discovering"), |theme| {
-            theme.colors.info
+            theme.colors.primary
         }),
         FeedConnectionState::Authenticating => (format!("{provider} · Authenticating"), |theme| {
-            theme.colors.info
+            theme.colors.primary
         }),
         FeedConnectionState::Streaming => {
-            (format!("{provider} · Live"), |theme| theme.colors.profit)
+            (format!("{provider} · Live"), |theme| theme.colors.positive)
         }
         FeedConnectionState::Recovering => (format!("{provider} · Reconnecting"), |theme| {
             theme.colors.warning
         }),
-        FeedConnectionState::Stopped => ("Stopped".to_string(), |theme| theme.colors.loss),
+        FeedConnectionState::Stopped => ("Stopped".to_string(), |theme| theme.colors.negative),
     }
 }
 
@@ -3971,51 +3949,51 @@ fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx:
     component.muted = gpui_color(colors.muted);
     component.muted_foreground = gpui_color(colors.muted_foreground);
     component.accent = gpui_color(colors.accent);
-    component.accent_foreground = gpui_color(colors.accent_foreground);
-    component.popover = gpui_color(colors.popover);
-    component.popover_foreground = gpui_color(colors.popover_foreground);
+    component.accent_foreground = gpui_color(colors.foreground);
+    component.popover = gpui_color(colors.card);
+    component.popover_foreground = gpui_color(colors.card_foreground);
 
     component.button = gpui_color(colors.background.with_alpha(0.0));
-    component.button_foreground = gpui_color(colors.secondary_foreground);
-    component.button_hover = gpui_color(colors.interactive_neutral_hover_bg);
-    component.button_active = gpui_color(colors.interactive_neutral_active_bg);
+    component.button_foreground = gpui_color(colors.muted_foreground);
+    component.button_hover = gpui_color(colors.accent);
+    component.button_active = gpui_color(colors.accent);
     component.primary = gpui_color(colors.primary);
     component.primary_foreground = gpui_color(colors.primary_foreground);
     component.primary_hover = gpui_color(colors.primary_hover);
-    component.primary_active = gpui_color(colors.primary_active);
+    component.primary_active = gpui_color(colors.primary_hover);
     component.button_primary = gpui_color(colors.primary);
     component.button_primary_foreground = gpui_color(colors.primary_foreground);
     component.button_primary_hover = gpui_color(colors.primary_hover);
-    component.button_primary_active = gpui_color(colors.primary_active);
-    component.secondary = gpui_color(colors.secondary);
-    component.secondary_foreground = gpui_color(colors.secondary_foreground);
-    component.secondary_hover = gpui_color(colors.interactive_neutral_hover_bg);
-    component.secondary_active = gpui_color(colors.interactive_neutral_active_bg);
-    component.button_secondary = gpui_color(colors.secondary);
-    component.button_secondary_foreground = gpui_color(colors.secondary_foreground);
-    component.button_secondary_hover = gpui_color(colors.interactive_neutral_hover_bg);
-    component.button_secondary_active = gpui_color(colors.interactive_neutral_active_bg);
+    component.button_primary_active = gpui_color(colors.primary_hover);
+    component.secondary = gpui_color(colors.muted);
+    component.secondary_foreground = gpui_color(colors.foreground);
+    component.secondary_hover = gpui_color(colors.accent);
+    component.secondary_active = gpui_color(colors.accent);
+    component.button_secondary = gpui_color(colors.muted);
+    component.button_secondary_foreground = gpui_color(colors.foreground);
+    component.button_secondary_hover = gpui_color(colors.accent);
+    component.button_secondary_active = gpui_color(colors.accent);
 
-    component.chart_1 = gpui_color(colors.chart_palette[0]);
-    component.chart_2 = gpui_color(colors.chart_palette[1]);
-    component.chart_3 = gpui_color(colors.chart_palette[2]);
-    component.chart_4 = gpui_color(colors.chart_palette[3]);
-    component.chart_5 = gpui_color(colors.chart_palette[4]);
-    component.chart_bullish = gpui_color(colors.chart_candle_up);
-    component.chart_bearish = gpui_color(colors.chart_candle_down);
+    component.chart_1 = gpui_color(colors.primary);
+    component.chart_2 = gpui_color(colors.positive);
+    component.chart_3 = gpui_color(colors.negative);
+    component.chart_4 = gpui_color(colors.warning);
+    component.chart_5 = gpui_color(colors.muted_foreground);
+    component.chart_bullish = gpui_color(colors.positive);
+    component.chart_bearish = gpui_color(colors.negative);
     component.danger = gpui_color(colors.destructive);
-    component.danger_foreground = gpui_color(colors.destructive_foreground);
-    component.info = gpui_color(colors.info);
-    component.success = gpui_color(colors.profit);
+    component.danger_foreground = gpui_color(colors.primary_foreground);
+    component.info = gpui_color(colors.primary);
+    component.success = gpui_color(colors.positive);
     component.warning = gpui_color(colors.warning);
 
-    component.sidebar = gpui_color(colors.surface_primary);
+    component.sidebar = gpui_color(colors.background);
     component.sidebar_foreground = gpui_color(colors.foreground);
     component.sidebar_border = gpui_color(colors.border);
     component.table = gpui_color(colors.card);
-    component.table_head = gpui_color(colors.surface_tertiary);
+    component.table_head = gpui_color(colors.muted);
     component.table_row_border = gpui_color(colors.border);
-    component.title_bar = gpui_color(colors.surface_primary);
+    component.title_bar = gpui_color(colors.background);
     component.title_bar_border = gpui_color(colors.border);
     component.status_bar = gpui_color(colors.card);
     component.status_bar_border = gpui_color(colors.border);
@@ -4313,7 +4291,7 @@ fn main() {
         .run(move |cx: &mut App| {
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                    "../assets/fonts/Inter-Regular.ttf"
+                    "../../../crates/ui/design_system/inter_400.ttf"
                 ))])
                 .expect("the bundled Inter Regular font is valid");
             gpui_component::init(cx);
@@ -4455,19 +4433,19 @@ mod tests {
     }
 
     #[test]
-    fn chrome_controls_use_secondary_until_selected_or_disabled() {
+    fn chrome_controls_use_muted_primary_and_disabled_hierarchy() {
         let colors = AxiusflowTheme::light().colors;
         assert_eq!(
             chrome_control_foreground(&colors, false, true),
-            colors.text_secondary
+            colors.muted_foreground
         );
         assert_eq!(
             chrome_control_foreground(&colors, true, true),
-            colors.interactive_neutral_active_fg
+            colors.primary
         );
         assert_eq!(
             chrome_control_foreground(&colors, false, false),
-            colors.text_unavailable
+            colors.disabled_foreground
         );
     }
 
