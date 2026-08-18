@@ -46,7 +46,7 @@ use gpui_component::{
 };
 use gpui_platform::application;
 use resident_market_worker::{
-    ChartState, DesktopMarketGeneration, EngineSeriesRequest, MarketDataWorker,
+    ChartState, EngineSeriesRequest, MarketDataWorker, MarketPublicationGeneration,
     MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
     MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
     UiDiagnosticsFeedback,
@@ -238,13 +238,13 @@ static COINBASE_INTERVALS: &[ChartInterval] = &[
 fn generation_status(
     worker_label: &str,
     subscription_id: &str,
-    generation: &DesktopMarketGeneration,
+    generation: MarketPublicationGeneration,
 ) -> String {
     let (first_sequence, last_sequence) = generation.sequence_range();
     format!(
         "{worker_label} · {subscription_id} · model g{} · {} retained · seq {first_sequence}–{last_sequence}",
         generation.publication_generation(),
-        generation.items().len(),
+        generation.retained_items(),
     )
 }
 
@@ -1231,7 +1231,7 @@ impl TerminalApp {
         self.worker_label = worker_label;
         self.subscription_id = subscription_id;
         self.replay_label =
-            generation_status(&self.worker_label, &self.subscription_id, &generation);
+            generation_status(&self.worker_label, &self.subscription_id, generation);
         let next_state = match (&self.chart, update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
                 let theme = self.theme;
@@ -1257,18 +1257,12 @@ impl TerminalApp {
                 });
                 publication_chart_state(accepted, recovery_pending)
             }
-            (None, axiusflow_application::ReplayStreamUpdate::Delta(_)) => {
-                if let Some(diagnostics) = ui_diagnostics {
-                    self.market_worker
-                        .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
-                            generation: diagnostics.generation(),
-                        });
-                }
-                self.set_chart_state(
-                    ChartState::Error,
-                    "market delta arrived before the initial covering snapshot".to_string(),
-                    cx,
-                );
+            (
+                None,
+                axiusflow_application::ReplayStreamUpdate::Delta(_)
+                | axiusflow_application::ReplayStreamUpdate::Tail(_),
+            ) => {
+                self.reject_incremental_publication(ui_diagnostics, cx);
                 return;
             }
         };
@@ -1300,6 +1294,24 @@ impl TerminalApp {
             );
         }
         cx.notify();
+    }
+
+    fn reject_incremental_publication(
+        &mut self,
+        diagnostics: Option<PendingUiDiagnostics>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(diagnostics) = diagnostics {
+            self.market_worker
+                .send_ui_diagnostics(UiDiagnosticsFeedback::Coalesced {
+                    generation: diagnostics.generation(),
+                });
+        }
+        self.set_chart_state(
+            ChartState::Error,
+            "market update arrived before the initial covering snapshot".to_string(),
+            cx,
+        );
     }
 
     fn apply_recovery(
@@ -1340,7 +1352,7 @@ impl TerminalApp {
                 self.replay_label = generation_status(
                     &self.worker_label,
                     &bootstrap.subscription_id,
-                    &bootstrap.generation,
+                    MarketPublicationGeneration::from_generation(&bootstrap.generation),
                 );
                 self.chart_state = ChartState::Ready;
                 self.chart_state_message = "market snapshot is current".to_string();
@@ -1463,9 +1475,9 @@ impl TerminalApp {
             MarketWorkerMessage::RithmicLive {
                 selection_generation,
                 series_generation,
-                snapshot,
+                update,
             } => {
-                self.apply_rithmic_live(selection_generation, series_generation, &snapshot, cx);
+                self.apply_rithmic_live(selection_generation, series_generation, update, cx);
             }
             MarketWorkerMessage::RithmicDom(frame) => {
                 self.apply_rithmic_dom(frame, cx);
@@ -1972,7 +1984,7 @@ impl TerminalApp {
         let replay_label = generation_status(
             &bootstrap.worker_label,
             &bootstrap.subscription_id,
-            &bootstrap.generation,
+            MarketPublicationGeneration::from_generation(&bootstrap.generation),
         );
         let snapshot = bootstrap.snapshot;
         let visible_bar_count = snapshot.bars().len();
@@ -1998,7 +2010,7 @@ impl TerminalApp {
         &mut self,
         selection_generation: std::num::NonZeroUsize,
         series_generation: std::num::NonZeroUsize,
-        snapshot: &axiusflow_application::ReplaySnapshot,
+        update: axiusflow_application::ReplayStreamUpdate,
         cx: &mut Context<Self>,
     ) {
         let Some(selected) = self.series_browser.selected() else {
@@ -2014,7 +2026,7 @@ impl TerminalApp {
         };
         if chart
             .update(cx, |chart, chart_cx| {
-                let result = chart.load_replay(snapshot);
+                let result = chart.try_queue_replay_update(update).map_err(|_| ());
                 if result.is_ok() {
                     chart_cx.notify();
                 }

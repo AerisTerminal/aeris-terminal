@@ -15,6 +15,9 @@ pub enum ReplayValidationError {
     NonIncreasingTimestamp {
         source_sequence: u64,
     },
+    TailTimestampChanged {
+        source_sequence: u64,
+    },
     ProvenanceSequenceMismatch {
         bar: u64,
         provenance: u64,
@@ -74,6 +77,10 @@ impl fmt::Display for ReplayValidationError {
             Self::NonIncreasingTimestamp { source_sequence } => write!(
                 formatter,
                 "replay timestamp did not increase at source sequence {source_sequence}"
+            ),
+            Self::TailTimestampChanged { source_sequence } => write!(
+                formatter,
+                "forming replay timestamp changed at source sequence {source_sequence}"
             ),
             Self::ProvenanceSequenceMismatch { bar, provenance } => write!(
                 formatter,
@@ -144,6 +151,7 @@ impl Error for ReplayValidationError {
             Self::MarketData(error) => Some(error),
             Self::Stream(error) => Some(error),
             Self::NonIncreasingTimestamp { .. }
+            | Self::TailTimestampChanged { .. }
             | Self::ProvenanceSequenceMismatch { .. }
             | Self::ExchangeTimestampOverflow { .. }
             | Self::ProvenanceExchangeTimestampMismatch { .. }

@@ -16,7 +16,7 @@ pub use generation::{
 pub use provenance::{
     ProvenancedMarketBar, ReplayProvenance, RequestContext, validate_provenanced_market_bar,
 };
-pub use replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate};
+pub use replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate};
 pub use stream::{
     MarketEventProvenance, Provenanced, SequenceDecision, SnapshotEvidence, StreamDelta,
 };

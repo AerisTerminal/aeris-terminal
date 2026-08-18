@@ -1243,6 +1243,7 @@ impl Render for OriginChartView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiusflow_application::{Provenanced, ReplayTailUpdate};
 
     fn interactive_chart() -> OriginChartView {
         let mut chart = OriginChartView::new();
@@ -1272,6 +1273,58 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[test]
+    fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+            .expect("embedded replay validates");
+        let mut chart = OriginChartView::with_replay(&replay);
+        let initial_expected = chart
+            .expected_replay_sequence()
+            .expect("snapshot establishes sequence");
+        let source = replay.bars().last().cloned().expect("tail exists");
+        let mut replacement_bar = *source.value();
+        replacement_bar.close = replacement_bar.close.saturating_add(1);
+        let mut replacement_provenance = source.provenance().clone();
+        replacement_provenance.event_id = "tail-replacement".to_string();
+        let replacement = ReplayTailUpdate::try_new(
+            Provenanced::new(replacement_bar, replacement_provenance),
+            replay.evidence().publication_generation + 1,
+            true,
+        )
+        .expect("replacement validates");
+        chart
+            .try_queue_replay_update(ReplayStreamUpdate::Tail(replacement))
+            .expect("replacement queues");
+        chart.apply_pending_data();
+        assert_eq!(chart.expected_replay_sequence(), Some(initial_expected));
+        assert_eq!(
+            chart
+                .latest_market_provenance()
+                .map(|provenance| provenance.event_id.as_str()),
+            Some("tail-replacement")
+        );
+
+        let appended = EmbeddedReplaySource
+            .load_delta(initial_expected.saturating_sub(1))
+            .expect("fixture delta loads")
+            .expect("fixture delta exists");
+        let appended = ReplayTailUpdate::try_new(
+            appended.item().clone(),
+            replay.evidence().publication_generation + 2,
+            true,
+        )
+        .expect("append validates");
+        chart
+            .try_queue_replay_update(ReplayStreamUpdate::Tail(appended))
+            .expect("append queues");
+        chart.apply_pending_data();
+        assert_eq!(
+            chart.expected_replay_sequence(),
+            initial_expected.checked_add(1)
+        );
     }
 
     #[cfg(feature = "diagnostics")]

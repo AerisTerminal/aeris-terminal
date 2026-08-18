@@ -2,7 +2,7 @@
 
 use crate::errors::ReplayValidationError;
 use crate::provenance::ProvenancedMarketBar;
-use crate::replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate};
+use crate::replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate};
 use crate::stream::{SequenceDecision, StreamDelta, StreamProtocolError};
 use axiusflow_instruments::InstrumentRevision;
 use axiusflow_market_data::BarDefinition;
@@ -143,6 +143,7 @@ impl MarketBarClientModel {
         match update {
             ReplayStreamUpdate::Snapshot(snapshot) => self.install_snapshot(&snapshot),
             ReplayStreamUpdate::Delta(delta) => self.apply_delta(&delta),
+            ReplayStreamUpdate::Tail(update) => self.apply_tail(&update),
         }
     }
 
@@ -282,6 +283,76 @@ impl MarketBarClientModel {
                 let generation = MarketGeneration::try_new(
                     current.session_generation(),
                     next_generation,
+                    first_sequence,
+                    last_sequence,
+                    items,
+                )?;
+                self.session = Some(candidate_session);
+                self.current = Some(generation.clone());
+                self.pending_resnapshot = None;
+                Ok(MarketBarModelOutcome::Published(generation))
+            }
+        }
+    }
+
+    fn apply_tail(
+        &mut self,
+        update: &ReplayTailUpdate,
+    ) -> Result<MarketBarModelOutcome, ReplayValidationError> {
+        let Some(current) = self.current.as_ref() else {
+            return Ok(MarketBarModelOutcome::ResnapshotRequired(
+                self.pending_resnapshot
+                    .unwrap_or(ResnapshotReason::InitialSubscription),
+            ));
+        };
+        if update.item().provenance().session_generation != current.session_generation() {
+            self.session = None;
+            self.pending_resnapshot = Some(ResnapshotReason::SessionChanged);
+            return Ok(MarketBarModelOutcome::ResnapshotRequired(
+                ResnapshotReason::SessionChanged,
+            ));
+        }
+        let Some(mut candidate_session) = self.session else {
+            return Ok(MarketBarModelOutcome::ResnapshotRequired(
+                self.pending_resnapshot
+                    .unwrap_or(ResnapshotReason::SequenceGap),
+            ));
+        };
+        let decision = candidate_session.accept_tail(update)?;
+        match decision {
+            SequenceDecision::Duplicate => Ok(MarketBarModelOutcome::Duplicate),
+            SequenceDecision::Gap { .. } | SequenceDecision::SnapshotRequired => {
+                self.session = Some(candidate_session);
+                self.pending_resnapshot = Some(ResnapshotReason::SequenceGap);
+                Ok(MarketBarModelOutcome::ResnapshotRequired(
+                    ResnapshotReason::SequenceGap,
+                ))
+            }
+            SequenceDecision::Accepted => {
+                let mut items = current.items().to_vec();
+                let sequence = update.item().value().source_sequence;
+                if current.sequence_range().1 == sequence {
+                    if let Some(last) = items.last_mut() {
+                        *last = update.item().clone();
+                    }
+                } else {
+                    items.push(update.item().clone());
+                }
+                let evicted = items.len().saturating_sub(self.maximum_items.get());
+                items.drain(..evicted);
+                let first_sequence = items
+                    .first()
+                    .ok_or(StreamProtocolError::EmptySnapshot)?
+                    .value()
+                    .source_sequence;
+                let last_sequence = items
+                    .last()
+                    .ok_or(StreamProtocolError::EmptySnapshot)?
+                    .value()
+                    .source_sequence;
+                let generation = MarketGeneration::try_new(
+                    current.session_generation(),
+                    update.publication_generation(),
                     first_sequence,
                     last_sequence,
                     items,

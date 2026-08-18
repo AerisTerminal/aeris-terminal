@@ -269,6 +269,30 @@ impl ChartDataBridge {
                         merged.accepted_deltas.push(delta.item().clone());
                     }
                 }
+                ReplayStreamUpdate::Tail(update) => {
+                    if update.item().provenance().session_generation != candidate_session_generation
+                        || update.item().provenance().schema_version
+                            != candidate_series.schema_version
+                        || update.publication_generation() <= candidate_publication_generation
+                    {
+                        continue;
+                    }
+                    let Some(session) = candidate_session.as_mut() else {
+                        merged.last_sequence_decision = Some(SequenceDecision::SnapshotRequired);
+                        continue;
+                    };
+                    let decision = session.accept_tail(&update)?;
+                    merged.last_sequence_decision = Some(decision);
+                    if matches!(decision, SequenceDecision::Gap { .. }) {
+                        self.request_resnapshot(ResnapshotReason::SequenceGap);
+                    }
+                    if decision == SequenceDecision::Accepted {
+                        candidate_publication_generation = update.publication_generation();
+                        candidate_last_sequence =
+                            candidate_last_sequence.max(update.item().value().source_sequence);
+                        merged.accepted_deltas.push(update.item().clone());
+                    }
+                }
             }
         }
         self.session = candidate_session;

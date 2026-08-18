@@ -13,11 +13,26 @@ pub struct SeriesSnapshot {
     pub bars: Arc<[MarketBar]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SeriesTail {
+    pub provider_generation: ProviderGeneration,
+    pub publication_generation: u64,
+    pub price_scale: u8,
+    pub quantity_scale: u8,
+    pub forming: bool,
+    pub bar: MarketBar,
+}
+
+struct StoredSeries {
+    covering: Arc<SeriesSnapshot>,
+    tail: Option<SeriesTail>,
+}
+
 pub(crate) struct SeriesStore {
     maximum_series: NonZeroUsize,
     maximum_bars: NonZeroUsize,
     total_bars: usize,
-    series: BTreeMap<BarSeriesKey, Arc<SeriesSnapshot>>,
+    series: BTreeMap<BarSeriesKey, StoredSeries>,
 }
 
 #[derive(Clone, Copy)]
@@ -93,24 +108,30 @@ impl SeriesStore {
         validate_bars(&bars)?;
         let current = self.series.get(&series);
         if let Some(current) = current {
-            if provider_generation < current.provider_generation {
+            if provider_generation < current.covering.provider_generation {
                 return Err(EngineError::StaleSeriesGeneration {
-                    current: current.provider_generation,
+                    current: current.covering.provider_generation,
                     received: provider_generation,
                 });
             }
-            if provider_generation == current.provider_generation {
-                if current.bars.as_ref() == bars
-                    && current.price_scale == price_scale
-                    && current.quantity_scale == quantity_scale
-                    && current.forming == forming
+            if provider_generation == current.covering.provider_generation {
+                let current_snapshot = current.snapshot();
+                if current_snapshot.bars.as_ref() == bars
+                    && current_snapshot.price_scale == price_scale
+                    && current_snapshot.quantity_scale == quantity_scale
+                    && current_snapshot.forming == forming
                 {
-                    return Ok(Arc::clone(current));
+                    return Ok(current_snapshot);
                 }
                 if realtime {
-                    validate_realtime_transition(current, price_scale, quantity_scale, &bars)?;
+                    validate_realtime_transition(
+                        &current_snapshot,
+                        price_scale,
+                        quantity_scale,
+                        &bars,
+                    )?;
                 } else {
-                    validate_history_transition(current, &bars)?;
+                    validate_history_transition(&current_snapshot, &bars)?;
                 }
             }
         } else if self.series.len() == self.maximum_series.get() {
@@ -118,7 +139,7 @@ impl SeriesStore {
                 maximum: self.maximum_series,
             });
         }
-        let retained = current.map_or(0, |snapshot| snapshot.bars.len());
+        let retained = current.map_or(0, StoredSeries::bar_count);
         let projected = self
             .total_bars
             .checked_sub(retained)
@@ -132,6 +153,7 @@ impl SeriesStore {
         }
         let publication_generation = match current {
             Some(snapshot) => snapshot
+                .covering
                 .publication_generation
                 .checked_add(1)
                 .ok_or(EngineError::CapacityOverflow)?,
@@ -147,19 +169,118 @@ impl SeriesStore {
             bars: bars.into(),
         });
         self.total_bars = projected;
-        self.series.insert(series, Arc::clone(&snapshot));
+        let stored = stored_series(&snapshot, realtime)?;
+        self.series.insert(series, stored);
         Ok(snapshot)
     }
 
+    pub(crate) fn install_realtime_tail(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bar: MarketBar,
+        forming: bool,
+    ) -> Result<SeriesTail, EngineError> {
+        bar.validate()?;
+        let current = self
+            .series
+            .get_mut(series)
+            .ok_or(EngineError::EmptySeries)?;
+        if provider_generation != current.covering.provider_generation {
+            return Err(EngineError::StaleSeriesGeneration {
+                current: current.covering.provider_generation,
+                received: provider_generation,
+            });
+        }
+        if current.covering.price_scale != price_scale
+            || current.covering.quantity_scale != quantity_scale
+        {
+            return Err(EngineError::ConflictingSeriesGeneration(
+                provider_generation,
+            ));
+        }
+
+        let previous = current.tail.map_or_else(
+            || current.covering.bars.last().copied(),
+            |tail| Some(tail.bar),
+        );
+        let previous = previous.ok_or(EngineError::EmptySeries)?;
+        if bar.source_sequence == previous.source_sequence {
+            if current.tail.is_none()
+                || bar.exchange_timestamp_unix_nanos != previous.exchange_timestamp_unix_nanos
+            {
+                return Err(EngineError::ConflictingSeriesGeneration(
+                    provider_generation,
+                ));
+            }
+        } else {
+            let expected = previous
+                .source_sequence
+                .checked_add(1)
+                .ok_or(EngineError::CapacityOverflow)?;
+            if bar.source_sequence != expected
+                || bar.exchange_timestamp_unix_nanos <= previous.exchange_timestamp_unix_nanos
+            {
+                return Err(EngineError::ConflictingSeriesGeneration(
+                    provider_generation,
+                ));
+            }
+            if let Some(tail) = current.tail.take() {
+                let mut completed = current.covering.bars.to_vec();
+                completed.push(tail.bar);
+                current.covering = Arc::new(SeriesSnapshot {
+                    series: current.covering.series.clone(),
+                    provider_generation,
+                    publication_generation: tail.publication_generation,
+                    price_scale,
+                    quantity_scale,
+                    forming: false,
+                    bars: completed.into(),
+                });
+            } else {
+                self.total_bars = self
+                    .total_bars
+                    .checked_add(1)
+                    .ok_or(EngineError::CapacityOverflow)?;
+                if self.total_bars > self.maximum_bars.get() {
+                    self.total_bars = self.total_bars.saturating_sub(1);
+                    return Err(EngineError::BarLimitExceeded {
+                        maximum: self.maximum_bars,
+                        requested: self.total_bars.saturating_add(1),
+                    });
+                }
+            }
+        }
+        let publication_generation = current
+            .tail
+            .map_or(current.covering.publication_generation, |tail| {
+                tail.publication_generation
+            })
+            .checked_add(1)
+            .ok_or(EngineError::CapacityOverflow)?;
+        let tail = SeriesTail {
+            provider_generation,
+            publication_generation,
+            price_scale,
+            quantity_scale,
+            forming,
+            bar,
+        };
+        current.tail = Some(tail);
+        Ok(tail)
+    }
+
     pub(crate) fn get(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
-        self.series.get(series).map(Arc::clone)
+        self.series.get(series).map(StoredSeries::snapshot)
     }
 
     pub(crate) fn invalidate(&mut self, series: &BarSeriesKey) -> bool {
         let Some(removed) = self.series.remove(series) else {
             return false;
         };
-        self.total_bars = self.total_bars.saturating_sub(removed.bars.len());
+        self.total_bars = self.total_bars.saturating_sub(removed.bar_count());
         true
     }
 
@@ -174,6 +295,68 @@ impl SeriesStore {
     pub(crate) fn approximate_bytes(&self) -> usize {
         self.total_bars.saturating_mul(size_of::<MarketBar>())
     }
+
+    #[cfg(test)]
+    pub(crate) fn completed_bars(&self, series: &BarSeriesKey) -> Option<Arc<[MarketBar]>> {
+        self.series
+            .get(series)
+            .map(|stored| Arc::clone(&stored.covering.bars))
+    }
+}
+
+impl StoredSeries {
+    fn bar_count(&self) -> usize {
+        self.covering.bars.len() + usize::from(self.tail.is_some())
+    }
+
+    fn snapshot(&self) -> Arc<SeriesSnapshot> {
+        let Some(tail) = self.tail else {
+            return Arc::clone(&self.covering);
+        };
+        let mut bars = self.covering.bars.to_vec();
+        bars.push(tail.bar);
+        Arc::new(SeriesSnapshot {
+            series: self.covering.series.clone(),
+            provider_generation: tail.provider_generation,
+            publication_generation: tail.publication_generation,
+            price_scale: tail.price_scale,
+            quantity_scale: tail.quantity_scale,
+            forming: tail.forming,
+            bars: bars.into(),
+        })
+    }
+}
+
+fn stored_series(
+    snapshot: &Arc<SeriesSnapshot>,
+    realtime: bool,
+) -> Result<StoredSeries, EngineError> {
+    if !realtime || !snapshot.forming {
+        return Ok(StoredSeries {
+            covering: Arc::clone(snapshot),
+            tail: None,
+        });
+    }
+    let (tail, completed) = snapshot.bars.split_last().ok_or(EngineError::EmptySeries)?;
+    Ok(StoredSeries {
+        covering: Arc::new(SeriesSnapshot {
+            series: snapshot.series.clone(),
+            provider_generation: snapshot.provider_generation,
+            publication_generation: snapshot.publication_generation,
+            price_scale: snapshot.price_scale,
+            quantity_scale: snapshot.quantity_scale,
+            forming: false,
+            bars: completed.into(),
+        }),
+        tail: Some(SeriesTail {
+            provider_generation: snapshot.provider_generation,
+            publication_generation: snapshot.publication_generation,
+            price_scale: snapshot.price_scale,
+            quantity_scale: snapshot.quantity_scale,
+            forming: snapshot.forming,
+            bar: *tail,
+        }),
+    })
 }
 
 fn validate_history_transition(

@@ -249,6 +249,54 @@ impl ReplaySnapshot {
 pub enum ReplayStreamUpdate {
     Snapshot(ReplaySnapshot),
     Delta(StreamDelta<ProvenancedMarketBar>),
+    Tail(ReplayTailUpdate),
+}
+
+/// One incremental live bar that either replaces the forming tail or appends its successor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayTailUpdate {
+    item: ProvenancedMarketBar,
+    publication_generation: u64,
+    forming: bool,
+}
+
+impl ReplayTailUpdate {
+    /// Creates one validated live-tail publication.
+    ///
+    /// # Errors
+    /// Returns an error for invalid canonical data, provenance, or a zero publication generation.
+    pub fn try_new(
+        item: ProvenancedMarketBar,
+        publication_generation: u64,
+        forming: bool,
+    ) -> Result<Self, ReplayValidationError> {
+        validate_provenanced_market_bar(&item)?;
+        if publication_generation == 0 {
+            return Err(ReplayValidationError::InvalidSnapshotEvidence(
+                "publication_generation",
+            ));
+        }
+        Ok(Self {
+            item,
+            publication_generation,
+            forming,
+        })
+    }
+
+    #[must_use]
+    pub const fn item(&self) -> &ProvenancedMarketBar {
+        &self.item
+    }
+
+    #[must_use]
+    pub const fn publication_generation(&self) -> u64 {
+        self.publication_generation
+    }
+
+    #[must_use]
+    pub const fn forming(&self) -> bool {
+        self.forming
+    }
 }
 
 /// Consumer-side replay state that never speculates across sequence gaps.
@@ -329,6 +377,38 @@ impl ReplaySession {
         Ok(decision)
     }
 
+    /// Validates one append-or-replace live tail against the accepted covering state.
+    ///
+    /// # Errors
+    /// Returns an error when canonical data is invalid or a replacement changes bar time.
+    pub fn accept_tail(
+        &mut self,
+        update: &ReplayTailUpdate,
+    ) -> Result<SequenceDecision, ReplayValidationError> {
+        validate_provenanced_market_bar(update.item())?;
+        let Some(expected) = self.sequence_tracker.expected_sequence() else {
+            return Ok(SequenceDecision::SnapshotRequired);
+        };
+        let current = expected.saturating_sub(1);
+        let sequence = update.item().value().source_sequence;
+        if sequence < current {
+            return Ok(SequenceDecision::Duplicate);
+        }
+        if sequence == current {
+            if update.item().provenance().exchange_timestamp_unix_nanos
+                != self.last_exchange_timestamp_unix_nanos
+            {
+                return Err(ReplayValidationError::TailTimestampChanged {
+                    source_sequence: sequence,
+                });
+            }
+            return Ok(SequenceDecision::Accepted);
+        }
+        let delta =
+            StreamDelta::try_new(sequence.saturating_sub(1), sequence, update.item().clone())?;
+        self.accept_delta(&delta)
+    }
+
     /// Returns the next source sequence expected by this session.
     #[must_use]
     pub const fn expected_sequence(self) -> Option<u64> {
@@ -372,6 +452,49 @@ mod tests {
         assert_eq!(
             snapshot.bars()[0].value().exchange_timestamp_seconds,
             snapshot.bars()[1].value().exchange_timestamp_seconds
+        );
+    }
+
+    #[test]
+    fn live_tail_replaces_in_place_then_appends_contiguously() {
+        let baseline = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+            .expect("fixture snapshot");
+        let mut session = ReplaySession::try_new(&baseline).expect("session starts");
+        let mut replacement_bar = *baseline.bars()[1].value();
+        replacement_bar.close = replacement_bar.close.saturating_add(1);
+        let replacement = ReplayTailUpdate::try_new(
+            Provenanced::new(replacement_bar, baseline.bars()[1].provenance().clone()),
+            baseline.evidence().publication_generation + 1,
+            true,
+        )
+        .expect("replacement validates");
+        assert_eq!(
+            session.accept_tail(&replacement).expect("tail replaces"),
+            SequenceDecision::Accepted
+        );
+        assert_eq!(
+            session.expected_sequence(),
+            baseline.evidence().last_sequence.checked_add(1)
+        );
+
+        let appended = EmbeddedReplaySource
+            .load_delta(baseline.evidence().last_sequence)
+            .expect("fixture delta loads")
+            .expect("fixture delta exists");
+        let appended = ReplayTailUpdate::try_new(
+            appended.item().clone(),
+            baseline.evidence().publication_generation + 2,
+            true,
+        )
+        .expect("append validates");
+        assert_eq!(
+            session.accept_tail(&appended).expect("tail appends"),
+            SequenceDecision::Accepted
+        );
+        assert_eq!(
+            session.expected_sequence(),
+            appended.item().value().source_sequence.checked_add(1)
         );
     }
 }

@@ -1,6 +1,6 @@
 use crate::series_store::SeriesSnapshot;
-use crate::{ConsumerId, EngineError, GenerationId};
-use axiusflow_market_data::BarSeriesKey;
+use crate::{ConsumerId, EngineError, GenerationId, ProviderGeneration};
+use axiusflow_market_data::{BarSeriesKey, MarketBar};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11,8 +11,24 @@ pub struct ConsumerPublication {
     pub snapshot: Arc<SeriesSnapshot>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsumerSeriesUpdate {
+    pub consumer_id: ConsumerId,
+    pub generation: GenerationId,
+    pub publication_generation: u64,
+    pub series: BarSeriesKey,
+    pub provider_generation: ProviderGeneration,
+    pub forming: bool,
+    pub bar: MarketBar,
+}
+
+struct PublicationState {
+    series: BarSeriesKey,
+    publication_generation: u64,
+}
+
 pub(crate) struct PublicationManager {
-    latest: BTreeMap<ConsumerId, ConsumerPublication>,
+    latest: BTreeMap<ConsumerId, PublicationState>,
 }
 
 impl PublicationManager {
@@ -28,25 +44,53 @@ impl PublicationManager {
         generation: GenerationId,
         snapshot: Arc<SeriesSnapshot>,
     ) -> Result<ConsumerPublication, EngineError> {
-        let publication_generation = match self.latest.get(&consumer_id) {
-            Some(publication) => publication
-                .publication_generation
-                .checked_add(1)
-                .ok_or(EngineError::CapacityOverflow)?,
-            None => 1,
-        };
+        let publication_generation = self.next_generation(consumer_id)?;
         let publication = ConsumerPublication {
             consumer_id,
             generation,
             publication_generation,
             snapshot,
         };
-        self.latest.insert(consumer_id, publication.clone());
+        self.latest.insert(
+            consumer_id,
+            PublicationState {
+                series: publication.snapshot.series.clone(),
+                publication_generation,
+            },
+        );
         Ok(publication)
     }
 
-    pub(crate) fn latest(&self, consumer_id: ConsumerId) -> Option<&ConsumerPublication> {
-        self.latest.get(&consumer_id)
+    pub(crate) fn publish_update(
+        &mut self,
+        consumer_id: ConsumerId,
+        generation: GenerationId,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        forming: bool,
+        bar: MarketBar,
+    ) -> Result<ConsumerSeriesUpdate, EngineError> {
+        let publication_generation = self.next_generation(consumer_id)?;
+        self.latest.insert(
+            consumer_id,
+            PublicationState {
+                series: series.clone(),
+                publication_generation,
+            },
+        );
+        Ok(ConsumerSeriesUpdate {
+            consumer_id,
+            generation,
+            publication_generation,
+            series: series.clone(),
+            provider_generation,
+            forming,
+            bar,
+        })
+    }
+
+    pub(crate) fn contains(&self, consumer_id: ConsumerId) -> bool {
+        self.latest.contains_key(&consumer_id)
     }
 
     pub(crate) fn remove(&mut self, consumer_id: ConsumerId) {
@@ -55,6 +99,15 @@ impl PublicationManager {
 
     pub(crate) fn invalidate_series(&mut self, series: &BarSeriesKey) {
         self.latest
-            .retain(|_, publication| &publication.snapshot.series != series);
+            .retain(|_, publication| &publication.series != series);
+    }
+
+    fn next_generation(&self, consumer_id: ConsumerId) -> Result<u64, EngineError> {
+        self.latest.get(&consumer_id).map_or(Ok(1), |current| {
+            current
+                .publication_generation
+                .checked_add(1)
+                .ok_or(EngineError::CapacityOverflow)
+        })
     }
 }

@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 22 of 180 tasks complete.**
+**Verified progress: 83 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -1582,7 +1582,9 @@ publish immediately
 
 # 34. ACTIVE BAR UPDATES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `SeriesStore` retains completed history in an immutable shared allocation and stores the forming bar separately. Coinbase and Rithmic realtime aggregation publish one protocol `SeriesUpdate` for same-bucket revisions at the existing 16 ms presentation cadence; when a bucket rolls between flushes, one covering publication preserves the completed bar's final OHLCV and is immediately stored again as immutable history plus a separate forming tail. Deterministic engine tests verify replace-last behavior, contiguous append, stable Rithmic forming-bar timestamps, boundary-roll preservation, and completed-history pointer identity across revisions.
 
 Do not repeatedly rebuild all historical bars when a new tick arrives.
 
@@ -1740,7 +1742,9 @@ The UI must never display a plausible but silently corrupted book.
 
 # 39. DO NOT SEND EVERY MARKET EVENT TO GPUI
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): provider events remain correctness-preserving inside the engine, while presentation receives only frame-cadenced same-bucket revisions or a covering image when a bar boundary must preserve more than one changed tail. Each consumer has one semantic series slot: a live tail merges into an unconsumed covering snapshot or replaces the prior pending tail. The desktop mailbox applies the same safe conflation and a deterministic regression proves 63 live revisions leave one queued update and one edge-triggered GPUI wake.
 
 The engine may receive:
 
@@ -1891,7 +1895,9 @@ Do not reconstruct the engine.
 
 # 43. MANY CHARTS MUST SHARE IMMUTABLE DATA
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): canonical completed bars are held as `Arc<[MarketBar]>`, and consumer snapshots clone the shared allocation rather than its bars. The existing twenty-consumer regression proves all charts receive one provider generation and pointer-identical canonical history while retaining independent consumer publication state; chart-local application and Origin representations remain presentation-owned.
 
 Avoid copying giant bar vectors per chart.
 
@@ -4365,7 +4371,9 @@ Record CPU and memory rather than guessing.
 
 # 138. MEMORY SHARING
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): completed canonical history is shared through one immutable `Arc<[MarketBar]>` and the mutable forming tail is stored separately. A focused regression revises that tail repeatedly and proves the completed-history pointer remains identical, then proves a single new immutable allocation is created only when the completed tail rolls into history. Twenty simultaneous consumers continue to share the same canonical allocation.
 
 Where appropriate:
 
@@ -4383,7 +4391,9 @@ Desktop may create chart-engine-specific vertex/geometry representations where n
 
 # 139. UI RENDER CADENCE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the desktop mailbox raises one edge-triggered wake until it is drained, and `FramePollGate` admits at most one pending GPUI next-frame poll for an active window. Between frames, superseded live tails conflate safely; at the frame boundary `ChartDataBridge` validates append-or-replace semantics and Origin receives one merged streaming update. Deterministic mailbox and chart tests cover one wake for 63 revisions plus replacement and contiguous append through one frame drain. An optimized Windows `--windowed-benchmark` run rendered 256 measured frames with chart queue depth `0/1`, zero overflows, `6.8755 ms` update-to-frame p99, `24.3698 ms` first pixel, an advancing 420-refresh DWM timeline, and zero late, dropped, or missed-frame growth.
 
 Market data may arrive faster than screen refresh.
 

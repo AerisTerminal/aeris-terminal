@@ -169,6 +169,36 @@ impl ConsumerEvents {
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
     }
+
+    fn publish_series_update(&mut self, update: envelope::Payload) {
+        let envelope::Payload::SeriesUpdate(next) = update else {
+            return;
+        };
+        if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = self.snapshot.as_mut()
+            && snapshot.consumer_id == next.consumer_id
+            && snapshot.generation == next.generation
+            && snapshot.series == next.series
+            && let Some(bar) = next.bar.as_ref()
+        {
+            match snapshot.bars.last_mut() {
+                Some(current) if current.source_sequence == bar.source_sequence => *current = *bar,
+                Some(current)
+                    if current.source_sequence.checked_add(1) == Some(bar.source_sequence) =>
+                {
+                    snapshot.bars.push(*bar);
+                }
+                _ => {
+                    self.snapshot = Some(envelope::Payload::SeriesUpdate(next));
+                    return;
+                }
+            }
+            snapshot.provider_generation = next.provider_generation;
+            snapshot.publication_generation = next.publication_generation;
+            snapshot.forming = next.forming;
+            return;
+        }
+        self.snapshot = Some(envelope::Payload::SeriesUpdate(next));
+    }
 }
 
 struct RithmicOrderBook {
@@ -194,6 +224,7 @@ struct LiveHandoff {
     connected: bool,
     history_ready: bool,
     dirty: bool,
+    published: Option<PublishedTailState>,
 }
 
 struct RithmicLiveHandoff {
@@ -207,6 +238,7 @@ struct RithmicLiveHandoff {
     connected: bool,
     history_ready: bool,
     dirty: bool,
+    published: Option<PublishedTailState>,
     live_session_generation: Option<u64>,
     last_trade_sequence: Option<u64>,
     history_boundary_unix_nanos: i64,
@@ -215,6 +247,30 @@ struct RithmicLiveHandoff {
 enum RithmicLiveCadence {
     Fixed { seconds: i64 },
     Tick { trades: u32, forming: u32 },
+}
+
+enum LiveSeriesPublication {
+    Tail(MarketBar),
+    Covering(Vec<MarketBar>),
+}
+
+#[derive(Clone, Copy)]
+enum PublishedTailState {
+    Covering(u64),
+    Forming(u64),
+}
+
+fn requires_covering_publication(
+    published: Option<PublishedTailState>,
+    active_sequence: u64,
+) -> bool {
+    match published {
+        Some(PublishedTailState::Covering(sequence)) => {
+            sequence.checked_add(1) != Some(active_sequence)
+        }
+        Some(PublishedTailState::Forming(sequence)) => sequence != active_sequence,
+        None => true,
+    }
 }
 
 impl RithmicLiveHandoff {
@@ -243,6 +299,7 @@ impl RithmicLiveHandoff {
             connected: false,
             history_ready: false,
             dirty: false,
+            published: None,
             live_session_generation: None,
             last_trade_sequence: None,
             history_boundary_unix_nanos: i64::MIN,
@@ -256,6 +313,7 @@ impl RithmicLiveHandoff {
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
+        self.published = None;
         self.live_session_generation = None;
         self.last_trade_sequence = None;
         self.history_boundary_unix_nanos = i64::MIN;
@@ -278,6 +336,9 @@ impl RithmicLiveHandoff {
         self.quantity_scale = quantity_scale;
         self.bars = bars.to_vec();
         self.history_boundary_unix_nanos = boundary;
+        self.published = bars
+            .last()
+            .map(|bar| PublishedTailState::Covering(bar.source_sequence));
         self.live_session_generation = None;
         self.last_trade_sequence = None;
         if let RithmicLiveCadence::Tick { trades, forming } = &mut self.cadence {
@@ -291,6 +352,21 @@ impl RithmicLiveHandoff {
             }
         }
         Ok(())
+    }
+
+    fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
+        if !self.connected || !self.history_ready || !self.dirty {
+            return None;
+        }
+        let active = self.bars.last().copied()?;
+        self.dirty = false;
+        let covering = requires_covering_publication(self.published, active.source_sequence);
+        self.published = Some(PublishedTailState::Forming(active.source_sequence));
+        if covering {
+            Some(LiveSeriesPublication::Covering(self.bars.clone()))
+        } else {
+            Some(LiveSeriesPublication::Tail(active))
+        }
     }
 
     fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
@@ -396,7 +472,7 @@ impl RithmicLiveHandoff {
 fn updated_rithmic_bar(
     mut bar: MarketBar,
     trade: &MarketTrade,
-    exchange_timestamp_unix_nanos: i64,
+    _exchange_timestamp_unix_nanos: i64,
 ) -> Result<MarketBar, String> {
     bar.high = bar.high.max(trade.price);
     bar.low = bar.low.min(trade.price);
@@ -405,8 +481,6 @@ fn updated_rithmic_bar(
         .volume
         .checked_add(trade.quantity)
         .ok_or_else(|| "Rithmic live volume overflowed".to_string())?;
-    bar.exchange_timestamp_seconds = exchange_timestamp_unix_nanos.div_euclid(1_000_000_000);
-    bar.exchange_timestamp_unix_nanos = exchange_timestamp_unix_nanos;
     Ok(bar)
 }
 
@@ -440,6 +514,7 @@ impl LiveHandoff {
             connected: false,
             history_ready: false,
             dirty: false,
+            published: None,
         })
     }
 
@@ -450,6 +525,24 @@ impl LiveHandoff {
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
+        self.published = None;
+    }
+
+    fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
+        if !self.connected || !self.history_ready || !self.dirty {
+            return None;
+        }
+        let active = self.aggregator.in_flight()?;
+        self.dirty = false;
+        let covering = requires_covering_publication(self.published, active.source_sequence);
+        self.published = Some(PublishedTailState::Forming(active.source_sequence));
+        if covering {
+            let mut bars = self.aggregator.history();
+            bars.push(active);
+            Some(LiveSeriesPublication::Covering(bars))
+        } else {
+            Some(LiveSeriesPublication::Tail(active))
+        }
     }
 }
 
@@ -2354,6 +2447,9 @@ impl Coordinator<'_> {
             live.connected = connected;
             live.history_ready = true;
             live.dirty = live.aggregator.in_flight().is_some();
+            live.published = bars
+                .last()
+                .map(|bar| PublishedTailState::Covering(bar.source_sequence));
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
@@ -2415,7 +2511,7 @@ impl Coordinator<'_> {
                     .is_some_and(|live| live.connected && live.history_ready)
                 {
                     SeriesLoadState::Live
-                } else if engine.latest_publication(*consumer_id).is_some() {
+                } else if engine.has_publication(*consumer_id) {
                     SeriesLoadState::Ready
                 } else {
                     SeriesLoadState::Resolving
@@ -2984,36 +3080,47 @@ impl Coordinator<'_> {
         let ready = self
             .live
             .iter_mut()
-            .filter(|(_, live)| live.connected && live.history_ready && live.dirty)
             .filter_map(|(series, live)| {
-                let active = live.aggregator.in_flight()?;
-                let mut bars = live.aggregator.history();
-                bars.push(active);
-                live.dirty = false;
                 Some((
                     series.clone(),
                     live.generation,
                     live.aggregator.price_scale(),
                     live.aggregator.quantity_scale(),
-                    bars,
+                    live.take_publication()?,
                 ))
             })
             .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, bars) in ready {
-            if let Ok(publications) = self.engine.install_realtime(
-                generation,
-                &series,
-                price_scale,
-                quantity_scale,
-                bars,
-                true,
-            ) {
-                for publication in publications {
-                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        events.snapshot = Some(snapshot_message(&publication));
-                    }
-                }
-            } else {
+        for (series, generation, price_scale, quantity_scale, update) in ready {
+            let published = match update {
+                LiveSeriesPublication::Tail(bar) => self
+                    .engine
+                    .install_realtime_tail(
+                        generation,
+                        &series,
+                        price_scale,
+                        quantity_scale,
+                        bar,
+                        true,
+                    )
+                    .map(|publications| {
+                        for publication in publications {
+                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                                events.publish_series_update(series_update_message(&publication));
+                            }
+                        }
+                    }),
+                LiveSeriesPublication::Covering(bars) => self
+                    .engine
+                    .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
+                    .map(|publications| {
+                        for publication in publications {
+                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                                events.snapshot = Some(snapshot_message(&publication));
+                            }
+                        }
+                    }),
+            };
+            if published.is_err() {
                 self.realtime_interrupted("Coinbase live publication failed");
                 return;
             }
@@ -3024,39 +3131,61 @@ impl Coordinator<'_> {
         let ready = self
             .rithmic_live
             .values_mut()
-            .filter(|live| live.connected && live.history_ready && live.dirty)
-            .map(|live| {
-                live.dirty = false;
-                (
+            .filter_map(|live| {
+                Some((
                     live.series.clone(),
                     live.generation,
                     live.price_scale,
                     live.quantity_scale,
-                    live.bars.clone(),
-                )
+                    live.take_publication()?,
+                ))
             })
             .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, bars) in ready {
-            if let Ok(publications) = self.engine.install_realtime(
-                generation,
-                &series,
-                price_scale,
-                quantity_scale,
-                bars,
-                true,
-            ) {
-                for publication in publications {
-                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        publish_state(
-                            events,
-                            &publication,
-                            SeriesLoadState::Live,
-                            PersistenceState::Durable,
-                            None,
-                        );
-                    }
-                }
-            } else {
+        for (series, generation, price_scale, quantity_scale, update) in ready {
+            let published = match update {
+                LiveSeriesPublication::Tail(bar) => self
+                    .engine
+                    .install_realtime_tail(
+                        generation,
+                        &series,
+                        price_scale,
+                        quantity_scale,
+                        bar,
+                        true,
+                    )
+                    .map(|publications| {
+                        for publication in publications {
+                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                                events.publish_series_update(series_update_message(&publication));
+                                events.series_state = Some(series_state_with_persistence(
+                                    publication.consumer_id,
+                                    publication.generation,
+                                    ipc_series(&publication.series),
+                                    SeriesLoadState::Live,
+                                    PersistenceState::Durable,
+                                    None,
+                                ));
+                            }
+                        }
+                    }),
+                LiveSeriesPublication::Covering(bars) => self
+                    .engine
+                    .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
+                    .map(|publications| {
+                        for publication in publications {
+                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                                publish_state(
+                                    events,
+                                    &publication,
+                                    SeriesLoadState::Live,
+                                    PersistenceState::Durable,
+                                    None,
+                                );
+                            }
+                        }
+                    }),
+            };
+            if published.is_err() {
                 if let Some(live) = self.rithmic_live.get_mut(&series) {
                     live.history_ready = false;
                 }
@@ -3401,6 +3530,20 @@ fn snapshot_message(
             .collect(),
         publication_generation: publication.publication_generation,
         forming: publication.snapshot.forming,
+    })
+}
+
+fn series_update_message(
+    publication: &axiusflow_market_engine::ConsumerSeriesUpdate,
+) -> envelope::Payload {
+    envelope::Payload::SeriesUpdate(axiusflow_local_engine_protocol::SeriesUpdate {
+        consumer_id: publication.consumer_id.0.get(),
+        generation: publication.generation.0.get(),
+        series: Some(ipc_series(&publication.series)),
+        provider_generation: publication.provider_generation.0.get(),
+        bar: Some(ipc_bar(publication.bar)),
+        forming: publication.forming,
+        publication_generation: publication.publication_generation,
     })
 }
 
@@ -3925,6 +4068,27 @@ mod tests {
             .accept_trade(&rithmic_trade(3, 1, 125_000_000_000, 116))
             .expect("forming minute updates");
         assert_eq!(fixed.bars[1].close, 116);
+        fixed.connected = true;
+        assert!(matches!(
+            fixed.take_publication(),
+            Some(LiveSeriesPublication::Tail(bar))
+                if bar.source_sequence == 41 && bar.close == 116
+        ));
+        fixed
+            .accept_trade(&rithmic_trade(4, 1, 126_000_000_000, 117))
+            .expect("forming minute receives its final revision");
+        fixed
+            .accept_trade(&rithmic_trade(5, 1, 181_000_000_000, 118))
+            .expect("following minute starts before the next publication");
+        assert!(matches!(
+            fixed.take_publication(),
+            Some(LiveSeriesPublication::Covering(bars))
+                if bars.len() == 3
+                    && bars[1].source_sequence == 41
+                    && bars[1].close == 117
+                    && bars[2].source_sequence == 42
+                    && bars[2].close == 118
+        ));
         let mut engine = configured_engine().expect("engine configures");
         engine
             .begin_provider_session("rithmic", generation)
@@ -3956,7 +4120,7 @@ mod tests {
         assert_eq!(tick.bars[1].source_sequence, 41);
         assert_eq!(tick.bars[1].close, 121);
         assert_eq!(tick.bars[1].volume, 4);
-        assert_eq!(tick.bars[1].exchange_timestamp_unix_nanos, 60_600_000_000);
+        assert_eq!(tick.bars[1].exchange_timestamp_unix_nanos, 60_500_000_000);
         assert!(
             tick.accept_trade(&rithmic_trade(4, 2, 60_700_000_000, 122))
                 .is_err()
@@ -4558,6 +4722,29 @@ mod tests {
         }
     }
 
+    fn is_live_update(
+        event: &envelope::Payload,
+        generation: u64,
+        provider_generation: u64,
+        close: i64,
+    ) -> bool {
+        matches!(
+            event,
+            envelope::Payload::SeriesUpdate(update)
+                if update.generation == generation
+                    && update.provider_generation == provider_generation
+                    && update.forming
+                    && update.bar.as_ref().is_some_and(|bar| bar.close == close)
+        ) || matches!(
+            event,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == generation
+                    && snapshot.provider_generation == provider_generation
+                    && snapshot.forming
+                    && snapshot.bars.last().is_some_and(|bar| bar.close == close)
+        )
+    }
+
     fn attach_fixture_consumers(harness: &FixtureRealtimeHarness) {
         for client in 1..=2 {
             harness.service.attach(client).expect("client attaches");
@@ -4681,13 +4868,11 @@ mod tests {
             .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
             .expect("shared BTC trade");
         assert!(matches!(
-            poll_until(&harness.service, client_id, 9, |event| matches!(
-                event,
-                envelope::Payload::SeriesSnapshot(snapshot)
-                    if snapshot.forming && snapshot.generation == 1
-            )),
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.bars.last().is_some_and(|bar| bar.close == 200)
+            poll_until(&harness.service, client_id, 9, |event| {
+                is_live_update(event, 1, 1, 200)
+            }),
+            envelope::Payload::SeriesUpdate(update)
+                if update.bar.as_ref().is_some_and(|bar| bar.close == 200)
         ));
 
         harness
@@ -4699,13 +4884,10 @@ mod tests {
             .send(FixtureRealtimeAction::Trade(trade(2, "2.10", 2)))
             .expect("remaining chart trade");
         assert!(matches!(
-            poll_until(&harness.service, client_id, 9, |event| matches!(
-                event,
-                envelope::Payload::SeriesSnapshot(snapshot)
-                    if snapshot.forming
-                        && snapshot.bars.last().is_some_and(|bar| bar.close == 210)
-            )),
-            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1
+            poll_until(&harness.service, client_id, 9, |event| {
+                is_live_update(event, 1, 1, 210)
+            }),
+            envelope::Payload::SeriesUpdate(update) if update.generation == 1
         ));
         assert!(harness.service.poll_event(client_id, 1).is_err());
         assert_eq!(
@@ -4799,13 +4981,10 @@ mod tests {
                 .expect("live trade enters the bounded provider queue");
         }
         assert!(matches!(
-            poll_until(&harness.service, 2, 2, |event| matches!(
-                event,
-                envelope::Payload::SeriesSnapshot(snapshot)
-                    if snapshot.forming
-                        && snapshot.bars.last().is_some_and(|bar| bar.close == 300)
-            )),
-            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.provider_generation == 1
+            poll_until(&harness.service, 2, 2, |event| {
+                is_live_update(event, 1, 1, 300)
+            }),
+            envelope::Payload::SeriesUpdate(update) if update.provider_generation == 1
         ));
 
         harness
@@ -4834,9 +5013,9 @@ mod tests {
         {
             pending += 1;
             assert!(pending <= 7, "consumer publication state remains bounded");
-            if let envelope::Payload::SeriesSnapshot(snapshot) = event {
+            if let envelope::Payload::SeriesUpdate(update) = event {
                 latest_snapshot =
-                    snapshot.forming && snapshot.bars.last().is_some_and(|bar| bar.close == 300);
+                    update.forming && update.bar.as_ref().is_some_and(|bar| bar.close == 300);
             }
         }
         assert!(
@@ -4971,14 +5150,11 @@ mod tests {
             .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
             .expect("live trade follows storage degradation");
         assert!(matches!(
-            poll_until(&harness.service, 1, 1, |event| matches!(
-                event,
-                envelope::Payload::SeriesSnapshot(snapshot)
-                    if snapshot.forming
-                        && snapshot.bars.last().is_some_and(|bar| bar.close == 200)
-            )),
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.provider_generation == 1 && snapshot.generation == 1
+            poll_until(&harness.service, 1, 1, |event| {
+                is_live_update(event, 1, 1, 200)
+            }),
+            envelope::Payload::SeriesUpdate(update)
+                if update.provider_generation == 1 && update.generation == 1
         ));
     }
 
@@ -6043,16 +6219,13 @@ mod tests {
             .actions
             .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
             .expect("first live trade");
-        let first_live = poll_until(
-            &harness.service,
-            1,
-            1,
-            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.provider_generation == 1 && snapshot.forming),
-        );
+        let first_live = poll_until(&harness.service, 1, 1, |event| {
+            is_live_update(event, 1, 1, 200)
+        });
         assert!(matches!(
             first_live,
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.bars.last().is_some_and(|bar| bar.source_sequence == 3 && bar.close == 200)
+            envelope::Payload::SeriesUpdate(update)
+                if update.bar.as_ref().is_some_and(|bar| bar.source_sequence == 3 && bar.close == 200)
         ));
 
         harness
@@ -6092,18 +6265,10 @@ mod tests {
             .send(FixtureRealtimeAction::Heartbeat)
             .expect("recovery heartbeat");
         for (client, consumer) in [(1, 1), (2, 2)] {
-            let resumed = poll_until(
-                &harness.service,
-                client,
-                consumer,
-                |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.provider_generation == 2 && snapshot.forming),
-            );
-            assert!(matches!(
-                resumed,
-                envelope::Payload::SeriesSnapshot(snapshot)
-                    if snapshot.generation == 1
-                        && snapshot.bars.last().is_some_and(|bar| bar.close == 210)
-            ));
+            let resumed = poll_until(&harness.service, client, consumer, |event| {
+                is_live_update(event, 1, 2, 210)
+            });
+            assert!(is_live_update(&resumed, 1, 2, 210));
         }
         harness.service.detach(1).expect("first client detaches");
         assert!(
@@ -6278,16 +6443,13 @@ mod tests {
                 "ETH-USD", 10, "2000.00", 1,
             )))
             .expect("ETH live trade");
-        let live = poll_until(
-            &harness.service,
-            1,
-            1,
-            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2 && snapshot.forming),
-        );
+        let live = poll_until(&harness.service, 1, 1, |event| {
+            is_live_update(event, 2, 1, 200_000)
+        });
         assert!(matches!(
             live,
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.bars.last().is_some_and(|bar| {
+            envelope::Payload::SeriesUpdate(update)
+                if update.bar.as_ref().is_some_and(|bar| {
                     bar.exchange_timestamp_seconds == 600 && bar.close == 200_000
                 })
         ));

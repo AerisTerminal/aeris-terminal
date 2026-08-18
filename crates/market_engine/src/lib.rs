@@ -11,7 +11,7 @@ mod series_store;
 
 pub use demand::{ConsumerDemand, ConsumerIdentity};
 pub use provider_manager::{ProviderCapabilities, ProviderHealth, ProviderStatus};
-pub use publication::ConsumerPublication;
+pub use publication::{ConsumerPublication, ConsumerSeriesUpdate};
 pub use series_store::SeriesSnapshot;
 
 use axiusflow_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
@@ -389,14 +389,56 @@ impl MarketEngine {
             .collect()
     }
 
+    /// Installs only the changed live tail and publishes one incremental update.
+    ///
+    /// Completed history remains shared and immutable while revisions to the forming
+    /// bar replace the prior tail without rebuilding the covering series.
+    ///
+    /// # Errors
+    /// Returns an error for stale generation, invalid continuity, precision, or capacity.
+    pub fn install_realtime_tail(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
+        bar: MarketBar,
+        forming: bool,
+    ) -> Result<Vec<ConsumerSeriesUpdate>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        let tail = self.series.install_realtime_tail(
+            series,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bar,
+            forming,
+        )?;
+        self.demands
+            .matching(series)
+            .into_iter()
+            .map(|(consumer_id, generation)| {
+                self.publications.publish_update(
+                    consumer_id,
+                    generation,
+                    series,
+                    tail.provider_generation,
+                    tail.forming,
+                    tail.bar,
+                )
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn current_demand(&self, consumer_id: ConsumerId) -> Option<&ConsumerDemand> {
         self.demands.current(consumer_id)
     }
 
     #[must_use]
-    pub fn latest_publication(&self, consumer_id: ConsumerId) -> Option<&ConsumerPublication> {
-        self.publications.latest(consumer_id)
+    pub fn has_publication(&self, consumer_id: ConsumerId) -> bool {
+        self.publications.contains(consumer_id)
     }
 
     /// Returns one immutable cached series for compatible in-memory derivation.
@@ -549,7 +591,7 @@ mod tests {
                 .expect("late BTC remains cacheable")
                 .is_empty()
         );
-        assert!(engine.latest_publication(id(1)).is_none());
+        assert!(!engine.has_publication(id(1)));
         let publication = engine
             .install_history(provider_generation(1), &eth, 2, 8, bars(2))
             .expect("current ETH publishes")
@@ -714,6 +756,93 @@ mod tests {
             engine.install_realtime(provider_generation(1), &btc, 2, 8, corrupted, true),
             Err(EngineError::ConflictingSeriesGeneration(_))
         ));
+    }
+
+    #[test]
+    fn covering_realtime_install_keeps_the_forming_bar_as_an_incremental_tail() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("covering realtime state installs");
+        let mut revised = bars(3).pop().expect("forming bar exists");
+        revised.close = 106;
+        engine
+            .install_realtime_tail(provider_generation(1), &btc, 2, 8, revised, true)
+            .expect("forming tail remains incrementally revisable");
+        let snapshot = engine
+            .series_snapshot(&btc)
+            .expect("revised series remains materializable");
+        assert_eq!(snapshot.bars.len(), 3);
+        assert_eq!(snapshot.bars[2].close, 106);
+    }
+
+    #[test]
+    fn realtime_tail_revisions_share_completed_history_until_bucket_roll() {
+        let mut engine = engine(2, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        register(&mut engine, 2, 1);
+        for consumer in 1..=2 {
+            engine
+                .set_series_demand(id(consumer), generation(1), &btc)
+                .expect("demand installs");
+        }
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        let completed = engine
+            .series
+            .completed_bars(&btc)
+            .expect("completed history is retained");
+
+        let mut tail = bars(3).pop().expect("tail exists");
+        let first = engine
+            .install_realtime_tail(provider_generation(1), &btc, 2, 8, tail, true)
+            .expect("tail appends");
+        assert_eq!(first.len(), 2);
+        assert_eq!(engine.metrics().stored_bars, 3);
+        assert!(Arc::ptr_eq(
+            &completed,
+            &engine
+                .series
+                .completed_bars(&btc)
+                .expect("completed history remains shared")
+        ));
+
+        tail.close = 106;
+        let revised = engine
+            .install_realtime_tail(provider_generation(1), &btc, 2, 8, tail, true)
+            .expect("forming tail revises");
+        assert_eq!(revised.len(), 2);
+        assert!(revised.iter().all(|update| update.bar.close == 106));
+        assert!(Arc::ptr_eq(
+            &completed,
+            &engine
+                .series
+                .completed_bars(&btc)
+                .expect("tail revision does not rebuild history")
+        ));
+
+        let next = bars(4).pop().expect("next tail exists");
+        engine
+            .install_realtime_tail(provider_generation(1), &btc, 2, 8, next, true)
+            .expect("next bucket appends");
+        assert!(!Arc::ptr_eq(
+            &completed,
+            &engine
+                .series
+                .completed_bars(&btc)
+                .expect("completed tail rolls into history once")
+        ));
+        let snapshot = engine
+            .series_snapshot(&btc)
+            .expect("covering state materializes");
+        assert_eq!(snapshot.bars.len(), 4);
+        assert_eq!(snapshot.bars[2].close, 106);
     }
 
     #[test]

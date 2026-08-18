@@ -117,10 +117,61 @@ pub enum ProviderCatalogEvent {
 
 pub struct MarketWorkerPublication {
     pub update: ReplayStreamUpdate,
-    pub generation: DesktopMarketGeneration,
+    pub generation: MarketPublicationGeneration,
     pub subscription_id: String,
     pub worker_label: String,
     pub ui_diagnostics: Option<PendingUiDiagnostics>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MarketPublicationGeneration {
+    publication_generation: u64,
+    retained_items: usize,
+    first_sequence: u64,
+    last_sequence: u64,
+}
+
+impl MarketPublicationGeneration {
+    #[must_use]
+    pub fn from_generation(generation: &DesktopMarketGeneration) -> Self {
+        let (first_sequence, last_sequence) = generation.sequence_range();
+        Self {
+            publication_generation: generation.publication_generation(),
+            retained_items: generation.items().len(),
+            first_sequence,
+            last_sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_tail(
+        publication_generation: u64,
+        retained_items: usize,
+        first_sequence: u64,
+        last_sequence: u64,
+    ) -> Self {
+        Self {
+            publication_generation,
+            retained_items,
+            first_sequence,
+            last_sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn publication_generation(self) -> u64 {
+        self.publication_generation
+    }
+
+    #[must_use]
+    pub const fn retained_items(self) -> usize {
+        self.retained_items
+    }
+
+    #[must_use]
+    pub const fn sequence_range(self) -> (u64, u64) {
+        (self.first_sequence, self.last_sequence)
+    }
 }
 
 pub enum MarketWorkerMessage {
@@ -147,7 +198,7 @@ pub enum MarketWorkerMessage {
     RithmicLive {
         selection_generation: NonZeroUsize,
         series_generation: NonZeroUsize,
-        snapshot: ReplaySnapshot,
+        update: ReplayStreamUpdate,
     },
     RithmicDom(DomFrame),
     CoinbaseSwitchMarker {
@@ -329,6 +380,13 @@ impl MarketWorkerSender {
         message: MarketWorkerMessage,
     ) -> Option<MarketWorkerMessage> {
         match message {
+            message @ MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Tail(_),
+                ..
+            }) => {
+                self.send_live_tail(queue, message);
+                None
+            }
             message @ MarketWorkerMessage::Diagnostics(_) => {
                 self.send_diagnostics(queue, message);
                 None
@@ -362,6 +420,44 @@ impl MarketWorkerSender {
                 None
             }
             message => Some(message),
+        }
+    }
+
+    fn send_live_tail(
+        &self,
+        queue: &mut VecDeque<MarketWorkerMessage>,
+        message: MarketWorkerMessage,
+    ) {
+        let incoming_generation = market_publication_generation(&message);
+        if let Some(index) = queue.iter().position(|queued| {
+            matches!(
+                queued,
+                MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Tail(_),
+                    ..
+                })
+            )
+        }) {
+            if market_publication_generation(&queue[index]) <= incoming_generation {
+                self.record_coalesced_message(&queue[index]);
+                queue[index] = message;
+            }
+            return;
+        }
+        if queue.len() >= self.mailbox.capacity
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::Diagnostics(_) | MarketWorkerMessage::Connection { .. }
+                )
+            })
+        {
+            queue.remove(index);
+        }
+        if queue.len() < self.mailbox.capacity {
+            queue.push_back(message);
+        } else {
+            self.record_coalesced_message(&message);
         }
     }
 
@@ -729,6 +825,15 @@ fn rithmic_message_generation(message: &MarketWorkerMessage) -> Option<(usize, u
             series_generation,
             ..
         } => Some((selection_generation.get(), series_generation.get())),
+        _ => None,
+    }
+}
+
+fn market_publication_generation(message: &MarketWorkerMessage) -> Option<u64> {
+    match message {
+        MarketWorkerMessage::Update(publication) => {
+            Some(publication.generation.publication_generation())
+        }
         _ => None,
     }
 }
@@ -1449,10 +1554,15 @@ impl FixtureMarketWorker {
         let ReplayStreamUpdate::Snapshot(decoded_snapshot) = publication.update else {
             return Err("fixture snapshot published a delta".to_string());
         };
+        let generation = self
+            .model
+            .current_generation()
+            .cloned()
+            .ok_or_else(|| "fixture snapshot did not retain a generation".to_string())?;
         Ok(MarketWorkerBootstrap {
             snapshot: decoded_snapshot,
             subscription_id: SUBSCRIPTION_ID.to_string(),
-            generation: publication.generation,
+            generation,
             worker_label: "deterministic fixture · disconnected".to_string(),
         })
     }
@@ -1489,7 +1599,7 @@ impl FixtureMarketWorker {
         };
         Ok(MarketWorkerPublication {
             update,
-            generation,
+            generation: MarketPublicationGeneration::from_generation(&generation),
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: "deterministic fixture · disconnected".to_string(),
             ui_diagnostics: None,
@@ -1501,11 +1611,11 @@ impl FixtureMarketWorker {
 mod tests {
     use super::{
         ChartState, EngineSeriesRequest, FixtureMarketWorker, MarketDataWorker,
-        MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, PendingUiDiagnostics,
-        ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel,
-        ui_diagnostics_channel,
+        MarketPublicationGeneration, MarketWorkerCommand, MarketWorkerMessage,
+        MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
+        ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
-    use axiusflow_application::ReplayStreamUpdate;
+    use axiusflow_application::{Provenanced, ReplayStreamUpdate, ReplayTailUpdate};
     use axiusflow_local_engine_protocol::{
         ProviderCatalogRejected, ProviderCatalogRejectionReason, SearchProviderInstruments,
         SelectProviderInstrument,
@@ -1778,6 +1888,60 @@ mod tests {
     }
 
     #[test]
+    fn live_tail_updates_conflate_to_one_frame_wake() {
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+        receiver.set_wake(Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        }));
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
+        let source = bootstrap
+            .snapshot
+            .bars()
+            .last()
+            .cloned()
+            .expect("tail exists");
+        for publication_generation in 2_u64..=64 {
+            let mut bar = *source.value();
+            bar.close = bar.close.saturating_add(
+                i64::try_from(publication_generation).expect("test generation fits"),
+            );
+            bar.high = bar.high.max(bar.close);
+            let tail = ReplayTailUpdate::try_new(
+                Provenanced::new(bar, source.provenance().clone()),
+                publication_generation,
+                true,
+            )
+            .expect("tail validates");
+            sender
+                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Tail(tail),
+                    generation: MarketPublicationGeneration::from_tail(
+                        publication_generation,
+                        2,
+                        1,
+                        2,
+                    ),
+                    subscription_id: "tail".to_string(),
+                    worker_label: "tail".to_string(),
+                    ui_diagnostics: None,
+                }))
+                .expect("tail sends");
+        }
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert_eq!(messages.len(), 1);
+        let MarketWorkerMessage::Update(publication) = &messages[0] else {
+            panic!("latest tail remains queued");
+        };
+        assert_eq!(publication.generation.publication_generation(), 64);
+    }
+
+    #[test]
     fn mailbox_wake_fires_for_queued_messages_on_registration() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         sender
@@ -1842,7 +2006,9 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
+                    generation: MarketPublicationGeneration::from_generation(
+                        &bootstrap.generation,
+                    ),
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: Some(PendingUiDiagnostics::new(generation)),
@@ -1888,7 +2054,9 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
+                    generation: MarketPublicationGeneration::from_generation(
+                        &bootstrap.generation,
+                    ),
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: Some(PendingUiDiagnostics::new(generation)),
@@ -1946,7 +2114,9 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
+                    generation: MarketPublicationGeneration::from_generation(
+                        &bootstrap.generation,
+                    ),
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: Some(PendingUiDiagnostics::new(generation)),
@@ -2023,7 +2193,9 @@ mod tests {
             sender
                 .send(MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: bootstrap.generation,
+                    generation: MarketPublicationGeneration::from_generation(
+                        &bootstrap.generation,
+                    ),
                     subscription_id: bootstrap.subscription_id,
                     worker_label: bootstrap.worker_label,
                     ui_diagnostics: None,
@@ -2313,7 +2485,7 @@ mod tests {
                 .send(MarketWorkerMessage::RithmicLive {
                     selection_generation: first,
                     series_generation: latest,
-                    snapshot: snapshot.clone(),
+                    update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
                 })
                 .is_ok()
         );
@@ -2322,7 +2494,7 @@ mod tests {
                 .send(MarketWorkerMessage::RithmicLive {
                     selection_generation: first,
                     series_generation: first,
-                    snapshot,
+                    update: ReplayStreamUpdate::Snapshot(snapshot),
                 })
                 .is_ok()
         );

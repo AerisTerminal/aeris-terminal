@@ -9,7 +9,7 @@ use std::{
 
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
-    ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate,
+    ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
 };
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
@@ -19,15 +19,16 @@ use axiusflow_local_engine_client::{
 };
 use axiusflow_local_engine_protocol::{
     DemandError, EngineFaultCode, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, envelope,
+    ProviderState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesUpdate,
+    envelope,
 };
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 
 use crate::resident_market_worker::{
-    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketWorkerBootstrap,
-    MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
-    MarketWorkerStartup, market_worker_channel,
+    ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
+    MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
+    MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -70,6 +71,7 @@ struct WorkerEndpoint {
     commands: mpsc::Receiver<MarketWorkerCommand>,
     shutdown: mpsc::SyncSender<()>,
     model: MarketBarClientModel,
+    publication: Option<MarketPublicationGeneration>,
     active_generation: u64,
     active: bool,
 }
@@ -113,6 +115,7 @@ fn start_group(
                 commands: command_rx,
                 shutdown: shutdown_tx,
                 model: empty_model(),
+                publication: None,
                 active_generation: INITIAL_GENERATION,
                 active: true,
             },
@@ -183,7 +186,13 @@ fn run_attached_workers(
             &endpoint.messages,
         ) {
             Ok((snapshot, generation)) => {
-                send_publication(&endpoint.messages, snapshot, generation)?;
+                let publication = MarketPublicationGeneration::from_generation(&generation);
+                send_publication(
+                    &endpoint.messages,
+                    ReplayStreamUpdate::Snapshot(snapshot),
+                    publication,
+                )?;
+                endpoint.publication = Some(publication);
                 let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
                     state: FeedConnectionState::Discovering,
                     message: "Historical bars are visible; Coinbase realtime is connecting"
@@ -226,6 +235,7 @@ fn run_attached_workers(
                     endpoint.consumer_id,
                     endpoint.active_generation,
                     &mut endpoint.model,
+                    &mut endpoint.publication,
                     &endpoint.messages,
                 )
             {
@@ -267,6 +277,7 @@ fn process_command(
                 message: "Loading Coinbase history through the resident engine".to_string(),
             });
             endpoint.model = empty_model();
+            endpoint.publication = None;
             endpoint.active_generation = request.sequence;
             client.set_series_demand(endpoint.consumer_id, request.sequence, series)
         }
@@ -276,6 +287,7 @@ fn process_command(
             endpoint.active_generation,
             command,
             &mut endpoint.model,
+            &mut endpoint.publication,
             &endpoint.messages,
         ),
         MarketWorkerCommand::ChartViewport(viewport) => {
@@ -312,6 +324,7 @@ fn apply_polled_event(
     consumer_id: u64,
     active_generation: u64,
     model: &mut MarketBarClientModel,
+    publication: &mut Option<MarketPublicationGeneration>,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     match event {
@@ -326,7 +339,41 @@ fn apply_polled_event(
             let MarketBarModelOutcome::Published(generation) = outcome else {
                 return Err("engine realtime snapshot was not publishable".to_string());
             };
-            send_publication(messages, replay, generation)
+            let status = MarketPublicationGeneration::from_generation(&generation);
+            *publication = Some(status);
+            send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)
+        }
+        envelope::Payload::SeriesUpdate(update) => {
+            if update.consumer_id != consumer_id || update.generation != active_generation {
+                return Err("engine realtime update identity mismatched".to_string());
+            }
+            let tail = replay_tail_update(&update)?;
+            let current = publication.ok_or_else(|| {
+                "engine realtime update arrived before a covering snapshot".to_string()
+            })?;
+            let (first_sequence, last_sequence) = current.sequence_range();
+            let sequence = tail.item().value().source_sequence;
+            if sequence < last_sequence || sequence > last_sequence.saturating_add(1) {
+                return Err("engine realtime update sequence was not contiguous".to_string());
+            }
+            let appended = usize::from(sequence > last_sequence);
+            let retained_items = current
+                .retained_items()
+                .saturating_add(appended)
+                .min(MODEL_CAPACITY);
+            let first_sequence = if appended > 0 && retained_items == MODEL_CAPACITY {
+                first_sequence.saturating_add(1)
+            } else {
+                first_sequence
+            };
+            let status = MarketPublicationGeneration::from_tail(
+                update.publication_generation,
+                retained_items,
+                first_sequence,
+                sequence.max(last_sequence),
+            );
+            *publication = Some(status);
+            send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
         }
         envelope::Payload::ProviderState(state) => apply_provider_state(&state, messages),
         envelope::Payload::SeriesState(state) => {
@@ -464,6 +511,7 @@ fn send_recovery(
     active_generation: u64,
     command: ReplayRecoveryCommand,
     model: &mut MarketBarClientModel,
+    publication: &mut Option<MarketPublicationGeneration>,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     let product = coinbase_products()
@@ -478,11 +526,14 @@ fn send_recovery(
         model,
         messages,
     )
-    .map(|(snapshot, generation)| MarketWorkerBootstrap {
-        snapshot,
-        subscription_id: SUBSCRIPTION_ID.to_string(),
-        generation,
-        worker_label: WORKER_LABEL.to_string(),
+    .map(|(snapshot, generation)| {
+        *publication = Some(MarketPublicationGeneration::from_generation(&generation));
+        MarketWorkerBootstrap {
+            snapshot,
+            subscription_id: SUBSCRIPTION_ID.to_string(),
+            generation,
+            worker_label: WORKER_LABEL.to_string(),
+        }
     });
     messages
         .send(MarketWorkerMessage::Recovery {
@@ -494,12 +545,12 @@ fn send_recovery(
 
 fn send_publication(
     messages: &MarketWorkerSender,
-    snapshot: ReplaySnapshot,
-    generation: DesktopMarketGeneration,
+    update: ReplayStreamUpdate,
+    generation: MarketPublicationGeneration,
 ) -> Result<(), String> {
     messages
         .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-            update: ReplayStreamUpdate::Snapshot(snapshot),
+            update,
             generation,
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: WORKER_LABEL.to_string(),
@@ -515,6 +566,10 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
     if series.provider != "coinbase"
         || SeriesCadence::try_from(series.cadence) != Ok(SeriesCadence::FixedSeconds)
+        || !coinbase_products().into_iter().any(|product| {
+            product.instrument_id == series.instrument_id
+                && product.entitlement_id == series.entitlement_id
+        })
     {
         return Err("engine Coinbase snapshot identity is invalid".to_string());
     }
@@ -555,48 +610,13 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .bars
         .iter()
         .map(|bar| {
-            let bar = MarketBar {
-                source_sequence: bar.source_sequence,
-                exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
-                exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
-                open: bar.open,
-                high: bar.high,
-                low: bar.low,
-                close: bar.close,
-                volume: bar.volume,
-            };
-            let exchange = bar.exchange_timestamp_unix_nanos;
-            Provenanced::new(
+            provenanced_engine_bar(
+                &series,
+                snapshot.provider_generation,
+                snapshot.consumer_id,
+                snapshot.generation,
                 bar,
-                MarketEventProvenance {
-                    event_id: format!(
-                        "engine-{}-{}-{}",
-                        snapshot.provider_generation, snapshot.generation, bar.source_sequence
-                    ),
-                    event_time_unix_nanos: exchange,
-                    publication_time_unix_nanos: received,
-                    producer: "axiusflow_engine".to_string(),
-                    schema_version: 1,
-                    correlation_id: format!(
-                        "engine-series-{}-{}",
-                        snapshot.consumer_id, snapshot.generation
-                    ),
-                    causation_id: String::new(),
-                    entitlement_revision: series.entitlement_id.clone(),
-                    session_generation: snapshot.provider_generation,
-                    source_id: series.provider.clone(),
-                    source_sequence: bar.source_sequence,
-                    exchange_timestamp_unix_nanos: exchange,
-                    provider_receive_timestamp_unix_nanos: received,
-                    nic_receive_timestamp_unix_nanos: None,
-                    axiusflow_receive_timestamp_unix_nanos: received,
-                    normalized_timestamp_unix_nanos: received,
-                    fanout_enqueue_timestamp_unix_nanos: Some(received),
-                    correction_flags: 0,
-                    quality_flags: 0,
-                    nic_timestamp_source: 0,
-                    semantic_class: 2,
-                },
+                received,
             )
         })
         .collect();
@@ -608,6 +628,82 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         bars,
     )
     .map_err(|error| error.to_string())
+}
+
+fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String> {
+    let series = update
+        .series
+        .as_ref()
+        .ok_or_else(|| "engine update has no series identity".to_string())?;
+    if series.provider != "coinbase"
+        || SeriesCadence::try_from(series.cadence) != Ok(SeriesCadence::FixedSeconds)
+    {
+        return Err("engine Coinbase update identity is invalid".to_string());
+    }
+    let bar = update
+        .bar
+        .as_ref()
+        .ok_or_else(|| "engine Coinbase update has no bar".to_string())?;
+    let item = provenanced_engine_bar(
+        series,
+        update.provider_generation,
+        update.consumer_id,
+        update.generation,
+        bar,
+        now_unix_nanos(),
+    );
+    ReplayTailUpdate::try_new(item, update.publication_generation, update.forming)
+        .map_err(|error| error.to_string())
+}
+
+fn provenanced_engine_bar(
+    series: &SeriesKey,
+    provider_generation: u64,
+    consumer_id: u64,
+    generation: u64,
+    bar: &axiusflow_local_engine_protocol::MarketBar,
+    received: i64,
+) -> Provenanced<MarketBar> {
+    let bar = MarketBar {
+        source_sequence: bar.source_sequence,
+        exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
+        exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+    };
+    let exchange = bar.exchange_timestamp_unix_nanos;
+    Provenanced::new(
+        bar,
+        MarketEventProvenance {
+            event_id: format!(
+                "engine-{provider_generation}-{generation}-{}",
+                bar.source_sequence
+            ),
+            event_time_unix_nanos: exchange,
+            publication_time_unix_nanos: received,
+            producer: "axiusflow_engine".to_string(),
+            schema_version: 1,
+            correlation_id: format!("engine-series-{consumer_id}-{generation}"),
+            causation_id: String::new(),
+            entitlement_revision: series.entitlement_id.clone(),
+            session_generation: provider_generation,
+            source_id: series.provider.clone(),
+            source_sequence: bar.source_sequence,
+            exchange_timestamp_unix_nanos: exchange,
+            provider_receive_timestamp_unix_nanos: received,
+            nic_receive_timestamp_unix_nanos: None,
+            axiusflow_receive_timestamp_unix_nanos: received,
+            normalized_timestamp_unix_nanos: received,
+            fanout_enqueue_timestamp_unix_nanos: Some(received),
+            correction_flags: 0,
+            quality_flags: 0,
+            nic_timestamp_source: 0,
+            semantic_class: 2,
+        },
+    )
 }
 
 fn series_key(
@@ -744,6 +840,39 @@ mod tests {
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.evidence().session_generation, 7);
         assert_eq!(snapshot.bars()[0].provenance().producer, "axiusflow_engine");
+    }
+
+    #[test]
+    fn ipc_live_update_preserves_one_tail_without_rebuilding_history() {
+        let update = replay_tail_update(&SeriesUpdate {
+            consumer_id: 1,
+            generation: 2,
+            series: Some(
+                series_key(
+                    coinbase_products().first().expect("BTC product"),
+                    ChartInterval::Minute1,
+                )
+                .expect("series"),
+            ),
+            provider_generation: 7,
+            bar: Some(IpcMarketBar {
+                source_sequence: 3,
+                exchange_timestamp_seconds: 120,
+                exchange_timestamp_unix_nanos: 120_000_000_000,
+                open: 100,
+                high: 120,
+                low: 90,
+                close: 115,
+                volume: 9,
+            }),
+            forming: true,
+            publication_generation: 8,
+        })
+        .expect("tail converts");
+        assert_eq!(update.item().value().source_sequence, 3);
+        assert_eq!(update.item().value().close, 115);
+        assert_eq!(update.publication_generation(), 8);
+        assert!(update.forming());
     }
 
     #[test]

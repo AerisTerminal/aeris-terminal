@@ -205,7 +205,7 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
             .send(MarketWorkerMessage::RithmicLive {
                 selection_generation: NonZeroUsize::MIN,
                 series_generation: generation,
-                snapshot: snapshot.clone(),
+                update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
             })
             .map_err(|_| "desktop burst mailbox disconnected")?;
         if generation.get().is_multiple_of(128) {
@@ -640,7 +640,7 @@ fn run_endurance_frame(
             .send(MarketWorkerMessage::RithmicLive {
                 selection_generation: NonZeroUsize::MIN,
                 series_generation: generation,
-                snapshot: snapshot.clone(),
+                update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
             })
             .map_err(|_| "desktop endurance mailbox disconnected")?;
         counters.updates_published = counters.updates_published.saturating_add(1);
