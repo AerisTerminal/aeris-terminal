@@ -2,7 +2,11 @@
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
-    sync::{Arc, atomic::AtomicU64, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -39,6 +43,60 @@ const MODEL_CAPACITY: usize = 350;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
+const WORKSPACE_ADDITION_CAPACITY: usize = 8;
+
+type EndpointRecord = (u64, InstallProviderInstrument, WorkerEndpoint);
+
+pub(super) struct WorkspaceMarketGroup {
+    pub initial: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    pub factory: WorkspaceMarketFactory,
+}
+
+#[derive(Clone)]
+pub(super) struct WorkspaceMarketFactory {
+    additions: mpsc::SyncSender<EndpointRecord>,
+    next_workspace_id: Arc<AtomicU64>,
+    next_consumer_id: Arc<AtomicU64>,
+}
+
+impl WorkspaceMarketFactory {
+    pub fn create_workspace(
+        &self,
+        product: InstallProviderInstrument,
+    ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+        let workspace_id = allocate_workspace_id(&self.next_workspace_id)?;
+        let consumer_id = allocate_consumer_id(&self.next_consumer_id)?;
+        let (worker, endpoint) = worker_endpoint(workspace_id, product, consumer_id);
+        self.additions
+            .try_send(endpoint)
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => {
+                    "workspace creation is busy; try again after the current workspace opens"
+                        .to_string()
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    "the resident engine workspace coordinator is unavailable".to_string()
+                }
+            })?;
+        Ok(worker)
+    }
+}
+
+fn allocate_workspace_id(next_workspace_id: &AtomicU64) -> Result<u64, String> {
+    next_workspace_id
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .map_err(|_| "workspace identity space is exhausted".to_string())
+}
+
+fn allocate_consumer_id(next_consumer_id: &AtomicU64) -> Result<u64, String> {
+    next_consumer_id
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .map_err(|_| "market consumer identity space is exhausted".to_string())
+}
+
+const fn checked_add_one(value: u64) -> Option<u64> {
+    value.checked_add(1)
+}
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let products = coinbase_products();
@@ -65,22 +123,26 @@ pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketData
     start_group(vec![(1, btc), (2, eth)])
 }
 
-pub(super) fn start_workspace_tabs() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String>
-{
-    start_group(workspace_tab_configurations()?)
-}
-
-fn workspace_tab_configurations() -> Result<Vec<(u64, InstallProviderInstrument)>, String> {
+pub(super) fn start_workspace_tabs() -> Result<WorkspaceMarketGroup, String> {
     let products = coinbase_products();
     let btc = products
         .first()
         .cloned()
         .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
-    let eth = products
-        .get(1)
-        .cloned()
-        .ok_or_else(|| "Coinbase engine ETH product is unavailable".to_string())?;
-    Ok(vec![(1, btc.clone()), (1, eth.clone()), (2, eth), (2, btc)])
+    let client_id = random_identity()?;
+    let first_consumer_id = random_identity()?;
+    let next_consumer_id = Arc::new(AtomicU64::new(first_consumer_id.saturating_add(1)));
+    let (initial_worker, initial_endpoint) = worker_endpoint(1, btc, first_consumer_id);
+    let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
+    spawn_group(client_id, vec![initial_endpoint], Some(addition_rx))?;
+    Ok(WorkspaceMarketGroup {
+        initial: vec![initial_worker],
+        factory: WorkspaceMarketFactory {
+            additions: addition_tx,
+            next_workspace_id: Arc::new(AtomicU64::new(2)),
+            next_consumer_id,
+        },
+    })
 }
 
 struct WorkerEndpoint {
@@ -102,47 +164,67 @@ fn start_group(
     let mut endpoints = Vec::with_capacity(configurations.len());
     for (workspace_id, product) in configurations {
         let consumer_id = random_identity()?;
-        let startup = MarketWorkerStartup::Loading(Box::new(
-            axiusflow_desktop::market_worker::CoinbaseWorkerStartup {
-                coinbase_product: product.clone(),
-                subscription_id: SUBSCRIPTION_ID.to_string(),
-                worker_label: WORKER_LABEL.to_string(),
-            },
-        ));
-        let (message_tx, message_rx) =
-            market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
-        let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let selection_sequence = Arc::new(AtomicU64::new(INITIAL_GENERATION));
-        workers.push((
-            startup,
-            MarketDataWorker::from_channels(
-                command_tx,
-                message_rx,
-                shutdown_rx,
-                None,
-                Some(selection_sequence),
-            ),
-        ));
-        endpoints.push((
-            workspace_id,
-            product,
-            WorkerEndpoint {
-                consumer_id,
-                messages: message_tx,
-                commands: command_rx,
-                shutdown: shutdown_tx,
-                model: empty_model(),
-                publication: None,
-                active_generation: INITIAL_GENERATION,
-                active: true,
-            },
-        ));
+        let (worker, endpoint) = worker_endpoint(workspace_id, product, consumer_id);
+        workers.push(worker);
+        endpoints.push(endpoint);
     }
+    spawn_group(client_id, endpoints, None)?;
+    Ok(workers)
+}
+
+fn worker_endpoint(
+    workspace_id: u64,
+    product: InstallProviderInstrument,
+    consumer_id: u64,
+) -> ((MarketWorkerStartup, MarketDataWorker), EndpointRecord) {
+    let startup = MarketWorkerStartup::Loading(Box::new(
+        axiusflow_desktop::market_worker::CoinbaseWorkerStartup {
+            coinbase_product: product.clone(),
+            subscription_id: SUBSCRIPTION_ID.to_string(),
+            worker_label: WORKER_LABEL.to_string(),
+        },
+    ));
+    let (message_tx, message_rx) =
+        market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
+    let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+    let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+    let selection_sequence = Arc::new(AtomicU64::new(INITIAL_GENERATION));
+    let worker = (
+        startup,
+        MarketDataWorker::from_channels(
+            command_tx,
+            message_rx,
+            shutdown_rx,
+            None,
+            Some(selection_sequence),
+        ),
+    );
+    let endpoint = (
+        workspace_id,
+        product,
+        WorkerEndpoint {
+            consumer_id,
+            messages: message_tx,
+            commands: command_rx,
+            shutdown: shutdown_tx,
+            model: empty_model(),
+            publication: None,
+            active_generation: INITIAL_GENERATION,
+            active: true,
+        },
+    );
+    (worker, endpoint)
+}
+
+fn spawn_group(
+    client_id: u64,
+    mut endpoints: Vec<EndpointRecord>,
+    additions: Option<mpsc::Receiver<EndpointRecord>>,
+) -> Result<(), String> {
     thread::Builder::new()
         .name("axiusflow-engine-market-client".to_string())
         .spawn(move || {
-            if let Err(error) = run_workers(client_id, &mut endpoints) {
+            if let Err(error) = run_workers(client_id, &mut endpoints, additions) {
                 for (_, _, endpoint) in &endpoints {
                     let _ = endpoint.messages.send(MarketWorkerMessage::State {
                         state: ChartState::Error,
@@ -155,12 +237,13 @@ fn start_group(
             }
         })
         .map_err(|error| error.to_string())?;
-    Ok(workers)
+    Ok(())
 }
 
 fn run_workers(
     client_id: u64,
-    endpoints: &mut [(u64, InstallProviderInstrument, WorkerEndpoint)],
+    endpoints: &mut Vec<EndpointRecord>,
+    additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
     for (_, _, endpoint) in endpoints.iter() {
         let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
@@ -171,7 +254,7 @@ fn run_workers(
     let executable = sibling_engine_executable()?;
     let mut client = connect_or_start_engine(&executable)?;
     client.attach_client(client_id)?;
-    let result = run_attached_workers(&mut client, client_id, endpoints);
+    let result = run_attached_workers(&mut client, client_id, endpoints, additions);
     for (_, _, endpoint) in endpoints
         .iter_mut()
         .filter(|(_, _, endpoint)| endpoint.active)
@@ -187,46 +270,44 @@ fn run_workers(
 fn run_attached_workers(
     client: &mut EngineClient,
     client_id: u64,
-    endpoints: &mut [(u64, InstallProviderInstrument, WorkerEndpoint)],
+    endpoints: &mut Vec<EndpointRecord>,
+    additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
     for (workspace_id, product, endpoint) in endpoints.iter_mut() {
-        client.register_consumer(client_id, *workspace_id, endpoint.consumer_id)?;
-        let _ =
-            endpoint.messages.send(MarketWorkerMessage::CoinbaseCatalog(
-                Ok(coinbase_products()),
-            ));
-        match request_snapshot(
-            client,
-            endpoint.consumer_id,
-            INITIAL_GENERATION,
-            series_key(product, ChartInterval::Minute1)?,
-            &mut endpoint.model,
-            &endpoint.messages,
-        ) {
-            Ok((snapshot, generation)) => {
-                let publication = MarketPublicationGeneration::from_generation(&generation);
-                send_publication(
-                    &endpoint.messages,
-                    ReplayStreamUpdate::Snapshot(snapshot),
-                    publication,
-                )?;
-                endpoint.publication = Some(publication);
-                let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-                    state: FeedConnectionState::Discovering,
-                    message: "Historical bars are visible; Coinbase realtime is connecting"
-                        .to_string(),
-                });
-            }
-            Err(error) => {
-                let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                    state: ChartState::Error,
-                    message: error,
-                });
-            }
-        }
+        initialize_endpoint(client, client_id, *workspace_id, product, endpoint)?;
     }
 
-    while endpoints.iter().any(|(_, _, endpoint)| endpoint.active) {
+    let mut additions = additions;
+    while additions.is_some() || endpoints.iter().any(|(_, _, endpoint)| endpoint.active) {
+        if let Some(receiver) = additions.as_ref() {
+            loop {
+                match receiver.try_recv() {
+                    Ok(mut record) => {
+                        match initialize_endpoint(
+                            client,
+                            client_id,
+                            record.0,
+                            &record.1,
+                            &mut record.2,
+                        ) {
+                            Ok(()) => endpoints.push(record),
+                            Err(error) => {
+                                let _ = record.2.messages.send(MarketWorkerMessage::State {
+                                    state: ChartState::Error,
+                                    message: error,
+                                });
+                                retire_endpoint(client, &mut record.2);
+                            }
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        additions = None;
+                        break;
+                    }
+                }
+            }
+        }
         for (_, _, endpoint) in endpoints
             .iter_mut()
             .filter(|(_, _, endpoint)| endpoint.active)
@@ -263,7 +344,54 @@ fn run_attached_workers(
                 });
             }
         }
+        endpoints.retain(|(_, _, endpoint)| endpoint.active);
         thread::sleep(POLL_INTERVAL);
+    }
+    Ok(())
+}
+
+fn initialize_endpoint(
+    client: &mut EngineClient,
+    client_id: u64,
+    workspace_id: u64,
+    product: &InstallProviderInstrument,
+    endpoint: &mut WorkerEndpoint,
+) -> Result<(), String> {
+    let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+        state: FeedConnectionState::Discovering,
+        message: "Connecting to the resident market engine".to_string(),
+    });
+    client.register_consumer(client_id, workspace_id, endpoint.consumer_id)?;
+    let _ = endpoint.messages.send(MarketWorkerMessage::CoinbaseCatalog(
+        Ok(coinbase_products()),
+    ));
+    match request_snapshot(
+        client,
+        endpoint.consumer_id,
+        INITIAL_GENERATION,
+        series_key(product, ChartInterval::Minute1)?,
+        &mut endpoint.model,
+        &endpoint.messages,
+    ) {
+        Ok((snapshot, generation)) => {
+            let publication = MarketPublicationGeneration::from_generation(&generation);
+            send_publication(
+                &endpoint.messages,
+                ReplayStreamUpdate::Snapshot(snapshot),
+                publication,
+            )?;
+            endpoint.publication = Some(publication);
+            let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Discovering,
+                message: "Historical bars are visible; Coinbase realtime is connecting".to_string(),
+            });
+        }
+        Err(error) => {
+            let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: error,
+            });
+        }
     }
     Ok(())
 }
@@ -828,21 +956,20 @@ mod tests {
     use axiusflow_engine_protocol::MarketBar as IpcMarketBar;
 
     #[test]
-    fn workspace_tabs_keep_two_independent_consumers_in_each_workspace() {
-        let configurations = workspace_tab_configurations().expect("workspace catalog");
-        let workspace_ids = configurations
-            .iter()
-            .map(|(workspace_id, _)| *workspace_id)
-            .collect::<Vec<_>>();
-        let instruments = configurations
-            .iter()
-            .map(|(_, instrument)| instrument.instrument_id.as_str())
-            .collect::<Vec<_>>();
+    fn workspace_creation_allocates_one_consumer_per_tab_without_identity_wraparound() {
+        let next_workspace_id = AtomicU64::new(2);
+        assert_eq!(allocate_workspace_id(&next_workspace_id), Ok(2));
+        assert_eq!(allocate_workspace_id(&next_workspace_id), Ok(3));
+        let exhausted = AtomicU64::new(u64::MAX);
+        assert!(allocate_workspace_id(&exhausted).is_err());
+        assert!(allocate_consumer_id(&exhausted).is_err());
 
-        assert_eq!(workspace_ids, vec![1, 1, 2, 2]);
-        assert_eq!(instruments[0], instruments[3]);
-        assert_eq!(instruments[1], instruments[2]);
-        assert_ne!(instruments[0], instruments[1]);
+        let product = coinbase_products().remove(0);
+        let (_worker, (workspace_id, endpoint_product, endpoint)) =
+            worker_endpoint(2, product.clone(), 41);
+        assert_eq!(workspace_id, 2);
+        assert_eq!(endpoint.consumer_id, 41);
+        assert_eq!(endpoint_product.instrument_id, product.instrument_id);
     }
 
     #[test]

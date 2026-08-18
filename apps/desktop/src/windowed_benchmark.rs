@@ -45,7 +45,7 @@ use std::{
 };
 
 use crate::readiness_conformance::ProcessMemoryProbe;
-use crate::{DesktopLifecycle, DesktopLifetimeMode, TerminalApp, subscribe_symbol_input};
+use crate::{DesktopLifecycle, DesktopLifetimeMode, WorkspaceSurface, subscribe_symbol_input};
 
 const SNAPSHOT_BARS: usize = 256;
 const REPLACEMENT_SNAPSHOT_BARS: usize = 600;
@@ -184,7 +184,7 @@ struct FrameSample {
 
 struct BenchmarkDriver {
     chart: Entity<OriginChartView>,
-    terminal: Entity<TerminalApp>,
+    terminal: Entity<WorkspaceSurface>,
     symbol_input: Entity<InputState>,
     worker: FixtureMarketWorker,
     _message_sender: MarketWorkerSender,
@@ -941,7 +941,7 @@ fn benchmark_root(
     let indicator_input = cx.new(|cx| InputState::new(window, cx));
     let terminal_symbol_input = symbol_input.clone();
     let terminal = cx.new(move |cx| {
-        TerminalApp::new(
+        WorkspaceSurface::new(
             cx,
             interaction_startup,
             interaction_worker,

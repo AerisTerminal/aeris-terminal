@@ -27,8 +27,6 @@ use axiusflow_engine_protocol::{
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
-#[cfg(target_os = "windows")]
-use gpui::WindowControlArea;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Hsla, KeyBinding,
     KeyDownEvent, MouseButton, Render, Task, WeakEntity, Window, WindowBounds, WindowOptions,
@@ -129,6 +127,8 @@ const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
+const MAXIMUM_OPEN_WORKSPACES: usize = 8;
+const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
 
@@ -175,7 +175,7 @@ fn finish_desktop_shutdown(
 struct DesktopLifecycle {
     mode: DesktopLifetimeMode,
     retirements: Rc<RefCell<Vec<Task<bool>>>>,
-    terminals: Rc<RefCell<Vec<WeakEntity<TerminalApp>>>>,
+    terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
 }
 
 impl DesktopLifecycle {
@@ -187,7 +187,7 @@ impl DesktopLifecycle {
         }
     }
 
-    fn register_terminal(&self, terminal: &Entity<TerminalApp>) {
+    fn register_terminal(&self, terminal: &Entity<WorkspaceSurface>) {
         self.terminals.borrow_mut().push(terminal.downgrade());
     }
 
@@ -345,13 +345,10 @@ fn elapsed_nanos(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
-struct TerminalApp {
+struct WorkspaceSurface {
     chart: Option<Entity<OriginChartView>>,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
-    drawing_toolbar: DrawingToolbarVisibility,
-    window_active: bool,
-    frame_poll_gate: frame_poll_gate::FramePollGate,
     chart_state: ChartState,
     chart_state_message: String,
     theme: AxiusflowTheme,
@@ -528,7 +525,7 @@ impl RithmicReconnectState {
     }
 }
 
-fn observe_chart(chart: Option<&Entity<OriginChartView>>, cx: &mut Context<TerminalApp>) {
+fn observe_chart(chart: Option<&Entity<OriginChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
             if app.provider == TerminalProvider::Coinbase
@@ -727,7 +724,7 @@ fn instrument_selector_label(selected: Option<(&str, &str)>, selection_pending: 
     )
 }
 
-fn terminal_instrument_label(app: &TerminalApp) -> String {
+fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
     if app.provider == TerminalProvider::Coinbase {
         return app.coinbase_product.as_ref().map_or_else(
             || "Select market".to_string(),
@@ -812,7 +809,7 @@ struct TerminalStartupState {
 
 fn terminal_startup_state(
     startup: MarketWorkerStartup,
-    cx: &mut Context<TerminalApp>,
+    cx: &mut Context<WorkspaceSurface>,
 ) -> TerminalStartupState {
     match startup {
         MarketWorkerStartup::Rithmic => {
@@ -849,7 +846,7 @@ fn terminal_startup_state(
     }
 }
 
-impl TerminalApp {
+impl WorkspaceSurface {
     fn new(
         cx: &mut Context<Self>,
         startup: MarketWorkerStartup,
@@ -883,9 +880,6 @@ impl TerminalApp {
             chart,
             dom,
             side_panel: None,
-            drawing_toolbar: DrawingToolbarVisibility::Expanded,
-            window_active: true,
-            frame_poll_gate: frame_poll_gate::FramePollGate::default(),
             chart_state,
             chart_state_message,
             theme,
@@ -955,11 +949,6 @@ impl TerminalApp {
 
     fn set_market_visibility(&mut self, visible: bool) {
         let _ = self.market_worker.try_set_market_visibility(visible);
-    }
-
-    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.retire_market_worker(cx);
-        window.remove_window();
     }
 
     fn available_intervals(&self) -> &'static [ChartInterval] {
@@ -1164,7 +1153,7 @@ impl TerminalApp {
         if let Some(command) =
             fullscreen_escape_command(event.keystroke.key.as_str(), window.is_fullscreen())
         {
-            command.execute(window, cx);
+            command.execute(window);
             cx.stop_propagation();
             return;
         }
@@ -1548,9 +1537,6 @@ impl TerminalApp {
     }
 
     fn poll_market_worker(&mut self, cx: &mut Context<Self>) -> usize {
-        if !self.window_active {
-            return 0;
-        }
         let (messages, disconnected) = self.market_worker.drain_messages();
         let applied = messages.len();
         for message in messages {
@@ -1648,56 +1634,19 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let theme = self.theme.toggled();
-        sync_component_theme(&theme, Some(window), cx);
+    fn apply_theme(&mut self, theme: &AxiusflowTheme, cx: &mut Context<Self>) {
         self.dom.update(cx, |dom, dom_cx| {
-            dom.set_theme(theme, dom_cx);
+            dom.set_theme(*theme, dom_cx);
         });
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                let theme_applied = chart.set_platform_theme(&theme).is_ok();
+                let theme_applied = chart.set_platform_theme(theme).is_ok();
                 debug_assert!(theme_applied);
                 chart_cx.notify();
             });
         }
-        self.theme = theme;
+        self.theme = *theme;
         cx.notify();
-    }
-
-    fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let window_active = window.is_window_active();
-        let became_active = window_active && !self.window_active;
-        self.window_active = window_active;
-        if became_active {
-            self.schedule_market_frame(window, cx);
-        }
-    }
-
-    fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.frame_poll_gate.try_schedule(self.window_active) {
-            return;
-        }
-        let app = cx.entity();
-        window.on_next_frame(move |window, cx| {
-            let diagnostics = app.update(cx, |app, cx| {
-                app.frame_poll_gate.complete();
-                if app.poll_market_worker(cx) > 0 {
-                    cx.notify();
-                }
-                app.pending_ui_diagnostics.take()
-            });
-            if let Some(mut diagnostics) = diagnostics {
-                diagnostics.mark_frame_submit();
-                let app = app.clone();
-                window.on_next_frame(move |_, cx| {
-                    app.update(cx, |app, _| {
-                        app.market_worker
-                            .send_ui_diagnostics(diagnostics.into_presented());
-                    });
-                });
-            }
-        });
     }
 
     fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
@@ -2152,11 +2101,6 @@ impl TerminalApp {
         }
     }
 
-    fn toggle_drawing_toolbar(&mut self, cx: &mut Context<Self>) {
-        self.drawing_toolbar.toggle();
-        cx.notify();
-    }
-
     fn add_indicator(&mut self, indicator: ChartIndicator, cx: &mut Context<Self>) -> bool {
         let Some(chart) = self.chart.clone() else {
             self.indicator_message = Some("Chart data is not available yet".to_string());
@@ -2193,9 +2137,10 @@ impl TerminalApp {
 }
 
 fn chrome_overlay_layer(
-    app_state: &TerminalApp,
-    app: &Entity<TerminalApp>,
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
     theme: &AxiusflowTheme,
+    chrome_height: f32,
     cx: &App,
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
@@ -2239,7 +2184,7 @@ fn chrome_overlay_layer(
         div()
             .id("chrome_overlay_scrim")
             .absolute()
-            .top(px(chart_chrome::CHART_CHROME_HEIGHT))
+            .top(px(chrome_height))
             .left_0()
             .right_0()
             .bottom_0()
@@ -2271,7 +2216,7 @@ fn chrome_overlay_layer(
 }
 
 fn timeframe_overlay_content(
-    app: &Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     intervals: &'static [ChartInterval],
     selected: ChartInterval,
     keyboard_selection: usize,
@@ -2333,113 +2278,9 @@ fn timeframe_overlay_content(
         )
 }
 
-impl Render for TerminalApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.track_window_activation(window, cx);
-        self.schedule_market_frame(window, cx);
-        let theme = self.theme;
-        let app = cx.entity();
-        let connection_state = self
-            .connection_state
-            .unwrap_or(FeedConnectionState::Disconnected);
-        let chart_has_market_data = self
-            .chart
-            .as_ref()
-            .is_some_and(|chart| chart.read(cx).has_market_data());
-        let drawing_state = self.drawing_toolbar_state(cx);
-        let overlay = chrome_overlay_layer(self, &app, &theme, cx);
-        let fullscreen_focus = self.chrome_focus.clone();
-        let header = terminal_header(
-            window,
-            cx,
-            &app,
-            HeaderState {
-                theme,
-                provider: self.provider,
-                instrument_label: terminal_instrument_label(self),
-                series_label: if self.provider == TerminalProvider::Coinbase {
-                    self.coinbase_interval.label().to_string()
-                } else {
-                    series_selector_label(
-                        self.series_browser.selected().map(|request| request.series),
-                        self.series_browser.pending().map(|request| request.series),
-                    )
-                },
-                instruments: self.instrument_entries(cx),
-                selected_series: self.series_browser.selected().map(|request| request.series),
-                symbol_input: self.symbol_input.clone(),
-                indicator_input: self.indicator_input.clone(),
-                indicator_message: self.indicator_message.clone(),
-                series_message: self.series_message.clone(),
-                pending: HeaderPendingState {
-                    symbol_selection: self.symbol_selection_pending,
-                    series: self.series_browser.pending().is_some()
-                        || self.coinbase_switch.is_pending(),
-                },
-                controls: HeaderControls::from_state(
-                    self.symbol_input.is_some()
-                        || !self.symbol_browser.results().is_empty()
-                        || !self.coinbase_products.is_empty(),
-                    self.symbol_browser.selected().is_some() || self.coinbase_product.is_some(),
-                )
-                .with_chart_controls(chart_has_market_data),
-                dom_visible: self.side_panel == Some(SidePanel::Dom),
-                connection_state,
-                chart_state: self.chart_state,
-                delayed: false,
-            },
-        );
-
-        let workspace = market_workspace(MarketWorkspaceState {
-            app: app.clone(),
-            chart: self.chart.as_ref(),
-            chart_has_market_data,
-            dom: self.dom.clone(),
-            side_panel: self.side_panel,
-            chart_state: self.chart_state,
-            chart_status_detail: chart_status_detail(
-                self.chart_state,
-                connection_state,
-                &self.chart_state_message,
-                self.connection_message.as_deref(),
-            )
-            .to_string(),
-            drawing_state,
-            drawing_toolbar_collapsed: self.drawing_toolbar.is_collapsed(),
-            theme: &theme,
-        });
-
-        div()
-            .relative()
-            .v_flex()
-            .size_full()
-            .track_focus(&self.chrome_focus)
-            .on_key_down(cx.listener(Self::on_terminal_key_down))
-            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
-            .on_action(|_: &ZoomWindow, window, cx| {
-                WindowCommand::MaximizeOrRestore.execute(window, cx);
-            })
-            .on_action(move |_: &ToggleFullscreen, window, cx| {
-                window.toggle_fullscreen();
-                fullscreen_focus.focus(window, cx);
-            })
-            .on_action(cx.listener(Self::close_window))
-            .bg(gpui_color(theme.colors.background))
-            .text_color(gpui_color(theme.colors.foreground))
-            .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .bg(gpui_color(theme.colors.background))
-                    .child(workspace),
-            )
-            .children(overlay)
-    }
-}
-
 struct MarketWorkspaceState<'a> {
-    app: Entity<TerminalApp>,
+    terminal: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     chart: Option<&'a Entity<OriginChartView>>,
     chart_has_market_data: bool,
     dom: Entity<ReadOnlyDomView>,
@@ -2453,6 +2294,7 @@ struct MarketWorkspaceState<'a> {
 
 fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<> {
     let MarketWorkspaceState {
+        terminal,
         app,
         chart,
         chart_has_market_data,
@@ -2498,16 +2340,15 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         .relative()
         .flex()
         .size_full()
-        .children(
-            (!drawing_toolbar_collapsed)
-                .then(|| drawing_toolbar(app.clone(), drawing_state, theme).into_any_element()),
-        )
+        .children((!drawing_toolbar_collapsed).then(|| {
+            drawing_toolbar(terminal.clone(), &app, drawing_state, theme).into_any_element()
+        }))
         .child(chart_surface.when(!drawing_toolbar_collapsed, |chart| {
             chart.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
         }))
         .children(
             drawing_toolbar_collapsed
-                .then(|| drawing_toolbar_expander(app.clone(), theme).into_any_element()),
+                .then(|| drawing_toolbar_expander(terminal, theme).into_any_element()),
         );
     div().size_full().overflow_hidden().child(
         h_resizable("market_workspace")
@@ -2621,7 +2462,8 @@ const DRAWING_TOOLS: [DrawingToolSpec; 8] = [
 ];
 
 fn drawing_toolbar(
-    app: Entity<TerminalApp>,
+    terminal: Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
@@ -2673,12 +2515,13 @@ fn drawing_toolbar(
                 .min_h(px(0.0))
                 .overflow_y_scrollbar()
                 .children(tools)
-                .child(drawing_toolbar_actions(app, state, theme)),
+                .child(drawing_toolbar_actions(terminal, app, state, theme)),
         )
 }
 
 fn drawing_toolbar_actions(
-    app: Entity<TerminalApp>,
+    terminal: Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
@@ -2698,7 +2541,7 @@ fn drawing_toolbar_actions(
                 24.0,
                 false,
                 state.has_selection,
-                TerminalApp::remove_selected_drawing,
+                WorkspaceSurface::remove_selected_drawing,
             ),
             app.clone(),
             theme,
@@ -2711,7 +2554,7 @@ fn drawing_toolbar_actions(
                 20.0,
                 state.selected_locked,
                 state.has_selection,
-                TerminalApp::toggle_selected_drawing_lock,
+                WorkspaceSurface::toggle_selected_drawing_lock,
             ),
             app.clone(),
             theme,
@@ -2724,7 +2567,7 @@ fn drawing_toolbar_actions(
                 20.0,
                 state.all_locked,
                 state.drawing_count > 0,
-                TerminalApp::toggle_all_drawings_lock,
+                WorkspaceSurface::toggle_all_drawings_lock,
             ),
             app.clone(),
             theme,
@@ -2737,23 +2580,26 @@ fn drawing_toolbar_actions(
                 24.0,
                 false,
                 state.drawing_count > 0,
-                TerminalApp::clear_drawings,
+                WorkspaceSurface::clear_drawings,
             ),
             app.clone(),
             theme,
         ))
-        .child(drawing_action_control(
-            DrawingActionSpec::new(
-                "drawing_toolbar_collapse",
-                "Collapse drawing toolbar",
-                HugeIcon::ArrowLeftIcon01,
-                24.0,
-                false,
+        .child(chrome_tooltip(
+            "drawing_toolbar_collapse",
+            "Collapse drawing toolbar",
+            button_activation(
+                drawing_toolbar_button(
+                    "drawing_toolbar_collapse",
+                    DrawingToolIcon::Huge(HugeIcon::ArrowLeftIcon01),
+                    "Collapse drawing toolbar",
+                    24.0,
+                    theme,
+                    false,
+                ),
                 true,
-                TerminalApp::toggle_drawing_toolbar,
+                move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
             ),
-            app,
-            theme,
         ))
 }
 
@@ -2765,7 +2611,7 @@ struct DrawingActionSpec {
     icon_size: f32,
     selected: bool,
     enabled: bool,
-    action: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+    action: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
 }
 
 impl DrawingActionSpec {
@@ -2776,7 +2622,7 @@ impl DrawingActionSpec {
         icon_size: f32,
         selected: bool,
         enabled: bool,
-        action: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+        action: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
     ) -> Self {
         Self {
             id,
@@ -2792,7 +2638,7 @@ impl DrawingActionSpec {
 
 fn drawing_action_control(
     spec: DrawingActionSpec,
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let button = drawing_toolbar_button(
@@ -2811,7 +2657,7 @@ fn drawing_action_control(
 }
 
 fn drawing_toolbar_expander(
-    app: Entity<TerminalApp>,
+    terminal: Entity<TerminalApp>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -2839,7 +2685,7 @@ fn drawing_toolbar_expander(
                 .cursor_pointer(),
                 true,
                 move |_, cx| {
-                    app.update(cx, TerminalApp::toggle_drawing_toolbar);
+                    terminal.update(cx, TerminalApp::toggle_drawing_toolbar);
                 },
             ),
         ))
@@ -2878,7 +2724,7 @@ fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
 
 fn side_panel_header(
     panel: SidePanel,
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -2913,7 +2759,7 @@ fn side_panel_header(
                 ),
                 true,
                 move |_, cx| {
-                    app.update(cx, TerminalApp::close_side_panel);
+                    app.update(cx, WorkspaceSurface::close_side_panel);
                 },
             ),
         ))
@@ -3013,20 +2859,16 @@ fn usize_generation(generation: u64) -> Option<std::num::NonZeroUsize> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WindowCommand {
-    Minimize,
     MaximizeOrRestore,
     ToggleFullscreen,
-    Close,
 }
 
 impl WindowCommand {
-    fn execute(self, window: &mut Window, cx: &mut App) {
+    fn execute(self, window: &mut Window) {
         match self {
-            Self::Minimize => window.minimize_window(),
             Self::MaximizeOrRestore if window.is_fullscreen() => window.toggle_fullscreen(),
             Self::MaximizeOrRestore => window.zoom_window(),
             Self::ToggleFullscreen => window.toggle_fullscreen(),
-            Self::Close => window.dispatch_action(Box::new(CloseWindow), cx),
         }
     }
 }
@@ -3038,59 +2880,45 @@ fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCom
     None
 }
 
-const fn window_controls_visible(is_fullscreen: bool) -> bool {
+const fn workspace_title_bar_visible(is_fullscreen: bool) -> bool {
     !is_fullscreen
 }
 
 fn terminal_header(
-    window: &mut Window,
-    cx: &mut Context<TerminalApp>,
-    app: &Entity<TerminalApp>,
+    terminal: &Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
-    let controls = header_controls(cx, app, state);
-
-    #[cfg(target_os = "windows")]
-    let window_controls = window_controls_visible(window.is_fullscreen())
-        .then(|| windows_window_controls(window, &theme));
-
-    #[cfg(target_os = "windows")]
-    return div()
+    let controls = header_controls(terminal, app, state);
+    div()
         .w_full()
         .h(px(theme.dimensions.app_header_height.logical_pixels))
         .flex()
         .items_center()
+        .px_3()
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.background))
-        .child(
-            div()
-                .h_full()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .overflow_x_hidden()
-                .child(div().flex_none().pl_4().pr_2().text_sm().child("Axiusflow"))
-                .child(controls)
-                .child(
-                    div()
-                        .h_full()
-                        .min_w(px(12.0))
-                        .flex_1()
-                        .window_control_area(WindowControlArea::Drag),
-                ),
-        )
-        .children(window_controls);
+        .child(controls)
+}
 
-    #[cfg(not(target_os = "windows"))]
+fn workspace_title_bar(
+    terminal: &Entity<TerminalApp>,
+    workspaces: &[WorkspaceTab],
+    active: usize,
+    enabled: bool,
+    error: Option<&str>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let tabs = workspace_tab_strip(terminal, workspaces, active, enabled, error, theme);
     TitleBar::new()
         .w_full()
-        .h(px(theme.dimensions.app_header_height.logical_pixels))
+        .h(px(WORKSPACE_TITLE_BAR_HEIGHT))
+        .pl_0()
         .border_b_1()
-        .border_color(gpui_color(theme.colors.border))
-        .bg(gpui_color(theme.colors.background))
+        .border_color(gpui_color(theme.colors.muted_border))
+        .bg(gpui_color(theme.colors.muted))
         .child(
             div()
                 .h_full()
@@ -3100,108 +2928,14 @@ fn terminal_header(
                 .items_center()
                 .overflow_x_hidden()
                 .child(div().flex_none().pl_4().pr_2().text_sm().child("Axiusflow"))
-                .child(controls)
+                .child(tabs)
                 .child(div().h_full().min_w(px(12.0)).flex_1()),
         )
 }
 
-#[cfg(target_os = "windows")]
-fn windows_window_controls(window: &Window, theme: &AxiusflowTheme) -> impl IntoElement {
-    let fullscreen = window.is_fullscreen();
-    let maximize = if window.is_maximized() || fullscreen {
-        ("restore", "\u{e923}")
-    } else {
-        ("maximize", "\u{e922}")
-    };
-
-    div()
-        .id("windows-window-controls")
-        .h_full()
-        .flex_none()
-        .flex()
-        .font_family("Segoe MDL2 Assets")
-        .child(windows_caption_button(
-            "minimize",
-            "\u{e921}",
-            WindowControlArea::Min,
-            WindowCommand::Minimize,
-            false,
-            theme,
-        ))
-        .child(windows_caption_button(
-            maximize.0,
-            maximize.1,
-            WindowControlArea::Max,
-            WindowCommand::MaximizeOrRestore,
-            false,
-            theme,
-        ))
-        .child(windows_caption_button(
-            "close",
-            "\u{e8bb}",
-            WindowControlArea::Close,
-            WindowCommand::Close,
-            true,
-            theme,
-        ))
-}
-
-#[cfg(target_os = "windows")]
-fn windows_caption_button(
-    id: &'static str,
-    glyph: &'static str,
-    area: WindowControlArea,
-    command: WindowCommand,
-    close: bool,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    let hover = if close {
-        gpui_color(theme.colors.negative)
-    } else {
-        gpui_color(theme.colors.accent)
-    };
-    let active = if close {
-        hover.opacity(0.8)
-    } else {
-        gpui_color(theme.colors.accent)
-    };
-    let hover_foreground = if close {
-        gpui_color(theme.colors.primary_foreground)
-    } else {
-        gpui_color(theme.colors.foreground)
-    };
-    let active_foreground = if close {
-        gpui_color(theme.colors.primary_foreground).opacity(0.8)
-    } else {
-        gpui_color(theme.colors.foreground)
-    };
-
-    div()
-        .id(id)
-        .h_full()
-        .w(px(36.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .content_center()
-        .occlude()
-        .text_size(px(10.0))
-        .text_color(gpui_color(theme.colors.muted_foreground))
-        .hover(move |style| style.bg(hover).text_color(hover_foreground))
-        .active(move |style| style.bg(active).text_color(active_foreground))
-        .window_control_area(area)
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            window.prevent_default();
-            command.execute(window, cx);
-            cx.stop_propagation();
-        })
-        .child(glyph)
-}
-
 fn header_controls(
-    cx: &mut Context<TerminalApp>,
-    app: &Entity<TerminalApp>,
+    terminal: &Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let dom_toggle = side_panel_toggle(
@@ -3227,7 +2961,6 @@ fn header_controls(
             connection_color(&state.theme),
         ))
         .child(instrument_selector(
-            cx,
             app.clone(),
             &InstrumentSelectorState {
                 label: state.instrument_label,
@@ -3257,7 +2990,7 @@ fn header_controls(
                 enabled: state.controls.enabled(HeaderControls::LATEST),
                 selected: false,
                 tooltip: "Return to the latest bar (End)",
-                toggle: TerminalApp::scroll_chart_to_latest,
+                toggle: WorkspaceSurface::scroll_chart_to_latest,
             },
             &state.theme,
             app.clone(),
@@ -3270,13 +3003,12 @@ fn header_controls(
                 enabled: state.controls.enabled(HeaderControls::FIT),
                 selected: false,
                 tooltip: "Fit chart and reset price scales (Home)",
-                toggle: TerminalApp::reset_chart_view,
+                toggle: WorkspaceSurface::reset_chart_view,
             },
             &state.theme,
             app.clone(),
         ))
         .child(indicator_selector(
-            cx,
             app.clone(),
             state.indicator_input,
             state.indicator_message,
@@ -3284,11 +3016,11 @@ fn header_controls(
             &state.theme,
         ))
         .child(dom_toggle)
-        .child(theme_toggle(app.clone(), &state.theme))
+        .child(theme_toggle(terminal.clone(), &state.theme))
 }
 
 fn side_panel_toggle(
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     theme: &AxiusflowTheme,
     panel: SidePanel,
     enabled: bool,
@@ -3298,7 +3030,8 @@ fn side_panel_toggle(
         SidePanel::Dom => (
             "dom_toggle",
             HugeIcon::SidebarRightIcon01,
-            TerminalApp::toggle_dom as fn(&mut TerminalApp, &mut Context<TerminalApp>),
+            WorkspaceSurface::toggle_dom
+                as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         ),
     };
     panel_toggle(
@@ -3318,8 +3051,7 @@ fn side_panel_toggle(
 }
 
 fn instrument_selector(
-    _cx: &mut Context<TerminalApp>,
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
@@ -3378,8 +3110,7 @@ fn connection_status_indicator(label: String, color: ThemeColor) -> impl IntoEle
 }
 
 fn indicator_selector(
-    _cx: &mut Context<TerminalApp>,
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     _input: Entity<InputState>,
     _message: Option<String>,
     enabled: bool,
@@ -3412,7 +3143,7 @@ fn indicator_selector(
 }
 
 fn indicator_dialog_content(
-    app: &Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     input: &Entity<InputState>,
     message: Option<&str>,
     keyboard_selection: usize,
@@ -3607,7 +3338,7 @@ struct InstrumentSelectorState {
 }
 
 fn instrument_dialog_content(
-    app: &Entity<TerminalApp>,
+    app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
@@ -3733,13 +3464,13 @@ struct PanelToggleState {
     enabled: bool,
     selected: bool,
     tooltip: &'static str,
-    toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+    toggle: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
 }
 
 fn panel_toggle(
     state: PanelToggleState,
     theme: &AxiusflowTheme,
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
 ) -> impl IntoElement {
     let button = Button::new(state.id)
         .icon(header_icon(state.icon))
@@ -3758,7 +3489,7 @@ fn panel_toggle(
     )
 }
 
-fn theme_toggle(app: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
+fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
     let next = theme.mode.toggled();
     let icon = match next {
         axiusflow_design_system::ThemeMode::Light => HugeIcon::SunIcon03,
@@ -3770,7 +3501,7 @@ fn theme_toggle(app: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoEl
         .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .cursor_pointer();
     let button = button_activation(button, true, move |window, cx| {
-        app.update(cx, |app, cx| app.toggle_theme(window, cx));
+        terminal.update(cx, |terminal, cx| terminal.toggle_theme(window, cx));
     });
     chrome_tooltip(
         "theme_toggle",
@@ -3809,7 +3540,7 @@ fn chrome_tooltip(
 }
 
 fn series_selector(
-    app: Entity<TerminalApp>,
+    app: Entity<WorkspaceSurface>,
     label: String,
     _selected: Option<rithmic_history::RithmicSeries>,
     _message: String,
@@ -4090,7 +3821,7 @@ fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
 
 fn subscribe_symbol_input(
     input: Option<Entity<InputState>>,
-    terminal: &Entity<TerminalApp>,
+    terminal: &Entity<WorkspaceSurface>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -4110,7 +3841,7 @@ fn subscribe_symbol_input(
             };
             let submitted = matches!(event, InputEvent::PressEnter { .. });
             if submitted {
-                let selected = terminal.update(cx, TerminalApp::submit_symbol_input);
+                let selected = terminal.update(cx, WorkspaceSurface::submit_symbol_input);
                 if selected {
                     terminal.update(cx, |app, app_cx| {
                         app.close_chrome_overlay(window, app_cx);
@@ -4135,7 +3866,7 @@ fn subscribe_symbol_input(
 
 fn subscribe_indicator_input(
     input: &Entity<InputState>,
-    terminal: &Entity<TerminalApp>,
+    terminal: &Entity<WorkspaceSurface>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -4172,33 +3903,687 @@ fn subscribe_indicator_input(
         .detach();
 }
 
-fn terminal_entity(
+fn workspace_surface_entity(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<TerminalApp> {
+) -> Entity<WorkspaceSurface> {
     let symbol_input = Some(symbol_input_for_startup(&bootstrap, window, cx));
     let search_input = symbol_input.clone();
     let indicator_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
     let indicator_search_input = indicator_input.clone();
-    let terminal_lifecycle = lifecycle.clone();
-    let terminal = cx.new(move |cx| {
-        TerminalApp::new(
+    let workspace_lifecycle = lifecycle.clone();
+    let workspace = cx.new(move |cx| {
+        WorkspaceSurface::new(
             cx,
             bootstrap,
             market_worker,
-            terminal_lifecycle,
+            workspace_lifecycle,
             symbol_input,
             indicator_input,
         )
     });
-    lifecycle.register_terminal(&terminal);
-    subscribe_symbol_input(search_input, &terminal, window, cx);
-    subscribe_indicator_input(&indicator_search_input, &terminal, window, cx);
-    terminal
+    lifecycle.register_terminal(&workspace);
+    subscribe_symbol_input(search_input, &workspace, window, cx);
+    subscribe_indicator_input(&indicator_search_input, &workspace, window, cx);
+    workspace
+}
+
+struct WorkspaceTab {
+    id: u64,
+    label: String,
+    surface: Entity<WorkspaceSurface>,
+}
+
+struct TerminalApp {
+    workspaces: Vec<WorkspaceTab>,
+    active: usize,
+    theme: AxiusflowTheme,
+    drawing_toolbar: DrawingToolbarVisibility,
+    window_active: bool,
+    frame_poll_gate: frame_poll_gate::FramePollGate,
+    chrome_focus: FocusHandle,
+    lifecycle: DesktopLifecycle,
+    workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    workspace_error: Option<String>,
+    next_workspace_id: u64,
+}
+
+fn workspace_switch(active: usize, next: usize, workspace_count: usize) -> Option<(usize, usize)> {
+    (next != active && next < workspace_count).then_some((active, next))
+}
+
+fn workspace_label(index: usize) -> String {
+    format!("Workspace {}", index + 1)
+}
+
+fn reorder_workspace_ids(ids: &mut Vec<u64>, dragged_id: u64, target_id: u64) -> bool {
+    let Some(from) = ids.iter().position(|id| *id == dragged_id) else {
+        return false;
+    };
+    let Some(target) = ids.iter().position(|id| *id == target_id) else {
+        return false;
+    };
+    if from == target {
+        return false;
+    }
+    let moving_right = from < target;
+    let dragged = ids.remove(from);
+    let Some(target) = ids.iter().position(|id| *id == target_id) else {
+        return false;
+    };
+    ids.insert(if moving_right { target + 1 } else { target }, dragged);
+    true
+}
+
+fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) -> Option<u64> {
+    if ids.len() <= 1 || !ids.contains(&closing_id) {
+        return None;
+    }
+    if active_id != closing_id {
+        return Some(active_id);
+    }
+    let closing = ids.iter().position(|id| *id == closing_id)?;
+    ids.get(closing + 1)
+        .or_else(|| closing.checked_sub(1).and_then(|index| ids.get(index)))
+        .copied()
+}
+
+impl TerminalApp {
+    fn new(
+        workspaces: Vec<WorkspaceTab>,
+        lifecycle: DesktopLifecycle,
+        workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        for workspace in &workspaces {
+            cx.observe(&workspace.surface, |_, _, cx| cx.notify())
+                .detach();
+        }
+        Self {
+            next_workspace_id: u64::try_from(workspaces.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+            workspaces,
+            active: 0,
+            theme: AxiusflowTheme::dark(),
+            drawing_toolbar: DrawingToolbarVisibility::Expanded,
+            window_active: true,
+            frame_poll_gate: frame_poll_gate::FramePollGate::default(),
+            chrome_focus: cx.focus_handle().tab_stop(true),
+            lifecycle,
+            workspace_factory,
+            workspace_error: None,
+        }
+    }
+
+    fn active_surface(&self) -> Entity<WorkspaceSurface> {
+        self.workspaces[self.active].surface.clone()
+    }
+
+    fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
+        let Some((previous, next)) = workspace_switch(self.active, next, self.workspaces.len())
+        else {
+            return;
+        };
+        self.workspaces[previous]
+            .surface
+            .update(cx, |workspace, _| workspace.set_market_visibility(false));
+        self.workspaces[next]
+            .surface
+            .update(cx, |workspace, _| workspace.set_market_visibility(true));
+        self.active = next;
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    fn reorder_workspace(&mut self, dragged_id: u64, target_id: u64, cx: &mut Context<Self>) {
+        let active_id = self.workspaces[self.active].id;
+        let mut ids = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        if !reorder_workspace_ids(&mut ids, dragged_id, target_id) {
+            return;
+        }
+        self.workspaces.sort_by_key(|workspace| {
+            ids.iter()
+                .position(|id| *id == workspace.id)
+                .unwrap_or(usize::MAX)
+        });
+        self.active = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == active_id)
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    fn close_workspace(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        let active_id = self.workspaces[self.active].id;
+        if ids.len() == 1 && ids[0] == tab_id {
+            self.retire_workspaces(cx);
+            window.remove_window();
+            return;
+        }
+        let Some(next_active_id) = active_workspace_after_close(&ids, active_id, tab_id) else {
+            return;
+        };
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == tab_id)
+        else {
+            return;
+        };
+        let removed = self.workspaces.remove(index);
+        removed.surface.update(cx, |workspace, workspace_cx| {
+            workspace.set_market_visibility(false);
+            workspace.retire_market_worker(workspace_cx);
+        });
+        self.active = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == next_active_id)
+            .unwrap_or(0);
+        self.workspaces[self.active]
+            .surface
+            .update(cx, |workspace, _| workspace.set_market_visibility(true));
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    fn add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspaces.len() >= MAXIMUM_OPEN_WORKSPACES {
+            self.workspace_error = Some(format!(
+                "Axiusflow supports at most {MAXIMUM_OPEN_WORKSPACES} open workspaces"
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(factory) = self.workspace_factory.clone() else {
+            return;
+        };
+        let active = self.active_surface();
+        let (product, interval) = {
+            let active = active.read(cx);
+            let Some(product) = active.coinbase_product.clone() else {
+                self.workspace_error =
+                    Some("The active workspace has no market to copy".to_string());
+                cx.notify();
+                return;
+            };
+            (product, active.coinbase_interval)
+        };
+        let (startup, worker) = match factory.create_workspace(product) {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.workspace_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let surface = workspace_surface_entity(startup, worker, &self.lifecycle, window, cx);
+        surface.update(cx, |workspace, workspace_cx| {
+            workspace.apply_theme(&self.theme, workspace_cx);
+            if interval != ChartInterval::Minute1 {
+                workspace.select_interval(interval, workspace_cx);
+            }
+        });
+        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+        self.workspaces[self.active]
+            .surface
+            .update(cx, |workspace, _| workspace.set_market_visibility(false));
+        self.workspaces.push(WorkspaceTab {
+            id: self.next_workspace_id,
+            label: format!("Workspace {}", self.next_workspace_id),
+            surface,
+        });
+        self.next_workspace_id = self.next_workspace_id.saturating_add(1);
+        self.active = self.workspaces.len() - 1;
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme = self.theme.toggled();
+        sync_component_theme(&self.theme, Some(window), cx);
+        for workspace in &self.workspaces {
+            workspace.surface.update(cx, |workspace, workspace_cx| {
+                workspace.apply_theme(&self.theme, workspace_cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn toggle_drawing_toolbar(&mut self, cx: &mut Context<Self>) {
+        self.drawing_toolbar.toggle();
+        cx.notify();
+    }
+
+    fn retire_workspaces<C: gpui::AppContext>(&mut self, cx: &mut C) {
+        for workspace in &self.workspaces {
+            workspace.surface.update(cx, |workspace, workspace_cx| {
+                workspace.retire_market_worker(workspace_cx);
+            });
+        }
+    }
+
+    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.retire_workspaces(cx);
+        window.remove_window();
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_surface().update(cx, |workspace, workspace_cx| {
+            workspace.on_terminal_key_down(event, window, workspace_cx);
+        });
+    }
+
+    fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let window_active = window.is_window_active();
+        let became_active = window_active && !self.window_active;
+        self.window_active = window_active;
+        if became_active {
+            self.schedule_market_frame(window, cx);
+        }
+    }
+
+    fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.frame_poll_gate.try_schedule(self.window_active) {
+            return;
+        }
+        let terminal = cx.entity();
+        window.on_next_frame(move |window, cx| {
+            let diagnostics = terminal.update(cx, |terminal, cx| {
+                terminal.frame_poll_gate.complete();
+                let mut diagnostics = Vec::new();
+                for workspace in &terminal.workspaces {
+                    let surface = workspace.surface.clone();
+                    let pending = surface.update(cx, |workspace, workspace_cx| {
+                        if workspace.poll_market_worker(workspace_cx) > 0 {
+                            workspace_cx.notify();
+                        }
+                        workspace.pending_ui_diagnostics.take()
+                    });
+                    if let Some(pending) = pending {
+                        diagnostics.push((surface, pending));
+                    }
+                }
+                diagnostics
+            });
+            if !diagnostics.is_empty() {
+                window.on_next_frame(move |_, cx| {
+                    for (workspace, mut diagnostics) in diagnostics {
+                        diagnostics.mark_frame_submit();
+                        workspace.update(cx, |workspace, _| {
+                            workspace
+                                .market_worker
+                                .send_ui_diagnostics(diagnostics.into_presented());
+                        });
+                    }
+                });
+            }
+        });
+    }
+}
+
+fn active_header_state(
+    workspace: &WorkspaceSurface,
+    theme: &AxiusflowTheme,
+    chart_has_market_data: bool,
+    cx: &App,
+) -> HeaderState {
+    HeaderState {
+        theme: *theme,
+        provider: workspace.provider,
+        instrument_label: terminal_instrument_label(workspace),
+        series_label: if workspace.provider == TerminalProvider::Coinbase {
+            workspace.coinbase_interval.label().to_string()
+        } else {
+            series_selector_label(
+                workspace
+                    .series_browser
+                    .selected()
+                    .map(|request| request.series),
+                workspace
+                    .series_browser
+                    .pending()
+                    .map(|request| request.series),
+            )
+        },
+        instruments: workspace.instrument_entries(cx),
+        selected_series: workspace
+            .series_browser
+            .selected()
+            .map(|request| request.series),
+        symbol_input: workspace.symbol_input.clone(),
+        indicator_input: workspace.indicator_input.clone(),
+        indicator_message: workspace.indicator_message.clone(),
+        series_message: workspace.series_message.clone(),
+        pending: HeaderPendingState {
+            symbol_selection: workspace.symbol_selection_pending,
+            series: workspace.series_browser.pending().is_some()
+                || workspace.coinbase_switch.is_pending(),
+        },
+        controls: HeaderControls::from_state(
+            workspace.symbol_input.is_some()
+                || !workspace.symbol_browser.results().is_empty()
+                || !workspace.coinbase_products.is_empty(),
+            workspace.symbol_browser.selected().is_some() || workspace.coinbase_product.is_some(),
+        )
+        .with_chart_controls(chart_has_market_data),
+        dom_visible: workspace.side_panel == Some(SidePanel::Dom),
+        connection_state: workspace
+            .connection_state
+            .unwrap_or(FeedConnectionState::Disconnected),
+        chart_state: workspace.chart_state,
+        delayed: false,
+    }
+}
+
+impl Render for TerminalApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.track_window_activation(window, cx);
+        self.schedule_market_frame(window, cx);
+        let terminal = cx.entity();
+        let active = self.active_surface();
+        let workspace = active.read(cx);
+        let connection_state = workspace
+            .connection_state
+            .unwrap_or(FeedConnectionState::Disconnected);
+        let chart_has_market_data = workspace
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).has_market_data());
+        let drawing_state = workspace.drawing_toolbar_state(cx);
+        let fullscreen = window.is_fullscreen();
+        let overlay = chrome_overlay_layer(
+            workspace,
+            &active,
+            &self.theme,
+            chart_chrome::CHART_CHROME_HEIGHT
+                + if fullscreen {
+                    0.0
+                } else {
+                    WORKSPACE_TITLE_BAR_HEIGHT
+                },
+            cx,
+        );
+        let title_bar = workspace_title_bar_visible(fullscreen).then(|| {
+            workspace_title_bar(
+                &terminal,
+                &self.workspaces,
+                self.active,
+                self.workspace_factory.is_some(),
+                self.workspace_error.as_deref(),
+                &self.theme,
+            )
+        });
+        let header = terminal_header(
+            &terminal,
+            &active,
+            active_header_state(workspace, &self.theme, chart_has_market_data, cx),
+        );
+        let market = market_workspace(MarketWorkspaceState {
+            terminal: terminal.clone(),
+            app: active.clone(),
+            chart: workspace.chart.as_ref(),
+            chart_has_market_data,
+            dom: workspace.dom.clone(),
+            side_panel: workspace.side_panel,
+            chart_state: workspace.chart_state,
+            chart_status_detail: chart_status_detail(
+                workspace.chart_state,
+                connection_state,
+                &workspace.chart_state_message,
+                workspace.connection_message.as_deref(),
+            )
+            .to_string(),
+            drawing_state,
+            drawing_toolbar_collapsed: self.drawing_toolbar.is_collapsed(),
+            theme: &self.theme,
+        });
+        let fullscreen_focus = self.chrome_focus.clone();
+        div()
+            .relative()
+            .v_flex()
+            .size_full()
+            .track_focus(&self.chrome_focus)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| {
+                WindowCommand::MaximizeOrRestore.execute(window);
+            })
+            .on_action(move |_: &ToggleFullscreen, window, cx| {
+                window.toggle_fullscreen();
+                fullscreen_focus.focus(window, cx);
+            })
+            .on_action(cx.listener(Self::close_window))
+            .bg(gpui_color(self.theme.colors.background))
+            .text_color(gpui_color(self.theme.colors.foreground))
+            .children(title_bar)
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .bg(gpui_color(self.theme.colors.background))
+                    .child(market),
+            )
+            .children(overlay)
+    }
+}
+
+#[derive(Clone)]
+struct WorkspaceTabDrag {
+    tab_id: u64,
+    index: usize,
+    label: String,
+    active: bool,
+    theme: AxiusflowTheme,
+}
+
+impl Render for WorkspaceTabDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        div()
+            .h(px(chart_chrome::CHART_CONTROL_SIZE))
+            .flex()
+            .items_center()
+            .px_3()
+            .rounded(px(f32::from(
+                chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
+            )))
+            .border_1()
+            .border_color(gpui_color(colors.primary))
+            .bg(gpui_color(if self.active {
+                colors.accent
+            } else {
+                colors.muted
+            }))
+            .text_sm()
+            .text_color(gpui_color(colors.foreground))
+            .child(self.label.clone())
+    }
+}
+
+fn workspace_tab_close_button(
+    terminal: Entity<TerminalApp>,
+    tab_id: u64,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let hover = gpui_color(theme.colors.background);
+    let foreground = gpui_color(theme.colors.foreground);
+    div()
+        .id(("close_workspace", tab_id))
+        .size(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+        .text_color(gpui_color(theme.colors.muted_foreground))
+        .cursor_pointer()
+        .hover(move |close| close.bg(hover).text_color(foreground))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.close_workspace(tab_id, window, cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(header_icon(HugeIcon::CancelIcon01).size(px(12.0)))
+}
+
+fn workspace_tab(
+    terminal: &Entity<TerminalApp>,
+    workspace: &WorkspaceTab,
+    index: usize,
+    active: usize,
+    drag_enabled: bool,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let tab_id = workspace.id;
+    let selected = index == active;
+    let select_terminal = terminal.clone();
+    let drop_terminal = terminal.clone();
+    let drag = WorkspaceTabDrag {
+        tab_id,
+        index,
+        label: workspace.label.clone(),
+        active: selected,
+        theme: *theme,
+    };
+    div()
+        .id(("workspace_tab", tab_id))
+        .h(px(chart_chrome::CHART_CONTROL_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .pl_3()
+        .pr_1()
+        .rounded(px(f32::from(
+            chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
+        )))
+        .border_1()
+        .border_color(gpui_color(if selected {
+            colors.border
+        } else {
+            colors.muted
+        }))
+        .bg(gpui_color(if selected {
+            colors.accent
+        } else {
+            colors.muted
+        }))
+        .text_sm()
+        .text_color(gpui_color(if selected {
+            colors.foreground
+        } else {
+            colors.muted_foreground
+        }))
+        .cursor_pointer()
+        .hover(move |tab| {
+            tab.bg(gpui_color(colors.accent))
+                .text_color(gpui_color(colors.foreground))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            select_terminal.update(cx, |terminal, cx| {
+                terminal.select_workspace(index, cx);
+            });
+        })
+        .when(drag_enabled, |tab| {
+            tab.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                .drag_over::<WorkspaceTabDrag>(move |tab, dragged, _, _| {
+                    let tab = tab
+                        .bg(gpui_color(colors.muted))
+                        .border_color(gpui_color(colors.primary));
+                    match index.cmp(&dragged.index) {
+                        std::cmp::Ordering::Less => tab.border_l_2(),
+                        std::cmp::Ordering::Greater => tab.border_r_2(),
+                        std::cmp::Ordering::Equal => tab,
+                    }
+                })
+                .on_drop(move |dragged: &WorkspaceTabDrag, _, cx| {
+                    drop_terminal.update(cx, |terminal, cx| {
+                        terminal.reorder_workspace(dragged.tab_id, tab_id, cx);
+                    });
+                })
+        })
+        .child(workspace.label.clone())
+        .child(workspace_tab_close_button(terminal.clone(), tab_id, theme))
+        .into_any_element()
+}
+
+fn workspace_tab_strip(
+    terminal: &Entity<TerminalApp>,
+    workspaces: &[WorkspaceTab],
+    active: usize,
+    enabled: bool,
+    error: Option<&str>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let tabs = workspaces.iter().enumerate().map(|(index, workspace)| {
+        workspace_tab(terminal, workspace, index, active, enabled, theme)
+    });
+    let add_terminal = terminal.clone();
+    let add_enabled = enabled && workspaces.len() < MAXIMUM_OPEN_WORKSPACES;
+    div()
+        .h_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .pl_2()
+        .overflow_x_hidden()
+        .children(enabled.then_some(tabs).into_iter().flatten())
+        .children(enabled.then(|| {
+            chrome_tooltip(
+                "add_workspace",
+                "Create workspace",
+                button_activation(
+                    chrome_button_style(
+                        Button::new("add_workspace")
+                            .icon(header_icon(HugeIcon::AddIcon01))
+                            .compact()
+                            .border_0()
+                            .disabled(!add_enabled)
+                            .when(add_enabled, Button::cursor_pointer),
+                        theme,
+                        false,
+                        add_enabled,
+                    ),
+                    add_enabled,
+                    move |window, cx| {
+                        add_terminal.update(cx, |terminal, cx| {
+                            terminal.add_workspace(window, cx);
+                        });
+                    },
+                ),
+            )
+        }))
+        .children(error.map(|error| {
+            chrome_tooltip(
+                "workspace_creation_error",
+                error.to_string(),
+                div()
+                    .size(px(7.0))
+                    .rounded_full()
+                    .bg(gpui_color(colors.negative)),
+            )
+        }))
 }
 
 fn terminal_root(
@@ -4208,12 +4593,33 @@ fn terminal_root(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
-    let terminal = terminal_entity(bootstrap, market_worker, lifecycle, window, cx);
+    let surface = workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx);
+    terminal_shell_root(
+        vec![WorkspaceTab {
+            id: 1,
+            label: workspace_label(0),
+            surface,
+        }],
+        None,
+        lifecycle,
+        window,
+        cx,
+    )
+}
+
+fn terminal_shell_root(
+    workspaces: Vec<WorkspaceTab>,
+    workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    lifecycle: &DesktopLifecycle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<Root> {
+    let terminal_lifecycle = lifecycle.clone();
+    let terminal =
+        cx.new(move |cx| TerminalApp::new(workspaces, terminal_lifecycle, workspace_factory, cx));
     let closing_terminal = terminal.clone();
     window.on_window_should_close(cx, move |_, cx| {
-        closing_terminal.update(cx, |terminal, terminal_cx| {
-            terminal.retire_market_worker(terminal_cx);
-        });
+        closing_terminal.update(cx, |terminal, cx| terminal.retire_workspaces(cx));
         true
     });
     let root = cx.new(|cx| Root::new(terminal.clone(), window, cx));
@@ -4225,153 +4631,28 @@ fn terminal_root(
     root
 }
 
-struct WorkspaceTab {
-    label: String,
-    terminals: Vec<Entity<TerminalApp>>,
-}
-
-struct WorkspaceTabs {
-    tabs: Vec<WorkspaceTab>,
-    active: usize,
-    theme: AxiusflowTheme,
-}
-
-impl WorkspaceTabs {
-    fn select_tab(&mut self, next: usize, cx: &mut Context<Self>) {
-        if next == self.active || next >= self.tabs.len() {
-            return;
-        }
-        for terminal in &self.tabs[self.active].terminals {
-            terminal.update(cx, |terminal, _| terminal.set_market_visibility(false));
-        }
-        for terminal in &self.tabs[next].terminals {
-            terminal.update(cx, |terminal, _| terminal.set_market_visibility(true));
-        }
-        self.active = next;
-        cx.notify();
-    }
-}
-
-impl Render for WorkspaceTabs {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
-        let tabs = cx.entity();
-        let tab_bar = div()
-            .h(px(42.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .border_b_1()
-            .border_color(gpui_color(colors.border))
-            .bg(gpui_color(colors.card))
-            .children(self.tabs.iter().enumerate().map(|(index, workspace)| {
-                let selected = index == self.active;
-                let tabs = tabs.clone();
-                button_activation(
-                    Button::new(format!("workspace_tab_{index}"))
-                        .label(workspace.label.clone())
-                        .selected(selected)
-                        .border_1()
-                        .border_color(gpui_color(if selected {
-                            colors.primary
-                        } else {
-                            colors.border
-                        }))
-                        .bg(gpui_color(if selected {
-                            colors.muted
-                        } else {
-                            colors.card
-                        })),
-                    true,
-                    move |_, cx| {
-                        tabs.update(cx, |tabs, tabs_cx| tabs.select_tab(index, tabs_cx));
-                    },
-                )
-            }));
-        let panes = self.tabs[self.active].terminals.iter().enumerate().fold(
-            div().flex().flex_1().overflow_hidden(),
-            |row, (index, terminal)| {
-                row.child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .when(index > 0, |pane| {
-                            pane.border_l_1().border_color(gpui_color(colors.border))
-                        })
-                        .child(terminal.clone()),
-                )
-            },
-        );
-        div()
-            .v_flex()
-            .size_full()
-            .bg(gpui_color(colors.background))
-            .child(tab_bar)
-            .child(panes)
-    }
-}
-
 fn workspace_tabs_root(
     market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    workspace_factory: engine_market_worker::WorkspaceMarketFactory,
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
-    let terminals = market_workers
+    let workspaces = market_workers
         .into_iter()
-        .map(|(bootstrap, market_worker)| {
-            terminal_entity(bootstrap, market_worker, lifecycle, window, cx)
-        })
-        .collect::<Vec<_>>();
-    let tabs = terminals
-        .chunks(2)
         .enumerate()
-        .map(|(index, terminals)| WorkspaceTab {
-            label: format!("Workspace {}", index + 1),
-            terminals: terminals.to_vec(),
+        .map(|(index, (bootstrap, market_worker))| WorkspaceTab {
+            id: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+            label: workspace_label(index),
+            surface: workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx),
         })
         .collect::<Vec<_>>();
-    for workspace in tabs.iter().skip(1) {
-        for terminal in &workspace.terminals {
-            terminal.update(cx, |terminal, _| terminal.set_market_visibility(false));
-        }
-    }
-    let all_terminals = tabs
-        .iter()
-        .flat_map(|workspace| workspace.terminals.iter().cloned())
-        .collect::<Vec<_>>();
-    window.on_window_should_close(cx, move |_, cx| {
-        for terminal in &all_terminals {
-            terminal.update(cx, |terminal, terminal_cx| {
-                terminal.retire_market_worker(terminal_cx);
-            });
-        }
-        true
-    });
-    let first_terminal = tabs
-        .first()
-        .and_then(|workspace| workspace.terminals.first())
-        .cloned();
-    let workspace_tabs = cx.new(|_| WorkspaceTabs {
-        tabs,
-        active: 0,
-        theme: AxiusflowTheme::dark(),
-    });
-    let root = cx.new(|cx| Root::new(workspace_tabs, window, cx));
-    if let Some(first_terminal) = first_terminal {
-        window.on_next_frame(move |window, cx| {
-            first_terminal.update(cx, |terminal, cx| {
-                terminal.chrome_focus.focus(window, cx);
-            });
-        });
-    }
-    root
+    terminal_shell_root(workspaces, Some(workspace_factory), lifecycle, window, cx)
 }
 
 struct ConfiguredDesktop {
     market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     lifetime_mode: DesktopLifetimeMode,
     layout: DesktopLayout,
 }
@@ -4408,6 +4689,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let first = arguments.next();
     let (lifetime_mode, command) = split_lifetime_mode(first, &mut arguments);
     let mut layout = DesktopLayout::Windows;
+    let mut workspace_factory = None;
     let market_workers = if let Some(argument) = command {
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
@@ -4449,7 +4731,9 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             }
             configure_engine_resource_mode(lifetime_mode)?;
             layout = DesktopLayout::WorkspaceTabs;
-            engine_market_worker::start_workspace_tabs()?
+            let group = engine_market_worker::start_workspace_tabs()?;
+            workspace_factory = Some(group.factory);
+            group.initial
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
@@ -4460,6 +4744,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     };
     Ok(Some(ConfiguredDesktop {
         market_workers,
+        workspace_factory,
         lifetime_mode,
         layout,
     }))
@@ -4476,6 +4761,7 @@ fn main() {
     };
     let lifecycle = DesktopLifecycle::new(configured.lifetime_mode);
     let market_workers = configured.market_workers;
+    let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     application()
         .with_assets(assets::DesktopAssets)
@@ -4526,8 +4812,16 @@ fn main() {
                 DesktopLayout::WorkspaceTabs => {
                     let window_lifecycle = lifecycle.clone();
                     let options = desktop_window_options(0, cx);
+                    let workspace_factory =
+                        workspace_factory.expect("workspace layout has a market workspace factory");
                     cx.open_window(options, move |window, cx| {
-                        workspace_tabs_root(market_workers, &window_lifecycle, window, cx)
+                        workspace_tabs_root(
+                            market_workers,
+                            workspace_factory,
+                            &window_lifecycle,
+                            window,
+                            cx,
+                        )
                     })
                     .expect("the Axiusflow workspace window opens");
                 }
@@ -4542,13 +4836,14 @@ mod tests {
         CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState,
         DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand, RithmicReadyAction,
         RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
-        TerminalProvider, WindowCommand, bounded_status_detail, catalog_rejection_domain,
-        chart_status_detail, chart_surface_notice, chrome_control_foreground,
-        connection_presentation, default_rithmic_contract_index, finish_desktop_shutdown,
-        fullscreen_escape_command, gpui_color, instrument_selector_label, publication_chart_state,
-        reconciled_bridge_state, reconnect_contract_index, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop, split_lifetime_mode,
-        window_controls_visible,
+        TerminalProvider, WindowCommand, active_workspace_after_close, bounded_status_detail,
+        catalog_rejection_domain, chart_status_detail, chart_surface_notice,
+        chrome_control_foreground, connection_presentation, default_rithmic_contract_index,
+        finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        reorder_workspace_ids, rithmic_ready_action, series_selector_label,
+        should_apply_rithmic_worker_stop, split_lifetime_mode, workspace_label, workspace_switch,
+        workspace_title_bar_visible,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -4631,9 +4926,33 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_hides_native_window_controls() {
-        assert!(!window_controls_visible(true));
-        assert!(window_controls_visible(false));
+    fn fullscreen_hides_workspace_title_bar_and_native_controls() {
+        assert!(!workspace_title_bar_visible(true));
+        assert!(workspace_title_bar_visible(false));
+    }
+
+    #[test]
+    fn workspace_tabs_switch_one_surface_and_preserve_stable_labels() {
+        assert_eq!(workspace_switch(0, 1, 2), Some((0, 1)));
+        assert_eq!(workspace_switch(1, 1, 2), None);
+        assert_eq!(workspace_switch(0, 2, 2), None);
+        assert_eq!(workspace_label(0), "Workspace 1");
+        assert_eq!(workspace_label(7), "Workspace 8");
+    }
+
+    #[test]
+    fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
+        let mut ids = vec![1, 2, 3];
+        assert!(reorder_workspace_ids(&mut ids, 1, 3));
+        assert_eq!(ids, vec![2, 3, 1]);
+        assert!(reorder_workspace_ids(&mut ids, 1, 2));
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(!reorder_workspace_ids(&mut ids, 2, 2));
+
+        assert_eq!(active_workspace_after_close(&ids, 2, 1), Some(2));
+        assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
+        assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
+        assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
     }
 
     #[test]
