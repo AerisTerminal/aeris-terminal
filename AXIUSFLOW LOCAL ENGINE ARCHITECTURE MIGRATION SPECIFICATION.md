@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 83 of 180 tasks complete.**
+**Verified progress: 103 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -603,7 +603,9 @@ Treat it as vendor material/build input/reference material.
 
 # 12. RITHMIC BOUNDARY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): Rithmic vendor protobuf generation and the private `generated` module remain confined to `crates/adapters/rithmic_protocol`; the module is not publicly exported. The adapter converts decoded trades, quotes, depth, catalog, history, timestamps, and session outcomes into canonical domain or bounded adapter contract values before the engine consumes them. Desktop, application, domain, market-engine, storage, and chart crates have no production dependency on either provider adapter. Repository conformance now fails if Rithmic protobuf escapes its adapter or an Origin/presentation layer acquires a provider implementation dependency.
 
 Rithmic protobuf/wire types must stop inside:
 
@@ -648,7 +650,9 @@ The same principle applies to Coinbase-specific types.
 
 # 13. CANONICAL MARKET TYPES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `crates/domain/market_data` owns validated provider-neutral fixed-point trades, quotes, depth snapshots/deltas, bars, exact timestamps, periods, and `BarSeriesKey`. Series identity carries provider, canonical instrument, entitlement, exact cadence, and definition revision; hot bars carry no repeated provider strings or provider wire objects. Both provider adapters normalize decoded events at their boundaries, while engine memory, IPC conversion, application validation, and chart publication operate on canonical values.
 
 All providers normalize into provider-neutral domain types.
 
@@ -682,7 +686,9 @@ The rest of Axiusflow should not repeatedly carry `"BTC-USD"` or Rithmic symbol 
 
 # 14. `market_engine` IS THE PRIMARY OWNER
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): one coordinator-owned `MarketEngine` contains the authoritative demand, provider, series, shared-subscription, and publication registries. `apps/engine` drives that owner and executes bounded provider/history/storage work; desktop and provider workers cannot mutate it directly. A new structural conformance check requires the cohesive owner fields and rejects `Mutex`, `RwLock`, mutable statics, or lazy lock owners anywhere in production `market_engine`, preserving message-driven single ownership rather than an `Arc<Mutex<_>>` graph.
 
 The target `market_engine` crate owns all market-data orchestration.
 
@@ -2507,7 +2513,9 @@ The engine is authoritative about market-data readiness.
 
 # 63. GPUI PRESENTATION MODEL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the desktop retains chart selection, consumer/publication generation, viewport, load/provider state, covering replay snapshot, live tail, and bounded presentation diagnostics only. Provider and storage work crosses authenticated IPC on background workers; GPUI applies validated application updates on frame boundaries. Desktop, terminal UI, and chart integration manifests exclude provider adapters, provider history, local storage/history, `market_engine`, and SQLite, and conformance scans reject concrete history/database/provider connection handles in production presentation source.
 
 A chart presentation model should conceptually look like:
 
@@ -2540,7 +2548,9 @@ OrderBookEngine
 
 # 64. CHART INTEGRATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `crates/ui/chart_integration` is the sole Axiusflow bridge to Origin. Its bounded `ChartDataBridge` validates series/session/publication generations, rejects stale or uncorrelated recovery snapshots, merges covering snapshots and contiguous tails, applies viewport and frame updates, and converts validated application data for Origin rendering. Workspace conformance now rejects any Origin manifest dependency or production source import outside this crate.
 
 `crates/ui/chart_integration` remains the only Axiusflow-specific bridge to Origin Charts.
 
@@ -2559,7 +2569,9 @@ It does not request provider data directly.
 
 # 65. ORIGIN CHART ENGINE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): Axiusflow consumes Origin only through pinned Git dependencies in `crates/ui/chart_integration`; no engine, provider, storage, protocol, application, desktop, or terminal-UI crate imports Origin directly. Origin remains a separate repository and receives already validated chart data, viewport commands, and rendering interaction through the bridge. The repository conformance test makes this dependency boundary executable.
 
 Do not migrate provider/backend responsibilities into Origin Charts.
 
@@ -2693,7 +2705,9 @@ The engine is shared.
 
 # 70. NO DATABASE CONNECTION PER CHART
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): SQLite and encrypted segment ownership remain in the engine-composed storage path. `apps/desktop`, `chart_integration`, and `terminal_ui` have no storage/history/SQLite dependency, and production presentation source contains no `rusqlite`, `HistoryStore`, Rithmic history connection, or ticker connection handle. Multiple chart consumers therefore share engine-owned local data rather than opening database connections per chart.
 
 Storage is engine-owned.
 
@@ -3971,7 +3985,9 @@ Then optimize observed hot spots.
 
 # 119. `ARCHITECTURE.md`
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `ARCHITECTURE.md` is synchronized with manifests and call paths. It explicitly assigns provider sessions, canonical market state, shared subscriptions, local persistence, lifecycle, and bounded publication to `axiusflow_engine`; assigns GPUI presentation and chart interaction to `axiusflow_desktop`; documents authenticated local IPC, persistence-independent first pixels, warm/markets-live/complete-exit behavior, independent multi-consumer charts, the current one-chart and `--multi-chart` surfaces, and the future desktop-owned tab/pane model. It also records the sole `chart_integration`/Origin boundary and the current unimplemented persistent multi-tab limitation without claiming target behavior as shipped.
 
 Update the existing root `ARCHITECTURE.md`.
 
@@ -4281,7 +4297,9 @@ Use ownership boundaries for failure isolation.
 
 # 133. MULTI-PROVIDER SERIES IDENTITY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): canonical `BarSeriesKey` identity contains provider, instrument, entitlement, exact period, and definition revision, and protocol conversion validates the same provenance. A new `MarketEngine` regression registers Coinbase and Rithmic, submits equal `BTC` instrument labels under distinct provider/entitlement identities, installs different data, and proves the engine retains two subscriptions and two independent stored series without cross-publication or merging.
 
 A canonical series identity must include enough provider/account provenance that:
 
@@ -5545,7 +5563,9 @@ Eviction should consider:
 
 # 170. TEST FILES MUST FOLLOW THE NEW ARCHITECTURE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): durable provider protocol, provider-history/handoff, storage lifecycle, `MarketEngine`, protocol/IPC handshake, desktop readiness, and forensic regression suites remain in the workspace. Deleted `desktop_market_runtime` and `desktop_provider_runtime` cannot regain manifests or Rust source. Repository conformance now requires the durable test entry points and preserves the resident-engine regressions proving valid history publishes from memory and advances live state even when persistence is degraded, retaining the historical `history.install_failed` invariant at its new owner.
 
 After migration, retain tests for durable boundaries:
 

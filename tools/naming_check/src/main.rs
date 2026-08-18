@@ -17,6 +17,8 @@ const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     ".gitignore",
     ".gitmodules",
     "AGENTS.md",
+    "ARCHITECTURE.md",
+    "AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md",
     "Cargo.lock",
     "Cargo.toml",
     "Dockerfile",
@@ -168,6 +170,16 @@ mod tests {
         files
     }
 
+    fn production_sources_under(relative: &str) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_files(
+            &repository_root().join(relative),
+            |path| path.extension().is_some_and(|extension| extension == "rs"),
+            &mut files,
+        );
+        files
+    }
+
     fn relative_string(path: &Path) -> String {
         path.strip_prefix(repository_root())
             .unwrap_or(path)
@@ -276,6 +288,184 @@ mod tests {
                 "axiusflow_rithmic_protocol_adapter",
             ],
         );
+    }
+
+    #[test]
+    fn provider_wire_and_origin_boundaries_remain_isolated() {
+        let rithmic_adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
+        assert!(
+            rithmic_adapter.contains("mod generated {"),
+            "Rithmic generated protobuf must remain owned by its adapter"
+        );
+        assert!(
+            !rithmic_adapter.contains("pub mod generated"),
+            "Rithmic generated protobuf must not be exported above the adapter boundary"
+        );
+
+        for path in workspace_manifests() {
+            let relative = relative_string(&path);
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            if contents.contains("origin_engine.workspace")
+                || contents.contains("origin_render.workspace")
+                || contents.contains("origin_render_gpui.workspace")
+            {
+                assert_eq!(
+                    relative, "crates/ui/chart_integration/Cargo.toml",
+                    "Origin crates may be consumed only by chart_integration"
+                );
+            }
+        }
+
+        for path in production_rust_sources() {
+            let relative = relative_string(&path);
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = production_prefix(&contents);
+            if production.contains("origin_engine")
+                || production.contains("origin_render")
+                || production.contains("origin_render_gpui")
+            {
+                assert!(
+                    relative.starts_with("crates/ui/chart_integration/src/"),
+                    "{relative} bypasses the Axiusflow chart integration boundary"
+                );
+            }
+            if !relative.starts_with("crates/adapters/rithmic_protocol/") {
+                assert!(
+                    !production.contains("rithmic.protobuf"),
+                    "{relative} leaks Rithmic vendor protobuf above its adapter"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_presentation_layers_exclude_provider_and_storage_ownership() {
+        for relative in [
+            "apps/desktop/Cargo.toml",
+            "crates/ui/chart_integration/Cargo.toml",
+            "crates/ui/terminal_ui/Cargo.toml",
+        ] {
+            assert_excludes(
+                relative,
+                &[
+                    "axiusflow_coinbase_market_adapter",
+                    "axiusflow_rithmic_protocol_adapter",
+                    "axiusflow_desktop_history",
+                    "axiusflow_desktop_storage",
+                    "axiusflow_market_engine",
+                    "axiusflow_provider_history",
+                    "rusqlite",
+                ],
+            );
+        }
+
+        for root in ["apps/desktop/src", "crates/ui"] {
+            for path in production_sources_under(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+                let production = production_prefix(&contents);
+                for forbidden in [
+                    "rusqlite::",
+                    "HistoryStore",
+                    "RithmicHistoryConnection",
+                    "RithmicTickerConnection",
+                ] {
+                    assert!(
+                        !production.contains(forbidden),
+                        "{} gives a presentation layer backend ownership through {forbidden}",
+                        relative_string(&path)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn market_engine_has_one_lock_free_mutable_owner() {
+        let owner = manifest("crates/market_engine/src/lib.rs");
+        for field in [
+            "demands: DemandRegistry",
+            "providers: ProviderManager",
+            "series: SeriesStore",
+            "subscriptions: SubscriptionRegistry",
+            "publications: PublicationManager",
+        ] {
+            assert!(
+                owner.contains(field),
+                "MarketEngine must retain authoritative ownership of {field}"
+            );
+        }
+
+        for path in production_sources_under("crates/market_engine/src") {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = production_prefix(&contents);
+            for forbidden in ["Mutex<", "RwLock<", "static mut", "OnceLock<", "LazyLock<"] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{} splits MarketEngine authority through {forbidden}",
+                    relative_string(&path)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn durable_migration_test_boundaries_remain_present() {
+        for relative in [
+            "tools/run_rithmic_protocol_conformance.sh",
+            "crates/provider_history/tests/provider_history_conformance.rs",
+            "crates/provider_history/tests/handoff_conformance.rs",
+            "crates/desktop_storage/tests/history_store_lifecycle.rs",
+            "crates/local_engine_protocol/tests/protocol.rs",
+            "apps/engine/tests/handshake.rs",
+            "apps/desktop/src/readiness_conformance.rs",
+        ] {
+            assert!(
+                repository_root().join(relative).is_file(),
+                "durable migration test boundary {relative} is missing"
+            );
+        }
+
+        let engine_core = manifest("crates/market_engine/src/lib.rs");
+        assert!(
+            engine_core.contains("stale_history_never_overwrites_a_new_consumer_generation")
+                && engine_core.contains("twenty_consumers_share_one_immutable_series_snapshot"),
+            "MarketEngine generation and sharing conformance must remain represented"
+        );
+        let engine_service = manifest("apps/engine/src/market_service.rs");
+        for regression in [
+            "storage_failure_degrades_persistence_without_hiding_provider_history",
+            "storage_degradation_preserves_provider_and_live_progress",
+        ] {
+            assert!(
+                engine_service.contains(regression),
+                "historical history.install_failed invariant lost regression {regression}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_markdown_inventory_is_exact() {
+        let actual = fs::read_dir(repository_root())
+            .expect("repository root is readable")
+            .filter_map(|entry| {
+                let path = entry.expect("repository entry is readable").path();
+                (path.extension().is_some_and(|extension| extension == "md"))
+                    .then(|| path.file_name().expect("Markdown has a name").to_owned())
+            })
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "AGENTS.md",
+            "ARCHITECTURE.md",
+            "AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+        assert_eq!(actual, expected, "repository Markdown inventory drifted");
     }
 
     #[test]

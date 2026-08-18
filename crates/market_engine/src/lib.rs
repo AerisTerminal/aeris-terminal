@@ -650,10 +650,14 @@ mod tests {
     }
 
     fn series(instrument: &str) -> BarSeriesKey {
+        provider_series("coinbase", instrument, "public")
+    }
+
+    fn provider_series(provider: &str, instrument: &str, entitlement: &str) -> BarSeriesKey {
         BarSeriesKey {
-            provider_id: "coinbase".to_string(),
+            provider_id: provider.to_string(),
             instrument_id: instrument.to_string(),
-            entitlement_id: "public".to_string(),
+            entitlement_id: entitlement.to_string(),
             period: BarPeriod::time(60).expect("test period validates"),
             definition_version: 1,
         }
@@ -1124,6 +1128,72 @@ mod tests {
         assert_eq!(engine.detach_client(ClientId(nonzero(1))), vec![id(1)]);
         assert!(!engine.has_subscription(&eth));
         assert!(engine.current_demand(id(3)).is_some());
+    }
+
+    #[test]
+    fn equal_instrument_labels_from_different_providers_never_share_series_state() {
+        let mut engine = engine(2, 2, 8);
+        engine
+            .register_provider(
+                "rithmic".to_string(),
+                ProviderConfig {
+                    account_id: "rithmic:test".to_string(),
+                    capabilities: ProviderCapabilities {
+                        historical_bars: true,
+                        realtime_bars: true,
+                        streams: StreamRequirements::BARS,
+                    },
+                    reconnect_delay: std::time::Duration::from_millis(500),
+                },
+            )
+            .expect("second provider registers");
+        engine
+            .begin_provider_session("rithmic", provider_generation(1))
+            .expect("second provider session begins");
+        register(&mut engine, 1, 1);
+        register(&mut engine, 2, 1);
+
+        let coinbase = provider_series("coinbase", "BTC", "public");
+        let rithmic = provider_series("rithmic", "BTC", "rithmic:test");
+        engine
+            .set_series_demand(id(1), generation(1), &coinbase)
+            .expect("Coinbase demand installs");
+        engine
+            .set_series_demand(id(2), generation(1), &rithmic)
+            .expect("Rithmic demand installs");
+
+        let mut coinbase_bars = bars(2);
+        coinbase_bars[1].close = 101;
+        let mut rithmic_bars = bars(2);
+        rithmic_bars[1].open = 200;
+        rithmic_bars[1].high = 210;
+        rithmic_bars[1].low = 190;
+        rithmic_bars[1].close = 202;
+        engine
+            .install_history(provider_generation(1), &coinbase, 2, 8, coinbase_bars)
+            .expect("Coinbase history installs");
+        engine
+            .install_history(provider_generation(1), &rithmic, 2, 8, rithmic_bars)
+            .expect("Rithmic history installs");
+
+        assert_eq!(
+            engine
+                .series_snapshot(&coinbase)
+                .expect("Coinbase series remains available")
+                .bars[1]
+                .close,
+            101
+        );
+        assert_eq!(
+            engine
+                .series_snapshot(&rithmic)
+                .expect("Rithmic series remains available")
+                .bars[1]
+                .close,
+            202
+        );
+        assert_eq!(engine.metrics().stored_series, 2);
+        assert_eq!(engine.metrics().active_subscriptions, 2);
     }
 
     #[test]
