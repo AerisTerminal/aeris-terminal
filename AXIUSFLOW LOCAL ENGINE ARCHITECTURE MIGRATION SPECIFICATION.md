@@ -2351,9 +2351,9 @@ Do not rebuild provider scheduling logic in this file.
 
 # 57. LOCAL HISTORY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-18): the crate and package identity are now `local_history` and `axiusflow_local_history`, its public error is `LocalHistoryError`, and desktop/UI manifests cannot depend on it. The resident production path still owns active local-history orchestration in `apps/engine/src/local_history.rs` rather than consuming the generic decoded-cache worker as a production dependency, so this section remains open pending consolidation or deletion of that remaining split.
+Evidence (2026-08-18): `axiusflow_engine` now consumes `axiusflow_local_history` as its production storage boundary and no longer depends on `local_storage` directly. The duplicate `apps/engine/src/local_history.rs` implementation and the unused desktop-era generic `HistoryWorker`, chart bindings, provider handoff, decoded cache, tests, and adapter dev-dependency cycle are deleted. `local_history::LocalHistoryStore` owns provider-neutral native-vault key access, encrypted immutable segment reads/writes, exact range identity, current and legacy schema decoding, contiguous canonical-bar validation, and redacted failures; engine policy supplies provider/account scope and compatible Coinbase derivation. Canonical decoded memory remains bounded once at `MarketEngine::SeriesStore`, and generation, repair, publication, and live handoff remain with the single engine coordinator. Conformance rejects restoration of the app-local duplicate and provider/UI ownership, while local-history restart, legacy compatibility, exact nanosecond cadence, and no-duplicate-derivation tests plus the resident engine storage/recovery suite cover the shipping path.
 
 Rename `desktop_history` conceptually to `local_history`.
 
@@ -2361,11 +2361,13 @@ It should not be desktop-owned.
 
 Responsibilities:
 
-- decoded bounded history cache,
+- bounded decoding and validation of retained segments,
 - immutable stored series reads,
-- range retrieval,
+- range-indexed retrieval mechanics through `local_storage`,
 - validation,
 - local history mechanics.
+
+The canonical decoded cache and history/live handoff remain owned once by `MarketEngine`; `local_history` must not duplicate them.
 
 The engine consumes it.
 
@@ -2377,7 +2379,7 @@ GPUI does not.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): the backend package and directory are now `axiusflow_local_storage` and `crates/local_storage`, and the public error is `LocalStorageError`. The resident engine is its production owner and uses it through the bounded local-history worker for encrypted immutable segments, keyed SQLite catalog metadata, retained coverage, crash-safe publication, restart recovery, and corrupt-segment quarantine. Desktop/UI manifests exclude the crate, and the full storage lifecycle suite remains the durable boundary test.
+Evidence (2026-08-18): the backend package and directory are now `axiusflow_local_storage` and `crates/local_storage`, and the public error is `LocalStorageError`. The resident engine is its production owner and reaches it through the bounded engine storage worker and `local_history` boundary for encrypted immutable segments, keyed SQLite catalog metadata, retained coverage, crash-safe publication, restart recovery, and corrupt-segment quarantine. Desktop/UI manifests exclude the crate, and the full storage lifecycle suite remains the durable boundary test.
 
 Rename `desktop_storage` conceptually to `local_storage`.
 

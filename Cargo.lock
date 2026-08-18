@@ -678,7 +678,6 @@ dependencies = [
 name = "axiusflow_coinbase_market_adapter"
 version = "0.1.0"
 dependencies = [
- "axiusflow_local_history",
  "axiusflow_market_data",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
@@ -733,7 +732,7 @@ dependencies = [
  "axiusflow_coinbase_market_adapter",
  "axiusflow_engine_protocol",
  "axiusflow_local_engine_client",
- "axiusflow_local_storage",
+ "axiusflow_local_history",
  "axiusflow_market_data",
  "axiusflow_market_engine",
  "axiusflow_platform_runtime",
@@ -773,7 +772,10 @@ name = "axiusflow_local_history"
 version = "0.1.0"
 dependencies = [
  "axiusflow_local_storage",
- "axiusflow_provider_history",
+ "axiusflow_market_data",
+ "axiusflow_platform_runtime",
+ "getrandom 0.4.3",
+ "zeroize",
 ]
 
 [[package]]
@@ -842,7 +844,6 @@ version = "0.1.0"
 name = "axiusflow_rithmic_protocol_adapter"
 version = "0.1.0"
 dependencies = [
- "axiusflow_local_history",
  "axiusflow_local_storage",
  "axiusflow_market_data",
  "axiusflow_observability",

@@ -17,8 +17,5 @@ tungstenite.workspace = true
 ureq.workspace = true
 webpki-roots.workspace = true
 
-[dev-dependencies]
-axiusflow_local_history = { path = "../../local_history" }
-
 [lints]
 workspace = true

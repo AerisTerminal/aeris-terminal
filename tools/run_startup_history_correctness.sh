@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
-
-cargo test --locked --package axiusflow_local_history --test startup_history_correctness
-
-echo "startup_history=passed cases=13 matrix=cold,warm,empty,populated,corrupt,migrated,offline,control-cloud-down cached_key_retention_revalidation=true expired_backing_cleanup=true cached_access_authorization=true expiration_order_consistent=true live_only_policy=true provider_identity_validation=true shared_multi_chart_cache=true chart_rebind_eviction_release=true retained_generation_charge=true released_generation_pruning=true temporary_arc_excluded=true active_handoff_pinning=true cached_generation_watermark_floor=true local_provider_generation_separation=true expired_handoff_floor_excluded=true local_cache_byte_rotation=true bounded_handoff_lifecycle=true ownership_safe_handoff_mutation=true decoded_sequence_validation=true maximum_sequence_duplicate_rejection=true bounded_decoder_contract=true zero_gap_duplicate_flicker=true overlap_charge_exact=true maximum_watermark_overlap_exact=true recovery_floor_tracks_every_observation=true covering_snapshot_after_loss=true failed_publication_recovery=true transactional_eviction=true storage_read_limit_config=true pre_io_segment_bound=true encrypted_file_read_bound=true preclone_snapshot_bound=true preclone_live_bound=true worker_wide_buffer_charge=true buffered_byte_bound=true bounded_memory_io=true worker_send=false gpui_thread_blocking_work=false performance_claim=not_measured"

@@ -30,6 +30,7 @@ use axiusflow_engine_protocol::{
     SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
     envelope,
 };
+use axiusflow_local_history::{HistoryScope, LocalHistoryStore, StoredHistory};
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
     OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState as CanonicalOrderBookState,
@@ -40,8 +41,8 @@ use axiusflow_market_engine::{
     ProviderHealth, ProviderRequest, StreamRequirements, Viewport, WorkspaceId,
 };
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
+use axiusflow_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 
-use crate::local_history::{LocalHistoryStore, StoredHistory};
 use crate::rithmic_realtime::{
     RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, RithmicRealtimeEvent,
 };
@@ -848,7 +849,8 @@ impl MarketService {
             &crate::default_engine_state_root()?
                 .join("market-history")
                 .join("coinbase"),
-        );
+        )
+        .map_err(|error| error.to_string());
         Self::start_composed(
             HistorySources::Split {
                 coinbase: Box::new(LiveCoinbaseHistory::try_new()?),
@@ -1444,7 +1446,7 @@ fn run_storage_worker(
         let completion = match request {
             StorageRequest::Read(series, generation) => {
                 let result = match storage.as_mut() {
-                    Some(Ok(storage)) => storage.read_latest(&series),
+                    Some(Ok(storage)) => read_local_history(storage, &series),
                     Some(Err(error)) => Err(error.clone()),
                     None => Ok(None),
                 };
@@ -1452,7 +1454,7 @@ fn run_storage_worker(
             }
             StorageRequest::Persist(series, generation, bars, derived) => {
                 let result = match storage.as_mut() {
-                    Some(Ok(storage)) => storage.persist(&series, &bars, derived),
+                    Some(Ok(storage)) => persist_local_history(storage, &series, &bars, derived),
                     Some(Err(error)) => Err(error.clone()),
                     None => Ok(()),
                 };
@@ -1466,6 +1468,73 @@ fn run_storage_worker(
             return;
         }
     }
+}
+
+fn read_local_history(
+    storage: &mut LocalHistoryStore,
+    series: &BarSeriesKey,
+) -> Result<Option<StoredHistory>, String> {
+    let scope = local_history_scope(series)?;
+    if let Some(stored) = storage
+        .read_latest(&scope, series)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Some(stored));
+    }
+    let target_seconds = match series.period {
+        BarPeriod::Time { seconds } if series.provider_id == "coinbase" && seconds > 60 => seconds,
+        BarPeriod::Time { .. }
+        | BarPeriod::Tick { .. }
+        | BarPeriod::Session { .. }
+        | BarPeriod::Week { .. }
+        | BarPeriod::Month { .. } => return Ok(None),
+    };
+    let interval = coinbase_interval(target_seconds)?;
+    let source_series = BarSeriesKey {
+        period: BarPeriod::time(60).map_err(|error| error.to_string())?,
+        ..series.clone()
+    };
+    let Some(source) = storage
+        .read_latest(&scope, &source_series)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let (bars, _) = aggregate_coinbase_bars(&source.bars, interval)?;
+    if bars.is_empty() {
+        return Ok(None);
+    }
+    let durable = storage.persist(&scope, series, &bars, true).is_ok();
+    Ok(Some(StoredHistory {
+        bars,
+        derived: true,
+        durable,
+    }))
+}
+
+fn persist_local_history(
+    storage: &mut LocalHistoryStore,
+    series: &BarSeriesKey,
+    bars: &[MarketBar],
+    derived: bool,
+) -> Result<(), String> {
+    let scope = local_history_scope(series)?;
+    storage
+        .persist(&scope, series, bars, derived)
+        .map_err(|error| error.to_string())
+}
+
+fn local_history_scope(series: &BarSeriesKey) -> Result<HistoryScope, String> {
+    let account_id = match series.provider_id.as_str() {
+        "coinbase" if series.entitlement_id == ENTITLEMENT_CLASS => COINBASE_PUBLIC_ACCOUNT_ID,
+        "rithmic" => RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
+        _ => return Err("local history provider scope is unsupported".to_string()),
+    };
+    Ok(HistoryScope {
+        provider_id: series.provider_id.clone(),
+        account_id: account_id.to_string(),
+        entitlement_revision: series.entitlement_id.clone(),
+    })
 }
 
 fn run_realtime_worker(

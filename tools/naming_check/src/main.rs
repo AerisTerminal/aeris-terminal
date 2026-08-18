@@ -766,7 +766,6 @@ mod tests {
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
                 .to_string(),
-            "crates/local_history/src/worker.rs::HistoryDecoder".to_string(),
             "crates/local_storage/src/model.rs::KeyRevocationEvidence".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
@@ -917,7 +916,7 @@ mod tests {
         for dependency in [
             "axiusflow_coinbase_market_adapter",
             "axiusflow_rithmic_protocol_adapter",
-            "axiusflow_local_storage",
+            "axiusflow_local_history",
             "axiusflow_market_engine",
             "axiusflow_provider_history",
             "axiusflow_platform_runtime",
@@ -930,6 +929,7 @@ mod tests {
         }
         for forbidden in [
             "gpui",
+            "axiusflow_local_storage",
             "axiusflow_chart_integration",
             "axiusflow_terminal_ui",
         ] {
@@ -938,5 +938,43 @@ mod tests {
                 "apps/engine/Cargo.toml must not depend on {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn local_history_is_the_engine_consumed_storage_boundary() {
+        let local_history = manifest("crates/local_history/Cargo.toml");
+        for dependency in [
+            "axiusflow_local_storage",
+            "axiusflow_market_data",
+            "axiusflow_platform_runtime",
+        ] {
+            assert!(
+                local_history.contains(dependency),
+                "local_history must compose {dependency}"
+            );
+        }
+        for forbidden in [
+            "axiusflow_coinbase_market_adapter",
+            "axiusflow_rithmic_protocol_adapter",
+            "axiusflow_provider_history",
+            "gpui",
+        ] {
+            assert!(
+                !production_dependencies("crates/local_history/Cargo.toml").contains(forbidden),
+                "local_history must not own {forbidden}"
+            );
+        }
+        assert!(
+            repository_root()
+                .join("crates/local_history/src/store.rs")
+                .is_file(),
+            "local_history must own production immutable segment mechanics"
+        );
+        assert!(
+            !repository_root()
+                .join("apps/engine/src/local_history.rs")
+                .exists(),
+            "the engine app must not duplicate local-history storage mechanics"
+        );
     }
 }

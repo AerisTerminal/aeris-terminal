@@ -1,17 +1,12 @@
-//! Worker-owned desktop history hydration and immutable chart publication.
+//! Engine-owned, provider-neutral local history mechanics.
 //!
-//! Blocking storage, provider response handling, and payload decoding are kept
-//! behind [`HistoryWorker`]. UI consumers receive only shared immutable
-//! [`HistoryPublication`] values from the bounded cache.
+//! This crate owns authenticated immutable segment reads, writes, decoding, and
+//! validation. Provider repair, canonical in-memory caching, generations, and
+//! history/live handoff remain owned by the resident market engine.
 
-mod cache;
 mod error;
-mod model;
-mod worker;
+mod store;
 
+pub use axiusflow_local_storage::HistoryScope;
 pub use error::LocalHistoryError;
-pub use model::{
-    CacheSource, ChartId, HistoryPublication, HydrationOutcome, HydrationRequest,
-    ProviderConnectionState, StartupCacheState, WorkerMetrics,
-};
-pub use worker::{HistoryDecoder, HistoryWorker, HistoryWorkerConfig};
+pub use store::{LocalHistoryStore, StoredHistory};

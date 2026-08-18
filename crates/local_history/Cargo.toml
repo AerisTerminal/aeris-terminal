@@ -8,7 +8,10 @@ publish.workspace = true
 
 [dependencies]
 axiusflow_local_storage = { path = "../local_storage" }
-axiusflow_provider_history = { path = "../provider_history" }
+axiusflow_market_data = { path = "../domain/market_data" }
+axiusflow_platform_runtime = { path = "../platform_runtime" }
+getrandom.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
