@@ -2,7 +2,7 @@ use std::{error::Error, fmt, io};
 
 /// Failures from the desktop-local history boundary.
 #[derive(Debug)]
-pub enum DesktopStorageError {
+pub enum LocalStorageError {
     InvalidConfiguration(&'static str),
     InvalidIdentity(&'static str),
     CatalogKeyMismatch,
@@ -20,7 +20,7 @@ pub enum DesktopStorageError {
     Random(getrandom::Error),
 }
 
-impl fmt::Display for DesktopStorageError {
+impl fmt::Display for LocalStorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfiguration(message) => {
@@ -70,7 +70,7 @@ impl fmt::Display for DesktopStorageError {
     }
 }
 
-impl Error for DesktopStorageError {
+impl Error for LocalStorageError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
@@ -81,19 +81,19 @@ impl Error for DesktopStorageError {
     }
 }
 
-impl From<io::Error> for DesktopStorageError {
+impl From<io::Error> for LocalStorageError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
     }
 }
 
-impl From<rusqlite::Error> for DesktopStorageError {
+impl From<rusqlite::Error> for LocalStorageError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Sqlite(error)
     }
 }
 
-impl From<getrandom::Error> for DesktopStorageError {
+impl From<getrandom::Error> for LocalStorageError {
     fn from(error: getrandom::Error) -> Self {
         Self::Random(error)
     }

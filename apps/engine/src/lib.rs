@@ -19,12 +19,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     ClientKind, EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
     MarketEventIdle, PROTOCOL_VERSION, ProviderInstrumentInstalled, ResourceMode, SetSelection,
     SetViewport, SetWatchlist, WorkspaceState, encode_envelope, envelope,
 };
+use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 const WORKSPACE_SCHEMA_REVISION: u32 = 1;
 const CACHE_MANIFEST_REVISION: u32 = 1;
@@ -1090,10 +1090,10 @@ mod tests {
     use sysinfo::{Pid, ProcessesToUpdate, System};
 
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
-    use axiusflow_local_engine_client::EngineClient;
-    use axiusflow_local_engine_protocol::{
+    use axiusflow_engine_protocol::{
         InstallProviderInstrument, ResourceMode, SeriesCadence, SeriesKey, envelope,
     };
+    use axiusflow_local_engine_client::EngineClient;
     use axiusflow_market_data::MarketBar;
 
     use super::{
@@ -1760,7 +1760,7 @@ mod tests {
                     cadence_value: 100,
                     definition_revision: 1,
                     entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
-                    cadence: axiusflow_local_engine_protocol::SeriesCadence::Trades as i32,
+                    cadence: axiusflow_engine_protocol::SeriesCadence::Trades as i32,
                 },
             )
             .expect("send demand");
@@ -1780,7 +1780,7 @@ mod tests {
                     envelope::Payload::SeriesState(state) => {
                         ready_received = state.generation == 1
                             && state.state
-                                == axiusflow_local_engine_protocol::SeriesLoadState::Ready as i32;
+                                == axiusflow_engine_protocol::SeriesLoadState::Ready as i32;
                     }
                     envelope::Payload::OrderBookSnapshot(snapshot) => {
                         order_book_received = snapshot.consumer_id == 1
@@ -1788,7 +1788,7 @@ mod tests {
                             && snapshot.provider_generation == 7
                             && snapshot.selection_generation == 9
                             && snapshot.state
-                                == axiusflow_local_engine_protocol::OrderBookState::AwaitingSnapshot
+                                == axiusflow_engine_protocol::OrderBookState::AwaitingSnapshot
                                     as i32
                             && snapshot.bids.is_empty()
                             && snapshot.asks.is_empty();

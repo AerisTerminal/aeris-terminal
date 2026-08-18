@@ -678,7 +678,7 @@ dependencies = [
 name = "axiusflow_coinbase_market_adapter"
 version = "0.1.0"
 dependencies = [
- "axiusflow_desktop_history",
+ "axiusflow_local_history",
  "axiusflow_market_data",
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
@@ -701,9 +701,9 @@ dependencies = [
  "axiusflow_application",
  "axiusflow_chart_integration",
  "axiusflow_design_system",
+ "axiusflow_engine_protocol",
  "axiusflow_instruments",
  "axiusflow_local_engine_client",
- "axiusflow_local_engine_protocol",
  "axiusflow_market_data",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
@@ -719,27 +719,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_desktop_history"
-version = "0.1.0"
-dependencies = [
- "axiusflow_desktop_storage",
- "axiusflow_provider_history",
-]
-
-[[package]]
-name = "axiusflow_desktop_storage"
-version = "0.1.0"
-dependencies = [
- "axiusflow_provider_history",
- "chacha20poly1305",
- "getrandom 0.4.3",
- "hmac",
- "rusqlite",
- "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
 name = "axiusflow_diagnostics_overhead"
 version = "0.1.0"
 dependencies = [
@@ -752,9 +731,9 @@ name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
  "axiusflow_coinbase_market_adapter",
- "axiusflow_desktop_storage",
+ "axiusflow_engine_protocol",
  "axiusflow_local_engine_client",
- "axiusflow_local_engine_protocol",
+ "axiusflow_local_storage",
  "axiusflow_market_data",
  "axiusflow_market_engine",
  "axiusflow_platform_runtime",
@@ -767,6 +746,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiusflow_engine_protocol"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_transport",
+ "prost",
+]
+
+[[package]]
 name = "axiusflow_instruments"
 version = "0.1.0"
 
@@ -774,7 +761,7 @@ version = "0.1.0"
 name = "axiusflow_local_engine_client"
 version = "0.1.0"
 dependencies = [
- "axiusflow_local_engine_protocol",
+ "axiusflow_engine_protocol",
  "axiusflow_platform_runtime",
  "getrandom 0.4.3",
  "interprocess",
@@ -782,11 +769,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_local_engine_protocol"
+name = "axiusflow_local_history"
 version = "0.1.0"
 dependencies = [
- "axiusflow_transport",
- "prost",
+ "axiusflow_local_storage",
+ "axiusflow_provider_history",
+]
+
+[[package]]
+name = "axiusflow_local_storage"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_provider_history",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "hmac",
+ "rusqlite",
+ "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -798,7 +798,7 @@ name = "axiusflow_market_data_performance"
 version = "0.1.0"
 dependencies = [
  "axiusflow_coinbase_market_adapter",
- "axiusflow_desktop_storage",
+ "axiusflow_local_storage",
  "axiusflow_market_data",
  "axiusflow_provider_history",
  "serde",
@@ -842,8 +842,8 @@ version = "0.1.0"
 name = "axiusflow_rithmic_protocol_adapter"
 version = "0.1.0"
 dependencies = [
- "axiusflow_desktop_history",
- "axiusflow_desktop_storage",
+ "axiusflow_local_history",
+ "axiusflow_local_storage",
  "axiusflow_market_data",
  "axiusflow_observability",
  "axiusflow_platform_runtime",

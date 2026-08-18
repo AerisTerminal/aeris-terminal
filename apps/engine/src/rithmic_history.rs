@@ -9,7 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_local_engine_protocol::InstallProviderInstrument;
+use axiusflow_engine_protocol::InstallProviderInstrument;
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, ChartAggregation, ChartInterval, MarketBar, RithmicChartAggregation,
     RithmicDailyAggregation,

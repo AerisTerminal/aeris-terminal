@@ -9,7 +9,7 @@ mod error;
 mod model;
 mod worker;
 
-pub use error::DesktopHistoryError;
+pub use error::LocalHistoryError;
 pub use model::{
     CacheSource, ChartId, HistoryPublication, HydrationOutcome, HydrationRequest,
     ProviderConnectionState, StartupCacheState, WorkerMetrics,

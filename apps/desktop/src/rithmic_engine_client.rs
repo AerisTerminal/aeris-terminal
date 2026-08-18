@@ -7,13 +7,13 @@ use crate::{
     rithmic_engine_history::{RithmicHistoryTask, history_message, validate_engine_instrument},
     rithmic_history::{RithmicSeries, RithmicSeriesRequest},
 };
-use axiusflow_local_engine_client::{
-    EngineClient, connect_or_start_engine, sibling_engine_executable,
-};
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSelection, SearchProviderInstruments,
     SelectProviderInstrument, envelope,
+};
+use axiusflow_local_engine_client::{
+    EngineClient, connect_or_start_engine, sibling_engine_executable,
 };
 use axiusflow_observability::FeedConnectionState;
 use std::{

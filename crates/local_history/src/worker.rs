@@ -1,11 +1,11 @@
 use crate::{
-    CacheSource, DesktopHistoryError, HistoryPublication, HydrationOutcome, HydrationRequest,
+    CacheSource, HistoryPublication, HydrationOutcome, HydrationRequest, LocalHistoryError,
     ProviderConnectionState, StartupCacheState, WorkerMetrics, cache::SharedHistoryCache,
 };
-use axiusflow_desktop_storage::{
-    AuthorizedHistoryRead, AvailabilityReason, CatalogKey, DesktopStorageError,
-    HistorySeriesIdentity, HistoryStore, MAXIMUM_SEGMENT_BYTES, PublicationRequest, RecoveryAction,
-    RetainedRange, SegmentIdentity,
+use axiusflow_local_storage::{
+    AuthorizedHistoryRead, AvailabilityReason, CatalogKey, HistorySeriesIdentity, HistoryStore,
+    LocalStorageError, MAXIMUM_SEGMENT_BYTES, PublicationRequest, RecoveryAction, RetainedRange,
+    SegmentIdentity,
 };
 use axiusflow_provider_history::{
     CoverageSnapshot, HandoffCoordinator, LiveAcceptance, SequencedHistory, VerifiedHistorySnapshot,
@@ -58,7 +58,7 @@ pub struct HistoryWorkerConfig {
 /// Blocking storage/decode and provider-handoff owner for one dedicated thread.
 ///
 /// ```compile_fail
-/// use axiusflow_desktop_history::HistoryWorker;
+/// use axiusflow_local_history::HistoryWorker;
 /// fn require_send<T: Send>() {}
 /// require_send::<HistoryWorker<u64>>();
 /// ```
@@ -94,18 +94,18 @@ impl<T: Clone> HistoryWorker<T> {
         maximum_catalog_entries: usize,
         ui_thread: ThreadId,
         config: HistoryWorkerConfig,
-    ) -> Result<Self, DesktopHistoryError> {
+    ) -> Result<Self, LocalHistoryError> {
         let owner_thread = thread::current().id();
         if owner_thread == ui_thread {
-            return Err(DesktopHistoryError::UiThreadWorkForbidden);
+            return Err(LocalHistoryError::UiThreadWorkForbidden);
         }
         if config.maximum_segment_read_bytes.get() > config.maximum_decoded_bytes.get() {
-            return Err(DesktopHistoryError::InvalidConfiguration(
+            return Err(LocalHistoryError::InvalidConfiguration(
                 "segment read bound exceeds decoded-memory bound",
             ));
         }
         if config.maximum_segment_read_bytes.get() > MAXIMUM_SEGMENT_BYTES {
-            return Err(DesktopHistoryError::InvalidConfiguration(
+            return Err(LocalHistoryError::InvalidConfiguration(
                 "segment read bound exceeds the storage limit",
             ));
         }
@@ -144,7 +144,7 @@ impl<T: Clone> HistoryWorker<T> {
     pub fn persist_segment(
         &mut self,
         request: PublicationRequest<'_>,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         let payload_bytes = u64::try_from(request.payload.len()).unwrap_or(u64::MAX);
         let started = Instant::now();
@@ -161,7 +161,7 @@ impl<T: Clone> HistoryWorker<T> {
                     .saturating_add(duration_nanos(started.elapsed()));
                 Ok(())
             }
-            Err(DesktopStorageError::SegmentAlreadyExists) => Ok(()),
+            Err(LocalStorageError::SegmentAlreadyExists) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
@@ -175,7 +175,7 @@ impl<T: Clone> HistoryWorker<T> {
         &self,
         series: HistorySeriesIdentity<'_>,
         now_unix_seconds: i64,
-    ) -> Result<Option<SegmentIdentity>, DesktopHistoryError> {
+    ) -> Result<Option<SegmentIdentity>, LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .latest_identity(series, now_unix_seconds)
@@ -190,7 +190,7 @@ impl<T: Clone> HistoryWorker<T> {
         &mut self,
         previous: Option<&SegmentIdentity>,
         request: PublicationRequest<'_>,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .replace_active_tail(previous, request)
@@ -205,7 +205,7 @@ impl<T: Clone> HistoryWorker<T> {
     pub fn enforce_derived_quota(
         &mut self,
         maximum_payload_bytes: u64,
-    ) -> Result<axiusflow_desktop_storage::QuotaEnforcementReport, DesktopHistoryError> {
+    ) -> Result<axiusflow_local_storage::QuotaEnforcementReport, LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .enforce_derived_quota(maximum_payload_bytes)
@@ -220,7 +220,7 @@ impl<T: Clone> HistoryWorker<T> {
         &self,
         series: HistorySeriesIdentity<'_>,
         now_unix_seconds: i64,
-    ) -> Result<CoverageSnapshot, DesktopHistoryError> {
+    ) -> Result<CoverageSnapshot, LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .series_coverage_snapshot(series, now_unix_seconds)
@@ -234,9 +234,9 @@ impl<T: Clone> HistoryWorker<T> {
     pub fn record_confirmed_empty(
         &mut self,
         series: HistorySeriesIdentity<'_>,
-        range: axiusflow_desktop_storage::RetainedRange,
+        range: axiusflow_local_storage::RetainedRange,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .record_confirmed_empty(series, range, now_unix_seconds)
@@ -250,10 +250,10 @@ impl<T: Clone> HistoryWorker<T> {
     pub fn resolve_repaired_range(
         &mut self,
         series: HistorySeriesIdentity<'_>,
-        range: axiusflow_desktop_storage::RetainedRange,
+        range: axiusflow_local_storage::RetainedRange,
         confirmed_empty: bool,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .resolve_repaired_range(series, range, confirmed_empty, now_unix_seconds)
@@ -269,7 +269,7 @@ impl<T: Clone> HistoryWorker<T> {
         series: HistorySeriesIdentity<'_>,
         requested: RetainedRange,
         now_unix_seconds: i64,
-    ) -> Result<Vec<SegmentIdentity>, DesktopHistoryError> {
+    ) -> Result<Vec<SegmentIdentity>, LocalHistoryError> {
         self.ensure_owner()?;
         self.store
             .retained_identities_in_range(series, requested, now_unix_seconds)
@@ -282,7 +282,7 @@ impl<T: Clone> HistoryWorker<T> {
     ///
     /// Returns an error for wrong-thread access, a mismatched local-segment key,
     /// expired local state cleanup failure, or a handoff bound violation.
-    pub fn cached_entries(&self) -> Result<usize, DesktopHistoryError> {
+    pub fn cached_entries(&self) -> Result<usize, LocalHistoryError> {
         self.ensure_owner()?;
         Ok(self.cache.len())
     }
@@ -292,7 +292,7 @@ impl<T: Clone> HistoryWorker<T> {
     /// # Errors
     ///
     /// Returns an error when called outside the owning worker thread.
-    pub fn cached_decoded_bytes(&mut self) -> Result<usize, DesktopHistoryError> {
+    pub fn cached_decoded_bytes(&mut self) -> Result<usize, LocalHistoryError> {
         self.ensure_owner()?;
         Ok(self
             .cache
@@ -310,9 +310,9 @@ impl<T: Clone> HistoryWorker<T> {
         &mut self,
         chart_id: crate::ChartId,
         identity: &SegmentIdentity,
-        encryption_key: &axiusflow_desktop_storage::SegmentEncryptionKey,
+        encryption_key: &axiusflow_local_storage::SegmentEncryptionKey,
         now_unix_seconds: i64,
-    ) -> Result<Option<Arc<HistoryPublication<T>>>, DesktopHistoryError> {
+    ) -> Result<Option<Arc<HistoryPublication<T>>>, LocalHistoryError> {
         self.ensure_owner()?;
         if self
             .authorized_cached_publication(identity, encryption_key, now_unix_seconds)?
@@ -330,7 +330,7 @@ impl<T: Clone> HistoryWorker<T> {
     ///
     /// Returns an error for wrong-thread access or a mismatched local-segment
     /// key. Expired local publications are removed and returned as absent.
-    pub fn unbind_chart(&mut self, chart_id: crate::ChartId) -> Result<(), DesktopHistoryError> {
+    pub fn unbind_chart(&mut self, chart_id: crate::ChartId) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         self.cache.unbind_chart(chart_id);
         Ok(())
@@ -344,9 +344,9 @@ impl<T: Clone> HistoryWorker<T> {
     pub fn current_publication(
         &mut self,
         identity: &SegmentIdentity,
-        encryption_key: &axiusflow_desktop_storage::SegmentEncryptionKey,
+        encryption_key: &axiusflow_local_storage::SegmentEncryptionKey,
         now_unix_seconds: i64,
-    ) -> Result<Option<Arc<HistoryPublication<T>>>, DesktopHistoryError> {
+    ) -> Result<Option<Arc<HistoryPublication<T>>>, LocalHistoryError> {
         self.ensure_owner()?;
         self.authorized_cached_publication(identity, encryption_key, now_unix_seconds)
     }
@@ -361,7 +361,7 @@ impl<T: Clone> HistoryWorker<T> {
         &mut self,
         request: HydrationRequest<'_>,
         decoder: &mut D,
-    ) -> Result<HydrationOutcome<T>, DesktopHistoryError> {
+    ) -> Result<HydrationOutcome<T>, LocalHistoryError> {
         self.ensure_owner()?;
         if let Some((publication, access_policy)) = self.cache.get(request.identity) {
             if let Some(access_policy) = access_policy
@@ -398,11 +398,11 @@ impl<T: Clone> HistoryWorker<T> {
                 self.maximum_segment_read_bytes.get(),
             )
             .map_err(|error| match error {
-                axiusflow_desktop_storage::DesktopStorageError::SegmentTooLarge {
+                axiusflow_local_storage::LocalStorageError::SegmentTooLarge {
                     requested,
                     maximum,
-                } => DesktopHistoryError::DecodedHistoryTooLarge { requested, maximum },
-                error => DesktopHistoryError::Storage(error),
+                } => LocalHistoryError::DecodedHistoryTooLarge { requested, maximum },
+                error => LocalHistoryError::Storage(error),
             });
         self.metrics.storage_read_nanos = self
             .metrics
@@ -421,7 +421,7 @@ impl<T: Clone> HistoryWorker<T> {
                 self.metrics.decode_operations = self.metrics.decode_operations.saturating_add(1);
                 let maximum_decoded_bytes = decoder
                     .retained_decoded_bytes(&payload)
-                    .map_err(DesktopHistoryError::Decode)?;
+                    .map_err(LocalHistoryError::Decode)?;
                 self.cache.reserve_publish_capacity(
                     request.identity,
                     maximum_decoded_bytes,
@@ -463,16 +463,16 @@ impl<T: Clone> HistoryWorker<T> {
     pub fn begin_handoff(
         &mut self,
         identity: SegmentIdentity,
-        encryption_key: &axiusflow_desktop_storage::SegmentEncryptionKey,
+        encryption_key: &axiusflow_local_storage::SegmentEncryptionKey,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         identity.validate()?;
         if self.handoffs.contains_key(&identity) {
-            return Err(DesktopHistoryError::HandoffAlreadyStarted);
+            return Err(LocalHistoryError::HandoffAlreadyStarted);
         }
         if self.handoffs.len() >= self.maximum_handoffs.get() {
-            return Err(DesktopHistoryError::HandoffLimitReached {
+            return Err(LocalHistoryError::HandoffLimitReached {
                 maximum: self.maximum_handoffs.get(),
             });
         }
@@ -502,12 +502,12 @@ impl<T: Clone> HistoryWorker<T> {
     /// # Errors
     ///
     /// Returns an error for wrong-thread access or an unknown handoff identity.
-    pub fn end_handoff(&mut self, identity: &SegmentIdentity) -> Result<(), DesktopHistoryError> {
+    pub fn end_handoff(&mut self, identity: &SegmentIdentity) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         let entry = self
             .handoffs
             .remove(identity)
-            .ok_or(DesktopHistoryError::MissingHandoff)?;
+            .ok_or(LocalHistoryError::MissingHandoff)?;
         self.release_buffered_bytes(&entry);
         self.cache.unpin(identity);
         Ok(())
@@ -525,14 +525,14 @@ impl<T: Clone> HistoryWorker<T> {
         identity: &SegmentIdentity,
         item: SequencedHistory<T>,
         decoded_item_bytes: usize,
-    ) -> Result<Option<Arc<HistoryPublication<T>>>, DesktopHistoryError> {
+    ) -> Result<Option<Arc<HistoryPublication<T>>>, LocalHistoryError> {
         self.ensure_owner()?;
         let started = Instant::now();
         let observed_sequence = item.sequence.get();
         let mut candidate = self
             .handoffs
             .remove(identity)
-            .ok_or(DesktopHistoryError::MissingHandoff)?;
+            .ok_or(LocalHistoryError::MissingHandoff)?;
         let acceptance = match candidate.coordinator.push_live(item) {
             Ok(acceptance) => acceptance,
             Err(error) => {
@@ -552,7 +552,7 @@ impl<T: Clone> HistoryWorker<T> {
                     self.release_buffered_bytes(&candidate);
                     candidate.buffered_item_bytes.clear();
                     self.handoffs.insert(identity.clone(), candidate);
-                    return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+                    return Err(LocalHistoryError::DecodedHistoryTooLarge {
                         requested,
                         maximum: self.maximum_decoded_bytes.get(),
                     });
@@ -573,11 +573,11 @@ impl<T: Clone> HistoryWorker<T> {
             LiveAcceptance::Accepted(item) => {
                 let Some((previous, access_policy)) = self.cache.get(identity) else {
                     self.handoffs.insert(identity.clone(), candidate);
-                    return Err(DesktopHistoryError::MissingHandoff);
+                    return Err(LocalHistoryError::MissingHandoff);
                 };
                 let Some(previous_decoded_bytes) = self.cache.decoded_bytes_for(identity) else {
                     self.handoffs.insert(identity.clone(), candidate);
-                    return Err(DesktopHistoryError::MissingHandoff);
+                    return Err(LocalHistoryError::MissingHandoff);
                 };
                 let decoded_bytes = previous_decoded_bytes.saturating_add(decoded_item_bytes);
                 if let Err(error) = self.cache.reserve_publish_capacity(
@@ -640,13 +640,13 @@ impl<T: Clone> HistoryWorker<T> {
         snapshot: VerifiedHistorySnapshot<T>,
         decoded_bytes: usize,
         startup_cache_state: StartupCacheState,
-    ) -> Result<Arc<HistoryPublication<T>>, DesktopHistoryError> {
+    ) -> Result<Arc<HistoryPublication<T>>, LocalHistoryError> {
         self.ensure_owner()?;
         let started = Instant::now();
         let mut candidate = self
             .handoffs
             .remove(identity)
-            .ok_or(DesktopHistoryError::MissingHandoff)?;
+            .ok_or(LocalHistoryError::MissingHandoff)?;
         let retained_live_bytes = candidate
             .buffered_item_bytes
             .range((Excluded(snapshot.watermark()), Unbounded))
@@ -662,7 +662,7 @@ impl<T: Clone> HistoryWorker<T> {
         let requested = decoded_bytes.saturating_add(other_buffered_bytes);
         if requested > self.maximum_decoded_bytes.get() {
             self.handoffs.insert(identity.clone(), candidate);
-            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            return Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested,
                 maximum: self.maximum_decoded_bytes.get(),
             });
@@ -730,12 +730,12 @@ impl<T: Clone> HistoryWorker<T> {
         identity: &SegmentIdentity,
         snapshot_watermark: u64,
         decoded_bytes: usize,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.ensure_owner()?;
         let candidate = self
             .handoffs
             .get(identity)
-            .ok_or(DesktopHistoryError::MissingHandoff)?;
+            .ok_or(LocalHistoryError::MissingHandoff)?;
         let retained_live_bytes = candidate
             .buffered_item_bytes
             .range((Excluded(snapshot_watermark), Unbounded))
@@ -754,9 +754,9 @@ impl<T: Clone> HistoryWorker<T> {
         )
     }
 
-    fn ensure_owner(&self) -> Result<(), DesktopHistoryError> {
+    fn ensure_owner(&self) -> Result<(), LocalHistoryError> {
         if thread::current().id() != self.owner_thread {
-            return Err(DesktopHistoryError::WorkerThreadMismatch);
+            return Err(LocalHistoryError::WorkerThreadMismatch);
         }
         Ok(())
     }
@@ -764,9 +764,9 @@ impl<T: Clone> HistoryWorker<T> {
     fn authorized_cached_publication(
         &mut self,
         identity: &SegmentIdentity,
-        encryption_key: &axiusflow_desktop_storage::SegmentEncryptionKey,
+        encryption_key: &axiusflow_local_storage::SegmentEncryptionKey,
         now_unix_seconds: i64,
-    ) -> Result<Option<Arc<HistoryPublication<T>>>, DesktopHistoryError> {
+    ) -> Result<Option<Arc<HistoryPublication<T>>>, LocalHistoryError> {
         let Some((publication, access_policy)) = self.cache.get(identity) else {
             return Ok(None);
         };
@@ -787,9 +787,9 @@ impl<T: Clone> HistoryWorker<T> {
         payload: &[u8],
         decoder: &mut D,
         maximum_decoded_bytes: usize,
-    ) -> Result<(Vec<SequencedHistory<T>>, usize, u64), DesktopHistoryError> {
+    ) -> Result<(Vec<SequencedHistory<T>>, usize, u64), LocalHistoryError> {
         if maximum_decoded_bytes == 0 {
-            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            return Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested: 1,
                 maximum: 0,
             });
@@ -797,14 +797,14 @@ impl<T: Clone> HistoryWorker<T> {
         let started = Instant::now();
         let decode_result = decoder
             .decode(payload, maximum_decoded_bytes)
-            .map_err(DesktopHistoryError::Decode);
+            .map_err(LocalHistoryError::Decode);
         self.metrics.decode_nanos = self
             .metrics
             .decode_nanos
             .saturating_add(duration_nanos(started.elapsed()));
         let (values, decoded_bytes) = decode_result?;
         if decoded_bytes > maximum_decoded_bytes {
-            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            return Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested: decoded_bytes,
                 maximum: maximum_decoded_bytes,
             });
@@ -830,9 +830,9 @@ fn duration_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn validate_decoded_history<T>(values: &[SequencedHistory<T>]) -> Result<u64, DesktopHistoryError> {
+fn validate_decoded_history<T>(values: &[SequencedHistory<T>]) -> Result<u64, LocalHistoryError> {
     let Some(last) = values.last() else {
-        return Err(DesktopHistoryError::Decode(
+        return Err(LocalHistoryError::Decode(
             "decoded segment contains no history values".to_string(),
         ));
     };
@@ -840,7 +840,7 @@ fn validate_decoded_history<T>(values: &[SequencedHistory<T>]) -> Result<u64, De
         .windows(2)
         .any(|pair| pair[0].sequence.get().checked_add(1) != Some(pair[1].sequence.get()))
     {
-        return Err(DesktopHistoryError::Decode(
+        return Err(LocalHistoryError::Decode(
             "decoded segment sequence is not contiguous".to_string(),
         ));
     }

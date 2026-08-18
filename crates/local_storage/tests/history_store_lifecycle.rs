@@ -1,6 +1,6 @@
-use axiusflow_desktop_storage::{
-    AvailabilityReason, CatalogKey, DataKind, DesktopStorageError, HistoryRead, HistoryScope,
-    HistorySeriesIdentity, HistoryStore, Invalidation, KeyRevocationEvidence, PublicationOutcome,
+use axiusflow_local_storage::{
+    AvailabilityReason, CatalogKey, DataKind, HistoryRead, HistoryScope, HistorySeriesIdentity,
+    HistoryStore, Invalidation, KeyRevocationEvidence, LocalStorageError, PublicationOutcome,
     PublicationRequest, RecoveryAction, RetainedRange, RetentionPolicy, SegmentEncryptionKey,
     SegmentIdentity,
 };
@@ -24,7 +24,7 @@ impl TestRoot {
             write!(&mut suffix, "{byte:02x}").expect("writing to a string succeeds");
         }
         let path = std::env::temp_dir().join(format!(
-            "axiusflow_desktop_storage_test_{}_{}",
+            "axiusflow_local_storage_test_{}_{}",
             std::process::id(),
             suffix
         ));
@@ -111,7 +111,7 @@ fn publish(
         .expect("fixture segment publication succeeds")
 }
 
-fn receipt(outcome: PublicationOutcome) -> axiusflow_desktop_storage::SegmentReceipt {
+fn receipt(outcome: PublicationOutcome) -> axiusflow_local_storage::SegmentReceipt {
     match outcome {
         PublicationOutcome::Published(receipt) => receipt,
         PublicationOutcome::MemoryOnly { .. } => panic!("fixture expected durable publication"),
@@ -725,7 +725,7 @@ fn publication_encrypts_then_reopens_with_exact_key_provenance() {
         .expect("fixture wrong key is structurally valid");
     assert!(matches!(
         HistoryStore::open(root.path(), wrong_catalog_key, 32),
-        Err(DesktopStorageError::CatalogKeyMismatch)
+        Err(LocalStorageError::CatalogKeyMismatch)
     ));
 }
 
@@ -758,7 +758,7 @@ fn scope_isolation_and_key_mismatch_never_destroy_valid_history() {
         .expect("wrong key fixture is valid");
     assert!(matches!(
         store.read(&owned, &wrong_bytes, 101, RecoveryAction::LiveOnly),
-        Err(DesktopStorageError::SegmentKeyMismatch)
+        Err(LocalStorageError::SegmentKeyMismatch)
     ));
     assert!(matches!(
         store.publish(PublicationRequest {
@@ -769,7 +769,7 @@ fn scope_isolation_and_key_mismatch_never_destroy_valid_history() {
             recovery: RecoveryAction::LiveOnly,
             now_unix_seconds: 100,
         }),
-        Err(DesktopStorageError::SegmentKeyMismatch)
+        Err(LocalStorageError::SegmentKeyMismatch)
     ));
     assert_eq!(
         store
@@ -1117,7 +1117,7 @@ fn secure_deletion_requires_key_revocation_before_removing_scope() {
     );
     assert!(matches!(
         store.secure_delete_account("coinbase", "account-a", &Revocations(BTreeSet::new())),
-        Err(DesktopStorageError::KeyRevocationMissing { .. })
+        Err(LocalStorageError::KeyRevocationMissing { .. })
     ));
     assert_eq!(
         store.statistics().expect("statistics read").active_entries,
@@ -1169,7 +1169,7 @@ fn secure_deletion_rejects_keys_shared_with_other_accounts() {
             "account-a",
             &Revocations(BTreeSet::from(["segment-key-v1".to_string()])),
         ),
-        Err(DesktopStorageError::SharedKeyStillReferenced { .. })
+        Err(LocalStorageError::SharedKeyStillReferenced { .. })
     ));
     assert_eq!(
         store.statistics().expect("statistics read").active_entries,
@@ -1189,7 +1189,7 @@ fn secure_deletion_rejects_keys_shared_with_other_accounts() {
     drop(store);
     assert!(matches!(
         HistoryStore::open(root.path(), catalog_key(), 1),
-        Err(DesktopStorageError::InvalidConfiguration(
+        Err(LocalStorageError::InvalidConfiguration(
             "existing catalog exceeds the configured entry bound"
         ))
     ));
@@ -1262,7 +1262,7 @@ fn retention_catalog_bounds_and_recovery_are_explicit() {
             recovery: RecoveryAction::LiveOnly,
             now_unix_seconds: 100,
         }),
-        Err(DesktopStorageError::CatalogFull { maximum: 1 })
+        Err(LocalStorageError::CatalogFull { maximum: 1 })
     ));
     assert_eq!(
         store
@@ -1301,7 +1301,7 @@ fn startup_removes_orphans_and_quarantines_missing_manifest_files() {
         let mut store = HistoryStore::open(root.path(), catalog_key(), 32).expect("store opens");
         assert!(matches!(
             HistoryStore::open(root.path(), catalog_key(), 32),
-            Err(DesktopStorageError::StoreAlreadyOpen)
+            Err(LocalStorageError::StoreAlreadyOpen)
         ));
         receipt(publish(
             &mut store,
@@ -1366,7 +1366,7 @@ fn startup_removes_orphans_and_quarantines_missing_manifest_files() {
             .expect("symlink fixture creates");
         assert!(matches!(
             HistoryStore::open(linked_root.path(), catalog_key(), 32),
-            Err(DesktopStorageError::InvalidConfiguration(
+            Err(LocalStorageError::InvalidConfiguration(
                 "owned storage path is not a real directory"
             ))
         ));

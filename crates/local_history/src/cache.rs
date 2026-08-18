@@ -1,5 +1,5 @@
-use crate::{ChartId, DesktopHistoryError, HistoryPublication};
-use axiusflow_desktop_storage::{SegmentAccessPolicy, SegmentIdentity};
+use crate::{ChartId, HistoryPublication, LocalHistoryError};
+use axiusflow_local_storage::{SegmentAccessPolicy, SegmentIdentity};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
@@ -89,10 +89,10 @@ impl<T> SharedHistoryCache<T> {
         identity: &SegmentIdentity,
         decoded_bytes: usize,
         reserved_decoded_bytes: usize,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         let requested = decoded_bytes.saturating_add(reserved_decoded_bytes);
         if requested > self.maximum_decoded_bytes.get() {
-            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            return Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested,
                 maximum: self.maximum_decoded_bytes.get(),
             });
@@ -105,10 +105,10 @@ impl<T> SharedHistoryCache<T> {
         identity: &SegmentIdentity,
         decoded_bytes: usize,
         reserved_decoded_bytes: usize,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         let requested = decoded_bytes.saturating_add(reserved_decoded_bytes);
         if requested > self.maximum_decoded_bytes.get() {
-            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            return Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested,
                 maximum: self.maximum_decoded_bytes.get(),
             });
@@ -130,10 +130,10 @@ impl<T> SharedHistoryCache<T> {
         decoded_bytes: usize,
         reserved_decoded_bytes: usize,
         access_policy: Option<SegmentAccessPolicy>,
-    ) -> Result<Arc<HistoryPublication<T>>, DesktopHistoryError> {
+    ) -> Result<Arc<HistoryPublication<T>>, LocalHistoryError> {
         let requested = decoded_bytes.saturating_add(reserved_decoded_bytes);
         if requested > self.maximum_decoded_bytes.get() {
-            return Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            return Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested,
                 maximum: self.maximum_decoded_bytes.get(),
             });
@@ -164,11 +164,11 @@ impl<T> SharedHistoryCache<T> {
         &mut self,
         chart_id: ChartId,
         identity: &SegmentIdentity,
-    ) -> Result<Option<Arc<HistoryPublication<T>>>, DesktopHistoryError> {
+    ) -> Result<Option<Arc<HistoryPublication<T>>>, LocalHistoryError> {
         if !self.chart_bindings.contains_key(&chart_id)
             && self.chart_bindings.len() >= self.maximum_charts.get()
         {
-            return Err(DesktopHistoryError::ChartLimitReached {
+            return Err(LocalHistoryError::ChartLimitReached {
                 maximum: self.maximum_charts.get(),
             });
         }
@@ -193,7 +193,7 @@ impl<T> SharedHistoryCache<T> {
         identity: &SegmentIdentity,
         decoded_bytes: usize,
         reserved_decoded_bytes: usize,
-    ) -> Result<(), DesktopHistoryError> {
+    ) -> Result<(), LocalHistoryError> {
         self.prune_retired();
         let evictions = self.planned_evictions(identity, decoded_bytes, reserved_decoded_bytes)?;
         for candidate in evictions {
@@ -207,7 +207,7 @@ impl<T> SharedHistoryCache<T> {
         identity: &SegmentIdentity,
         decoded_bytes: usize,
         reserved_decoded_bytes: usize,
-    ) -> Result<Vec<SegmentIdentity>, DesktopHistoryError> {
+    ) -> Result<Vec<SegmentIdentity>, LocalHistoryError> {
         let replacement = self.entries.get(identity);
         let replacement_is_retained =
             replacement.is_some_and(|entry| Arc::strong_count(&entry.publication) > 1);
@@ -283,7 +283,7 @@ impl<T> SharedHistoryCache<T> {
             || projected_bytes > self.maximum_decoded_bytes.get()
             || projected_generations > self.maximum_generations
         {
-            return Err(DesktopHistoryError::CacheFull {
+            return Err(LocalHistoryError::CacheFull {
                 maximum_entries: self.maximum_entries.get(),
             });
         }

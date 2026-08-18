@@ -1,8 +1,8 @@
-use axiusflow_desktop_history::{
-    ChartId, DesktopHistoryError, HistoryDecoder, HistoryWorker, HistoryWorkerConfig,
-    HydrationOutcome, HydrationRequest, ProviderConnectionState, StartupCacheState,
+use axiusflow_local_history::{
+    ChartId, HistoryDecoder, HistoryWorker, HistoryWorkerConfig, HydrationOutcome,
+    HydrationRequest, LocalHistoryError, ProviderConnectionState, StartupCacheState,
 };
-use axiusflow_desktop_storage::{
+use axiusflow_local_storage::{
     AvailabilityReason, CatalogKey, DataKind, HistoryScope, HistoryStore, PublicationOutcome,
     PublicationRequest, RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
 };
@@ -209,14 +209,14 @@ fn assert_cached_access_policy(
         .expect("wrong fixture key is valid");
     assert!(matches!(
         worker.current_publication(populated_cold, &wrong_key, 101),
-        Err(DesktopHistoryError::Storage(
-            axiusflow_desktop_storage::DesktopStorageError::SegmentKeyMismatch
+        Err(LocalHistoryError::Storage(
+            axiusflow_local_storage::LocalStorageError::SegmentKeyMismatch
         ))
     ));
     assert!(matches!(
         worker.bind_chart(ChartId(99), populated_cold, &wrong_key, 101),
-        Err(DesktopHistoryError::Storage(
-            axiusflow_desktop_storage::DesktopStorageError::SegmentKeyMismatch
+        Err(LocalHistoryError::Storage(
+            axiusflow_local_storage::LocalStorageError::SegmentKeyMismatch
         ))
     ));
     assert!(matches!(
@@ -229,8 +229,8 @@ fn assert_cached_access_policy(
             ),
             decoder,
         ),
-        Err(DesktopHistoryError::Storage(
-            axiusflow_desktop_storage::DesktopStorageError::SegmentKeyMismatch
+        Err(LocalHistoryError::Storage(
+            axiusflow_local_storage::LocalStorageError::SegmentKeyMismatch
         ))
     ));
     let mut expired_request = hydration_request(
@@ -302,7 +302,7 @@ fn assert_recovery_cases(
             ),
             decoder,
         ),
-        Err(DesktopHistoryError::Decode(_))
+        Err(LocalHistoryError::Decode(_))
     ));
     assert!(matches!(
         worker.hydrate_visible(
@@ -314,7 +314,7 @@ fn assert_recovery_cases(
             ),
             decoder,
         ),
-        Err(DesktopHistoryError::DecodedHistoryTooLarge {
+        Err(LocalHistoryError::DecodedHistoryTooLarge {
             requested: 65,
             maximum: 64,
         })
@@ -427,7 +427,7 @@ fn multi_chart_cache_and_handoff_are_bounded_and_atomic() {
 
         assert!(matches!(
             worker.push_live(&identity, item(6), 225),
-            Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested: 265,
                 maximum: 256,
             })
@@ -439,7 +439,7 @@ fn multi_chart_cache_and_handoff_are_bounded_and_atomic() {
         assert!(Arc::ptr_eq(&live, &after_overflow));
         assert!(matches!(
             worker.push_live(&identity, item(6), 8),
-            Err(DesktopHistoryError::Provider(_))
+            Err(LocalHistoryError::Provider(_))
         ));
         let recovered = worker
             .install_snapshot(&identity, snapshot(8, 6), 48, StartupCacheState::Warm)
@@ -636,11 +636,11 @@ fn chart_rebind_to_cache_miss_releases_old_eviction_pin() {
 fn assert_gap_recovery(
     worker: &mut HistoryWorker<u64>,
     identity: &SegmentIdentity,
-    previous: &Arc<axiusflow_desktop_history::HistoryPublication<u64>>,
+    previous: &Arc<axiusflow_local_history::HistoryPublication<u64>>,
 ) {
     assert!(matches!(
         worker.push_live(identity, item(8), 8),
-        Err(DesktopHistoryError::Provider(_))
+        Err(LocalHistoryError::Provider(_))
     ));
     let after_gap = worker
         .current_publication(identity, &segment_key(), 101)
@@ -649,7 +649,7 @@ fn assert_gap_recovery(
     assert!(Arc::ptr_eq(previous, &after_gap));
     assert!(matches!(
         worker.install_snapshot(identity, snapshot(9, 7), 56, StartupCacheState::Warm,),
-        Err(DesktopHistoryError::Provider(_))
+        Err(LocalHistoryError::Provider(_))
     ));
     let recovered = worker
         .install_snapshot(identity, snapshot(9, 8), 64, StartupCacheState::Warm)
@@ -695,7 +695,7 @@ fn live_buffer_bounds_latch_a_covering_snapshot_requirement() {
             .expect("handoff starts");
         assert!(matches!(
             worker.push_live(&byte_bound, item(1), 65),
-            Err(DesktopHistoryError::DecodedHistoryTooLarge {
+            Err(LocalHistoryError::DecodedHistoryTooLarge {
                 requested: 81,
                 maximum: 64,
             })
@@ -710,14 +710,14 @@ fn live_buffer_bounds_latch_a_covering_snapshot_requirement() {
                 0,
                 StartupCacheState::Cold,
             ),
-            Err(DesktopHistoryError::Provider(_))
+            Err(LocalHistoryError::Provider(_))
         ));
         worker
             .install_snapshot(&byte_bound, snapshot(1, 1), 8, StartupCacheState::Cold)
             .expect("snapshot covers byte-bound loss");
         assert!(matches!(
             worker.begin_handoff(byte_bound, &segment_key(), 101),
-            Err(DesktopHistoryError::HandoffAlreadyStarted)
+            Err(LocalHistoryError::HandoffAlreadyStarted)
         ));
 
         assert_item_bound_recovery(&mut worker);
@@ -729,7 +729,7 @@ fn live_buffer_bounds_latch_a_covering_snapshot_requirement() {
             .expect("fourth bounded handoff starts");
         assert!(matches!(
             worker.begin_handoff(fifth.clone(), &segment_key(), 101),
-            Err(DesktopHistoryError::HandoffLimitReached { maximum: 4 })
+            Err(LocalHistoryError::HandoffLimitReached { maximum: 4 })
         ));
         worker
             .end_handoff(&fourth)
@@ -755,15 +755,15 @@ fn assert_item_bound_recovery(worker: &mut HistoryWorker<u64>) {
         .expect("second live item buffers");
     assert!(matches!(
         worker.push_live(&item_bound, item(3), 8),
-        Err(DesktopHistoryError::Provider(_))
+        Err(LocalHistoryError::Provider(_))
     ));
     assert!(matches!(
         worker.push_live(&item_bound, item(5), 8),
-        Err(DesktopHistoryError::Provider(_))
+        Err(LocalHistoryError::Provider(_))
     ));
     assert!(matches!(
         worker.install_snapshot(&item_bound, snapshot(1, 3), 24, StartupCacheState::Cold,),
-        Err(DesktopHistoryError::Provider(_))
+        Err(LocalHistoryError::Provider(_))
     ));
     let recovered = worker
         .install_snapshot(&item_bound, snapshot(1, 5), 40, StartupCacheState::Cold)
@@ -783,7 +783,7 @@ fn assert_oversized_snapshot_rejected(worker: &mut HistoryWorker<u64>) {
             65,
             StartupCacheState::Cold,
         ),
-        Err(DesktopHistoryError::DecodedHistoryTooLarge {
+        Err(LocalHistoryError::DecodedHistoryTooLarge {
             requested: 65,
             maximum: 64,
         })
@@ -821,7 +821,7 @@ fn rejected_publication_does_not_partially_evict_cache() {
             .expect("rejected handoff starts");
         assert!(matches!(
             worker.install_snapshot(&rejected, snapshot(1, 3), 24, StartupCacheState::Cold,),
-            Err(DesktopHistoryError::CacheFull { .. })
+            Err(LocalHistoryError::CacheFull { .. })
         ));
         assert!(
             worker
@@ -868,7 +868,7 @@ fn active_handoff_publication_is_pinned_until_retired() {
             .expect("pending handoff starts");
         assert!(matches!(
             worker.install_snapshot(&pending, snapshot(1, 1), 8, StartupCacheState::Cold,),
-            Err(DesktopHistoryError::CacheFull { .. })
+            Err(LocalHistoryError::CacheFull { .. })
         ));
         worker
             .push_live(&first, item(2), 8)
@@ -879,7 +879,7 @@ fn active_handoff_publication_is_pinned_until_retired() {
             .expect("handoff restarts from cached watermark");
         assert!(matches!(
             worker.install_snapshot(&first, snapshot(1, 2), 16, StartupCacheState::Warm),
-            Err(DesktopHistoryError::Provider(_))
+            Err(LocalHistoryError::Provider(_))
         ));
         worker
             .end_handoff(&first)
@@ -921,7 +921,7 @@ fn ui_thread_cannot_construct_blocking_history_worker() {
             thread::current().id(),
             config()
         ),
-        Err(DesktopHistoryError::UiThreadWorkForbidden)
+        Err(LocalHistoryError::UiThreadWorkForbidden)
     ));
     assert!(!root.path().join("catalog.sqlite").exists());
 
@@ -933,7 +933,7 @@ fn ui_thread_cannot_construct_blocking_history_worker() {
         invalid.maximum_decoded_bytes = invalid.maximum_segment_read_bytes;
         assert!(matches!(
             HistoryWorker::<u64>::try_open(root_path, catalog_key(), 4, ui_thread, invalid),
-            Err(DesktopHistoryError::InvalidConfiguration(
+            Err(LocalHistoryError::InvalidConfiguration(
                 "segment read bound exceeds the storage limit"
             ))
         ));
@@ -956,8 +956,8 @@ fn invalid_provider_identity_is_rejected_before_handoff_allocation() {
         invalid.schema_revision = 0;
         assert!(matches!(
             worker.begin_handoff(invalid, &segment_key(), 101),
-            Err(DesktopHistoryError::Storage(
-                axiusflow_desktop_storage::DesktopStorageError::InvalidIdentity("schema_revision")
+            Err(LocalHistoryError::Storage(
+                axiusflow_local_storage::LocalStorageError::InvalidIdentity("schema_revision")
             ))
         ));
         worker
@@ -1034,7 +1034,7 @@ fn duplicate_maximum_decoded_sequence_is_rejected() {
                 ),
                 &mut decoder,
             ),
-            Err(DesktopHistoryError::Decode(_))
+            Err(LocalHistoryError::Decode(_))
         ));
     })
     .join()
@@ -1149,7 +1149,7 @@ fn expand_segment(path: &Path, bytes: usize) {
     fs::write(path, vec![0_u8; bytes]).expect("expanded segment writes");
 }
 
-fn assert_provider_fetch(result: Result<HydrationOutcome<u64>, DesktopHistoryError>) {
+fn assert_provider_fetch(result: Result<HydrationOutcome<u64>, LocalHistoryError>) {
     match result {
         Ok(HydrationOutcome::ProviderFetchRequired { .. }) => {}
         outcome => panic!("expected provider fetch, got {outcome:?}"),
@@ -1157,11 +1157,8 @@ fn assert_provider_fetch(result: Result<HydrationOutcome<u64>, DesktopHistoryErr
 }
 
 fn ready(
-    result: Result<HydrationOutcome<u64>, DesktopHistoryError>,
-) -> (
-    Arc<axiusflow_desktop_history::HistoryPublication<u64>>,
-    bool,
-) {
+    result: Result<HydrationOutcome<u64>, LocalHistoryError>,
+) -> (Arc<axiusflow_local_history::HistoryPublication<u64>>, bool) {
     match result.expect("hydration succeeds") {
         HydrationOutcome::Ready {
             publication,
@@ -1205,7 +1202,7 @@ fn snapshot(generation: u64, last_sequence: u64) -> VerifiedHistorySnapshot<u64>
     .expect("fixture snapshot is contiguous")
 }
 
-fn sequences(publication: &axiusflow_desktop_history::HistoryPublication<u64>) -> Vec<u64> {
+fn sequences(publication: &axiusflow_local_history::HistoryPublication<u64>) -> Vec<u64> {
     publication
         .values
         .iter()

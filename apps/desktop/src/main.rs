@@ -20,7 +20,7 @@ use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
     ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
 };
@@ -4361,7 +4361,7 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
-    use axiusflow_local_engine_protocol::{ProviderInstrumentSummary, ResourceMode};
+    use axiusflow_engine_protocol::{ProviderInstrumentSummary, ResourceMode};
     use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};

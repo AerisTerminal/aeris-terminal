@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     AttachClient, ClientHello, ClientKind, DetachClient, EngineReady, Envelope, EnvelopeDecoder,
     InstallProviderInstrument, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
     RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,

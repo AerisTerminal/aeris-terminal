@@ -57,7 +57,9 @@ The architecture must also support multiple workspace tabs, with multiple charts
 
 # 1. PRIMARY DESIGN PRINCIPLE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the shipping dependency graph and production call paths now enforce the stated ownership split. Desktop depends on the provider-neutral engine client/protocol and presentation crates but no provider adapter, history/storage implementation, or `market_engine`; the engine application alone composes providers, canonical market state, local storage, and IPC service ownership. Repository conformance rejects UI dependencies in backend layers, backend dependencies in desktop presentation, duplicate mutable `MarketEngine` authority, and the return of transitional runtime crates.
 
 The most important architectural rule is:
 
@@ -153,7 +155,9 @@ A persistent storage failure must be tested separately and must not leave an alr
 
 # 4. TARGET PROCESS TOPOLOGY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the workspace contains exactly two application packages, `axiusflow_desktop` and `axiusflow_engine`. The desktop reaches the resident engine only through `local_engine_client` plus the versioned `engine_protocol`; its manifest excludes provider, provider-history, local-history, local-storage, and `market_engine` crates. The engine manifest composes both provider adapters, `market_engine`, local storage, platform runtime, and the protocol while excluding GPUI and UI crates. Conformance tests preserve these dependency and process-topology boundaries.
 
 The final high-level topology is:
 
@@ -232,7 +236,9 @@ The desktop must not create Rithmic or Coinbase network sessions.
 
 # 5. TARGET PROCESS OWNERSHIP
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): desktop production sources own GPUI state, bounded engine-client bridges, application projections, and Origin integration only. The resident engine coordinator owns demand/subscription registries, provider sessions, provider history, canonical bars, live aggregation, depth reconstruction, local persistence, recovery, resource policy, and per-consumer publication. Static conformance rejects provider sockets, storage APIs, `HistoryStore`, and provider connection types from presentation layers, while runtime regressions prove shared provider work, independent consumers, disconnect cleanup, storage-failure isolation, and generation-fenced publication.
 
 ## `axiusflow_desktop`
 
@@ -305,7 +311,9 @@ That answer comes from `axiusflow_engine`.
 
 # 6. FINAL REPOSITORY SHAPE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the repository has one desktop app, one engine app, provider-neutral domain/application/engine/protocol/history/storage crates, isolated provider adapters, platform/transport/observability crates, and the three UI crates. The final transitional crate identities were removed in this slice: `desktop_history` became `local_history`, `desktop_storage` became `local_storage`, and `local_engine_protocol` became `engine_protocol`. A conformance regression requires the replacement manifests and rejects restoration of the retired directories or workspace members; the deleted desktop runtime crates remain forbidden.
 
 The final platform repository should converge toward approximately this shape.
 
@@ -407,15 +415,17 @@ Do not leave permanent:
 
 # 7. CURRENT CRATE MIGRATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-The current repository still contains:
+Evidence (2026-08-18): all callers, manifests, imports, scripts, tests, package identities, and lockfile entries were migrated from `desktop_history`, `desktop_storage`, and `local_engine_protocol` to `local_history`, `local_storage`, and `engine_protocol`. Public error identities were corrected to `LocalHistoryError` and `LocalStorageError`, so no backend API retains desktop ownership language. Repository conformance fails if any retired crate directory or workspace identity returns.
+
+At migration start, the repository contained the transitional crate identities:
 
 - `desktop_history`
 - `desktop_storage`
 - `local_engine_protocol`
 
-These require deliberate migration.
+Their deliberate migration is complete; the retired names remain here only as historical input to the completed task.
 
 ---
 
@@ -580,7 +590,9 @@ Do not maintain a second stream runtime above `market_engine`.
 
 # 11. `provider_kit`
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `provider_kit` remains vendor build/reference input only. It is not a Cargo workspace member and contains no Rust source or Cargo manifest; the Rithmic adapter build script reads only its pinned protobuf directory, and the standalone protocol conformance script validates that input. A repository regression prevents the directory from becoming an Axiusflow Rust/application layer.
 
 `provider_kit` contains Rithmic vendor reference/protocol material.
 
@@ -788,7 +800,7 @@ The protocol communicates product intent.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): the engine publishes `EngineReady`, workspace/resource state, provider state, generation-qualified series state, covering snapshots, incremental tails, conflated order-book images, provider-neutral catalog results/rejections, stage-specific `DemandError`, and bounded idle replies. `local_engine_protocol` depends only on the shared transport and Prost and contains no SQLite operation, Rithmic wire type, cache entry, history scheduler, worker handle, or synchronization primitive. Desktop consumers validate identity, generation, continuity, and fixed-point values before converting these product events into application/chart models.
+Evidence (2026-08-18): the engine publishes `EngineReady`, workspace/resource state, provider state, generation-qualified series state, covering snapshots, incremental tails, conflated order-book images, provider-neutral catalog results/rejections, stage-specific `DemandError`, and bounded idle replies. `engine_protocol` depends only on the shared transport and Prost and contains no SQLite operation, Rithmic wire type, cache entry, history scheduler, worker handle, or synchronization primitive. Desktop consumers validate identity, generation, continuity, and fixed-point values before converting these product events into application/chart models.
 
 The engine sends useful state/publications.
 
@@ -2341,6 +2353,8 @@ Do not rebuild provider scheduling logic in this file.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-18): the crate and package identity are now `local_history` and `axiusflow_local_history`, its public error is `LocalHistoryError`, and desktop/UI manifests cannot depend on it. The resident production path still owns active local-history orchestration in `apps/engine/src/local_history.rs` rather than consuming the generic decoded-cache worker as a production dependency, so this section remains open pending consolidation or deletion of that remaining split.
+
 Rename `desktop_history` conceptually to `local_history`.
 
 It should not be desktop-owned.
@@ -2361,7 +2375,9 @@ GPUI does not.
 
 # 58. LOCAL STORAGE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the backend package and directory are now `axiusflow_local_storage` and `crates/local_storage`, and the public error is `LocalStorageError`. The resident engine is its production owner and uses it through the bounded local-history worker for encrypted immutable segments, keyed SQLite catalog metadata, retained coverage, crash-safe publication, restart recovery, and corrupt-segment quarantine. Desktop/UI manifests exclude the crate, and the full storage lifecycle suite remains the durable boundary test.
 
 Rename `desktop_storage` conceptually to `local_storage`.
 
@@ -3708,9 +3724,9 @@ Create baseline evidence.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): `local_engine_protocol` version 3 defines authenticated attach/detach, stable client/workspace/consumer identities, per-consumer series generations, viewport and visibility demand, consumer removal, explicit series and persistence states, fixed-point snapshots/updates, provider state, stage-specific demand errors, resource mode, and complete shutdown. Removed tags `8..=14` and `19..=24` remain unused. Every payload passed fragmented/coalesced round-trip, malformed/version/frame-bound tests, and strict package Clippy.
+Evidence (2026-08-11; crate renamed 2026-08-18): `engine_protocol` version 3 defined authenticated attach/detach, stable client/workspace/consumer identities, per-consumer series generations, viewport and visibility demand, consumer removal, explicit series and persistence states, fixed-point snapshots/updates, provider state, stage-specific demand errors, resource mode, and complete shutdown. Removed tags `8..=14` and `19..=24` remain unused. Every payload passed fragmented/coalesced round-trip, malformed/version/frame-bound tests, and strict package Clippy.
 
-Expand/replace `local_engine_protocol` into final `engine_protocol`.
+The transitional `local_engine_protocol` identity was replaced by final `engine_protocol` after all callers cut over.
 
 Add only essential:
 
@@ -3929,7 +3945,7 @@ It must not hide cold-start failures.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): `desktop_market_runtime` and `desktop_provider_runtime` are deleted after their real owners moved to the resident engine, Rithmic adapter, observability, or the sole desktop presentation consumer. Dead Coinbase drivers/fixtures, the uncalled provider/history composition, old `application::stream_runtime`, the unconsumed desktop event/publication queue, the desktop-era Rithmic adapter module name, and the stale provider-runtime conformance script are also gone. The final duplicate-IPC audit found that the old protobuf market-stream schema and conversion adapter were used only by the deterministic disconnected desktop fixture; production publication already used `local_engine_protocol`. The fixture now drives the existing application replay model directly, its uncalled worker-thread bridge and startup variant are deleted, transport-neutral replay sequence/checksum types live with the application model, and the orphaned `protocols`, `market_protocol`, schema, build, dependency, workspace, and lockfile paths are removed. The shared bounded framing crate remains because protocol v10 actively uses it. No compatibility market protocol or dead fixture runtime remains.
+Evidence (2026-08-11; protocol crate renamed 2026-08-18): `desktop_market_runtime` and `desktop_provider_runtime` are deleted after their real owners moved to the resident engine, Rithmic adapter, observability, or the sole desktop presentation consumer. Dead Coinbase drivers/fixtures, the uncalled provider/history composition, old `application::stream_runtime`, the unconsumed desktop event/publication queue, the desktop-era Rithmic adapter module name, and the stale provider-runtime conformance script are also gone. The final duplicate-IPC audit found that the old protobuf market-stream schema and conversion adapter were used only by the deterministic disconnected desktop fixture; production publication already used the protocol now named `engine_protocol`. The fixture now drives the existing application replay model directly, its uncalled worker-thread bridge and startup variant are deleted, transport-neutral replay sequence/checksum types live with the application model, and the orphaned `protocols`, `market_protocol`, schema, build, dependency, workspace, and lockfile paths are removed. The shared bounded framing crate remains because protocol v10 actively uses it. No compatibility market protocol or dead fixture runtime remains.
 
 After Coinbase and Rithmic use the new engine:
 
@@ -4154,7 +4170,7 @@ Adapters may depend on:
 
 They may not depend on UI.
 
-Evidence (2026-08-14): the unused Coinbase adapter production dependency on `desktop_storage` was removed from its manifest and lockfile entry. Coinbase and Rithmic production dependencies are now limited to canonical market data, provider-history contracts, platform/observability primitives, and provider wire/network/security libraries. Their storage/history conformance fixtures remain dev-only, neither adapter depends on UI, and a deterministic dependency-direction test parses only each production dependency table to prevent storage or UI regression.
+Evidence (2026-08-14; storage crate renamed 2026-08-18): the unused Coinbase adapter production dependency on the crate now named `local_storage` was removed from its manifest and lockfile entry. Coinbase and Rithmic production dependencies are now limited to canonical market data, provider-history contracts, platform/observability primitives, and provider wire/network/security libraries. Their storage/history conformance fixtures remain dev-only, neither adapter depends on UI, and a deterministic dependency-direction test parses only each production dependency table to prevent storage or UI regression.
 
 ---
 
@@ -4522,7 +4538,9 @@ If the system requires a ten-minute explanation involving many overlapping runti
 
 # 145. EXPECTED FINAL CHART FLOW
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): authenticated engine IPC tests drive provider-neutral series demand through the resident coordinator and receive a canonical snapshot. Engine regressions prove memory reuse, local-history-first progressive publication, provider repair, live continuation, and publication before asynchronous persistence failure handling. Desktop conversion tests preserve fixed-point provenance and incremental tails, and chart integration accepts the first real snapshot into Origin. Naming conformance now requires those boundary regressions to remain present.
 
 For BTC 1m:
 
@@ -4580,7 +4598,9 @@ chart
 
 # 146. EXPECTED TIMEFRAME FLOW
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): a consumer generation change immediately replaces interval demand without recreating the shared realtime session. Deterministic engine tests prove a cached compatible one-minute series is aggregated and published as five-minute data before provider refresh, the derived result is cached, finer data is never fabricated from a coarser source, repeated demand hits canonical memory, and symbol/interval switching retains the same process-owned realtime session.
 
 BTC 1m → 5m:
 
@@ -4617,7 +4637,9 @@ No provider session recreation merely because interval changed.
 
 # 147. EXPECTED SYMBOL FLOW
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): newer per-consumer demand becomes authoritative immediately, cancels obsolete history interest without waiting for cleanup, and rejects late results through generation fencing. Engine tests prove cached symbol state publishes immediately, BTC-to-ETH switching reuses the shared provider session, another consumer's matching demand and canonical series remain independent, and stale history cannot overwrite the newer chart generation. Conformance requires the cancellation and shared-session regressions to remain present.
 
 BTC → ETH:
 
@@ -5436,7 +5458,7 @@ The versioning scheme must clearly distinguish:
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): Axiusflow IPC prost messages remain isolated in `crates/local_engine_protocol`, while Rithmic vendor protobuf remains isolated in `crates/adapters/rithmic_protocol`. The bounded decoder rejects oversized/over-buffered frames, missing payloads, malformed protobuf, and any protocol-version mismatch. Removed envelope tags remain explicitly unused; the new provider-neutral instrument command and acknowledgement use new tags 41 and 42. Protocol v8 and the `axiusflow-engine-v8` local socket deliberately fence incompatible older residents. Authenticated IPC tests exercise the new schema without importing any Rithmic wire type.
+Evidence (2026-08-11; crate renamed 2026-08-18): Axiusflow IPC prost messages remain isolated in `crates/engine_protocol`, while Rithmic vendor protobuf remains isolated in `crates/adapters/rithmic_protocol`. The bounded decoder rejects oversized/over-buffered frames, missing payloads, malformed protobuf, and any protocol-version mismatch. Removed envelope tags remain explicitly unused; the new provider-neutral instrument command and acknowledgement use new tags 41 and 42. Protocol v8 and the `axiusflow-engine-v8` local socket deliberately fence incompatible older residents. Authenticated IPC tests exercise the new schema without importing any Rithmic wire type.
 
 If protobuf is used for Axiusflow IPC:
 
@@ -5917,7 +5939,7 @@ Evidence (2026-08-11): the following implementation-grounded map was completed b
 
 - KEEP domain crates, provider adapters, provider-history algorithms, pure application generation/provenance, chart integration, observability, platform runtime, and transport.
 - MOVE/MERGE generic execution ownership from `desktop_market_runtime` and `desktop_provider_runtime` into `market_engine`; move history/storage ownership behind the engine.
-- RENAME `local_engine_protocol`, `desktop_history`, and `desktop_storage` only after their callers cut over.
+- RENAME the former `local_engine_protocol`, `desktop_history`, and `desktop_storage` identities only after their callers cut over. This cutover completed on 2026-08-18 as `engine_protocol`, `local_history`, and `local_storage`.
 - DELETE the two desktop runtime crates, Rithmic desktop product-runtime duplication, and obsolete execution bridges after the new owner replaces them.
 - KEEP only GPUI presentation, bounded engine client behavior, UI-side generation defense, and Origin integration in desktop.
 

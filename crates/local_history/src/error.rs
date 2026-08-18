@@ -1,10 +1,10 @@
-use axiusflow_desktop_storage::DesktopStorageError;
+use axiusflow_local_storage::LocalStorageError;
 use axiusflow_provider_history::ProviderHistoryError;
 use std::{error::Error, fmt};
 
 /// Failure at the worker-owned desktop history boundary.
 #[derive(Debug)]
-pub enum DesktopHistoryError {
+pub enum LocalHistoryError {
     InvalidConfiguration(&'static str),
     UiThreadWorkForbidden,
     WorkerThreadMismatch,
@@ -15,11 +15,11 @@ pub enum DesktopHistoryError {
     HandoffAlreadyStarted,
     HandoffLimitReached { maximum: usize },
     MissingHandoff,
-    Storage(DesktopStorageError),
+    Storage(LocalStorageError),
     Provider(ProviderHistoryError),
 }
 
-impl fmt::Display for DesktopHistoryError {
+impl fmt::Display for LocalHistoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfiguration(reason) => {
@@ -60,7 +60,7 @@ impl fmt::Display for DesktopHistoryError {
     }
 }
 
-impl Error for DesktopHistoryError {
+impl Error for LocalHistoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Storage(error) => Some(error),
@@ -70,13 +70,13 @@ impl Error for DesktopHistoryError {
     }
 }
 
-impl From<DesktopStorageError> for DesktopHistoryError {
-    fn from(error: DesktopStorageError) -> Self {
+impl From<LocalStorageError> for LocalHistoryError {
+    fn from(error: LocalStorageError) -> Self {
         Self::Storage(error)
     }
 }
 
-impl From<ProviderHistoryError> for DesktopHistoryError {
+impl From<ProviderHistoryError> for LocalHistoryError {
     fn from(error: ProviderHistoryError) -> Self {
         Self::Provider(error)
     }

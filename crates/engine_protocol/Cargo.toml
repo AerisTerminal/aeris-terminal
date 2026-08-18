@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_local_engine_protocol"
+name = "axiusflow_engine_protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

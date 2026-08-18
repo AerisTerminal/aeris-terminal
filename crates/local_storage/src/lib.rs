@@ -10,7 +10,7 @@ mod error;
 mod model;
 mod store;
 
-pub use error::DesktopStorageError;
+pub use error::LocalStorageError;
 pub use model::{
     AuthorizedHistoryRead, AvailabilityReason, CatalogStatistics, DataKind, DeletionReport,
     HistoryRead, HistoryScope, HistorySeriesIdentity, Invalidation, KeyRevocationEvidence,

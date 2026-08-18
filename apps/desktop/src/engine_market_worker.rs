@@ -11,16 +11,16 @@ use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
 };
+use axiusflow_engine_protocol::{
+    DemandError, EngineFaultCode, InstallProviderInstrument, ProviderConnectionState,
+    ProviderState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesUpdate,
+    envelope,
+};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_local_engine_client::{
     EngineClient, connect_or_start_engine, sibling_engine_executable,
-};
-use axiusflow_local_engine_protocol::{
-    DemandError, EngineFaultCode, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesUpdate,
-    envelope,
 };
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
@@ -661,7 +661,7 @@ fn provenanced_engine_bar(
     provider_generation: u64,
     consumer_id: u64,
     generation: u64,
-    bar: &axiusflow_local_engine_protocol::MarketBar,
+    bar: &axiusflow_engine_protocol::MarketBar,
     received: i64,
 ) -> Provenanced<MarketBar> {
     let bar = MarketBar {
@@ -805,7 +805,7 @@ fn random_identity() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_local_engine_protocol::MarketBar as IpcMarketBar;
+    use axiusflow_engine_protocol::MarketBar as IpcMarketBar;
 
     #[test]
     fn ipc_snapshot_preserves_fixed_point_precision_and_engine_provenance() {

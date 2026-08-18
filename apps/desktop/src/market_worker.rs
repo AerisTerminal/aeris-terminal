@@ -10,7 +10,7 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
     SearchProviderInstruments, SelectProviderInstrument,
 };
@@ -1616,7 +1616,7 @@ mod tests {
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
     use axiusflow_application::{Provenanced, ReplayStreamUpdate, ReplayTailUpdate};
-    use axiusflow_local_engine_protocol::{
+    use axiusflow_engine_protocol::{
         ProviderCatalogRejected, ProviderCatalogRejectionReason, SearchProviderInstruments,
         SelectProviderInstrument,
     };

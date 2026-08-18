@@ -274,8 +274,8 @@ mod tests {
             "crates/market_engine/Cargo.toml",
             "crates/domain/instruments/Cargo.toml",
             "crates/domain/market_data/Cargo.toml",
-            "crates/desktop_storage/Cargo.toml",
-            "crates/desktop_history/Cargo.toml",
+            "crates/local_storage/Cargo.toml",
+            "crates/local_history/Cargo.toml",
             "crates/adapters/coinbase_market/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
         ] {
@@ -287,6 +287,68 @@ mod tests {
                 "axiusflow_coinbase_market_adapter",
                 "axiusflow_rithmic_protocol_adapter",
             ],
+        );
+    }
+
+    #[test]
+    fn transitional_backend_crate_names_do_not_return() {
+        let workspace = manifest("Cargo.toml");
+        for (retired, replacement) in [
+            ("desktop_history", "local_history"),
+            ("desktop_storage", "local_storage"),
+            ("local_engine_protocol", "engine_protocol"),
+        ] {
+            assert!(
+                !repository_root().join("crates").join(retired).exists(),
+                "retired crate directory crates/{retired} must not return"
+            );
+            assert!(
+                !workspace.contains(retired),
+                "workspace must not restore transitional crate {retired}"
+            );
+            assert!(
+                repository_root()
+                    .join("crates")
+                    .join(replacement)
+                    .join("Cargo.toml")
+                    .is_file(),
+                "replacement crate crates/{replacement} is missing"
+            );
+            assert!(
+                workspace.contains(replacement),
+                "workspace must retain replacement crate {replacement}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_kit_remains_vendor_only() {
+        let provider_kit = repository_root().join("provider_kit");
+        assert!(
+            provider_kit.is_dir(),
+            "provider_kit vendor input is missing"
+        );
+        assert!(
+            !manifest("Cargo.toml").contains("provider_kit"),
+            "provider_kit must not become a workspace application crate"
+        );
+
+        let mut application_sources = Vec::new();
+        collect_files(
+            &provider_kit,
+            |path| {
+                path.file_name().is_some_and(|name| name == "Cargo.toml")
+                    || path.extension().is_some_and(|extension| extension == "rs")
+            },
+            &mut application_sources,
+        );
+        assert!(
+            application_sources.is_empty(),
+            "provider_kit must not gain Axiusflow Rust/application source: {:?}",
+            application_sources
+                .iter()
+                .map(|path| relative_string(path))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -352,8 +414,8 @@ mod tests {
                 &[
                     "axiusflow_coinbase_market_adapter",
                     "axiusflow_rithmic_protocol_adapter",
-                    "axiusflow_desktop_history",
-                    "axiusflow_desktop_storage",
+                    "axiusflow_local_history",
+                    "axiusflow_local_storage",
                     "axiusflow_market_engine",
                     "axiusflow_provider_history",
                     "rusqlite",
@@ -418,8 +480,8 @@ mod tests {
             "tools/run_rithmic_protocol_conformance.sh",
             "crates/provider_history/tests/provider_history_conformance.rs",
             "crates/provider_history/tests/handoff_conformance.rs",
-            "crates/desktop_storage/tests/history_store_lifecycle.rs",
-            "crates/local_engine_protocol/tests/protocol.rs",
+            "crates/local_storage/tests/history_store_lifecycle.rs",
+            "crates/engine_protocol/tests/protocol.rs",
             "apps/engine/tests/handshake.rs",
             "apps/desktop/src/readiness_conformance.rs",
         ] {
@@ -445,6 +507,42 @@ mod tests {
                 "historical history.install_failed invariant lost regression {regression}"
             );
         }
+    }
+
+    #[test]
+    fn resident_engine_chart_and_timeframe_flows_remain_covered() {
+        let engine_ipc = manifest("apps/engine/src/lib.rs");
+        assert!(
+            engine_ipc
+                .contains("authenticated_market_demand_crosses_ipc_and_returns_engine_snapshot"),
+            "resident engine chart flow must retain authenticated IPC snapshot coverage"
+        );
+
+        let engine_service = manifest("apps/engine/src/market_service.rs");
+        for regression in [
+            "storage_failure_degrades_persistence_without_hiding_provider_history",
+            "compatible_minute_history_publishes_and_caches_a_coarser_series",
+            "finer_history_never_derives_from_a_coarser_cached_series",
+            "symbol_and_interval_switch_reuses_the_shared_realtime_session",
+            "newer_demand_cancels_history_without_waiting_for_cleanup",
+        ] {
+            assert!(
+                engine_service.contains(regression),
+                "resident engine flow lost regression {regression}"
+            );
+        }
+
+        let desktop_bridge = manifest("apps/desktop/src/engine_market_worker.rs");
+        assert!(
+            desktop_bridge
+                .contains("ipc_snapshot_preserves_fixed_point_precision_and_engine_provenance"),
+            "desktop must retain engine snapshot conversion coverage"
+        );
+        let chart_view = manifest("crates/ui/chart_integration/src/view.rs");
+        assert!(
+            chart_view.contains("empty_chart_surface_accepts_its_first_real_snapshot"),
+            "Origin chart integration must retain first-snapshot coverage"
+        );
     }
 
     #[test]
@@ -478,8 +576,8 @@ mod tests {
                 "axiusflow_desktop_provider_runtime",
                 "axiusflow_rithmic_protocol_adapter",
                 "axiusflow_provider_history",
-                "axiusflow_desktop_storage",
-                "axiusflow_desktop_history",
+                "axiusflow_local_storage",
+                "axiusflow_local_history",
                 "axiusflow_market_engine",
             ],
         );
@@ -668,8 +766,8 @@ mod tests {
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
                 .to_string(),
-            "crates/desktop_history/src/worker.rs::HistoryDecoder".to_string(),
-            "crates/desktop_storage/src/model.rs::KeyRevocationEvidence".to_string(),
+            "crates/local_history/src/worker.rs::HistoryDecoder".to_string(),
+            "crates/local_storage/src/model.rs::KeyRevocationEvidence".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
@@ -698,7 +796,7 @@ mod tests {
 
     #[test]
     fn local_market_protocol_excludes_trading_execution_commands() {
-        let protocol = manifest("crates/local_engine_protocol/src/messages.rs");
+        let protocol = manifest("crates/engine_protocol/src/messages.rs");
         for forbidden in [
             "CancelOrder",
             "ExecutionReport",
@@ -768,7 +866,7 @@ mod tests {
         for relative in [
             "apps/engine/Cargo.toml",
             "crates/local_engine_client/Cargo.toml",
-            "crates/local_engine_protocol/Cargo.toml",
+            "crates/engine_protocol/Cargo.toml",
         ] {
             assert_excludes(
                 relative,
@@ -785,7 +883,7 @@ mod tests {
                 "{relative} must use platform-local IPC"
             );
             assert!(
-                contents.contains("axiusflow_local_engine_protocol"),
+                contents.contains("axiusflow_engine_protocol"),
                 "{relative} must use the versioned local protocol"
             );
         }
@@ -799,8 +897,8 @@ mod tests {
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
-                "axiusflow_desktop_storage",
-                "axiusflow_desktop_history",
+                "axiusflow_local_storage",
+                "axiusflow_local_history",
                 "axiusflow_chart_integration",
                 "axiusflow_terminal_ui",
                 "gpui",
@@ -819,11 +917,11 @@ mod tests {
         for dependency in [
             "axiusflow_coinbase_market_adapter",
             "axiusflow_rithmic_protocol_adapter",
-            "axiusflow_desktop_storage",
+            "axiusflow_local_storage",
             "axiusflow_market_engine",
             "axiusflow_provider_history",
             "axiusflow_platform_runtime",
-            "axiusflow_local_engine_protocol",
+            "axiusflow_engine_protocol",
         ] {
             assert!(
                 contents.contains(dependency),

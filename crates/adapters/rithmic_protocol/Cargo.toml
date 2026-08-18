@@ -23,8 +23,8 @@ webpki-roots.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
-axiusflow_desktop_history = { path = "../../desktop_history" }
-axiusflow_desktop_storage = { path = "../../desktop_storage" }
+axiusflow_local_history = { path = "../../local_history" }
+axiusflow_local_storage = { path = "../../local_storage" }
 rcgen.workspace = true
 
 [build-dependencies]

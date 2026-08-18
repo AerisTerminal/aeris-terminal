@@ -2,7 +2,7 @@ use axiusflow_coinbase_market_adapter::{
     CoinbaseInterval, aggregate_coinbase_bars, decode_history_segment, encode_history_bar,
     encode_history_segment,
 };
-use axiusflow_desktop_storage::{
+use axiusflow_local_storage::{
     CatalogKey, DataKind, HistoryRead, HistoryScope, HistorySeriesIdentity, HistoryStore,
     PublicationOutcome, PublicationRequest, RecoveryAction, RetainedRange, RetentionPolicy,
     SegmentEncryptionKey, SegmentIdentity,

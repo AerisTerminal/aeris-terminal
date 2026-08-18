@@ -4,16 +4,16 @@ use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
 };
+use axiusflow_engine_protocol::{
+    DemandError, InstallProviderInstrument, OrderBookSnapshot as IpcOrderBookSnapshot,
+    OrderBookState as IpcOrderBookState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    SeriesUpdate, envelope,
+};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
 use axiusflow_local_engine_client::{
     EngineClient, connect_or_start_engine, sibling_engine_executable,
-};
-use axiusflow_local_engine_protocol::{
-    DemandError, InstallProviderInstrument, OrderBookSnapshot as IpcOrderBookSnapshot,
-    OrderBookState as IpcOrderBookState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
-    SeriesUpdate, envelope,
 };
 use axiusflow_market_data::{
     BarDefinition, ChartAggregation, ChartInterval, DepthLevel, MarketBar, OrderBookPublication,
@@ -770,7 +770,7 @@ fn dom_from_snapshot(
 }
 
 fn ipc_depth_levels(
-    levels: &[axiusflow_local_engine_protocol::OrderBookLevel],
+    levels: &[axiusflow_engine_protocol::OrderBookLevel],
     bids: bool,
 ) -> Result<Vec<DepthLevel>, String> {
     let mut previous = None;
@@ -841,7 +841,7 @@ pub(crate) fn history_message(result: RithmicHistoryResult) -> MarketWorkerMessa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_local_engine_protocol::{MarketBar as IpcMarketBar, OrderBookLevel};
+    use axiusflow_engine_protocol::{MarketBar as IpcMarketBar, OrderBookLevel};
 
     fn nonzero(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test generation is non-zero")

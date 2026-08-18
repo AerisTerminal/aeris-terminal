@@ -21,7 +21,7 @@ use axiusflow_coinbase_market_adapter::{
     CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseInterval, CoinbaseSession,
     ENTITLEMENT_CLASS, aggregate_coinbase_bars, decode_history_bar,
 };
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     DemandError, EngineFaultCode, InstallProviderInstrument, MarketBar as IpcMarketBar,
     OrderBookLevel as IpcOrderBookLevel, OrderBookSnapshot as IpcOrderBookSnapshot,
     OrderBookState as IpcOrderBookState, PersistenceState, ProviderCatalogRejected,
@@ -3626,7 +3626,7 @@ fn snapshot_message(
 fn series_update_message(
     publication: &axiusflow_market_engine::ConsumerSeriesUpdate,
 ) -> envelope::Payload {
-    envelope::Payload::SeriesUpdate(axiusflow_local_engine_protocol::SeriesUpdate {
+    envelope::Payload::SeriesUpdate(axiusflow_engine_protocol::SeriesUpdate {
         consumer_id: publication.consumer_id.0.get(),
         generation: publication.generation.0.get(),
         series: Some(ipc_series(&publication.series)),

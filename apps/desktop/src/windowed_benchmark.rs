@@ -16,7 +16,7 @@ use axiusflow_desktop::market_worker::{
     CoinbaseWorkerStartup, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
     MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
 };
-use axiusflow_local_engine_protocol::InstallProviderInstrument;
+use axiusflow_engine_protocol::InstallProviderInstrument;
 use axiusflow_market_data::ChartInterval;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]

@@ -1,5 +1,5 @@
 use crate::{
-    DesktopStorageError,
+    LocalStorageError,
     model::{CatalogStatistics, RecoveryAction},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -113,9 +113,9 @@ impl Catalog {
         catalog_key_id: &str,
         catalog_key_verifier: &[u8; 32],
         maximum_entries: usize,
-    ) -> Result<Self, DesktopStorageError> {
+    ) -> Result<Self, LocalStorageError> {
         if rusqlite::version() != EXPECTED_SQLITE_VERSION {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "bundled SQLite version drifted",
             ));
         }
@@ -203,7 +203,7 @@ impl Catalog {
         if usize::try_from(existing_count.saturating_add(coverage_count)).unwrap_or(usize::MAX)
             > maximum_entries
         {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "existing catalog exceeds the configured entry bound",
             ));
         }
@@ -213,10 +213,7 @@ impl Catalog {
         })
     }
 
-    pub fn find(
-        &self,
-        segment_id: &[u8; 32],
-    ) -> Result<Option<CatalogRecord>, DesktopStorageError> {
+    pub fn find(&self, segment_id: &[u8; 32]) -> Result<Option<CatalogRecord>, LocalStorageError> {
         let record = self
             .connection
             .query_row(
@@ -231,13 +228,13 @@ impl Catalog {
         Ok(record)
     }
 
-    pub fn insert(&self, record: &NewCatalogRecord<'_>) -> Result<(), DesktopStorageError> {
+    pub fn insert(&self, record: &NewCatalogRecord<'_>) -> Result<(), LocalStorageError> {
         if self
             .total_count()?
             .saturating_add(self.coverage_marker_count()?)
             >= self.maximum_entries
         {
-            return Err(DesktopStorageError::CatalogFull {
+            return Err(LocalStorageError::CatalogFull {
                 maximum: self.maximum_entries,
             });
         }
@@ -269,12 +266,12 @@ impl Catalog {
                 record.calendar_revision,
                 record.adjustment_revision,
                 i64::try_from(record.correction_revision)
-                    .map_err(|_| { DesktopStorageError::InvalidIdentity("correction_revision") })?,
+                    .map_err(|_| { LocalStorageError::InvalidIdentity("correction_revision") })?,
                 record.file_name,
                 record.file_checksum.as_slice(),
                 record.payload_checksum.as_slice(),
                 i64::try_from(record.payload_bytes)
-                    .map_err(|_| { DesktopStorageError::InvalidIdentity("payload_bytes") })?,
+                    .map_err(|_| { LocalStorageError::InvalidIdentity("payload_bytes") })?,
                 record.key_id,
                 record.key_verifier.as_slice(),
                 record.retention_until,
@@ -288,7 +285,7 @@ impl Catalog {
     pub fn replace_quarantined(
         &self,
         record: &NewCatalogRecord<'_>,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         let updated = self.connection.execute(
             "UPDATE history_segment SET
                  provider_token=?2, account_token=?3, entitlement_token=?4,
@@ -315,12 +312,12 @@ impl Catalog {
                 record.calendar_revision,
                 record.adjustment_revision,
                 i64::try_from(record.correction_revision)
-                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                    .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?,
                 record.file_name,
                 record.file_checksum.as_slice(),
                 record.payload_checksum.as_slice(),
                 i64::try_from(record.payload_bytes)
-                    .map_err(|_| DesktopStorageError::InvalidIdentity("payload_bytes"))?,
+                    .map_err(|_| LocalStorageError::InvalidIdentity("payload_bytes"))?,
                 record.key_id,
                 record.key_verifier.as_slice(),
                 record.retention_until,
@@ -329,7 +326,7 @@ impl Catalog {
             ],
         )?;
         if updated != 1 {
-            return Err(DesktopStorageError::SegmentAlreadyExists);
+            return Err(LocalStorageError::SegmentAlreadyExists);
         }
         Ok(())
     }
@@ -339,7 +336,7 @@ impl Catalog {
         segment_id: &[u8; 32],
         reason: &str,
         quarantine_file_name: Option<&str>,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         self.connection.execute(
             "UPDATE history_segment
              SET state=?2, quarantine_reason=?3, quarantine_file_name=?4
@@ -357,7 +354,7 @@ impl Catalog {
     pub fn matching(
         &self,
         filter: CatalogFilter<'_>,
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         match filter {
             CatalogFilter::Scope {
                 provider,
@@ -418,7 +415,7 @@ impl Catalog {
                 current,
             } => self.query_records(
                 "provider_token=?1 AND account_token=?2 AND entitlement_token=?3 AND instrument_token=?4 AND correction_revision<>?5",
-                params![provider.as_slice(), account.as_slice(), entitlement.as_slice(), instrument.as_slice(), i64::try_from(current).map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?],
+                params![provider.as_slice(), account.as_slice(), entitlement.as_slice(), instrument.as_slice(), i64::try_from(current).map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?],
             ),
         }
     }
@@ -428,7 +425,7 @@ impl Catalog {
         tokens: SeriesTokens<'_>,
         dimensions: SeriesDimensions,
         now_unix_seconds: i64,
-    ) -> Result<Option<(i64, i64)>, DesktopStorageError> {
+    ) -> Result<Option<(i64, i64)>, LocalStorageError> {
         self.connection
             .query_row(
                 "SELECT range_start, range_end FROM history_segment
@@ -451,7 +448,7 @@ impl Catalog {
                     dimensions.calendar_revision,
                     dimensions.adjustment_revision,
                     i64::try_from(dimensions.correction_revision).map_err(|_| {
-                        DesktopStorageError::InvalidIdentity("correction_revision")
+                        LocalStorageError::InvalidIdentity("correction_revision")
                     })?,
                     now_unix_seconds,
                 ],
@@ -466,7 +463,7 @@ impl Catalog {
         tokens: SeriesTokens<'_>,
         dimensions: SeriesDimensions,
         now_unix_seconds: i64,
-    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+    ) -> Result<Vec<(i64, i64)>, LocalStorageError> {
         self.segment_series_ranges(tokens, dimensions, now_unix_seconds, ACTIVE_STATE, false)
     }
 
@@ -475,7 +472,7 @@ impl Catalog {
         tokens: SeriesTokens<'_>,
         dimensions: SeriesDimensions,
         now_unix_seconds: i64,
-    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+    ) -> Result<Vec<(i64, i64)>, LocalStorageError> {
         self.segment_series_ranges(
             tokens,
             dimensions,
@@ -490,7 +487,7 @@ impl Catalog {
         tokens: SeriesTokens<'_>,
         dimensions: SeriesDimensions,
         range: (i64, i64),
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         self.query_records(
             "provider_token=?1 AND account_token=?2 AND entitlement_token=?3
              AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
@@ -509,7 +506,7 @@ impl Catalog {
                 dimensions.calendar_revision,
                 dimensions.adjustment_revision,
                 i64::try_from(dimensions.correction_revision)
-                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                    .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?,
                 QUARANTINED_STATE,
                 range.0,
                 range.1,
@@ -524,7 +521,7 @@ impl Catalog {
         now_unix_seconds: i64,
         state: i64,
         include_expired: bool,
-    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+    ) -> Result<Vec<(i64, i64)>, LocalStorageError> {
         let mut statement = self.connection.prepare(
             "SELECT range_start, range_end FROM history_segment
              WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
@@ -548,7 +545,7 @@ impl Catalog {
                 dimensions.calendar_revision,
                 dimensions.adjustment_revision,
                 i64::try_from(dimensions.correction_revision)
-                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                    .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?,
                 state,
                 include_expired,
                 now_unix_seconds,
@@ -563,7 +560,7 @@ impl Catalog {
         tokens: SeriesTokens<'_>,
         dimensions: SeriesDimensions,
         class: i64,
-    ) -> Result<Vec<(i64, i64)>, DesktopStorageError> {
+    ) -> Result<Vec<(i64, i64)>, LocalStorageError> {
         let mut statement = self.connection.prepare(
             "SELECT range_start, range_end FROM history_coverage_marker
              WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
@@ -586,7 +583,7 @@ impl Catalog {
                 dimensions.calendar_revision,
                 dimensions.adjustment_revision,
                 i64::try_from(dimensions.correction_revision)
-                    .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                    .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?,
                 class,
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -601,9 +598,9 @@ impl Catalog {
         range: (i64, i64),
         class: i64,
         created_at: i64,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         let correction_revision = i64::try_from(dimensions.correction_revision)
-            .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?;
+            .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?;
         let exists: bool = self.connection.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM history_coverage_marker
@@ -639,7 +636,7 @@ impl Catalog {
             .saturating_add(self.coverage_marker_count()?)
             >= self.maximum_entries
         {
-            return Err(DesktopStorageError::CatalogFull {
+            return Err(LocalStorageError::CatalogFull {
                 maximum: self.maximum_entries,
             });
         }
@@ -678,9 +675,9 @@ impl Catalog {
         repaired: (i64, i64),
         replacement_class: Option<i64>,
         created_at: i64,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         let correction_revision = i64::try_from(dimensions.correction_revision)
-            .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?;
+            .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?;
         let mut statement = self.connection.prepare(
             "SELECT range_start, range_end, class, created_at FROM history_coverage_marker
              WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
@@ -723,7 +720,7 @@ impl Catalog {
             .saturating_add(residual_count)
             .saturating_add(usize::from(replacement_class.is_some()));
         if resulting_count > self.maximum_entries {
-            return Err(DesktopStorageError::CatalogFull {
+            return Err(LocalStorageError::CatalogFull {
                 maximum: self.maximum_entries,
             });
         }
@@ -778,7 +775,7 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), DesktopStorageError> {
+    pub fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), LocalStorageError> {
         let transaction = self.connection.transaction()?;
         for record in records {
             transaction.execute(
@@ -790,18 +787,18 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn active_records(&self) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+    pub fn active_records(&self) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         self.query_records("state=0", params![])
     }
 
-    pub fn all_records(&self) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+    pub fn all_records(&self) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         self.query_records("1=1", params![])
     }
 
     pub fn key_material_reference_count(
         &self,
         key_verifier: &[u8; 32],
-    ) -> Result<usize, DesktopStorageError> {
+    ) -> Result<usize, LocalStorageError> {
         let count: i64 = self.connection.query_row(
             "SELECT count(*) FROM history_segment WHERE key_verifier=?1",
             [key_verifier.as_slice()],
@@ -814,7 +811,7 @@ impl Catalog {
         &self,
         key_id: &str,
         key_verifier: &[u8; 32],
-    ) -> Result<bool, DesktopStorageError> {
+    ) -> Result<bool, LocalStorageError> {
         let count: i64 = self.connection.query_row(
             "SELECT count(*) FROM history_segment
              WHERE key_id=?1 AND key_verifier<>?2",
@@ -824,7 +821,7 @@ impl Catalog {
         Ok(count != 0)
     }
 
-    pub fn active_file_names(&self) -> Result<BTreeSet<String>, DesktopStorageError> {
+    pub fn active_file_names(&self) -> Result<BTreeSet<String>, LocalStorageError> {
         let mut statement = self
             .connection
             .prepare("SELECT file_name FROM history_segment WHERE state=0")?;
@@ -834,7 +831,7 @@ impl Catalog {
         Ok(names)
     }
 
-    pub fn quarantine_file_names(&self) -> Result<BTreeSet<String>, DesktopStorageError> {
+    pub fn quarantine_file_names(&self) -> Result<BTreeSet<String>, LocalStorageError> {
         let mut statement = self.connection.prepare(
             "SELECT quarantine_file_name FROM history_segment
              WHERE state=1 AND quarantine_file_name IS NOT NULL",
@@ -845,7 +842,7 @@ impl Catalog {
         Ok(names)
     }
 
-    pub fn statistics(&self) -> Result<CatalogStatistics, DesktopStorageError> {
+    pub fn statistics(&self) -> Result<CatalogStatistics, LocalStorageError> {
         let active: i64 = self.connection.query_row(
             "SELECT count(*) FROM history_segment WHERE state=?1",
             [ACTIVE_STATE],
@@ -869,20 +866,20 @@ impl Catalog {
         })
     }
 
-    pub fn checkpoint_after_deletion(&self) -> Result<(), DesktopStorageError> {
+    pub fn checkpoint_after_deletion(&self) -> Result<(), LocalStorageError> {
         self.connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 
-    fn total_count(&self) -> Result<usize, DesktopStorageError> {
+    fn total_count(&self) -> Result<usize, LocalStorageError> {
         let count: i64 =
             self.connection
                 .query_row("SELECT count(*) FROM history_segment", [], |row| row.get(0))?;
         Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 
-    fn coverage_marker_count(&self) -> Result<usize, DesktopStorageError> {
+    fn coverage_marker_count(&self) -> Result<usize, LocalStorageError> {
         let count: i64 = self.connection.query_row(
             "SELECT count(*) FROM history_coverage_marker",
             [],
@@ -895,7 +892,7 @@ impl Catalog {
         &self,
         predicate: &str,
         parameters: P,
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError>
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError>
     where
         P: rusqlite::Params,
     {
@@ -949,7 +946,7 @@ fn insert_coverage_marker_in_transaction(
     range: (i64, i64),
     class: i64,
     created_at: i64,
-) -> Result<(), DesktopStorageError> {
+) -> Result<(), LocalStorageError> {
     transaction.execute(
         "INSERT OR IGNORE INTO history_coverage_marker(
              provider_token, account_token, entitlement_token, instrument_token,
@@ -971,7 +968,7 @@ fn insert_coverage_marker_in_transaction(
             dimensions.calendar_revision,
             dimensions.adjustment_revision,
             i64::try_from(dimensions.correction_revision)
-                .map_err(|_| DesktopStorageError::InvalidIdentity("correction_revision"))?,
+                .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?,
             class,
             created_at,
         ],
@@ -983,7 +980,7 @@ fn initialize_metadata(
     connection: &Connection,
     catalog_key_id: &str,
     catalog_key_verifier: &[u8; 32],
-) -> Result<(), DesktopStorageError> {
+) -> Result<(), LocalStorageError> {
     let existing = connection
         .query_row(
             "SELECT schema_version, catalog_key_id, catalog_key_verifier
@@ -1022,10 +1019,10 @@ fn initialize_metadata(
             )?;
         }
         Some((CATALOG_SCHEMA_VERSION, _, _)) => {
-            return Err(DesktopStorageError::CatalogKeyMismatch);
+            return Err(LocalStorageError::CatalogKeyMismatch);
         }
         Some(_) => {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "unsupported catalog schema version",
             ));
         }

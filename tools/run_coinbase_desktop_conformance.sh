@@ -6,7 +6,7 @@ manifest_path="$repo_root/Cargo.toml"
 
 for package in \
     axiusflow_coinbase_market_adapter \
-    axiusflow_desktop_history \
+    axiusflow_local_history \
     axiusflow_desktop
 do
     cargo test \

@@ -1,5 +1,5 @@
 use crate::{
-    DesktopStorageError,
+    LocalStorageError,
     catalog::{
         CONFIRMED_EMPTY_CLASS, Catalog, CatalogFilter, CatalogRecord, INVALIDATED_CLASS,
         NewCatalogRecord, SeriesDimensions, SeriesTokens,
@@ -58,9 +58,9 @@ impl HistoryStore {
         root: impl AsRef<Path>,
         catalog_key: CatalogKey,
         maximum_catalog_entries: usize,
-    ) -> Result<Self, DesktopStorageError> {
+    ) -> Result<Self, LocalStorageError> {
         if maximum_catalog_entries == 0 || maximum_catalog_entries > MAXIMUM_CATALOG_ENTRIES {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "catalog entry bound must be within 1..=100000",
             ));
         }
@@ -102,7 +102,7 @@ impl HistoryStore {
     pub fn publish(
         &mut self,
         request: PublicationRequest<'_>,
-    ) -> Result<PublicationOutcome, DesktopStorageError> {
+    ) -> Result<PublicationOutcome, LocalStorageError> {
         request.identity.validate()?;
         let retention_until = match request.retention {
             RetentionPolicy::MemoryOnly => {
@@ -121,7 +121,7 @@ impl HistoryStore {
             RetentionPolicy::UntilRevoked => None,
         };
         if request.payload.len() > MAXIMUM_SEGMENT_BYTES {
-            return Err(DesktopStorageError::SegmentTooLarge {
+            return Err(LocalStorageError::SegmentTooLarge {
                 requested: request.payload.len(),
                 maximum: MAXIMUM_SEGMENT_BYTES,
             });
@@ -139,7 +139,7 @@ impl HistoryStore {
         &mut self,
         previous: Option<&crate::SegmentIdentity>,
         request: PublicationRequest<'_>,
-    ) -> Result<PublicationOutcome, DesktopStorageError> {
+    ) -> Result<PublicationOutcome, LocalStorageError> {
         let outcome = self.publish(request)?;
         if matches!(outcome, PublicationOutcome::Published(_))
             && let Some(previous) = previous
@@ -163,7 +163,7 @@ impl HistoryStore {
         encryption_key: &SegmentEncryptionKey,
         now_unix_seconds: i64,
         missing_recovery: RecoveryAction,
-    ) -> Result<HistoryRead, DesktopStorageError> {
+    ) -> Result<HistoryRead, LocalStorageError> {
         self.read_bounded(
             identity,
             encryption_key,
@@ -185,7 +185,7 @@ impl HistoryStore {
         &self,
         series: crate::HistorySeriesIdentity<'_>,
         now_unix_seconds: i64,
-    ) -> Result<Option<crate::SegmentIdentity>, DesktopStorageError> {
+    ) -> Result<Option<crate::SegmentIdentity>, LocalStorageError> {
         series.validate()?;
         let scope = scope_tokens(&self.catalog_key, series.scope)?;
         let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
@@ -235,7 +235,7 @@ impl HistoryStore {
         &self,
         series: crate::HistorySeriesIdentity<'_>,
         now_unix_seconds: i64,
-    ) -> Result<crate::RetainedSeriesCoverage, DesktopStorageError> {
+    ) -> Result<crate::RetainedSeriesCoverage, LocalStorageError> {
         series.validate()?;
         let scope = scope_tokens(&self.catalog_key, series.scope)?;
         let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
@@ -279,10 +279,10 @@ impl HistoryStore {
         series: crate::HistorySeriesIdentity<'_>,
         requested: crate::RetainedRange,
         now_unix_seconds: i64,
-    ) -> Result<Vec<crate::SegmentIdentity>, DesktopStorageError> {
+    ) -> Result<Vec<crate::SegmentIdentity>, LocalStorageError> {
         series.validate()?;
         if requested.start_unix_nanos >= requested.end_unix_nanos {
-            return Err(DesktopStorageError::InvalidIdentity("coverage_range"));
+            return Err(LocalStorageError::InvalidIdentity("coverage_range"));
         }
         let scope = scope_tokens(&self.catalog_key, series.scope)?;
         let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
@@ -331,7 +331,7 @@ impl HistoryStore {
         &self,
         series: crate::HistorySeriesIdentity<'_>,
         now_unix_seconds: i64,
-    ) -> Result<CoverageSnapshot, DesktopStorageError> {
+    ) -> Result<CoverageSnapshot, LocalStorageError> {
         series.validate()?;
         let scope = scope_tokens(&self.catalog_key, series.scope)?;
         let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
@@ -366,7 +366,7 @@ impl HistoryStore {
                 now_unix_seconds,
             )?),
         )
-        .map_err(|_| DesktopStorageError::InvalidConfiguration("catalog coverage range is invalid"))
+        .map_err(|_| LocalStorageError::InvalidConfiguration("catalog coverage range is invalid"))
     }
 
     /// Records provider-proven empty coverage for one exact series revision.
@@ -378,7 +378,7 @@ impl HistoryStore {
         series: crate::HistorySeriesIdentity<'_>,
         range: crate::RetainedRange,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         self.record_coverage_marker(series, range, CONFIRMED_EMPTY_CLASS, now_unix_seconds)
     }
 
@@ -391,7 +391,7 @@ impl HistoryStore {
         series: crate::HistorySeriesIdentity<'_>,
         range: crate::RetainedRange,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         self.record_coverage_marker(series, range, INVALIDATED_CLASS, now_unix_seconds)
     }
 
@@ -409,10 +409,10 @@ impl HistoryStore {
         range: crate::RetainedRange,
         confirmed_empty: bool,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         series.validate()?;
         if range.start_unix_nanos >= range.end_unix_nanos {
-            return Err(DesktopStorageError::InvalidIdentity("coverage_range"));
+            return Err(LocalStorageError::InvalidIdentity("coverage_range"));
         }
         let scope = scope_tokens(&self.catalog_key, series.scope)?;
         let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
@@ -445,10 +445,10 @@ impl HistoryStore {
         range: crate::RetainedRange,
         class: i64,
         now_unix_seconds: i64,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         series.validate()?;
         if range.start_unix_nanos >= range.end_unix_nanos {
-            return Err(DesktopStorageError::InvalidIdentity("coverage_range"));
+            return Err(LocalStorageError::InvalidIdentity("coverage_range"));
         }
         let scope = scope_tokens(&self.catalog_key, series.scope)?;
         let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
@@ -484,7 +484,7 @@ impl HistoryStore {
         now_unix_seconds: i64,
         missing_recovery: RecoveryAction,
         maximum_payload_bytes: usize,
-    ) -> Result<HistoryRead, DesktopStorageError> {
+    ) -> Result<HistoryRead, LocalStorageError> {
         Ok(
             match self.read_bounded_authorized(
                 identity,
@@ -513,9 +513,9 @@ impl HistoryStore {
         now_unix_seconds: i64,
         missing_recovery: RecoveryAction,
         maximum_payload_bytes: usize,
-    ) -> Result<crate::AuthorizedHistoryRead, DesktopStorageError> {
+    ) -> Result<crate::AuthorizedHistoryRead, LocalStorageError> {
         if maximum_payload_bytes == 0 || maximum_payload_bytes > MAXIMUM_SEGMENT_BYTES {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "segment read bound must be within 1..=67108864",
             ));
         }
@@ -547,11 +547,11 @@ impl HistoryStore {
         if record.key_id != encryption_key.key_id()
             || record.key_verifier != segment_key_verifier(encryption_key)?
         {
-            return Err(DesktopStorageError::SegmentKeyMismatch);
+            return Err(LocalStorageError::SegmentKeyMismatch);
         }
         let payload_bytes = usize::try_from(record.payload_bytes).unwrap_or(usize::MAX);
         if payload_bytes > maximum_payload_bytes {
-            return Err(DesktopStorageError::SegmentTooLarge {
+            return Err(LocalStorageError::SegmentTooLarge {
                 requested: payload_bytes,
                 maximum: maximum_payload_bytes,
             });
@@ -581,7 +581,7 @@ impl HistoryStore {
         &mut self,
         identity: &crate::SegmentIdentity,
         now_unix_seconds: i64,
-    ) -> Result<bool, DesktopStorageError> {
+    ) -> Result<bool, LocalStorageError> {
         identity.validate()?;
         let segment_id = identity_token(&self.catalog_key, identity)?;
         let Some(record) = self.catalog.find(&segment_id)? else {
@@ -603,10 +603,7 @@ impl HistoryStore {
     ///
     /// Returns an error for invalid filter fields, filesystem failure, or
     /// catalog failure.
-    pub fn invalidate(
-        &mut self,
-        invalidation: &Invalidation,
-    ) -> Result<usize, DesktopStorageError> {
+    pub fn invalidate(&mut self, invalidation: &Invalidation) -> Result<usize, LocalStorageError> {
         let records = self.records_for_invalidation(invalidation)?;
         let removed = records.len();
         self.remove_records(&records)?;
@@ -618,7 +615,7 @@ impl HistoryStore {
     /// # Errors
     ///
     /// Returns an error when file removal or the catalog transaction fails.
-    pub fn purge_expired(&mut self, now_unix_seconds: i64) -> Result<usize, DesktopStorageError> {
+    pub fn purge_expired(&mut self, now_unix_seconds: i64) -> Result<usize, LocalStorageError> {
         let expired = self
             .catalog
             .all_records()?
@@ -648,7 +645,7 @@ impl HistoryStore {
         provider_id: &str,
         account_id: &str,
         evidence: &impl KeyRevocationEvidence,
-    ) -> Result<DeletionReport, DesktopStorageError> {
+    ) -> Result<DeletionReport, LocalStorageError> {
         validate_identifier("provider_id", provider_id)?;
         validate_identifier("account_id", account_id)?;
         let provider = crate::crypto::provider_token(&self.catalog_key, provider_id)?;
@@ -675,14 +672,14 @@ impl HistoryStore {
                     .iter()
                     .find(|record| record.key_verifier == key_verifier)
                     .map_or("unknown", |record| record.key_id.as_str());
-                return Err(DesktopStorageError::SharedKeyStillReferenced {
+                return Err(LocalStorageError::SharedKeyStillReferenced {
                     key_id: key_id.to_string(),
                 });
             }
         }
         for key_id in key_ids {
             if !evidence.confirms_revocation(key_id) {
-                return Err(DesktopStorageError::KeyRevocationMissing {
+                return Err(LocalStorageError::KeyRevocationMissing {
                     key_id: key_id.to_string(),
                 });
             }
@@ -703,7 +700,7 @@ impl HistoryStore {
     /// # Errors
     ///
     /// Returns an error when the catalog cannot be queried.
-    pub fn statistics(&self) -> Result<CatalogStatistics, DesktopStorageError> {
+    pub fn statistics(&self) -> Result<CatalogStatistics, LocalStorageError> {
         self.catalog.statistics()
     }
 
@@ -715,7 +712,7 @@ impl HistoryStore {
     pub fn enforce_derived_quota(
         &mut self,
         maximum_payload_bytes: u64,
-    ) -> Result<crate::QuotaEnforcementReport, DesktopStorageError> {
+    ) -> Result<crate::QuotaEnforcementReport, LocalStorageError> {
         let mut derived = self
             .catalog
             .active_records()?
@@ -751,7 +748,7 @@ impl HistoryStore {
         &mut self,
         request: &PublicationRequest<'_>,
         retention_until: Option<i64>,
-    ) -> Result<PublicationOutcome, DesktopStorageError> {
+    ) -> Result<PublicationOutcome, LocalStorageError> {
         let associated_data = encode_identity(request.identity);
         let segment_id = identity_token(&self.catalog_key, request.identity)?;
         let request_key_verifier = segment_key_verifier(request.encryption_key)?;
@@ -759,7 +756,7 @@ impl HistoryStore {
             .catalog
             .key_id_has_different_verifier(request.encryption_key.key_id(), &request_key_verifier)?
         {
-            return Err(DesktopStorageError::SegmentKeyMismatch);
+            return Err(LocalStorageError::SegmentKeyMismatch);
         }
         let replacement = self.replacement_record(request, &segment_id)?;
         if replacement.is_none() {
@@ -770,7 +767,7 @@ impl HistoryStore {
                 .saturating_add(statistics.coverage_entries)
                 >= statistics.maximum_entries
             {
-                return Err(DesktopStorageError::CatalogFull {
+                return Err(LocalStorageError::CatalogFull {
                     maximum: statistics.maximum_entries,
                 });
             }
@@ -787,12 +784,12 @@ impl HistoryStore {
         if let Err(error) = fs::hard_link(&staged_path, &final_path) {
             let _ = fs::remove_file(&staged_path);
             return if error.kind() == io::ErrorKind::AlreadyExists {
-                Err(DesktopStorageError::SegmentAlreadyExists)
+                Err(LocalStorageError::SegmentAlreadyExists)
             } else {
                 Err(error.into())
             };
         }
-        let finalize_result = (|| -> Result<(), DesktopStorageError> {
+        let finalize_result = (|| -> Result<(), LocalStorageError> {
             fs::remove_file(&staged_path)?;
             make_file_read_only(&final_path)?;
             sync_directory(&self.segments)
@@ -838,7 +835,7 @@ impl HistoryStore {
     fn remove_retained_identity(
         &mut self,
         identity: &crate::SegmentIdentity,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         let segment_id = identity_token(&self.catalog_key, identity)?;
         if let Some(record) = self.catalog.find(&segment_id)? {
             self.remove_records(&[record])?;
@@ -854,7 +851,7 @@ impl HistoryStore {
         file_name: &str,
         encoded: &crate::crypto::EncodedSegment,
         replacement: bool,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         let scope = scope_tokens(&self.catalog_key, &request.identity.scope)?;
         let instrument = instrument_token(&self.catalog_key, &request.identity.instrument_id)?;
         let resolution = resolution_token(&self.catalog_key, &request.identity.resolution)?;
@@ -895,7 +892,7 @@ impl HistoryStore {
         &mut self,
         request: &PublicationRequest<'_>,
         segment_id: &[u8; 32],
-    ) -> Result<Option<CatalogRecord>, DesktopStorageError> {
+    ) -> Result<Option<CatalogRecord>, LocalStorageError> {
         let Some(record) = self.catalog.find(segment_id)? else {
             return Ok(None);
         };
@@ -913,7 +910,7 @@ impl HistoryStore {
             || request.recovery != RecoveryAction::ProviderRefetch
             || !key_matches
         {
-            return Err(DesktopStorageError::SegmentAlreadyExists);
+            return Err(LocalStorageError::SegmentAlreadyExists);
         }
         Ok(Some(record))
     }
@@ -924,10 +921,10 @@ impl HistoryStore {
         encryption_key: &SegmentEncryptionKey,
         record: &CatalogRecord,
         maximum_payload_bytes: usize,
-    ) -> Result<HistoryRead, DesktopStorageError> {
+    ) -> Result<HistoryRead, LocalStorageError> {
         let path = match self.record_path(record) {
             Ok(path) => path,
-            Err(DesktopStorageError::CorruptSegment(_)) => {
+            Err(LocalStorageError::CorruptSegment(_)) => {
                 self.catalog.mark_quarantined(
                     &record.segment_id,
                     "unsafe_catalog_file_name",
@@ -943,14 +940,14 @@ impl HistoryStore {
         let maximum_file_bytes = maximum_payload_bytes.saturating_add(SEGMENT_FILE_OVERHEAD_BYTES);
         let file = match read_bounded_file(&path, maximum_file_bytes) {
             Ok(file) => file,
-            Err(DesktopStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Err(LocalStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
                 self.quarantine_record(record, "file_missing")?;
                 return Ok(unavailable(
                     AvailabilityReason::Quarantined,
                     record.recovery,
                 ));
             }
-            Err(DesktopStorageError::SegmentTooLarge { .. }) => {
+            Err(LocalStorageError::SegmentTooLarge { .. }) => {
                 self.quarantine_record(record, "stored_segment_exceeds_bound")?;
                 return Ok(unavailable(
                     AvailabilityReason::Quarantined,
@@ -969,9 +966,7 @@ impl HistoryStore {
         let associated_data = encode_identity(identity);
         let payload = match decrypt_segment(&file, &associated_data, encryption_key) {
             Ok(payload) => payload,
-            Err(
-                DesktopStorageError::AuthenticationFailed | DesktopStorageError::CorruptSegment(_),
-            ) => {
+            Err(LocalStorageError::AuthenticationFailed | LocalStorageError::CorruptSegment(_)) => {
                 self.quarantine_record(record, "authentication_or_format_failure")?;
                 return Ok(unavailable(
                     AvailabilityReason::Quarantined,
@@ -995,7 +990,7 @@ impl HistoryStore {
     fn records_for_invalidation(
         &self,
         invalidation: &Invalidation,
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         match invalidation {
             Invalidation::Entitlement { scope } => {
                 scope.validate()?;
@@ -1074,7 +1069,7 @@ impl HistoryStore {
                 current_revision,
             } => {
                 if *current_revision == 0 || *current_revision > i64::MAX as u64 {
-                    return Err(DesktopStorageError::InvalidIdentity("correction_revision"));
+                    return Err(LocalStorageError::InvalidIdentity("correction_revision"));
                 }
                 self.dimension_revision_records(scope, instrument_id, |tokens, instrument| {
                     CatalogFilter::Correction {
@@ -1094,7 +1089,7 @@ impl HistoryStore {
         scope: &HistoryScope,
         instrument_id: &str,
         current_revision: u32,
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError> {
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         validate_revision(current_revision, "source_revision")?;
         self.dimension_revision_records(scope, instrument_id, |tokens, instrument| {
             CatalogFilter::Source {
@@ -1112,7 +1107,7 @@ impl HistoryStore {
         scope: &HistoryScope,
         instrument_id: Option<&str>,
         filter: F,
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError>
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError>
     where
         F: for<'a> FnOnce(
             &'a crate::crypto::ScopeTokens,
@@ -1132,7 +1127,7 @@ impl HistoryStore {
         scope: &HistoryScope,
         instrument_id: &str,
         filter: F,
-    ) -> Result<Vec<CatalogRecord>, DesktopStorageError>
+    ) -> Result<Vec<CatalogRecord>, LocalStorageError>
     where
         F: for<'a> FnOnce(&'a crate::crypto::ScopeTokens, &'a [u8; 32]) -> CatalogFilter<'a>,
     {
@@ -1143,14 +1138,14 @@ impl HistoryStore {
         self.catalog.matching(filter(&tokens, &instrument))
     }
 
-    fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), DesktopStorageError> {
+    fn remove_records(&mut self, records: &[CatalogRecord]) -> Result<(), LocalStorageError> {
         self.unlink_record_files(records)?;
         self.catalog.remove_records(records)?;
         sync_directory(&self.segments)?;
         Ok(())
     }
 
-    fn unlink_record_files(&self, records: &[CatalogRecord]) -> Result<usize, DesktopStorageError> {
+    fn unlink_record_files(&self, records: &[CatalogRecord]) -> Result<usize, LocalStorageError> {
         let mut removed = 0_usize;
         for record in records {
             if let Ok(path) = self.record_path(record) {
@@ -1164,7 +1159,7 @@ impl HistoryStore {
         Ok(removed)
     }
 
-    fn remove_quarantine_file(&self, record: &CatalogRecord) -> Result<bool, DesktopStorageError> {
+    fn remove_quarantine_file(&self, record: &CatalogRecord) -> Result<bool, LocalStorageError> {
         let Some(file_name) = &record.quarantine_file_name else {
             return Ok(false);
         };
@@ -1175,14 +1170,14 @@ impl HistoryStore {
         &mut self,
         record: &CatalogRecord,
         reason: &str,
-    ) -> Result<(), DesktopStorageError> {
+    ) -> Result<(), LocalStorageError> {
         let source = self.record_path(record)?;
         let quarantine_file_name = if source.exists() {
             let destination = self.unique_quarantine_path(&record.file_name)?;
             let file_name = destination
                 .file_name()
                 .and_then(|value| value.to_str())
-                .ok_or(DesktopStorageError::InvalidConfiguration(
+                .ok_or(LocalStorageError::InvalidConfiguration(
                     "quarantine path lacks a valid file name",
                 ))?
                 .to_string();
@@ -1197,13 +1192,13 @@ impl HistoryStore {
             .mark_quarantined(&record.segment_id, reason, quarantine_file_name.as_deref())
     }
 
-    fn recover_filesystem(&mut self) -> Result<(), DesktopStorageError> {
+    fn recover_filesystem(&mut self) -> Result<(), LocalStorageError> {
         remove_directory_contents(&self.staging)?;
         let active_names = self.catalog.active_file_names()?;
         for entry in fs::read_dir(&self.segments)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
-                return Err(DesktopStorageError::InvalidConfiguration(
+                return Err(LocalStorageError::InvalidConfiguration(
                     "segments directory contains a non-file entry",
                 ));
             }
@@ -1216,7 +1211,7 @@ impl HistoryStore {
         for entry in fs::read_dir(&self.quarantine)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
-                return Err(DesktopStorageError::InvalidConfiguration(
+                return Err(LocalStorageError::InvalidConfiguration(
                     "quarantine directory contains a non-file entry",
                 ));
             }
@@ -1229,7 +1224,7 @@ impl HistoryStore {
             let path = self.record_path(&record);
             if path
                 .as_ref()
-                .is_err_and(|error| matches!(error, DesktopStorageError::CorruptSegment(_)))
+                .is_err_and(|error| matches!(error, LocalStorageError::CorruptSegment(_)))
                 || path.as_ref().is_ok_and(|path| !path.is_file())
             {
                 self.catalog.mark_quarantined(
@@ -1245,30 +1240,30 @@ impl HistoryStore {
         Ok(())
     }
 
-    fn record_path(&self, record: &CatalogRecord) -> Result<PathBuf, DesktopStorageError> {
+    fn record_path(&self, record: &CatalogRecord) -> Result<PathBuf, LocalStorageError> {
         if !is_segment_file_name(&record.file_name) {
-            return Err(DesktopStorageError::CorruptSegment(
+            return Err(LocalStorageError::CorruptSegment(
                 "catalog contains an unsafe file name",
             ));
         }
         Ok(self.segments.join(&record.file_name))
     }
 
-    fn unique_staging_path(&self) -> Result<PathBuf, DesktopStorageError> {
+    fn unique_staging_path(&self) -> Result<PathBuf, LocalStorageError> {
         unique_path(&self.staging, "stage", "tmp")
     }
 
-    fn unique_quarantine_path(&self, file_name: &str) -> Result<PathBuf, DesktopStorageError> {
+    fn unique_quarantine_path(&self, file_name: &str) -> Result<PathBuf, LocalStorageError> {
         unique_path(&self.quarantine, file_name, "corrupt")
     }
 
-    fn quarantine_path(&self, file_name: &str) -> Result<PathBuf, DesktopStorageError> {
+    fn quarantine_path(&self, file_name: &str) -> Result<PathBuf, LocalStorageError> {
         if file_name.is_empty()
             || file_name.len() > 160
             || file_name.contains(['/', '\\'])
             || file_name.chars().any(char::is_control)
         {
-            return Err(DesktopStorageError::CorruptSegment(
+            return Err(LocalStorageError::CorruptSegment(
                 "catalog contains an unsafe quarantine file name",
             ));
         }
@@ -1301,9 +1296,9 @@ fn unavailable(reason: AvailabilityReason, recovery: RecoveryAction) -> HistoryR
     HistoryRead::Unavailable { reason, recovery }
 }
 
-fn validate_revision(revision: u32, field: &'static str) -> Result<(), DesktopStorageError> {
+fn validate_revision(revision: u32, field: &'static str) -> Result<(), LocalStorageError> {
     if revision == 0 {
-        return Err(DesktopStorageError::InvalidIdentity(field));
+        return Err(LocalStorageError::InvalidIdentity(field));
     }
     Ok(())
 }
@@ -1312,7 +1307,7 @@ fn unique_path(
     directory: &Path,
     prefix: &str,
     extension: &str,
-) -> Result<PathBuf, DesktopStorageError> {
+) -> Result<PathBuf, LocalStorageError> {
     for _ in 0..16 {
         let mut nonce = [0_u8; 16];
         getrandom::fill(&mut nonce)?;
@@ -1321,12 +1316,12 @@ fn unique_path(
             return Ok(path);
         }
     }
-    Err(DesktopStorageError::InvalidConfiguration(
+    Err(LocalStorageError::InvalidConfiguration(
         "failed to allocate a unique owned file name",
     ))
 }
 
-fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), DesktopStorageError> {
+fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), LocalStorageError> {
     let mut file = private_new_file(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -1334,7 +1329,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), DesktopStorageErro
 }
 
 #[cfg(unix)]
-fn open_root_lock(path: &Path) -> Result<File, DesktopStorageError> {
+fn open_root_lock(path: &Path) -> Result<File, LocalStorageError> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = OpenOptions::new()
         .read(true)
@@ -1347,7 +1342,7 @@ fn open_root_lock(path: &Path) -> Result<File, DesktopStorageError> {
 }
 
 #[cfg(not(unix))]
-fn open_root_lock(path: &Path) -> Result<File, DesktopStorageError> {
+fn open_root_lock(path: &Path) -> Result<File, LocalStorageError> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1357,16 +1352,16 @@ fn open_root_lock(path: &Path) -> Result<File, DesktopStorageError> {
     try_lock_root(file)
 }
 
-fn try_lock_root(file: File) -> Result<File, DesktopStorageError> {
+fn try_lock_root(file: File) -> Result<File, LocalStorageError> {
     match file.try_lock() {
         Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(DesktopStorageError::StoreAlreadyOpen),
+        Err(TryLockError::WouldBlock) => Err(LocalStorageError::StoreAlreadyOpen),
         Err(TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
 #[cfg(unix)]
-fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
+fn make_file_read_only(path: &Path) -> Result<(), LocalStorageError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o400))?;
     File::open(path)?.sync_all()?;
@@ -1374,13 +1369,13 @@ fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
 }
 
 #[cfg(windows)]
-fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
+fn make_file_read_only(path: &Path) -> Result<(), LocalStorageError> {
     OpenOptions::new().write(true).open(path)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
-fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
+fn make_file_read_only(path: &Path) -> Result<(), LocalStorageError> {
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions)?;
@@ -1388,11 +1383,11 @@ fn make_file_read_only(path: &Path) -> Result<(), DesktopStorageError> {
     Ok(())
 }
 
-fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, DesktopStorageError> {
+fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, LocalStorageError> {
     let file = File::open(path)?;
     let length = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
     if length > maximum {
-        return Err(DesktopStorageError::SegmentTooLarge {
+        return Err(LocalStorageError::SegmentTooLarge {
             requested: length,
             maximum,
         });
@@ -1401,7 +1396,7 @@ fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, DesktopStor
     file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() > maximum {
-        return Err(DesktopStorageError::SegmentTooLarge {
+        return Err(LocalStorageError::SegmentTooLarge {
             requested: bytes.len(),
             maximum,
         });
@@ -1409,11 +1404,11 @@ fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, DesktopStor
     Ok(bytes)
 }
 
-fn remove_directory_contents(directory: &Path) -> Result<(), DesktopStorageError> {
+fn remove_directory_contents(directory: &Path) -> Result<(), LocalStorageError> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "owned staging directory contains a non-file entry",
             ));
         }
@@ -1423,7 +1418,7 @@ fn remove_directory_contents(directory: &Path) -> Result<(), DesktopStorageError
 }
 
 #[cfg(unix)]
-fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
+fn remove_owned_file(path: &Path) -> Result<bool, LocalStorageError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1432,7 +1427,7 @@ fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
 }
 
 #[cfg(windows)]
-fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
+fn remove_owned_file(path: &Path) -> Result<bool, LocalStorageError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1441,7 +1436,7 @@ fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn remove_owned_file(path: &Path) -> Result<bool, DesktopStorageError> {
+fn remove_owned_file(path: &Path) -> Result<bool, LocalStorageError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1459,11 +1454,11 @@ fn is_segment_file_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn create_private_directory(path: &Path) -> Result<(), DesktopStorageError> {
+fn create_private_directory(path: &Path) -> Result<(), LocalStorageError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => {
-            return Err(DesktopStorageError::InvalidConfiguration(
+            return Err(LocalStorageError::InvalidConfiguration(
                 "owned storage path is not a real directory",
             ));
         }
@@ -1474,20 +1469,20 @@ fn create_private_directory(path: &Path) -> Result<(), DesktopStorageError> {
 }
 
 #[cfg(unix)]
-fn harden_private_directory(path: &Path) -> Result<(), DesktopStorageError> {
+fn harden_private_directory(path: &Path) -> Result<(), LocalStorageError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn harden_private_directory(path: &Path) -> Result<(), DesktopStorageError> {
+fn harden_private_directory(path: &Path) -> Result<(), LocalStorageError> {
     fs::metadata(path)?;
     Ok(())
 }
 
 #[cfg(unix)]
-fn private_new_file(path: &Path) -> Result<File, DesktopStorageError> {
+fn private_new_file(path: &Path) -> Result<File, LocalStorageError> {
     use std::os::unix::fs::OpenOptionsExt;
     Ok(OpenOptions::new()
         .write(true)
@@ -1497,18 +1492,18 @@ fn private_new_file(path: &Path) -> Result<File, DesktopStorageError> {
 }
 
 #[cfg(not(unix))]
-fn private_new_file(path: &Path) -> Result<File, DesktopStorageError> {
+fn private_new_file(path: &Path) -> Result<File, LocalStorageError> {
     Ok(OpenOptions::new().write(true).create_new(true).open(path)?)
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), DesktopStorageError> {
+fn sync_directory(path: &Path) -> Result<(), LocalStorageError> {
     File::open(path)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> Result<(), DesktopStorageError> {
+fn sync_directory(path: &Path) -> Result<(), LocalStorageError> {
     use std::os::windows::fs::OpenOptionsExt;
 
     const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -1523,8 +1518,8 @@ fn sync_directory(path: &Path) -> Result<(), DesktopStorageError> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn sync_directory(_path: &Path) -> Result<(), DesktopStorageError> {
-    Err(DesktopStorageError::InvalidConfiguration(
+fn sync_directory(_path: &Path) -> Result<(), LocalStorageError> {
+    Err(LocalStorageError::InvalidConfiguration(
         "directory metadata durability is unavailable on this platform",
     ))
 }

@@ -8,11 +8,11 @@ use std::{
 };
 
 use axiusflow_engine::{EngineState, bind_listener, serve_client, serve_client_with_state};
-use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
     ResourceMode, WorkspaceState, encode_envelope, envelope,
 };
+use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
 use axiusflow_platform_runtime::CredentialVault;
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 

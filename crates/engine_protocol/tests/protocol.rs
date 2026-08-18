@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
     EngineFaultCode, EngineReady, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries,
     InstallProviderInstrument, MAX_FRAME_BYTES, MarketBar, MarketEventIdle, OrderBookLevel,

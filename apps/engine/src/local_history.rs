@@ -10,7 +10,7 @@ use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseInterval, ENTITLEMENT_CLASS, aggregate_coinbase_bars,
     decode_history_segment,
 };
-use axiusflow_desktop_storage::{
+use axiusflow_local_storage::{
     CatalogKey, DataKind, HistoryRead, HistoryScope, HistorySeriesIdentity, HistoryStore,
     PublicationRequest, RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
 };

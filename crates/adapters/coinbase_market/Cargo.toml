@@ -18,7 +18,7 @@ ureq.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
-axiusflow_desktop_history = { path = "../../desktop_history" }
+axiusflow_local_history = { path = "../../local_history" }
 
 [lints]
 workspace = true

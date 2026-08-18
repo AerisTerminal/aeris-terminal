@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_local_engine_protocol::{
+use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,

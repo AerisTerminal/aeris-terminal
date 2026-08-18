@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_desktop_history"
+name = "axiusflow_local_history"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-axiusflow_desktop_storage = { path = "../desktop_storage" }
+axiusflow_local_storage = { path = "../local_storage" }
 axiusflow_provider_history = { path = "../provider_history" }
 
 [lints]

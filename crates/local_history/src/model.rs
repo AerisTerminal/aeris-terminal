@@ -1,4 +1,4 @@
-use axiusflow_desktop_storage::{
+use axiusflow_local_storage::{
     AvailabilityReason, RecoveryAction, SegmentEncryptionKey, SegmentIdentity,
 };
 use axiusflow_provider_history::SequencedHistory;

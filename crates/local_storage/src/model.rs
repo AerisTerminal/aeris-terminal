@@ -1,4 +1,4 @@
-use crate::DesktopStorageError;
+use crate::LocalStorageError;
 use std::fmt;
 use zeroize::Zeroize;
 
@@ -13,7 +13,7 @@ pub struct HistoryScope {
 }
 
 impl HistoryScope {
-    pub(crate) fn validate(&self) -> Result<(), DesktopStorageError> {
+    pub(crate) fn validate(&self) -> Result<(), LocalStorageError> {
         validate_identifier("provider_id", &self.provider_id)?;
         validate_identifier("account_id", &self.account_id)?;
         validate_identifier("entitlement_revision", &self.entitlement_revision)
@@ -62,27 +62,27 @@ impl SegmentIdentity {
     /// # Errors
     ///
     /// Returns an error naming the invalid identity field.
-    pub fn validate(&self) -> Result<(), DesktopStorageError> {
+    pub fn validate(&self) -> Result<(), LocalStorageError> {
         self.scope.validate()?;
         validate_identifier("instrument_id", &self.instrument_id)?;
         validate_identifier("resolution", &self.resolution)?;
         if self.range_start_unix_nanos >= self.range_end_unix_nanos {
-            return Err(DesktopStorageError::InvalidIdentity("time_range"));
+            return Err(LocalStorageError::InvalidIdentity("time_range"));
         }
         if self.source_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("source_revision"));
+            return Err(LocalStorageError::InvalidIdentity("source_revision"));
         }
         if self.schema_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("schema_revision"));
+            return Err(LocalStorageError::InvalidIdentity("schema_revision"));
         }
         if self.calendar_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("calendar_revision"));
+            return Err(LocalStorageError::InvalidIdentity("calendar_revision"));
         }
         if self.adjustment_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("adjustment_revision"));
+            return Err(LocalStorageError::InvalidIdentity("adjustment_revision"));
         }
         if self.correction_revision == 0 || self.correction_revision > i64::MAX as u64 {
-            return Err(DesktopStorageError::InvalidIdentity("correction_revision"));
+            return Err(LocalStorageError::InvalidIdentity("correction_revision"));
         }
         Ok(())
     }
@@ -174,24 +174,24 @@ impl RetainedSeriesCoverage {
 }
 
 impl HistorySeriesIdentity<'_> {
-    pub(crate) fn validate(self) -> Result<(), DesktopStorageError> {
+    pub(crate) fn validate(self) -> Result<(), LocalStorageError> {
         self.scope.validate()?;
         validate_identifier("instrument_id", self.instrument_id)?;
         validate_identifier("resolution", self.resolution)?;
         if self.source_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("source_revision"));
+            return Err(LocalStorageError::InvalidIdentity("source_revision"));
         }
         if self.schema_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("schema_revision"));
+            return Err(LocalStorageError::InvalidIdentity("schema_revision"));
         }
         if self.calendar_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("calendar_revision"));
+            return Err(LocalStorageError::InvalidIdentity("calendar_revision"));
         }
         if self.adjustment_revision == 0 {
-            return Err(DesktopStorageError::InvalidIdentity("adjustment_revision"));
+            return Err(LocalStorageError::InvalidIdentity("adjustment_revision"));
         }
         if self.correction_revision == 0 || self.correction_revision > i64::MAX as u64 {
-            return Err(DesktopStorageError::InvalidIdentity("correction_revision"));
+            return Err(LocalStorageError::InvalidIdentity("correction_revision"));
         }
         Ok(())
     }
@@ -212,13 +212,11 @@ impl RecoveryAction {
         }
     }
 
-    pub(crate) fn from_code(code: i64) -> Result<Self, DesktopStorageError> {
+    pub(crate) fn from_code(code: i64) -> Result<Self, LocalStorageError> {
         match code {
             1 => Ok(Self::ProviderRefetch),
             2 => Ok(Self::LiveOnly),
-            _ => Err(DesktopStorageError::CorruptSegment(
-                "invalid recovery action",
-            )),
+            _ => Err(LocalStorageError::CorruptSegment("invalid recovery action")),
         }
     }
 }
@@ -243,7 +241,7 @@ impl SegmentEncryptionKey {
     /// # Errors
     ///
     /// Returns an error when the non-secret vault key identifier is invalid.
-    pub fn try_new(key_id: String, bytes: [u8; 32]) -> Result<Self, DesktopStorageError> {
+    pub fn try_new(key_id: String, bytes: [u8; 32]) -> Result<Self, LocalStorageError> {
         validate_identifier("segment_key_id", &key_id)?;
         Ok(Self { key_id, bytes })
     }
@@ -354,7 +352,7 @@ impl SegmentAccessPolicy {
         &self,
         encryption_key: &SegmentEncryptionKey,
         now_unix_seconds: i64,
-    ) -> Result<Option<(AvailabilityReason, RecoveryAction)>, DesktopStorageError> {
+    ) -> Result<Option<(AvailabilityReason, RecoveryAction)>, LocalStorageError> {
         if self
             .retention_until
             .is_some_and(|expiry| expiry <= now_unix_seconds)
@@ -364,7 +362,7 @@ impl SegmentAccessPolicy {
         if self.key_id != encryption_key.key_id()
             || self.key_verifier != crate::crypto::segment_key_verifier(encryption_key)?
         {
-            return Err(DesktopStorageError::SegmentKeyMismatch);
+            return Err(LocalStorageError::SegmentKeyMismatch);
         }
         Ok(None)
     }
@@ -465,13 +463,13 @@ pub struct QuotaEnforcementReport {
 pub(crate) fn validate_identifier(
     field: &'static str,
     value: &str,
-) -> Result<(), DesktopStorageError> {
+) -> Result<(), LocalStorageError> {
     if value.is_empty()
         || value.len() > MAXIMUM_IDENTITY_BYTES
         || value.trim() != value
         || value.chars().any(char::is_control)
     {
-        return Err(DesktopStorageError::InvalidIdentity(field));
+        return Err(LocalStorageError::InvalidIdentity(field));
     }
     Ok(())
 }
