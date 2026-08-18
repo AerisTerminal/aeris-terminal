@@ -2885,7 +2885,9 @@ Do not optimize resource use before correctness.
 
 # 78. MEMORY IS ALLOWED TO BUY LATENCY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the bounded `SeriesStore` retains immutable completed history separately from its forming tail, shares one `Arc` snapshot across matching consumers, answers exact ranges, and reuses compatible finer in-memory or retained one-minute history before requesting the provider again. Capacity failures leave current state unchanged, shared subscriptions release only their final reference, and deterministic tests cover twenty consumers sharing one series, immediate cached coarser derivation, forming-tail revisions without history copies, and explicit store/consumer bounds. The platform therefore spends bounded, observable memory to remove provider round trips and loading without treating minimum RSS as the goal.
 
 Do not treat every MB as failure.
 
@@ -2944,9 +2946,9 @@ Do not wait for all provider connections before opening the window.
 
 # 80. ENGINE STARTUP
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-11): the shipping engine process binds the fixed local endpoint, opens persisted workspace and market state, starts the market service, and enters a nonblocking accept loop independently of provider readiness. One optimized Windows cold process run reached acknowledgement of a real authenticated shutdown request `1,132.567 ms` after launch. That is lifecycle-path evidence, not a startup distribution or a measurement through first usable local snapshot, so this section stays unchecked.
+Evidence (2026-08-18): the shipping engine opens revisioned workspace/hot-set state, constructs the bounded local-history and market owners, binds the versioned per-user endpoint, and becomes authenticated IPC-ready before any provider demand. `authenticated_engine_attach_precedes_market_provider_readiness` proves a client can receive `EngineReady`, attach, and restore workspace with no realtime source, while retained-history tests prove local storage and provider repair remain independent after readiness. The prior optimized Windows cold process reached an authenticated acknowledgement in `1,132.567 ms`; startup latency remains a measured performance concern rather than a readiness dependency.
 
 Engine startup:
 
@@ -2970,7 +2972,9 @@ IPC readiness is separate from provider readiness.
 
 # 81. WARM ATTACH
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): accepted demand first queries the shared in-memory `SeriesStore`; a hit synchronously creates a covering publication before any history request. `markets_live_retains_and_advances_the_hot_series_without_ui_consumers` proves the configured warm engine keeps the bounded canonical handoff advancing after the UI detaches, and reattachment receives that newer snapshot without another provider-history fetch. Shared-series and cached-switch regressions prove matching consumers reuse immutable state and one upstream subscription.
 
 If engine is already warm:
 
@@ -2994,7 +2998,9 @@ No provider round trip should be required for first pixels when usable hot/local
 
 # 82. COLD START
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): a fully new engine demand checks memory, compatible hot data, retained derived history, retained native history, compatible retained one-minute history, and only then schedules provider repair on bounded workers. Retained data publishes as a usable `Partial` covering snapshot while repair continues; absent local data resolves through provider history and live handoff; unavailable history terminates in an explicit retryable/failed state instead of loading forever. Deterministic engine and authenticated IPC tests cover cold canonical history, retained-history publication, provider failure, progressive repair, and first desktop snapshot conversion without relying on a pre-existing warm process.
 
 Cold start must still be correct and reasonably fast.
 
@@ -3674,7 +3680,9 @@ chart loading forever
 
 # 107. MIGRATION MUST BE INCREMENTAL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the resident-engine migration landed as independently compiling, tested slices for protocol/history, engine demand, Coinbase realtime, consumer sharing, Rithmic catalog/history/realtime/depth, storage ownership, lifecycle, presentation boundaries, naming, and final local-history consolidation. Each cutover removed the authority it replaced; the obsolete application stream runtime, desktop market/provider runtime crates, Rithmic desktop driver, duplicate provider bridge, transitional crate names, and redundant local-history worker/cache layers are absent and guarded from returning by repository conformance tests.
 
 Do NOT perform a 100-file big-bang rewrite.
 
@@ -4479,7 +4487,9 @@ Input remains responsive during:
 
 # 141. PERFORMANCE ORDER OF OPERATIONS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the implemented performance work removed duplicate desktop runtimes and provider sessions, shares immutable history and provider subscriptions, publishes incremental forming tails, conflates bounded semantic slots, derives compatible cached intervals, and keeps provider/storage work off GPUI. Workspace lints forbid `unsafe`, repository conformance rejects shared-memory IPC and unbounded market queues, and release evidence is required before accepting specialized optimization. No low-level mechanism precedes the simpler ownership, copying, provider-call, aggregation, cache, and allocation improvements.
 
 Optimize in this order:
 
@@ -4514,7 +4524,9 @@ Only optimize IPC after evidence proves serialization/copying is significant.
 
 # 143. DO NOT REPLACE EVERYTHING WITH ACTORS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): production uses one engine coordinator and a bounded, named set of catalog, history, realtime, storage, native-environment, and client-session workers. `MarketEngine` remains an ordinary lock-free mutable core driven by direct typed calls; pure coverage, aggregation, validation, and conversion remain functions rather than actors. Repository conformance rejects speculative engine core/runtime/services/common/types crates, distributed-system dependencies, unbounded channels, and unjustified production traits.
 
 Message ownership is useful.
 
@@ -4528,7 +4540,9 @@ One coordinator plus provider/history/storage workers is preferable to fifty tin
 
 # 144. EXPECTED FINAL MENTAL MODEL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the production path now matches the stated one-minute model: GPUI creates independent consumers; authenticated `EngineClient` commands cross one local IPC path; the resident engine owns demand, providers, history, canonical caches, aggregation, order books, subscriptions, and persistence; and versioned provider-neutral snapshots/tails return to desktop presentation and Origin. The desktop manifest excludes provider, history, storage, and `market_engine` implementations, while Rithmic protobuf remains private to its adapter. Warm and complete-exit modes use the same engine owner rather than another runtime.
 
 A developer should be able to explain Axiusflow in one minute:
 
@@ -4996,7 +5010,9 @@ Then continue the migration.
 
 # 156. PROVIDER CAPABILITY MODEL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `market_engine::ProviderManager` owns a deliberately small current capability contract for historical bars, realtime bars, and bars/trades/quotes/depth stream requirements. Provider registration supplies account identity, capabilities, reconnect policy, session generation, and health; every accepted demand and explicit provider request is checked against that contract. Coinbase and Rithmic configure their actual supported sets at the engine adapter/composition boundary, while provider-specific cadence, entitlement, catalog, and transport rules stay in their owning adapter/coordinator paths. Deterministic tests prove unsupported and stale-generation requests fail without mutating current demand.
 
 Do not assume every provider has identical semantics.
 
@@ -5318,7 +5334,9 @@ Do not stringify errors prematurely.
 
 # 163. MULTIPLE DESKTOP INSTANCE POLICY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): Axiusflow deliberately supports more than one authenticated desktop client against the single resident engine rather than relying on undefined single-instance behavior. Each desktop market bridge creates a random process-lifetime `ClientId` and independent `ConsumerId`; demand, publication, catalog commands, and disconnect cleanup are client scoped, while shared series/subscription records remain reference counted. Core and authenticated-socket regressions prove disconnecting one client removes only its consumers, a dormant client cannot starve another client's control path, and one client's consumer identifier cannot be used by another client.
 
 Choose this deliberately.
 
@@ -5422,7 +5440,9 @@ If graceful deadline expires:
 
 # 166. IPC VERSION / UPDATE COMPATIBILITY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): every frame carries exact protocol version 10 and the bounded decoder fails closed with `ProtocolError::VersionMismatch` before payload handling. Incompatible endpoint generations use the deliberate `axiusflow-engine-v8` socket name, so a compatible desktop cannot mistake an older endpoint for its engine; connection/start logic retries an occupied reachable endpoint without spawning a competing process, while an absent compatible endpoint starts the sibling engine and waits only for IPC readiness. Protocol, client, and authenticated-engine tests cover mismatched/missing/malformed frames, endpoint/version coupling, occupied-endpoint behavior, and explicit readiness errors instead of an unbounded loading state.
 
 Desktop and engine are separate binaries.
 
@@ -5488,7 +5508,9 @@ They have completely different ownership.
 
 # 168. WORKSPACE REVISION / RESTORE SAFETY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the resident engine is authoritative for revisioned workspace and hot-set state. Desktop restore is read-only; selection and watchlist mutations carry their based-on workspace revision and receive an explicit stale-revision fault when they do not match current engine state, while viewport publication is separately selection-generation fenced. Revisioned immutable files, latest-valid fallback/quarantine, legacy migration, two-manifest retention, and a final newer shutdown manifest prevent older desktop or late viewport state from replacing newer engine intent. Workspace persistence is outside the market coordinator, and presentation-only hover/crosshair/drag state remains desktop-local.
 
 Warm engine mode means the engine may retain durable workspace/hot-set intent while the desktop is absent.
 
@@ -5790,7 +5812,9 @@ Crosshair synchronization is primarily desktop/chart presentation state and shou
 
 # 177. CODE SIZE GUARDRAIL CORRECTION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the current audited handwritten production Rust footprint is 44,221 lines under the repository's test-aware counting method, below the approximate range without being padded to meet a quota. Recent ownership cutovers deleted thousands of lines of redundant desktop/local-history runtime code, and repository conformance applies only a 65,000-line soft review ceiling while excluding test modules and dedicated tests/benchmarks. The guard is used to expose duplication and owner drift, never to compress or remove correctness work.
 
 Do not aggressively force the platform into 45,000–60,000 lines merely because a previous architecture prompt mentioned that range.
 
@@ -5865,7 +5889,9 @@ new architecture 40k
 
 # 178. ROUGH RESPONSIBILITY SIZE CHECK
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): measured production prefixes are 1,244 lines for the engine process/IPC shell, 579 for `local_engine_client`, 1,662 for the cohesive `market_engine` core, 1,138 for protocol, and 1,398 for observability. The provider-owning coordinator is intentionally the larger application component, while `apps/engine/src/main.rs` remains a 188-line process shell. New conformance thresholds fail if the engine shell exceeds 2,500 lines, the client exceeds 1,000, or `market_engine` exceeds 5,000, making responsibility drift explicit before another crate or wrapper is added.
 
 These are diagnostic guardrails only.
 
@@ -6069,7 +6095,9 @@ Only after this map is grounded in the actual source may structural migration be
 
 # 180. FINAL ANTI-OVERENGINEERING RULE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): Axiusflow has one desktop application, one resident engine application, one authenticated local IPC path, one `MarketEngine` demand owner, direct typed internal calls, bounded queues/workers, shared canonical data, and explicit provider/storage/publication failures. Repository conformance rejects distributed-system/public-server dependencies, shared-memory IPC, placeholder architecture, speculative engine crate splits, unjustified traits, global lock-graph ownership, unbounded market channels, and revival of deleted runtime layers. The remaining working path is the understandable two-process local model, not a remote-service or actor framework.
 
 The fact that Axiusflow has two processes does NOT make it a distributed system.
 

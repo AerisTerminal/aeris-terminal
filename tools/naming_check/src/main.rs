@@ -977,4 +977,150 @@ mod tests {
             "the engine app must not duplicate local-history storage mechanics"
         );
     }
+
+    #[test]
+    fn resident_market_contracts_remain_explicit_and_provider_neutral() {
+        let demand = manifest("crates/market_engine/src/demand.rs");
+        assert!(
+            demand.contains("pub(crate) fn set_viewport")
+                && demand.contains("if generation != current")
+                && demand.contains("EngineError::StaleConsumerGeneration"),
+            "viewport demand must remain explicit and generation fenced"
+        );
+
+        let provider_manager = manifest("crates/market_engine/src/provider_manager.rs");
+        for contract in [
+            "pub struct ProviderCapabilities",
+            "historical_bars: bool",
+            "realtime_bars: bool",
+            "streams: StreamRequirements",
+            "verify_request",
+            "verify_streams",
+        ] {
+            assert!(
+                provider_manager.contains(contract),
+                "provider capability contract lost {contract}"
+            );
+        }
+
+        let engine_core = manifest("crates/market_engine/src/lib.rs");
+        for regression in [
+            "provider_and_viewport_generations_are_exactly_fenced",
+            "provider_configuration_routes_only_supported_generation_fenced_requests",
+            "shared_subscriptions_ref_count_streams_and_release_only_the_last_consumer",
+        ] {
+            assert!(
+                engine_core.contains(regression),
+                "resident market contract lost regression {regression}"
+            );
+        }
+
+        let coordinator = manifest("apps/engine/src/market_service.rs");
+        for regression in [
+            "compatible_minute_history_publishes_and_caches_a_coarser_series",
+            "newer_demand_cancels_history_without_waiting_for_cleanup",
+            "symbol_and_interval_switch_reuses_the_shared_realtime_session",
+        ] {
+            assert!(
+                coordinator.contains(regression),
+                "viewport/history lifecycle lost regression {regression}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_clients_versions_and_workspace_writes_remain_fenced() {
+        let engine_core = manifest("crates/market_engine/src/lib.rs");
+        assert!(
+            engine_core.contains("disconnect_removes_only_the_owning_clients_consumers"),
+            "multiple desktop clients must remain client scoped"
+        );
+
+        let engine_ipc = manifest("apps/engine/src/lib.rs");
+        for regression in [
+            "authenticated_connection_drop_retires_detached_client_consumers",
+            "dormant_market_client_does_not_starve_another_clients_control",
+        ] {
+            assert!(
+                engine_ipc.contains(regression),
+                "authenticated multi-client behavior lost regression {regression}"
+            );
+        }
+        let coordinator = manifest("apps/engine/src/market_service.rs");
+        assert!(
+            coordinator.contains("later_consumers_reuse_one_engine_history_fetch")
+                && coordinator.contains("another client's consumer is rejected"),
+            "multiple clients must share upstream work without sharing consumer authority"
+        );
+        assert!(
+            engine_ipc.contains("workspace revision is stale")
+                && engine_ipc.contains("stale_workspace_fault"),
+            "workspace writes must reject stale desktop revisions explicitly"
+        );
+
+        let protocol = manifest("crates/engine_protocol/src/lib.rs");
+        assert!(
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 10"),
+            "incompatible IPC revisions require a deliberate protocol-version change"
+        );
+        let codec = manifest("crates/engine_protocol/src/codec.rs");
+        assert!(
+            codec.contains("ProtocolError::VersionMismatch"),
+            "IPC decoding must fail closed on incompatible protocol versions"
+        );
+        let client = manifest("crates/local_engine_client/src/lib.rs");
+        for contract in [
+            "protocol_socket_name_tracks_the_active_version",
+            "reached_endpoint_is_retried_without_spawning_another_engine",
+        ] {
+            assert!(
+                client.contains(contract),
+                "engine startup/version fencing lost {contract}"
+            );
+        }
+
+        let handshake = manifest("apps/engine/tests/handshake.rs");
+        for regression in [
+            "workspace_selection_is_durable_across_engine_restart",
+            "chart_viewport_is_generation_fenced_and_persisted_independently",
+            "shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation",
+        ] {
+            assert!(
+                handshake.contains(regression),
+                "workspace revision authority lost regression {regression}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_responsibilities_remain_proportionate() {
+        fn production_lines(relative: &str) -> usize {
+            production_prefix(&manifest(relative)).lines().count()
+        }
+
+        let engine_shell = production_lines("apps/engine/src/main.rs")
+            + production_lines("apps/engine/src/lib.rs");
+        let engine_client = production_lines("crates/local_engine_client/src/lib.rs");
+        let market_engine = production_sources_under("crates/market_engine/src")
+            .into_iter()
+            .map(|path| {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+                production_prefix(&contents).lines().count()
+            })
+            .sum::<usize>();
+
+        assert!(
+            engine_shell <= 2_500,
+            "engine process and IPC shell grew to {engine_shell} lines; inspect leaked market ownership"
+        );
+        assert!(
+            engine_client <= 1_000,
+            "local EngineClient grew to {engine_client} lines; it must not become a market runtime"
+        );
+        assert!(
+            market_engine <= 5_000,
+            "MarketEngine grew to {market_engine} lines; organize the cohesive owner before adding crates"
+        );
+    }
 }
