@@ -32,12 +32,12 @@ use axiusflow_rithmic_protocol_adapter::{
 const CALLBACK_CAPACITY: usize = 256;
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const EVENT_WAIT: Duration = Duration::from_millis(16);
-const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const ENVIRONMENT_CAPACITY: usize = 8;
 
 pub(crate) enum RithmicRealtimeControl {
     Select(InstallProviderInstrument),
+    Stop,
 }
 
 pub(crate) enum RithmicCatalogControl {
@@ -148,6 +148,7 @@ impl EnvironmentState {
 pub(crate) fn run_catalog(
     controls: &Receiver<RithmicCatalogControl>,
     publications: &SyncSender<RithmicCatalogEvent>,
+    reconnect_delay: Duration,
 ) {
     let Ok(mut environment) = start_environment_monitors() else {
         while let Ok(control) = controls.recv() {
@@ -158,7 +159,7 @@ pub(crate) fn run_catalog(
     let mut generation = 0_u64;
     loop {
         let Ok((runtime, events)) = open_catalog_runtime() else {
-            match controls.recv_timeout(RECONNECT_DELAY) {
+            match controls.recv_timeout(reconnect_delay) {
                 Ok(control) => reject_catalog_control(publications, control, None),
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -178,7 +179,7 @@ pub(crate) fn run_catalog(
         ) {
             CatalogSessionExit::Retry(updated) => {
                 generation = updated;
-                thread::park_timeout(RECONNECT_DELAY);
+                thread::park_timeout(reconnect_delay);
             }
             CatalogSessionExit::Closed => return,
         }
@@ -578,41 +579,63 @@ pub(crate) fn run(
     publications: &SyncSender<RithmicRealtimeEvent>,
 ) {
     let Ok(mut environment) = start_environment_monitors() else {
-        while let Ok(RithmicRealtimeControl::Select(selected)) = controls.recv() {
-            let _ = publications.send(RithmicRealtimeEvent::Disconnected(
-                selected.session_generation,
-            ));
+        while let Ok(control) = controls.recv() {
+            if let RithmicRealtimeControl::Select(selected) = control {
+                let _ = publications.send(RithmicRealtimeEvent::Disconnected(
+                    selected.session_generation,
+                ));
+            }
         }
         return;
     };
     let mut last_generation = 0_u64;
-    let Ok(RithmicRealtimeControl::Select(mut selected)) = controls.recv() else {
-        return;
-    };
     loop {
-        while let Ok(RithmicRealtimeControl::Select(newer)) = controls.try_recv() {
-            selected = newer;
-        }
-        let generation = next_generation(last_generation, selected.session_generation);
-        let (environment_events, environment_state) = environment.parts();
-        match run_selection(
-            &selected,
-            generation,
-            controls,
-            publications,
-            environment_events,
-            environment_state,
-        ) {
-            SelectionExit::Replace {
-                selected: replacement,
-                generation,
-            } => {
-                selected = replacement;
-                last_generation = generation;
+        let mut selected = loop {
+            match controls.recv() {
+                Ok(RithmicRealtimeControl::Select(selected)) => break selected,
+                Ok(RithmicRealtimeControl::Stop) => {}
+                Err(_) => return,
             }
-            SelectionExit::Closed { generation } => {
-                let _ = publications.send(RithmicRealtimeEvent::Disconnected(generation));
-                return;
+        };
+        loop {
+            let mut stop_requested = false;
+            while let Ok(control) = controls.try_recv() {
+                match control {
+                    RithmicRealtimeControl::Select(newer) => {
+                        selected = newer;
+                        stop_requested = false;
+                    }
+                    RithmicRealtimeControl::Stop => stop_requested = true,
+                }
+            }
+            if stop_requested {
+                break;
+            }
+            let generation = next_generation(last_generation, selected.session_generation);
+            let (environment_events, environment_state) = environment.parts();
+            match run_selection(
+                &selected,
+                generation,
+                controls,
+                publications,
+                environment_events,
+                environment_state,
+            ) {
+                SelectionExit::Replace {
+                    selected: replacement,
+                    generation,
+                } => {
+                    selected = replacement;
+                    last_generation = generation;
+                }
+                SelectionExit::Idle { generation } => {
+                    last_generation = generation;
+                    break;
+                }
+                SelectionExit::Closed { generation } => {
+                    let _ = publications.send(RithmicRealtimeEvent::Disconnected(generation));
+                    return;
+                }
             }
         }
     }
@@ -624,6 +647,9 @@ enum SelectionExit {
         generation: u64,
     },
     Closed {
+        generation: u64,
+    },
+    Idle {
         generation: u64,
     },
 }
@@ -670,6 +696,9 @@ fn run_selection(
                     selected: replacement,
                     generation,
                 };
+            }
+            Ok(RithmicRealtimeControl::Stop) => {
+                return stop_selection(&mut runtime, generation);
             }
             Err(TryRecvError::Disconnected) => {
                 let _ = runtime.stop();
@@ -735,6 +764,11 @@ fn run_selection(
     }
 }
 
+fn stop_selection(runtime: &mut Runtime, generation: u64) -> SelectionExit {
+    let _ = runtime.stop();
+    SelectionExit::Idle { generation }
+}
+
 fn poll_environment(
     environment: &Receiver<EnvironmentMessage>,
     state: &mut EnvironmentState,
@@ -787,6 +821,9 @@ fn wait_for_replacement(
                     selected,
                     generation,
                 };
+            }
+            Ok(RithmicRealtimeControl::Stop) => {
+                return SelectionExit::Idle { generation };
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {

@@ -36,8 +36,8 @@ use axiusflow_market_data::{
 };
 use axiusflow_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, EngineError, GenerationId, MarketEngine,
-    MarketEngineConfig, ProviderCapabilities, ProviderGeneration, ProviderHealth, Viewport,
-    WorkspaceId,
+    MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
+    ProviderHealth, ProviderRequest, StreamRequirements, Viewport, WorkspaceId,
 };
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 
@@ -50,11 +50,12 @@ const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
 const STORAGE_CAPACITY: usize = 16;
 const REALTIME_CAPACITY: usize = 2_048;
+const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 4_096;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
 const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
-const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
 const HISTORY_BARS_PER_SERIES: usize = 350;
@@ -951,7 +952,8 @@ impl MarketService {
         let (realtime_tx, realtime_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_control_tx, realtime_control_rx) = mpsc::sync_channel(1);
         let (rithmic_realtime_tx, rithmic_realtime_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
-        let (rithmic_realtime_control_tx, rithmic_realtime_control_rx) = mpsc::sync_channel(1);
+        let (rithmic_realtime_control_tx, rithmic_realtime_control_rx) =
+            mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
         let (rithmic_catalog_tx, rithmic_catalog_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (rithmic_catalog_control_tx, rithmic_catalog_control_rx) =
             mpsc::sync_channel(COMMAND_CAPACITY);
@@ -981,21 +983,21 @@ impl MarketService {
             command_tx.clone(),
             Arc::clone(&shutdown),
         )?);
-        if let Some(realtime) = realtime {
-            workers.push(spawn_realtime_worker(
-                realtime,
-                realtime_control_rx,
-                realtime_tx,
-                Arc::clone(&realtime_overflow),
-                Arc::clone(&realtime_stop),
-            )?);
-        }
+        workers.extend(spawn_optional_realtime_worker(
+            realtime,
+            realtime_control_rx,
+            realtime_tx,
+            &realtime_overflow,
+            &realtime_stop,
+            configured_reconnect_delay(&engine, "coinbase")?,
+        )?);
         workers.extend(start_rithmic_workers(
             rithmic_realtime,
             rithmic_catalog_control_rx,
             rithmic_catalog_tx,
             rithmic_realtime_control_rx,
             rithmic_realtime_tx,
+            configured_reconnect_delay(&engine, "rithmic")?,
         )?);
         let coordinator_shutdown = Arc::clone(&shutdown);
         let coordinator_realtime_stop = Arc::clone(&realtime_stop);
@@ -1337,11 +1339,43 @@ fn spawn_realtime_worker(
     events: SyncSender<RealtimeEvent>,
     overflow: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    reconnect_delay: Duration,
 ) -> Result<thread::JoinHandle<()>, String> {
     thread::Builder::new()
         .name("axiusflow-coinbase-realtime".to_string())
-        .spawn(move || run_realtime_worker(realtime, &controls, &events, &overflow, &stop))
+        .spawn(move || {
+            run_realtime_worker(
+                realtime,
+                &controls,
+                &events,
+                &overflow,
+                &stop,
+                reconnect_delay,
+            );
+        })
         .map_err(|error| error.to_string())
+}
+
+fn spawn_optional_realtime_worker(
+    realtime: Option<Box<dyn RealtimeSource>>,
+    controls: Receiver<RealtimeControl>,
+    events: SyncSender<RealtimeEvent>,
+    overflow: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+    reconnect_delay: Duration,
+) -> Result<Option<thread::JoinHandle<()>>, String> {
+    realtime
+        .map(|realtime| {
+            spawn_realtime_worker(
+                realtime,
+                controls,
+                events,
+                Arc::clone(overflow),
+                Arc::clone(stop),
+                reconnect_delay,
+            )
+        })
+        .transpose()
 }
 
 fn start_rithmic_workers(
@@ -1350,13 +1384,20 @@ fn start_rithmic_workers(
     catalog_events: SyncSender<RithmicCatalogEvent>,
     realtime_controls: Receiver<RithmicRealtimeControl>,
     realtime_events: SyncSender<RithmicRealtimeEvent>,
+    reconnect_delay: Duration,
 ) -> Result<Vec<thread::JoinHandle<()>>, String> {
     if !enabled {
         return Ok(Vec::new());
     }
     let catalog = thread::Builder::new()
         .name("axiusflow-rithmic-catalog".to_string())
-        .spawn(move || crate::rithmic_realtime::run_catalog(&catalog_controls, &catalog_events))
+        .spawn(move || {
+            crate::rithmic_realtime::run_catalog(
+                &catalog_controls,
+                &catalog_events,
+                reconnect_delay,
+            );
+        })
         .map_err(|error| error.to_string())?;
     let realtime = thread::Builder::new()
         .name("axiusflow-rithmic-realtime".to_string())
@@ -1433,6 +1474,7 @@ fn run_realtime_worker(
     events: &SyncSender<RealtimeEvent>,
     overflow: &AtomicBool,
     stop: &Arc<AtomicBool>,
+    reconnect_delay: Duration,
 ) {
     let mut generation = ProviderGeneration(
         NonZeroU64::new(COINBASE_PROVIDER_GENERATION).unwrap_or(NonZeroU64::MIN),
@@ -1463,7 +1505,7 @@ fn run_realtime_worker(
             if stopped {
                 break;
             }
-            thread::park_timeout(RECONNECT_DELAY);
+            thread::park_timeout(reconnect_delay);
         }
     }
 }
@@ -1529,6 +1571,7 @@ fn run_coordinator(
         catalog_selections: BTreeMap::new(),
         realtime_started: false,
         realtime_connected: false,
+        rithmic_realtime_started: false,
     };
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -1598,9 +1641,17 @@ struct Coordinator<'a> {
     catalog_selections: BTreeMap<String, u64>,
     realtime_started: bool,
     realtime_connected: bool,
+    rithmic_realtime_started: bool,
 }
 
 impl Coordinator<'_> {
+    fn detach_client(&mut self, client_id: ClientId) {
+        for consumer_id in self.engine.detach_client(client_id) {
+            self.events.remove(&consumer_id);
+            self.remove_waiter(consumer_id);
+        }
+    }
+
     fn begin_shutdown(&self) {
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
@@ -1619,8 +1670,7 @@ impl Coordinator<'_> {
             }
             Command::Detach(client_id, reply) => {
                 self.attached.remove(&client_id);
-                self.remove_client_events(client_id);
-                self.engine.detach_client(client_id);
+                self.detach_client(client_id);
                 self.release_unused_live_market_data();
                 let _ = reply.send(Ok(()));
             }
@@ -1812,19 +1862,6 @@ impl Coordinator<'_> {
         if !key_exists_after_reset && retained_catalog_len >= MAXIMUM_CATALOG_INSTRUMENTS {
             return Err("provider instrument catalog capacity is exhausted".to_string());
         }
-        if provider == "rithmic"
-            && let Some(control) = self.rithmic_realtime_control
-        {
-            match control.try_send(RithmicRealtimeControl::Select(instrument.clone())) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    return Err("Rithmic live selection capacity is exhausted".to_string());
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    return Err("Rithmic live worker is unavailable".to_string());
-                }
-            }
-        }
         if engine_generation.is_none()
             || provider != "rithmic"
                 && engine_generation.is_some_and(|current| provider_generation > current)
@@ -1872,9 +1909,10 @@ impl Coordinator<'_> {
     > {
         authorize_consumer(&self.engine, client_id, waiter.consumer_id)?;
         let provider_generation = self.provider_generation_for_series(series)?;
+        let streams = chart_stream_requirements(series);
         let mut publication = self
             .engine
-            .set_series_demand(waiter.consumer_id, waiter.generation, series)
+            .set_series_demand_with_streams(waiter.consumer_id, waiter.generation, series, streams)
             .map_err(|error| error.to_string())?;
         self.remove_waiter(waiter.consumer_id);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
@@ -1998,16 +2036,9 @@ impl Coordinator<'_> {
             | BarPeriod::Week { .. }
             | BarPeriod::Month { .. } => return Ok(false),
         };
-        let source_series = BarSeriesKey {
-            period: BarPeriod::time(60).map_err(|error| error.to_string())?,
-            ..series.clone()
-        };
-        let Some(source) = self.engine.series_snapshot(&source_series) else {
+        let Some(source) = self.engine.compatible_series_snapshot(series, generation) else {
             return Ok(false);
         };
-        if source.provider_generation != generation {
-            return Ok(false);
-        }
         let mut source_bars = source.bars.to_vec();
         if source.forming {
             source_bars.pop();
@@ -2250,7 +2281,51 @@ impl Coordinator<'_> {
     }
 
     fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
+        let streams = self
+            .engine
+            .subscription_status(series)
+            .map(|status| status.streams)
+            .ok_or_else(|| "series has no accepted upstream subscription".to_string())?;
+        if streams.contains(MarketStream::Trades) {
+            self.engine
+                .verify_provider_request(&series.provider_id, ProviderRequest::Trades)
+                .map_err(|error| error.to_string())?;
+        }
+        if streams.contains(MarketStream::Quotes) {
+            self.engine
+                .verify_provider_request(&series.provider_id, ProviderRequest::Quotes)
+                .map_err(|error| error.to_string())?;
+        }
+        if streams.contains(MarketStream::Depth) {
+            self.engine
+                .verify_provider_request(&series.provider_id, ProviderRequest::Depth)
+                .map_err(|error| error.to_string())?;
+        }
+        if !streams.contains(MarketStream::Trades)
+            && !streams.contains(MarketStream::Quotes)
+            && !streams.contains(MarketStream::Depth)
+        {
+            return Ok(());
+        }
         if series.provider_id == "rithmic" {
+            if !self.rithmic_realtime_started
+                && let Some(control) = self.rithmic_realtime_control
+            {
+                let instrument = self
+                    .catalog
+                    .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                    .cloned()
+                    .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+                match control.try_send(RithmicRealtimeControl::Select(instrument)) {
+                    Ok(()) => self.rithmic_realtime_started = true,
+                    Err(TrySendError::Full(_)) => {
+                        return Err("Rithmic live selection capacity is exhausted".to_string());
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err("Rithmic live worker is unavailable".to_string());
+                    }
+                }
+            }
             if !self.rithmic_live.contains_key(series)
                 && let Some(mut handoff) =
                     RithmicLiveHandoff::new(series, self.provider_generation_for_series(series)?)
@@ -2289,6 +2364,13 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) -> Result<(), &'static str> {
+        if self
+            .engine
+            .verify_provider_request(&series.provider_id, ProviderRequest::HistoricalBars)
+            .is_err()
+        {
+            return Err("provider does not support historical bars");
+        }
         let key = (series.clone(), generation);
         if self.history_inflight.contains(&key) {
             return Ok(());
@@ -2581,8 +2663,11 @@ impl Coordinator<'_> {
             RithmicRealtimeEvent::Depth(generation, snapshot) => {
                 self.rithmic_depth(generation, &snapshot);
             }
-            RithmicRealtimeEvent::Recovering(generation)
-            | RithmicRealtimeEvent::Disconnected(generation) => {
+            RithmicRealtimeEvent::Recovering(generation) => {
+                self.rithmic_recovering(generation, "Rithmic live session is recovering");
+            }
+            RithmicRealtimeEvent::Disconnected(generation) => {
+                self.rithmic_realtime_started = false;
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
             }
         }
@@ -3307,23 +3392,6 @@ impl Coordinator<'_> {
             .unwrap_or(ProviderGeneration(NonZeroU64::MIN))
     }
 
-    fn remove_client_events(&mut self, client_id: ClientId) {
-        let removed = self
-            .events
-            .keys()
-            .copied()
-            .filter(|consumer_id| {
-                self.engine
-                    .current_demand(*consumer_id)
-                    .is_some_and(|demand| demand.identity.client_id == client_id)
-            })
-            .collect::<Vec<_>>();
-        for consumer_id in removed {
-            self.events.remove(&consumer_id);
-            self.remove_waiter(consumer_id);
-        }
-    }
-
     fn remove_waiter(&mut self, consumer_id: ConsumerId) {
         for waiters in self.pending.values_mut() {
             waiters.retain(|waiter| waiter.consumer_id != consumer_id);
@@ -3350,19 +3418,10 @@ impl Coordinator<'_> {
     }
 
     fn prune_unused_live_series(&mut self) {
-        let demanded = self
-            .events
-            .keys()
-            .filter_map(|consumer_id| {
-                self.engine
-                    .current_demand(*consumer_id)
-                    .and_then(|demand| demand.series.clone())
-            })
-            .collect::<BTreeSet<_>>();
         for series in self
             .rithmic_live
             .keys()
-            .filter(|series| !demanded.contains(*series))
+            .filter(|series| !self.engine.has_subscription(series))
         {
             for ((active, _), stop) in &self.history_cancellations {
                 if active == series {
@@ -3370,9 +3429,10 @@ impl Coordinator<'_> {
                 }
             }
         }
-        self.live.retain(|series, _| demanded.contains(series));
+        self.live
+            .retain(|series, _| self.engine.has_subscription(series));
         self.rithmic_live
-            .retain(|series, _| demanded.contains(series));
+            .retain(|series, _| self.engine.has_subscription(series));
     }
 
     fn release_unused_live_market_data(&mut self) {
@@ -3384,13 +3444,27 @@ impl Coordinator<'_> {
     }
 
     fn stop_realtime_if_idle(&mut self) {
-        if !self.live.is_empty() || !self.realtime_started {
-            return;
+        if self.live.is_empty() && self.realtime_started {
+            self.realtime_stop.store(true, Ordering::Release);
+            self.realtime_started = false;
+            self.realtime_connected = false;
+            self.live.clear();
+            let generation = self.coinbase_provider_generation();
+            let _ = self.engine.end_provider_session("coinbase", generation);
         }
-        self.realtime_stop.store(true, Ordering::Release);
-        self.realtime_started = false;
-        self.realtime_connected = false;
-        self.live.clear();
+        if self.rithmic_live.is_empty() && self.rithmic_realtime_started {
+            if let Some(control) = self.rithmic_realtime_control {
+                let _ = control.try_send(RithmicRealtimeControl::Stop);
+            }
+            self.rithmic_realtime_started = false;
+            if let Some(generation) = self
+                .engine
+                .provider_status("rithmic")
+                .and_then(|status| status.generation)
+            {
+                let _ = self.engine.end_provider_session("rithmic", generation);
+            }
+        }
     }
 }
 
@@ -3417,6 +3491,12 @@ fn authorize_consumer(
         .ok_or_else(|| "consumer is not owned by the attached client".to_string())
 }
 
+fn configured_reconnect_delay(engine: &MarketEngine, provider: &str) -> Result<Duration, String> {
+    engine
+        .provider_reconnect_delay(provider)
+        .ok_or_else(|| format!("{provider} reconnect policy is unavailable"))
+}
+
 fn configured_engine() -> Result<MarketEngine, String> {
     let mut engine = MarketEngine::new(MarketEngineConfig {
         maximum_consumers: NonZeroUsize::new(MAXIMUM_CONSUMERS).unwrap_or(NonZeroUsize::MIN),
@@ -3426,10 +3506,14 @@ fn configured_engine() -> Result<MarketEngine, String> {
     engine
         .register_provider(
             "coinbase".to_string(),
-            ProviderCapabilities {
-                historical_bars: true,
-                realtime_bars: true,
-                order_book: false,
+            ProviderConfig {
+                account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+                capabilities: ProviderCapabilities {
+                    historical_bars: true,
+                    realtime_bars: true,
+                    streams: StreamRequirements::BARS.with(MarketStream::Trades),
+                },
+                reconnect_delay: PROVIDER_RECONNECT_DELAY,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -3444,10 +3528,16 @@ fn configured_engine() -> Result<MarketEngine, String> {
     engine
         .register_provider(
             "rithmic".to_string(),
-            ProviderCapabilities {
-                historical_bars: true,
-                realtime_bars: true,
-                order_book: true,
+            ProviderConfig {
+                account_id: "rithmic:test".to_string(),
+                capabilities: ProviderCapabilities {
+                    historical_bars: true,
+                    realtime_bars: true,
+                    streams: StreamRequirements::BARS
+                        .with(MarketStream::Trades)
+                        .with(MarketStream::Depth),
+                },
+                reconnect_delay: PROVIDER_RECONNECT_DELAY,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -3679,6 +3769,21 @@ fn valid_catalog_field(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= MAXIMUM_CATALOG_FIELD_BYTES
         && !value.chars().any(char::is_control)
+}
+
+fn chart_stream_requirements(series: &BarSeriesKey) -> StreamRequirements {
+    let live_bars = !matches!(
+        series.period,
+        BarPeriod::Week { .. } | BarPeriod::Month { .. }
+    );
+    let mut streams = StreamRequirements::BARS;
+    if live_bars {
+        streams = streams.with(MarketStream::Trades);
+    }
+    if series.provider_id == "rithmic" {
+        streams = streams.with(MarketStream::Depth);
+    }
+    streams
 }
 
 fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Result<(), String> {
@@ -3919,6 +4024,7 @@ mod tests {
             catalog_selections: BTreeMap::new(),
             realtime_started: false,
             realtime_connected: false,
+            rithmic_realtime_started: false,
         }
     }
 
@@ -4943,6 +5049,75 @@ mod tests {
                 .0
                 .get(),
             1
+        );
+    }
+
+    #[test]
+    fn rithmic_upstream_starts_on_first_demand_and_stops_after_final_release() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let (rithmic_control_tx, rithmic_control_rx) = mpsc::sync_channel(2);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let generation = ProviderGeneration(id(7).expect("provider generation"));
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let series = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        let mut engine = configured_engine().expect("engine configures");
+        engine
+            .begin_provider_session("rithmic", generation)
+            .expect("Rithmic session begins");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand_with_streams(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+                chart_stream_requirements(&series),
+            )
+            .expect("Rithmic demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        coordinator.rithmic_realtime_control = Some(&rithmic_control_tx);
+        coordinator.catalog.insert(
+            (series.provider_id.clone(), series.instrument_id.clone()),
+            provider_instrument(7, 1),
+        );
+
+        coordinator
+            .ensure_realtime(&series)
+            .expect("first demand starts Rithmic upstream");
+        assert!(matches!(
+            rithmic_control_rx.try_recv(),
+            Ok(RithmicRealtimeControl::Select(_))
+        ));
+        assert!(coordinator.engine.remove_consumer(consumer_id));
+        coordinator.release_unused_live_market_data();
+        assert!(matches!(
+            rithmic_control_rx.try_recv(),
+            Ok(RithmicRealtimeControl::Stop)
+        ));
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .map(|status| status.health),
+            Some(ProviderHealth::Disconnected)
         );
     }
 
@@ -6478,6 +6653,7 @@ mod tests {
                 &event_tx,
                 &worker_overflow,
                 &worker_stop,
+                PROVIDER_RECONNECT_DELAY,
             );
         });
 

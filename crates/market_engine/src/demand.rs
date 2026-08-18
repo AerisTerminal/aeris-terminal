@@ -3,6 +3,59 @@ use axiusflow_market_data::BarSeriesKey;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketStream {
+    Bars,
+    Trades,
+    Quotes,
+    Depth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamRequirements(u8);
+
+impl StreamRequirements {
+    const BARS_BIT: u8 = 1 << 0;
+    const TRADES_BIT: u8 = 1 << 1;
+    const QUOTES_BIT: u8 = 1 << 2;
+    const DEPTH_BIT: u8 = 1 << 3;
+
+    pub const NONE: Self = Self(0);
+    pub const BARS: Self = Self(Self::BARS_BIT);
+
+    #[must_use]
+    pub const fn with(self, stream: MarketStream) -> Self {
+        let bit = match stream {
+            MarketStream::Bars => Self::BARS_BIT,
+            MarketStream::Trades => Self::TRADES_BIT,
+            MarketStream::Quotes => Self::QUOTES_BIT,
+            MarketStream::Depth => Self::DEPTH_BIT,
+        };
+        Self(self.0 | bit)
+    }
+
+    #[must_use]
+    pub const fn contains(self, stream: MarketStream) -> bool {
+        let bit = match stream {
+            MarketStream::Bars => Self::BARS_BIT,
+            MarketStream::Trades => Self::TRADES_BIT,
+            MarketStream::Quotes => Self::QUOTES_BIT,
+            MarketStream::Depth => Self::DEPTH_BIT,
+        };
+        self.0 & bit != 0
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConsumerIdentity {
     pub client_id: ClientId,
     pub workspace_id: WorkspaceId,
@@ -14,6 +67,7 @@ pub struct ConsumerDemand {
     pub identity: ConsumerIdentity,
     pub generation: Option<GenerationId>,
     pub series: Option<BarSeriesKey>,
+    pub streams: Option<StreamRequirements>,
     pub viewport: Option<Viewport>,
     pub visible: bool,
 }
@@ -50,6 +104,7 @@ impl DemandRegistry {
                 identity,
                 generation: None,
                 series: None,
+                streams: None,
                 viewport: None,
                 visible,
             },
@@ -62,15 +117,20 @@ impl DemandRegistry {
         consumer_id: ConsumerId,
         generation: GenerationId,
         series: BarSeriesKey,
+        streams: StreamRequirements,
     ) -> Result<bool, EngineError> {
         series.validate()?;
+        if streams.is_empty() {
+            return Err(EngineError::EmptyStreamRequirements);
+        }
         let demand = self
             .consumers
             .get_mut(&consumer_id)
             .ok_or(EngineError::UnknownConsumer(consumer_id))?;
         if let Some(current) = demand.generation {
             if generation < current
-                || generation == current && demand.series.as_ref() != Some(&series)
+                || generation == current
+                    && (demand.series.as_ref() != Some(&series) || demand.streams != Some(streams))
             {
                 return Err(EngineError::StaleConsumerGeneration {
                     consumer_id,
@@ -84,6 +144,7 @@ impl DemandRegistry {
         }
         demand.generation = Some(generation);
         demand.series = Some(series);
+        demand.streams = Some(streams);
         demand.viewport = None;
         Ok(true)
     }
@@ -141,16 +202,16 @@ impl DemandRegistry {
             .collect()
     }
 
-    pub(crate) fn remove(&mut self, consumer_id: ConsumerId) -> bool {
-        self.consumers.remove(&consumer_id).is_some()
+    pub(crate) fn remove(&mut self, consumer_id: ConsumerId) -> Option<ConsumerDemand> {
+        self.consumers.remove(&consumer_id)
     }
 
-    pub(crate) fn remove_client(&mut self, client_id: ClientId) -> Vec<ConsumerId> {
+    pub(crate) fn remove_client(&mut self, client_id: ClientId) -> Vec<ConsumerDemand> {
         let removed = self
             .consumers
             .values()
             .filter(|demand| demand.identity.client_id == client_id)
-            .map(|demand| demand.identity.consumer_id)
+            .cloned()
             .collect::<Vec<_>>();
         self.consumers
             .retain(|_, demand| demand.identity.client_id != client_id);

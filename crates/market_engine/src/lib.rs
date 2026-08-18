@@ -8,11 +8,15 @@ mod demand;
 mod provider_manager;
 mod publication;
 mod series_store;
+mod subscription_registry;
 
-pub use demand::{ConsumerDemand, ConsumerIdentity};
-pub use provider_manager::{ProviderCapabilities, ProviderHealth, ProviderStatus};
+pub use demand::{ConsumerDemand, ConsumerIdentity, MarketStream, StreamRequirements};
+pub use provider_manager::{
+    ProviderCapabilities, ProviderConfig, ProviderHealth, ProviderRequest, ProviderStatus,
+};
 pub use publication::{ConsumerPublication, ConsumerSeriesUpdate};
 pub use series_store::SeriesSnapshot;
+pub use subscription_registry::SubscriptionStatus;
 
 use axiusflow_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
 use demand::DemandRegistry;
@@ -24,6 +28,7 @@ use std::{
     fmt,
     num::{NonZeroU64, NonZeroUsize},
 };
+use subscription_registry::SubscriptionRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientId(pub NonZeroU64);
@@ -73,6 +78,7 @@ pub struct MarketEngineConfig {
 pub struct MarketEngineMetrics {
     pub active_consumers: usize,
     pub registered_providers: usize,
+    pub active_subscriptions: usize,
     pub stored_series: usize,
     pub stored_bars: usize,
     pub approximate_series_bytes: usize,
@@ -81,11 +87,17 @@ pub struct MarketEngineMetrics {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EngineError {
     InvalidProviderIdentity,
+    InvalidProviderReconnectPolicy,
     DuplicateProvider(String),
     UnknownProvider(String),
     StaleProviderGeneration {
         current: Option<ProviderGeneration>,
         received: ProviderGeneration,
+    },
+    ProviderSessionUnavailable(String),
+    UnsupportedProviderRequest {
+        provider: String,
+        request: ProviderRequest,
     },
     DuplicateConsumer(ConsumerId),
     UnknownConsumer(ConsumerId),
@@ -93,6 +105,7 @@ pub enum EngineError {
     ConsumerLimitExceeded {
         maximum: NonZeroUsize,
     },
+    EmptyStreamRequirements,
     StaleConsumerGeneration {
         consumer_id: ConsumerId,
         current: GenerationId,
@@ -132,6 +145,9 @@ impl fmt::Display for EngineError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidProviderIdentity => formatter.write_str("provider identity is invalid"),
+            Self::InvalidProviderReconnectPolicy => {
+                formatter.write_str("provider reconnect policy is invalid")
+            }
             Self::DuplicateProvider(provider) => {
                 write!(formatter, "provider {provider} is already registered")
             }
@@ -140,6 +156,15 @@ impl fmt::Display for EngineError {
             }
             Self::StaleProviderGeneration { .. } => {
                 formatter.write_str("provider generation is stale")
+            }
+            Self::ProviderSessionUnavailable(provider) => {
+                write!(formatter, "provider {provider} has no active session")
+            }
+            Self::UnsupportedProviderRequest { provider, request } => {
+                write!(
+                    formatter,
+                    "provider {provider} does not support {request:?}"
+                )
             }
             Self::DuplicateConsumer(consumer) => {
                 write!(formatter, "consumer {} is already registered", consumer.0)
@@ -152,6 +177,9 @@ impl fmt::Display for EngineError {
             }
             Self::ConsumerLimitExceeded { maximum } => {
                 write!(formatter, "consumer limit {maximum} exceeded")
+            }
+            Self::EmptyStreamRequirements => {
+                formatter.write_str("consumer demand must request at least one stream")
             }
             Self::StaleConsumerGeneration { .. } => {
                 formatter.write_str("consumer generation is stale")
@@ -202,6 +230,7 @@ pub struct MarketEngine {
     demands: DemandRegistry,
     providers: ProviderManager,
     series: SeriesStore,
+    subscriptions: SubscriptionRegistry,
     publications: PublicationManager,
 }
 
@@ -212,6 +241,7 @@ impl MarketEngine {
             demands: DemandRegistry::new(config.maximum_consumers),
             providers: ProviderManager::new(),
             series: SeriesStore::new(config.maximum_series, config.maximum_bars),
+            subscriptions: SubscriptionRegistry::new(),
             publications: PublicationManager::new(),
         }
     }
@@ -223,9 +253,9 @@ impl MarketEngine {
     pub fn register_provider(
         &mut self,
         provider: String,
-        capabilities: ProviderCapabilities,
+        config: ProviderConfig,
     ) -> Result<(), EngineError> {
-        self.providers.register(provider, capabilities)
+        self.providers.register(provider, config)
     }
 
     /// Begins a strictly newer provider session generation.
@@ -253,9 +283,43 @@ impl MarketEngine {
         self.providers.set_health(provider, generation, health)
     }
 
+    /// Ends the exact active provider session without discarding its generation fence.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown provider or stale generation.
+    pub fn end_provider_session(
+        &mut self,
+        provider: &str,
+        generation: ProviderGeneration,
+    ) -> Result<(), EngineError> {
+        self.providers.end_session(provider, generation)
+    }
+
+    /// Verifies that the configured provider session can route one request class.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown, inactive, or incapable provider session.
+    pub fn verify_provider_request(
+        &self,
+        provider: &str,
+        request: ProviderRequest,
+    ) -> Result<(), EngineError> {
+        self.providers.verify_request(provider, request)
+    }
+
     #[must_use]
     pub fn provider_status(&self, provider: &str) -> Option<ProviderStatus> {
         self.providers.status(provider)
+    }
+
+    #[must_use]
+    pub fn provider_account_id(&self, provider: &str) -> Option<&str> {
+        self.providers.account_id(provider)
+    }
+
+    #[must_use]
+    pub fn provider_reconnect_delay(&self, provider: &str) -> Option<std::time::Duration> {
+        self.providers.reconnect_delay(provider)
     }
 
     /// Registers one independently generated chart or DOM consumer.
@@ -282,10 +346,46 @@ impl MarketEngine {
         generation: GenerationId,
         series: &BarSeriesKey,
     ) -> Result<Option<ConsumerPublication>, EngineError> {
+        self.set_series_demand_with_streams(
+            consumer_id,
+            generation,
+            series,
+            StreamRequirements::BARS,
+        )
+    }
+
+    /// Makes a newer series and its explicit upstream stream requirements authoritative.
+    ///
+    /// # Errors
+    /// Returns an error for invalid series, unsupported streams, unknown consumer, or stale generation.
+    pub fn set_series_demand_with_streams(
+        &mut self,
+        consumer_id: ConsumerId,
+        generation: GenerationId,
+        series: &BarSeriesKey,
+        streams: StreamRequirements,
+    ) -> Result<Option<ConsumerPublication>, EngineError> {
+        self.providers
+            .verify_streams(&series.provider_id, streams)?;
+        let previous = self.demands.current(consumer_id).and_then(|demand| {
+            demand
+                .series
+                .as_ref()
+                .zip(demand.streams)
+                .map(|(series, streams)| (series.clone(), streams))
+        });
         let changed = self
             .demands
-            .set_series(consumer_id, generation, series.clone())?;
+            .set_series(consumer_id, generation, series.clone(), streams)?;
         if changed {
+            self.subscriptions.replace(
+                consumer_id,
+                previous
+                    .as_ref()
+                    .map(|(series, streams)| (series, *streams)),
+                series,
+                streams,
+            );
             self.publications.remove(consumer_id);
         }
         self.series.get(series).map_or(Ok(None), |snapshot| {
@@ -336,6 +436,8 @@ impl MarketEngine {
     ) -> Result<Vec<ConsumerPublication>, EngineError> {
         self.providers
             .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::HistoricalBars)?;
         let snapshot = self.series.install(
             series.clone(),
             provider_generation,
@@ -371,6 +473,8 @@ impl MarketEngine {
     ) -> Result<Vec<ConsumerPublication>, EngineError> {
         self.providers
             .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::RealtimeBars)?;
         let snapshot = self.series.install_realtime(
             series.clone(),
             provider_generation,
@@ -407,6 +511,8 @@ impl MarketEngine {
     ) -> Result<Vec<ConsumerSeriesUpdate>, EngineError> {
         self.providers
             .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::RealtimeBars)?;
         let tail = self.series.install_realtime_tail(
             series,
             provider_generation,
@@ -447,17 +553,59 @@ impl MarketEngine {
         self.series.get(series)
     }
 
-    pub fn remove_consumer(&mut self, consumer_id: ConsumerId) -> bool {
-        self.publications.remove(consumer_id);
-        self.demands.remove(consumer_id)
+    /// Returns the closest compatible finer fixed-time source for derivation.
+    #[must_use]
+    pub fn compatible_series_snapshot(
+        &self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+    ) -> Option<Arc<SeriesSnapshot>> {
+        self.series.compatible_source(series, provider_generation)
     }
 
-    pub fn detach_client(&mut self, client_id: ClientId) -> usize {
-        let removed = self.demands.remove_client(client_id);
-        for consumer_id in &removed {
-            self.publications.remove(*consumer_id);
+    /// Returns an immutable in-memory range from one canonical series.
+    #[must_use]
+    pub fn series_range(
+        &self,
+        series: &BarSeriesKey,
+        viewport: Viewport,
+    ) -> Option<Arc<SeriesSnapshot>> {
+        self.series.range(series, viewport)
+    }
+
+    #[must_use]
+    pub fn subscription_status(&self, series: &BarSeriesKey) -> Option<SubscriptionStatus> {
+        self.subscriptions.status(series)
+    }
+
+    #[must_use]
+    pub fn has_subscription(&self, series: &BarSeriesKey) -> bool {
+        self.subscriptions.contains(series)
+    }
+
+    pub fn remove_consumer(&mut self, consumer_id: ConsumerId) -> bool {
+        self.publications.remove(consumer_id);
+        let Some(removed) = self.demands.remove(consumer_id) else {
+            return false;
+        };
+        if let Some(series) = removed.series.as_ref() {
+            self.subscriptions.remove(consumer_id, series);
         }
-        removed.len()
+        true
+    }
+
+    pub fn detach_client(&mut self, client_id: ClientId) -> Vec<ConsumerId> {
+        let removed = self.demands.remove_client(client_id);
+        let mut consumer_ids = Vec::with_capacity(removed.len());
+        for demand in removed {
+            let consumer_id = demand.identity.consumer_id;
+            if let Some(series) = demand.series.as_ref() {
+                self.subscriptions.remove(consumer_id, series);
+            }
+            self.publications.remove(consumer_id);
+            consumer_ids.push(consumer_id);
+        }
+        consumer_ids
     }
 
     pub fn invalidate_series(&mut self, series: &BarSeriesKey) -> bool {
@@ -470,6 +618,7 @@ impl MarketEngine {
         MarketEngineMetrics {
             active_consumers: self.demands.len(),
             registered_providers: self.providers.len(),
+            active_subscriptions: self.subscriptions.len(),
             stored_series: self.series.len(),
             stored_bars: self.series.total_bars(),
             approximate_series_bytes: self.series.approximate_bytes(),
@@ -541,10 +690,14 @@ mod tests {
         engine
             .register_provider(
                 "coinbase".to_string(),
-                ProviderCapabilities {
-                    historical_bars: true,
-                    realtime_bars: true,
-                    order_book: false,
+                ProviderConfig {
+                    account_id: "coinbase:public".to_string(),
+                    capabilities: ProviderCapabilities {
+                        historical_bars: true,
+                        realtime_bars: true,
+                        streams: StreamRequirements::BARS.with(MarketStream::Trades),
+                    },
+                    reconnect_delay: std::time::Duration::from_millis(250),
                 },
             )
             .expect("provider registers");
@@ -707,7 +860,7 @@ mod tests {
         register(&mut engine, 1, 1);
         register(&mut engine, 2, 1);
         register(&mut engine, 3, 2);
-        assert_eq!(engine.detach_client(ClientId(nonzero(1))), 2);
+        assert_eq!(engine.detach_client(ClientId(nonzero(1))).len(), 2);
         assert!(engine.current_demand(id(1)).is_none());
         assert!(engine.current_demand(id(2)).is_none());
         assert!(engine.current_demand(id(3)).is_some());
@@ -887,5 +1040,144 @@ mod tests {
                 .close,
             105
         );
+    }
+
+    #[test]
+    fn shared_subscriptions_ref_count_streams_and_release_only_the_last_consumer() {
+        let mut engine = engine(3, 2, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        let eth = series("coinbase:spot:ETH-USD");
+        for consumer in 1..=3 {
+            register(&mut engine, consumer, if consumer < 3 { 1 } else { 2 });
+        }
+        engine
+            .set_series_demand_with_streams(id(1), generation(1), &btc, StreamRequirements::BARS)
+            .expect("first demand installs");
+        engine
+            .set_series_demand_with_streams(
+                id(2),
+                generation(1),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("duplicate demand coalesces");
+        assert_eq!(
+            engine.subscription_status(&btc),
+            Some(SubscriptionStatus {
+                consumer_count: 2,
+                streams: StreamRequirements::BARS.with(MarketStream::Trades),
+            })
+        );
+
+        engine
+            .set_series_demand_with_streams(id(1), generation(2), &eth, StreamRequirements::BARS)
+            .expect("one chart switches atomically");
+        assert_eq!(
+            engine
+                .subscription_status(&btc)
+                .map(|status| status.consumer_count),
+            Some(1)
+        );
+        assert_eq!(
+            engine
+                .subscription_status(&eth)
+                .map(|status| status.consumer_count),
+            Some(1)
+        );
+
+        assert!(engine.remove_consumer(id(2)));
+        assert!(!engine.has_subscription(&btc));
+        assert!(engine.has_subscription(&eth));
+        assert_eq!(engine.detach_client(ClientId(nonzero(1))), vec![id(1)]);
+        assert!(!engine.has_subscription(&eth));
+        assert!(engine.current_demand(id(3)).is_some());
+    }
+
+    #[test]
+    fn provider_configuration_routes_only_supported_generation_fenced_requests() {
+        let mut engine = engine(1, 1, 2);
+        assert_eq!(
+            engine.provider_account_id("coinbase"),
+            Some("coinbase:public")
+        );
+        assert_eq!(
+            engine.provider_reconnect_delay("coinbase"),
+            Some(std::time::Duration::from_millis(250))
+        );
+        engine
+            .verify_provider_request("coinbase", ProviderRequest::Trades)
+            .expect("trade requests route");
+        assert!(matches!(
+            engine.verify_provider_request("coinbase", ProviderRequest::Quotes),
+            Err(EngineError::UnsupportedProviderRequest { .. })
+        ));
+        engine
+            .end_provider_session("coinbase", provider_generation(1))
+            .expect("active session disconnects");
+        assert_eq!(
+            engine
+                .provider_status("coinbase")
+                .map(|status| status.health),
+            Some(ProviderHealth::Disconnected)
+        );
+        assert!(matches!(
+            engine.begin_provider_session("coinbase", provider_generation(1)),
+            Err(EngineError::StaleProviderGeneration { .. })
+        ));
+        engine
+            .begin_provider_session("coinbase", provider_generation(2))
+            .expect("reconnect advances the provider generation");
+    }
+
+    #[test]
+    fn series_store_answers_ranges_and_selects_the_closest_compatible_interval() {
+        let mut engine = engine(1, 3, 16);
+        let minute = series("coinbase:spot:BTC-USD");
+        let mut five_minute = minute.clone();
+        five_minute.period = BarPeriod::time(300).expect("five-minute period");
+        let mut fifteen_minute = minute.clone();
+        fifteen_minute.period = BarPeriod::time(900).expect("fifteen-minute period");
+        engine
+            .install_history(provider_generation(1), &minute, 2, 8, bars(4))
+            .expect("minute history installs");
+        engine
+            .install_history(provider_generation(1), &five_minute, 2, 8, bars(3))
+            .expect("five-minute history installs");
+
+        let source = engine
+            .compatible_series_snapshot(&fifteen_minute, provider_generation(1))
+            .expect("closest finer interval is found");
+        assert_eq!(source.series.period, five_minute.period);
+        let range = engine
+            .series_range(
+                &minute,
+                Viewport::try_new(1_700_000_060_000_000_000, 1_700_000_180_000_000_000)
+                    .expect("range validates"),
+            )
+            .expect("range intersects history");
+        assert_eq!(range.bars.len(), 2);
+        assert_eq!(range.bars[0].source_sequence, 2);
+        assert_eq!(range.bars[1].source_sequence, 3);
+    }
+
+    #[test]
+    fn repeated_current_demand_recovers_with_a_new_covering_publication() {
+        let mut engine = engine(1, 1, 4);
+        let btc = series("coinbase:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand(id(1), generation(1), &btc)
+            .expect("demand installs");
+        let first = engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history publishes")
+            .pop()
+            .expect("covering publication exists");
+        let recovery = engine
+            .set_series_demand(id(1), generation(1), &btc)
+            .expect("current demand reasserts")
+            .expect("covering recovery publishes");
+        assert_eq!(recovery.publication_generation, 2);
+        assert!(Arc::ptr_eq(&first.snapshot, &recovery.snapshot));
     }
 }

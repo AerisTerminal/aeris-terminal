@@ -2276,7 +2276,9 @@ The client publisher should use bounded/latest-state behavior and recovery snaps
 
 # 55. SERIES STORE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `market_engine/src/series_store.rs` is the bounded owner of canonical completed history and separate forming tails, immutable snapshots, exact in-memory time-range queries, closest compatible finer fixed-time source selection, generation/continuity validation, correction invalidation, and bar/byte accounting. The coordinator now asks `SeriesStore` for compatible hot sources instead of constructing a Coinbase one-minute key itself; deterministic tests cover range boundaries, closest-source selection, immutable sharing, tail revision/rollover, bounds, and invalidation.
 
 `market_engine/src/series_store.rs` owns hot canonical/derived series.
 
@@ -2703,7 +2705,9 @@ One account/provider session should serve compatible consumers.
 
 # 72. PROVIDER MANAGER
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `market_engine/src/provider_manager.rs` owns canonical provider account identity, capabilities, reconnect delay, session generation, and health, rejects stale connect/disconnect transitions, and authorizes history/realtime/trade/quote/depth routing before adapter work. The process shell passes the configured reconnect policy to Coinbase realtime and Rithmic catalog workers while provider-specific authentication, sockets, retry mechanics, and wire logic remain in adapters. Tests verify account/policy exposure, capability rejection, exact disconnect fencing, and strictly newer reconnect generations.
 
 `market_engine/src/provider_manager.rs`
 
@@ -2725,7 +2729,9 @@ It does not understand GPUI charts.
 
 # 73. SUBSCRIPTION REGISTRY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `market_engine/src/subscription_registry.rs` derives one bounded shared subscription record from accepted consumer demands, keeps exact per-series consumer references, unions explicit bars/trades/quotes/depth requirements, coalesces duplicate demand, and removes only the final unused record. Coordinator cleanup now queries this registry instead of rebuilding demand from IPC event maps. Coinbase and Rithmic upstream lifetimes release on the final reference under the warm policy, and the Rithmic worker can stop and later accept a new selection without creating another runtime. Deterministic core and coordinator tests cover duplicate coalescing, atomic switches, client detach, provider isolation, first-start, and final-release behavior.
 
 `market_engine/src/subscription_registry.rs`
 
@@ -2743,7 +2749,9 @@ It does not render.
 
 # 74. DEMAND REGISTRY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `market_engine/src/demand.rs` maps each stable `ConsumerId` to its client/workspace identity, current generation, canonical provider/instrument/entitlement/definition/interval series key, viewport, visibility priority, and explicit stream requirements. Stale or conflicting same-generation mutations fail before shared state changes; a newer symbol or interval replaces only that consumer and atomically moves its subscription reference. Tests cover independent charts, generation fencing, viewport fencing, switch churn, and client-scoped cleanup.
 
 `market_engine/src/demand.rs`
 
@@ -2763,7 +2771,9 @@ A single chart update only mutates that chart's demand.
 
 # 75. PUBLICATION MANAGER
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `market_engine/src/publication.rs` converts authoritative snapshots and live tails into consumer/generation-qualified publications with monotonic per-consumer publication generations, invalidates publications with corrected series, and removes state on demand replacement or detach. Reasserting an unchanged current demand produces a newer covering recovery publication backed by the same immutable snapshot. The bounded process-shell publication slots conflate only equivalent covering/tail state, while bucket rollover forces a covering snapshot; deterministic tests cover recovery generation, slow-consumer conflation, incremental tails, shared immutable snapshots, invalidation, and stale-demand fencing.
 
 `market_engine/src/publication.rs`
 

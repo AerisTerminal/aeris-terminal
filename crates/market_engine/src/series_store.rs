@@ -1,5 +1,5 @@
-use crate::{EngineError, ProviderGeneration};
-use axiusflow_market_data::{BarSeriesKey, MarketBar};
+use crate::{EngineError, ProviderGeneration, Viewport};
+use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar};
 use std::{collections::BTreeMap, mem::size_of, num::NonZeroUsize, sync::Arc};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +274,68 @@ impl SeriesStore {
 
     pub(crate) fn get(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
         self.series.get(series).map(StoredSeries::snapshot)
+    }
+
+    pub(crate) fn compatible_source(
+        &self,
+        target: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+    ) -> Option<Arc<SeriesSnapshot>> {
+        let BarPeriod::Time {
+            seconds: target_seconds,
+        } = target.period
+        else {
+            return None;
+        };
+        self.series
+            .iter()
+            .filter_map(|(candidate, stored)| {
+                let BarPeriod::Time {
+                    seconds: source_seconds,
+                } = candidate.period
+                else {
+                    return None;
+                };
+                (candidate.provider_id == target.provider_id
+                    && candidate.instrument_id == target.instrument_id
+                    && candidate.entitlement_id == target.entitlement_id
+                    && candidate.definition_version == target.definition_version
+                    && source_seconds < target_seconds
+                    && target_seconds % source_seconds == 0
+                    && stored.covering.provider_generation == provider_generation)
+                    .then_some((source_seconds, stored.snapshot()))
+            })
+            .max_by_key(|(source_seconds, _)| *source_seconds)
+            .map(|(_, snapshot)| snapshot)
+    }
+
+    pub(crate) fn range(
+        &self,
+        series: &BarSeriesKey,
+        viewport: Viewport,
+    ) -> Option<Arc<SeriesSnapshot>> {
+        let source = self.get(series)?;
+        let bars = source
+            .bars
+            .iter()
+            .copied()
+            .filter(|bar| {
+                bar.exchange_timestamp_unix_nanos >= viewport.start_unix_nanos
+                    && bar.exchange_timestamp_unix_nanos < viewport.end_unix_nanos
+            })
+            .collect::<Vec<_>>();
+        let last_is_source_tail = bars.last() == source.bars.last();
+        (!bars.is_empty()).then(|| {
+            Arc::new(SeriesSnapshot {
+                series: source.series.clone(),
+                provider_generation: source.provider_generation,
+                publication_generation: source.publication_generation,
+                price_scale: source.price_scale,
+                quantity_scale: source.quantity_scale,
+                forming: source.forming && last_is_source_tail,
+                bars: bars.into(),
+            })
+        })
     }
 
     pub(crate) fn invalidate(&mut self, series: &BarSeriesKey) -> bool {
