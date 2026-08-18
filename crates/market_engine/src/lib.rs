@@ -868,6 +868,39 @@ mod tests {
     }
 
     #[test]
+    fn visibility_changes_only_the_selected_workspace_consumer() {
+        let mut engine = engine(2, 1, 2);
+        register(&mut engine, 1, 1);
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(nonzero(1)),
+                    workspace_id: WorkspaceId(nonzero(2)),
+                    consumer_id: id(2),
+                },
+                true,
+            )
+            .expect("second workspace consumer registers");
+        engine
+            .set_visibility(id(1), false)
+            .expect("first consumer becomes hidden");
+        assert_eq!(
+            engine.current_demand(id(1)).map(|demand| demand.visible),
+            Some(false)
+        );
+        assert_eq!(
+            engine.current_demand(id(2)).map(|demand| demand.visible),
+            Some(true)
+        );
+        assert_eq!(
+            engine
+                .current_demand(id(2))
+                .map(|demand| demand.identity.workspace_id),
+            Some(WorkspaceId(nonzero(2)))
+        );
+    }
+
+    #[test]
     fn decimal_precision_is_part_of_one_provider_generation() {
         let mut engine = engine(1, 1, 2);
         let btc = series("coinbase:spot:BTC-USD");

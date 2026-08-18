@@ -1566,15 +1566,21 @@ mod tests {
             EngineClient::connect(&socket_name, &token).expect("connect consumer cleanup client");
         let series = cached_series(BTC_INSTRUMENT, 60);
         client.attach_client(21).expect("IPC client attaches");
-        for consumer_id in [101, 102] {
+        for (workspace_id, consumer_id) in [(1, 101), (2, 102)] {
             client
-                .register_consumer(21, 1, consumer_id)
+                .register_consumer(21, workspace_id, consumer_id)
                 .expect("chart consumer registers");
             client
                 .set_series_demand(consumer_id, 1, series.clone())
                 .expect("chart demand succeeds");
             poll_ipc_snapshot(&mut client, consumer_id, 1, &series);
         }
+        client
+            .set_market_visibility(101, false)
+            .expect("first workspace chart becomes inactive");
+        client
+            .set_market_visibility(102, true)
+            .expect("second workspace chart remains active");
 
         client
             .remove_market_consumer(101)

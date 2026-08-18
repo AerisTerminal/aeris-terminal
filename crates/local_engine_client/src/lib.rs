@@ -18,7 +18,8 @@ use axiusflow_local_engine_protocol::{
     InstallProviderInstrument, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
     RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
     SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineResourceMode, SetSelection,
-    SetViewport, ShutdownEngine, ViewportDemand, WorkspaceState, encode_envelope, envelope,
+    SetViewport, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, encode_envelope,
+    envelope,
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
@@ -370,6 +371,18 @@ impl EngineClient {
                 generation,
                 start_unix_nanos,
                 end_unix_nanos,
+            }))
+    }
+
+    /// Updates one consumer's presentation priority without changing market demand.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn set_market_visibility(&mut self, consumer_id: u64, visible: bool) -> Result<(), String> {
+        self.connection
+            .send(envelope::Payload::VisibilityDemand(VisibilityDemand {
+                consumer_id,
+                visible,
             }))
     }
 

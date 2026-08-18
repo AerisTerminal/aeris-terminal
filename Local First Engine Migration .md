@@ -740,7 +740,9 @@ where practical.
 
 # 15. ENGINE COMMAND MODEL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): protocol v10 and `local_engine_client::EngineClient` expose a compact product-intent command surface for client attach/detach, consumer register/remove, series replacement, viewport and visibility updates, bounded event polling, provider-neutral catalog search/selection, resource mode, and complete shutdown. The resident server authorizes those commands against the attached client before forwarding typed values to `MarketService`; desktop code depends on the local client/protocol and never invokes provider implementations. Depth lifetime is derived from explicit engine stream requirements instead of adding redundant provider-specific socket commands. The typed visibility client method and authenticated two-workspace regression close the final command-surface gap.
 
 The desktop communicates intent.
 
@@ -778,7 +780,9 @@ The protocol communicates product intent.
 
 # 16. ENGINE EVENT MODEL
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the engine publishes `EngineReady`, workspace/resource state, provider state, generation-qualified series state, covering snapshots, incremental tails, conflated order-book images, provider-neutral catalog results/rejections, stage-specific `DemandError`, and bounded idle replies. `local_engine_protocol` depends only on the shared transport and Prost and contains no SQLite operation, Rithmic wire type, cache entry, history scheduler, worker handle, or synchronization primitive. Desktop consumers validate identity, generation, continuity, and fixed-point values before converting these product events into application/chart models.
 
 The engine sends useful state/publications.
 
@@ -817,7 +821,9 @@ IPC is a product boundary.
 
 # 17. EVERY UI CONSUMER HAS A STABLE IDENTITY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `ClientId`, `WorkspaceId`, `ConsumerId`, `GenerationId`, and canonical `SeriesKey` identities cross protocol v10 and map into the bounded `DemandRegistry`. The engine contains no global active symbol, interval, or chart; each consumer owns independent generation, series, viewport, visibility, and stream requirements, while shared subscriptions remain separately ref-counted. Tests cover two workspaces under one authenticated client, visibility isolation, one-chart switching/removal without mutating another, client-scoped disconnect cleanup, and twenty independent consumers across five workspace identities.
 
 Multiple tabs and multiple charts require this architecture from the beginning.
 
@@ -1239,7 +1245,9 @@ No GPUI callback may synchronously wait for provider/network/storage work.
 
 # 26. CRITICAL DATA PATH
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): the shipping path is provider or retained-local input -> adapter/domain validation -> fixed-point canonical bars/book -> bounded in-memory `SeriesStore`/order-book owner -> generation-qualified engine snapshot or tail -> authenticated local IPC -> desktop application model -> `chart_integration` -> Origin Charts -> GPUI frame. Provider and storage work stay on bounded engine workers, persistence is not a publication gate, and the desktop performs only validation/projection before frame-conflated presentation. Authenticated IPC snapshot tests, desktop fixed-point/tail projection tests, Origin frame-boundary tests, and the release windowed benchmark exercise the same boundaries without a compatibility backend path.
 
 The critical visible chart path should be:
 
@@ -2666,7 +2674,9 @@ Switching back should reuse retained state.
 
 # 69. NO THREAD PER CHART
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-18): `engine_market_worker::start_group` builds any number of chart endpoints and then starts exactly one desktop engine-client thread and one authenticated connection for the group. The resident engine owns one coordinator, bounded role-level provider/history/storage workers, and one `MarketEngine`; consumer registration adds bounded demand/publication state but no runtime, database worker, or provider socket. The Rithmic presentation mode likewise has one app-level engine client plus one bounded history/result helper, while provider sessions remain resident-engine workers. Twenty-consumer tests prove one provider generation, independent chart mutations, shared immutable snapshots, and final-reference cleanup; the release multi-consumer benchmark exercises the same fixed worker topology.
 
 Opening 20 charts must not create:
 
