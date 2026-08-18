@@ -35,7 +35,7 @@ use crate::resident_market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_DOM_LEVELS: usize = 20;
-const HISTORY_COMMAND_CAPACITY: usize = 1;
+const HISTORY_COMMAND_CAPACITY: usize = 2;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_TIMEOUT: Duration = Duration::from_secs(35);
 const ENGINE_WORKSPACE_ID: u64 = 1;
@@ -61,6 +61,7 @@ pub(crate) enum RithmicSeriesPublication {
 
 enum HistoryCommand {
     Fetch(HistoryFetchRequest),
+    Visibility(bool),
 }
 
 #[derive(Default)]
@@ -206,6 +207,19 @@ impl RithmicHistoryTask {
 
     pub(crate) fn try_recv_dom(&self) -> Option<DomFrame> {
         self.dom.take()
+    }
+
+    pub(crate) fn set_visibility(&self, visible: bool) -> Result<(), String> {
+        self.commands
+            .as_ref()
+            .ok_or_else(|| "Rithmic engine history client stopped".to_string())?
+            .try_send(HistoryCommand::Visibility(visible))
+            .map_err(|error| match error {
+                TrySendError::Full(_) => "Rithmic engine history client is busy".to_string(),
+                TrySendError::Disconnected(_) => {
+                    "Rithmic engine history client stopped".to_string()
+                }
+            })
     }
 
     pub(crate) fn cancel(&mut self) {
@@ -364,6 +378,10 @@ impl EngineHistorySession {
         }
     }
 
+    fn set_visibility(&mut self, visible: bool) -> Result<(), String> {
+        self.client.set_market_visibility(self.consumer_id, visible)
+    }
+
     fn reset_consumer(&mut self) -> Result<(), String> {
         self.client
             .remove_market_consumer(self.consumer_id)
@@ -411,6 +429,11 @@ fn run_history_worker(
                 } else {
                     active_request = None;
                     session = None;
+                }
+            }
+            Ok(HistoryCommand::Visibility(visible)) => {
+                if let Some(active) = session.as_mut() {
+                    let _ = active.set_visibility(visible);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {

@@ -953,6 +953,10 @@ impl TerminalApp {
         }
     }
 
+    fn set_market_visibility(&mut self, visible: bool) {
+        let _ = self.market_worker.try_set_market_visibility(visible);
+    }
+
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         self.retire_market_worker(cx);
         window.remove_window();
@@ -4168,13 +4172,13 @@ fn subscribe_indicator_input(
         .detach();
 }
 
-fn terminal_root(
+fn terminal_entity(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<Root> {
+) -> Entity<TerminalApp> {
     let symbol_input = Some(symbol_input_for_startup(&bootstrap, window, cx));
     let search_input = symbol_input.clone();
     let indicator_input =
@@ -4192,6 +4196,19 @@ fn terminal_root(
         )
     });
     lifecycle.register_terminal(&terminal);
+    subscribe_symbol_input(search_input, &terminal, window, cx);
+    subscribe_indicator_input(&indicator_search_input, &terminal, window, cx);
+    terminal
+}
+
+fn terminal_root(
+    bootstrap: MarketWorkerStartup,
+    market_worker: MarketDataWorker,
+    lifecycle: &DesktopLifecycle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<Root> {
+    let terminal = terminal_entity(bootstrap, market_worker, lifecycle, window, cx);
     let closing_terminal = terminal.clone();
     window.on_window_should_close(cx, move |_, cx| {
         closing_terminal.update(cx, |terminal, terminal_cx| {
@@ -4199,8 +4216,6 @@ fn terminal_root(
         });
         true
     });
-    subscribe_symbol_input(search_input, &terminal, window, cx);
-    subscribe_indicator_input(&indicator_search_input, &terminal, window, cx);
     let root = cx.new(|cx| Root::new(terminal.clone(), window, cx));
     window.on_next_frame(move |window, cx| {
         terminal.update(cx, |terminal, cx| {
@@ -4210,9 +4225,162 @@ fn terminal_root(
     root
 }
 
+struct WorkspaceTab {
+    label: String,
+    terminals: Vec<Entity<TerminalApp>>,
+}
+
+struct WorkspaceTabs {
+    tabs: Vec<WorkspaceTab>,
+    active: usize,
+    theme: AxiusflowTheme,
+}
+
+impl WorkspaceTabs {
+    fn select_tab(&mut self, next: usize, cx: &mut Context<Self>) {
+        if next == self.active || next >= self.tabs.len() {
+            return;
+        }
+        for terminal in &self.tabs[self.active].terminals {
+            terminal.update(cx, |terminal, _| terminal.set_market_visibility(false));
+        }
+        for terminal in &self.tabs[next].terminals {
+            terminal.update(cx, |terminal, _| terminal.set_market_visibility(true));
+        }
+        self.active = next;
+        cx.notify();
+    }
+}
+
+impl Render for WorkspaceTabs {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        let tabs = cx.entity();
+        let tab_bar = div()
+            .h(px(42.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.card))
+            .children(self.tabs.iter().enumerate().map(|(index, workspace)| {
+                let selected = index == self.active;
+                let tabs = tabs.clone();
+                button_activation(
+                    Button::new(format!("workspace_tab_{index}"))
+                        .label(workspace.label.clone())
+                        .selected(selected)
+                        .border_1()
+                        .border_color(gpui_color(if selected {
+                            colors.primary
+                        } else {
+                            colors.border
+                        }))
+                        .bg(gpui_color(if selected {
+                            colors.muted
+                        } else {
+                            colors.card
+                        })),
+                    true,
+                    move |_, cx| {
+                        tabs.update(cx, |tabs, tabs_cx| tabs.select_tab(index, tabs_cx));
+                    },
+                )
+            }));
+        let panes = self.tabs[self.active].terminals.iter().enumerate().fold(
+            div().flex().flex_1().overflow_hidden(),
+            |row, (index, terminal)| {
+                row.child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .when(index > 0, |pane| {
+                            pane.border_l_1().border_color(gpui_color(colors.border))
+                        })
+                        .child(terminal.clone()),
+                )
+            },
+        );
+        div()
+            .v_flex()
+            .size_full()
+            .bg(gpui_color(colors.background))
+            .child(tab_bar)
+            .child(panes)
+    }
+}
+
+fn workspace_tabs_root(
+    market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    lifecycle: &DesktopLifecycle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<Root> {
+    let terminals = market_workers
+        .into_iter()
+        .map(|(bootstrap, market_worker)| {
+            terminal_entity(bootstrap, market_worker, lifecycle, window, cx)
+        })
+        .collect::<Vec<_>>();
+    let tabs = terminals
+        .chunks(2)
+        .enumerate()
+        .map(|(index, terminals)| WorkspaceTab {
+            label: format!("Workspace {}", index + 1),
+            terminals: terminals.to_vec(),
+        })
+        .collect::<Vec<_>>();
+    for workspace in tabs.iter().skip(1) {
+        for terminal in &workspace.terminals {
+            terminal.update(cx, |terminal, _| terminal.set_market_visibility(false));
+        }
+    }
+    let all_terminals = tabs
+        .iter()
+        .flat_map(|workspace| workspace.terminals.iter().cloned())
+        .collect::<Vec<_>>();
+    window.on_window_should_close(cx, move |_, cx| {
+        for terminal in &all_terminals {
+            terminal.update(cx, |terminal, terminal_cx| {
+                terminal.retire_market_worker(terminal_cx);
+            });
+        }
+        true
+    });
+    let first_terminal = tabs
+        .first()
+        .and_then(|workspace| workspace.terminals.first())
+        .cloned();
+    let workspace_tabs = cx.new(|_| WorkspaceTabs {
+        tabs,
+        active: 0,
+        theme: AxiusflowTheme::dark(),
+    });
+    let root = cx.new(|cx| Root::new(workspace_tabs, window, cx));
+    if let Some(first_terminal) = first_terminal {
+        window.on_next_frame(move |window, cx| {
+            first_terminal.update(cx, |terminal, cx| {
+                terminal.chrome_focus.focus(window, cx);
+            });
+        });
+    }
+    root
+}
+
 struct ConfiguredDesktop {
     market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
     lifetime_mode: DesktopLifetimeMode,
+    layout: DesktopLayout,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DesktopLayout {
+    #[default]
+    Windows,
+    WorkspaceTabs,
 }
 
 fn split_lifetime_mode(
@@ -4239,6 +4407,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let mut arguments = std::env::args_os().skip(1);
     let first = arguments.next();
     let (lifetime_mode, command) = split_lifetime_mode(first, &mut arguments);
+    let mut layout = DesktopLayout::Windows;
     let market_workers = if let Some(argument) = command {
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
@@ -4273,6 +4442,14 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             }
             configure_engine_resource_mode(lifetime_mode)?;
             engine_market_worker::start_multi_chart()?
+        } else if argument == "--workspace-tabs" {
+            if arguments.next().is_some() {
+                eprintln!("usage: axiusflow_desktop --workspace-tabs");
+                std::process::exit(2);
+            }
+            configure_engine_resource_mode(lifetime_mode)?;
+            layout = DesktopLayout::WorkspaceTabs;
+            engine_market_worker::start_workspace_tabs()?
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
@@ -4284,6 +4461,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     Ok(Some(ConfiguredDesktop {
         market_workers,
         lifetime_mode,
+        layout,
     }))
 }
 
@@ -4298,6 +4476,7 @@ fn main() {
     };
     let lifecycle = DesktopLifecycle::new(configured.lifetime_mode);
     let market_workers = configured.market_workers;
+    let layout = configured.layout;
     application()
         .with_assets(assets::DesktopAssets)
         .run(move |cx: &mut App| {
@@ -4331,14 +4510,27 @@ fn main() {
                 }
             })
             .detach();
-            for (window_index, (bootstrap, market_worker)) in market_workers.into_iter().enumerate()
-            {
-                let options = desktop_window_options(window_index, cx);
-                let window_lifecycle = lifecycle.clone();
-                cx.open_window(options, move |window, cx| {
-                    terminal_root(bootstrap, market_worker, &window_lifecycle, window, cx)
-                })
-                .expect("the Axiusflow terminal window opens");
+            match layout {
+                DesktopLayout::Windows => {
+                    for (window_index, (bootstrap, market_worker)) in
+                        market_workers.into_iter().enumerate()
+                    {
+                        let options = desktop_window_options(window_index, cx);
+                        let window_lifecycle = lifecycle.clone();
+                        cx.open_window(options, move |window, cx| {
+                            terminal_root(bootstrap, market_worker, &window_lifecycle, window, cx)
+                        })
+                        .expect("the Axiusflow terminal window opens");
+                    }
+                }
+                DesktopLayout::WorkspaceTabs => {
+                    let window_lifecycle = lifecycle.clone();
+                    let options = desktop_window_options(0, cx);
+                    cx.open_window(options, move |window, cx| {
+                        workspace_tabs_root(market_workers, &window_lifecycle, window, cx)
+                    })
+                    .expect("the Axiusflow workspace window opens");
+                }
             }
             cx.activate(true);
         });

@@ -1602,6 +1602,65 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_multi_consumer_polling_realigns_after_a_command_fault() {
+        let socket_name = socket_name("market-response-realignment");
+        let listener = bind_listener(&socket_name).expect("bind realignment endpoint");
+        let token = [31_u8; 32];
+        let market =
+            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
+        let server_market = market.clone();
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept realignment client");
+            serve_client_with_market(stream, &token, 23, &EngineState::default(), &server_market)
+                .expect("serve realignment client");
+        });
+
+        let mut client =
+            EngineClient::connect(&socket_name, &token).expect("connect realignment client");
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        client.attach_client(23).expect("IPC client attaches");
+        for consumer_id in [101, 102] {
+            client
+                .register_consumer(23, 1, consumer_id)
+                .expect("consumer registers");
+            client
+                .set_series_demand(consumer_id, 1, series.clone())
+                .expect("consumer demand succeeds");
+            poll_ipc_snapshot(&mut client, consumer_id, 1, &series);
+            while client
+                .poll_market_event(consumer_id)
+                .expect("consumer drains initial publications")
+                .is_some()
+            {}
+        }
+
+        client
+            .set_market_visibility(999, false)
+            .expect("unknown-consumer visibility command crosses IPC");
+        assert!(matches!(
+            client
+                .poll_market_event(101)
+                .expect("command fault is delivered"),
+            Some(envelope::Payload::Fault(_))
+        ));
+        assert_eq!(
+            client
+                .poll_market_event(102)
+                .expect("second consumer remains aligned"),
+            None
+        );
+        assert_eq!(
+            client
+                .poll_market_event(101)
+                .expect("first consumer receives its buffered idle"),
+            None
+        );
+
+        drop(client);
+        server.join().expect("join realignment server");
+    }
+
+    #[test]
     fn authenticated_connection_drop_retires_detached_client_consumers() {
         let socket_name = socket_name("disconnect-cleanup");
         let listener = bind_listener(&socket_name).expect("bind disconnect cleanup endpoint");

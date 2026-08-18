@@ -65,6 +65,24 @@ pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketData
     start_group(vec![(1, btc), (2, eth)])
 }
 
+pub(super) fn start_workspace_tabs() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String>
+{
+    start_group(workspace_tab_configurations()?)
+}
+
+fn workspace_tab_configurations() -> Result<Vec<(u64, InstallProviderInstrument)>, String> {
+    let products = coinbase_products();
+    let btc = products
+        .first()
+        .cloned()
+        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
+    let eth = products
+        .get(1)
+        .cloned()
+        .ok_or_else(|| "Coinbase engine ETH product is unavailable".to_string())?;
+    Ok(vec![(1, btc.clone()), (1, eth.clone()), (2, eth), (2, btc)])
+}
+
 struct WorkerEndpoint {
     consumer_id: u64,
     messages: MarketWorkerSender,
@@ -301,6 +319,9 @@ fn process_command(
             }
             Ok(())
         }
+        MarketWorkerCommand::Visibility(visible) => {
+            client.set_market_visibility(endpoint.consumer_id, visible)
+        }
         MarketWorkerCommand::Shutdown => {
             retire_endpoint(client, endpoint);
             Ok(())
@@ -452,7 +473,6 @@ fn request_snapshot(
     messages: &MarketWorkerSender,
 ) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
     client.set_series_demand(consumer_id, generation, series)?;
-    let mut accepted = None;
     loop {
         let Some(event) = client.poll_market_event(consumer_id)? else {
             thread::sleep(POLL_INTERVAL);
@@ -470,9 +490,9 @@ fn request_snapshot(
                         });
                     }
                     SeriesLoadState::Ready | SeriesLoadState::Live => {
-                        return accepted.ok_or_else(|| {
+                        return Err(
                             "engine marked history ready without a covering snapshot".to_string()
-                        });
+                        );
                     }
                     SeriesLoadState::Failed => {
                         return Err(state.detail.unwrap_or_else(|| {
@@ -496,7 +516,7 @@ fn request_snapshot(
                 let MarketBarModelOutcome::Published(generation) = outcome else {
                     return Err("engine snapshot did not publish a client generation".to_string());
                 };
-                accepted = Some((replay, generation));
+                return Ok((replay, generation));
             }
             envelope::Payload::DemandError(error) => return Err(demand_error(&error)),
             envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
@@ -806,6 +826,24 @@ fn random_identity() -> Result<u64, String> {
 mod tests {
     use super::*;
     use axiusflow_engine_protocol::MarketBar as IpcMarketBar;
+
+    #[test]
+    fn workspace_tabs_keep_two_independent_consumers_in_each_workspace() {
+        let configurations = workspace_tab_configurations().expect("workspace catalog");
+        let workspace_ids = configurations
+            .iter()
+            .map(|(workspace_id, _)| *workspace_id)
+            .collect::<Vec<_>>();
+        let instruments = configurations
+            .iter()
+            .map(|(_, instrument)| instrument.instrument_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(workspace_ids, vec![1, 1, 2, 2]);
+        assert_eq!(instruments[0], instruments[3]);
+        assert_eq!(instruments[1], instruments[2]);
+        assert_ne!(instruments[0], instruments[1]);
+    }
 
     #[test]
     fn ipc_snapshot_preserves_fixed_point_precision_and_engine_provenance() {

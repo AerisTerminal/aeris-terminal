@@ -35,6 +35,7 @@ pub(super) struct Snapshot {
     pub(super) price_scale: u8,
     pub(super) quantity_scale: u8,
     pub(super) bars: Vec<MarketBar>,
+    pub(super) handoff_boundary_unix_nanos: i64,
 }
 
 pub(super) fn fetch(
@@ -89,6 +90,7 @@ pub(super) fn fetch(
         price_scale: instrument.descriptor.price_scale,
         quantity_scale: instrument.descriptor.quantity_scale,
         bars,
+        handoff_boundary_unix_nanos: replay.range.end_unix_nanos,
     })
 }
 

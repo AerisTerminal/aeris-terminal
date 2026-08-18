@@ -189,6 +189,9 @@ fn process_command(
                 });
             }
         }
+        MarketWorkerCommand::Visibility(visible) => {
+            let _ = state.history.set_visibility(visible);
+        }
         MarketWorkerCommand::Shutdown
         | MarketWorkerCommand::Recovery(_)
         | MarketWorkerCommand::CoinbaseSelect(_)

@@ -1,8 +1,8 @@
 use crate::{
     CollectedHistory, CollectionProgress, DecodedControlMessage, DecodedTimeBar,
     DecodedTimeBarType, HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
-    RithmicHistoryConnection, RithmicProviderInstrument, RithmicSessionMessage,
-    TimeBarReplayRequest, TimeBarType,
+    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicHistoryConnection,
+    RithmicProviderInstrument, RithmicSessionMessage, TimeBarReplayRequest, TimeBarType,
 };
 use axiusflow_market_data::{
     ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation, RithmicTimeUnit,
@@ -658,7 +658,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
                 finish_seconds,
                 maximum_bars,
             )?;
-            aggregate_daily_chart_history(daily, period)
+            aggregate_daily_chart_history(daily, period, &instrument.descriptor.venue_id)
         }
     }
 }
@@ -745,15 +745,22 @@ fn collect_tick_chart_history<T: RithmicHistoryTransport>(
 fn aggregate_daily_chart_history(
     daily: Vec<MarketBar>,
     period: RithmicDailyAggregation,
+    venue_id: &str,
 ) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
+    let calendar = RithmicExchangeCalendar::for_venue(venue_id)
+        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
+    let calendar_period = match period {
+        RithmicDailyAggregation::Week => RithmicCalendarPeriod::Week,
+        RithmicDailyAggregation::Month => RithmicCalendarPeriod::Month,
+    };
     let daily = daily
         .into_iter()
         .map(|bar| (bar.exchange_timestamp_unix_nanos, bar))
         .collect::<BTreeMap<_, _>>();
     let mut aggregated = Vec::new();
-    let mut active = None::<(i64, MarketBar)>;
+    let mut active = None::<(crate::RithmicCalendarBucket, MarketBar)>;
     for (_, daily_bar) in daily {
-        let bucket = daily_bucket(daily_bar.exchange_timestamp_seconds, period);
+        let bucket = calendar.bucket(daily_bar.exchange_timestamp_seconds, calendar_period);
         match &mut active {
             Some((active_bucket, aggregate)) if *active_bucket == bucket => {
                 aggregate.high = aggregate.high.max(daily_bar.high);
@@ -781,33 +788,6 @@ fn aggregate_daily_chart_history(
             .map_err(|_| RithmicHistoryAdapterError::MalformedHistory)?;
     }
     Ok(aggregated)
-}
-
-fn daily_bucket(timestamp_seconds: i64, period: RithmicDailyAggregation) -> i64 {
-    let unix_day = timestamp_seconds.div_euclid(86_400);
-    match period {
-        RithmicDailyAggregation::Week => unix_day - (unix_day + 3).rem_euclid(7),
-        RithmicDailyAggregation::Month => {
-            let (year, month) = civil_year_month(unix_day);
-            year * 12 + i64::from(month)
-        }
-    }
-}
-
-fn civil_year_month(unix_day: i64) -> (i64, u32) {
-    let day = unix_day + 719_468;
-    let era = day.div_euclid(146_097);
-    let day_of_era = day - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    if month <= 2 {
-        year += 1;
-    }
-    (year, u32::try_from(month).unwrap_or(1))
 }
 
 /// Converts one provider tick bar without discarding its subsecond ordering key.
@@ -1459,6 +1439,7 @@ mod tests {
                 daily_bar(monday + 7 * 86_400, [118, 125, 115, 122], 40),
             ],
             RithmicDailyAggregation::Week,
+            "CME",
         )
         .expect("weekly aggregation validates");
         assert_eq!(weekly.len(), 2);
@@ -1485,6 +1466,7 @@ mod tests {
                 daily_bar(march_1, [115, 130, 110, 125], 30),
             ],
             RithmicDailyAggregation::Month,
+            "CME",
         )
         .expect("monthly aggregation validates");
         assert_eq!(monthly.len(), 3);

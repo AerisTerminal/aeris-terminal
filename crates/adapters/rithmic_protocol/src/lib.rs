@@ -7,6 +7,7 @@ mod generated {
 }
 
 mod book;
+mod calendar;
 mod catalog;
 mod collectors;
 mod credentials;
@@ -27,6 +28,7 @@ pub use book::{
     AggregateBookAssembler, AggregateBookConfigError, AggregateBookImage, AggregateBookLimits,
     AggregateBookOutcome, AggregateBookRecoveryReason,
 };
+pub use calendar::{RithmicCalendarBucket, RithmicCalendarPeriod, RithmicExchangeCalendar};
 pub use catalog::{DecodedCatalogMessage, InstrumentReference, SymbolSearchResult};
 pub use collectors::{
     CollectedHistory, CollectedSymbols, CollectionProgress, CollectorError, HistoryBars,

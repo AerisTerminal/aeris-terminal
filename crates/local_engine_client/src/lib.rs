@@ -5,7 +5,7 @@
 //! it contains no provider or GPUI behavior.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -33,6 +33,7 @@ pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
+const MAX_PENDING_MARKET_RESPONSES: usize = 128;
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
 
 /// Loads the installation credential from the native vault, creating it once.
@@ -86,6 +87,8 @@ fn redacted_vault_error<E>(_error: E) -> String {
 pub struct EngineClient {
     connection: FramedConnection,
     ready: EngineReady,
+    pending_market_responses: BTreeMap<u64, VecDeque<envelope::Payload>>,
+    pending_market_response_count: usize,
 }
 
 struct EngineConnectionFailure {
@@ -139,7 +142,12 @@ impl EngineClient {
                 });
             }
         };
-        Ok(Self { connection, ready })
+        Ok(Self {
+            connection,
+            ready,
+            pending_market_responses: BTreeMap::new(),
+            pending_market_response_count: 0,
+        })
     }
 
     /// Returns the negotiated engine readiness state.
@@ -402,17 +410,49 @@ impl EngineClient {
         &mut self,
         consumer_id: u64,
     ) -> Result<Option<envelope::Payload>, String> {
+        if let Some(payload) = self.take_pending_market_response(consumer_id) {
+            return market_poll_result(payload, consumer_id);
+        }
         self.connection
             .send(envelope::Payload::PollMarketEvent(PollMarketEvent {
                 consumer_id,
             }))?;
-        match self.connection.receive()? {
-            envelope::Payload::MarketEventIdle(idle) if idle.consumer_id == consumer_id => Ok(None),
-            envelope::Payload::MarketEventIdle(_) => {
-                Err("engine returned market idle for another consumer".to_string())
+        loop {
+            let payload = self.connection.receive()?;
+            if let Some(response_consumer_id) = market_response_consumer_id(&payload)
+                && response_consumer_id != consumer_id
+            {
+                self.buffer_market_response(response_consumer_id, payload)?;
+                continue;
             }
-            payload => Ok(Some(payload)),
+            return market_poll_result(payload, consumer_id);
         }
+    }
+
+    fn take_pending_market_response(&mut self, consumer_id: u64) -> Option<envelope::Payload> {
+        let pending = self.pending_market_responses.get_mut(&consumer_id)?;
+        let payload = pending.pop_front()?;
+        self.pending_market_response_count = self.pending_market_response_count.saturating_sub(1);
+        if pending.is_empty() {
+            self.pending_market_responses.remove(&consumer_id);
+        }
+        Some(payload)
+    }
+
+    fn buffer_market_response(
+        &mut self,
+        consumer_id: u64,
+        payload: envelope::Payload,
+    ) -> Result<(), String> {
+        if self.pending_market_response_count >= MAX_PENDING_MARKET_RESPONSES {
+            return Err("engine market response realignment exceeded its bound".to_string());
+        }
+        self.pending_market_responses
+            .entry(consumer_id)
+            .or_default()
+            .push_back(payload);
+        self.pending_market_response_count += 1;
+        Ok(())
     }
 
     /// Removes one consumer without affecting shared engine state.
@@ -433,6 +473,35 @@ impl EngineClient {
     pub fn detach_client(&mut self, client_id: u64) -> Result<(), String> {
         self.connection
             .send(envelope::Payload::DetachClient(DetachClient { client_id }))
+    }
+}
+
+fn market_response_consumer_id(payload: &envelope::Payload) -> Option<u64> {
+    match payload {
+        envelope::Payload::SeriesState(state) => Some(state.consumer_id),
+        envelope::Payload::SeriesSnapshot(snapshot) => Some(snapshot.consumer_id),
+        envelope::Payload::SeriesUpdate(update) => Some(update.consumer_id),
+        envelope::Payload::DemandError(error) => Some(error.consumer_id),
+        envelope::Payload::MarketEventIdle(idle) => Some(idle.consumer_id),
+        envelope::Payload::OrderBookSnapshot(snapshot) => Some(snapshot.consumer_id),
+        envelope::Payload::ProviderInstrumentSearchResult(result) => Some(result.consumer_id),
+        envelope::Payload::ProviderCatalogRejected(rejection) => Some(rejection.consumer_id),
+        envelope::Payload::ProviderInstrumentSelection(selection) => Some(selection.consumer_id),
+        _ => None,
+    }
+}
+
+fn market_poll_result(
+    payload: envelope::Payload,
+    consumer_id: u64,
+) -> Result<Option<envelope::Payload>, String> {
+    match payload {
+        envelope::Payload::MarketEventIdle(idle) if idle.consumer_id == consumer_id => Ok(None),
+        envelope::Payload::MarketEventIdle(idle) => Err(format!(
+            "engine returned market idle for consumer {} while polling consumer {consumer_id}",
+            idle.consumer_id
+        )),
+        payload => Ok(Some(payload)),
     }
 }
 

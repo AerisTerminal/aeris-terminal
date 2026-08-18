@@ -1006,6 +1006,7 @@ pub enum MarketWorkerCommand {
     EngineSeries(EngineSeriesRequest),
     CoinbaseSelect(Box<CoinbaseSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
+    Visibility(bool),
     Shutdown,
 }
 
@@ -1320,6 +1321,29 @@ impl MarketDataWorker {
             })
     }
 
+    /// Updates engine resource priority for a visible or hidden chart consumer.
+    ///
+    /// # Errors
+    /// Returns the requested state when the bounded worker mailbox is full or disconnected.
+    pub fn try_set_market_visibility(&self, visible: bool) -> Result<(), TrySendError<bool>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(visible));
+        };
+        commands
+            .try_send(MarketWorkerCommand::Visibility(visible))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::Visibility(visible)) => {
+                    TrySendError::Full(visible)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::Visibility(visible)) => {
+                    TrySendError::Disconnected(visible)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("visibility send errors retain the visibility command")
+                }
+            })
+    }
+
     #[must_use]
     pub fn ui_diagnostics_sender(&self) -> Option<UiDiagnosticsSender> {
         self.ui_diagnostics.clone()
@@ -1357,7 +1381,8 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
-                    | MarketWorkerCommand::ChartViewport(_),
+                    | MarketWorkerCommand::ChartViewport(_)
+                    | MarketWorkerCommand::Visibility(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
@@ -1365,7 +1390,8 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
-                    | MarketWorkerCommand::ChartViewport(_),
+                    | MarketWorkerCommand::ChartViewport(_)
+                    | MarketWorkerCommand::Visibility(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }
@@ -1730,6 +1756,26 @@ mod tests {
         assert!(messages.is_empty());
         assert!(!newly_disconnected);
         worker_thread.join().expect("worker exits");
+    }
+
+    #[test]
+    fn workspace_visibility_crosses_the_bounded_worker_boundary() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
+
+        worker
+            .try_set_market_visibility(false)
+            .expect("visibility command is accepted");
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::Visibility(false))
+        ));
+
+        drop(command_rx);
+        let _ = worker.begin_retirement();
     }
 
     #[test]

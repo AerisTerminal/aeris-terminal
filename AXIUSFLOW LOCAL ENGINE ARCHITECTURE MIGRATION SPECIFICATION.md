@@ -9,7 +9,7 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 103 of 180 tasks complete.**
+**Verified progress: 107 of 180 tasks complete.**
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -3895,9 +3895,11 @@ Remove desktop access to storage.
 
 # 115. PHASE 7 — RITHMIC MIGRATION
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Progress evidence (2026-08-11): protocol v10 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, the complete Rithmic chart cadence catalog, exact nanosecond bar time, bounded engine-owned order-book images, bounded exact catalog search, coarse catalog rejection, and complete selected-instrument metadata. Search and selection cross authenticated IPC as consumer- and command-generation-fenced provider-neutral messages. The resident engine owns the native-vault catalog/quote session, converts adapter catalog results at the worker boundary, installs canonical identity and precision before publishing selection success, and then coordinates its separate native-vault history and realtime sessions. It owns replay planning, cancellation, all 15 cadence collection, encrypted persistence, snapshot publication, bounded transport retry, native power/network transitions, provider-generation advancement, history/live buffering, live tick/fixed/session candle publication, the sole depth subscription, canonical top-20 order-book reconstruction, recovery state, and conflated depth IPC publication. Native environment state is retained across recovery, unavailable/suspended states fence connection startup, restored states start newer generations, and monitor failure closes a provider worker rather than continuing without lifecycle evidence. Each catalog/realtime worker retains cancellation handles and join handles for its native network and power monitors, including cleanup of partial startup. The desktop creates no Rithmic socket, loads no provider credential, starts no native provider lifecycle monitor, and performs no provider retry or live aggregation. Its app-local bounded `rithmic_engine_client` and `rithmic_engine_history` modules speak provider-neutral engine protocol directly and project engine chart/DOM snapshots; the old runtime-owned worker, shell, live chart, transition capture, series browser, and the entire `desktop_market_runtime` compatibility crate are deleted, and the desktop depends on neither `rithmic_protocol` nor `desktop_provider_runtime`. Deterministic tests cover protocol catalog round trips, catalog installation before publication, exact-time live handoff, completed-history immutability, forming-tail continuation, session-change rejection, generation monotonicity, native-state retention, native waiter cancellation, continuous snapshot conversion, engine-owned depth reconstruction/projection, all-cadence encrypted restart, provider-history isolation/cancellation, and app-local mailbox conflation. Credentialed native catalog smoke testing and exchange-calendar-owned live week/month bars remain open, so this phase remains unchecked.
+
+Completion evidence (2026-08-19): the Rithmic adapter owns CME-family Chicago session-roll and daylight-saving calendar bucketing, and the engine continues weekly/monthly bars from daily history with the replay end watermark fencing already-covered buffered trades. Focused adapter and engine tests pass for fixed, tick, week, month, Monday/month/leap-day boundaries, DST, live forming publication, and session changes. The optimized native-vault smoke completed against Rithmic Test for MNQU6/CME with authenticated ticker login, 31-result symbol discovery, reference data, trades, quotes, depth, heartbeat, 2,332 time-history bars, 110 tick-history bars, clean close, and a second authenticated reconnect (`target/release/rithmic_test_smoke.exe`, exit 0). This evidence supersedes the two open items in the earlier progress note.
 
 Move Rithmic provider ownership into ProviderManager.
 
@@ -4745,7 +4747,7 @@ Provider network is not required before rendering those cached states.
 
 # 150. DEFINITION OF MIGRATION SUCCESS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 The migration is NOT successful because:
 
@@ -4782,11 +4784,13 @@ At minimum:
 19. GPUI remains responsive while market data streams.
 20. No duplicate legacy market runtime remains.
 
+Completion evidence (2026-08-19): the Windows release desktop visibly rendered Coinbase history and changing realtime candles, completed the required timeframe and symbol sequences, recovered terminal failures without indefinite Loading, and retained usable charts while persistence was degraded. Deterministic engine tests cover storage failure, provider isolation, rapid generation-fenced switching, same-series sharing, close isolation, one shared provider session, and bounded terminal states. The credentialed optimized Rithmic Test smoke authenticated twice and exercised catalog, reference data, trades, quotes, depth, heartbeat, 2,332 time-history bars, 110 tick-history bars, clean close, and reconnect. The native `--workspace-tabs` surface rendered two independent chart panes in each of two tabs through one shared desktop coordinator and one resident engine; ten rapid tab alternations and explicit return to both tabs retained visible candles, correct BTC/ETH identities, a responsive GPUI window, one engine PID, and three established engine-owned Coinbase connections. Warm close retained engine PID 11272, reopening attached to the same PID, `--exit-with-desktop` terminated both processes, and a later cold launch created engine PID 34644 and rendered both charts. The release windowed benchmark measured 256 frames at 165 Hz with 5.9801 ms p50 and 6.7742 ms p99 update-to-frame callback, 6.8429 ms p99 frame callback interval, 0 queue overflows, 24.2556 ms first pixel, 6.7611 ms snapshot-replacement first pixel, and sub-0.3 ms chart snapshot installation. Repository conformance rejects the deleted desktop market/provider runtimes and duplicate protocol/storage paths.
+
 ---
 
 # 151. FINAL DELIVERY REQUIREMENT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 Do not return with:
 
@@ -4810,11 +4814,120 @@ At final completion provide:
 
 ### Final process topology
 
+```text
+axiusflow_desktop (GPUI presentation only)
+    -> bounded background local_engine_client
+    -> authenticated local protocol v10
+    -> axiusflow_engine
+        -> one coordinator owning MarketEngine demand/state
+        -> bounded Coinbase history + shared realtime workers
+        -> bounded Rithmic catalog/history/realtime workers
+        -> bounded encrypted local_history worker
+        -> per-consumer conflated snapshots/tails/order books
+
+Origin Charts <- chart_integration <- desktop application models
+```
+
+The normal launch is one chart. `--multi-chart` opens two independent native windows. `--workspace-tabs` opens one native window with two presentation tabs and two independent chart consumers per tab; all four consumers share one desktop coordinator, one authenticated engine client, the resident `MarketEngine`, canonical series storage, and upstream provider subscriptions. Hidden tabs retain presentation entities and publish visibility/resource-priority changes rather than creating backend instances.
+
 ### Final Cargo dependency graph
+
+Direct workspace edges, excluding third-party crates:
+
+```text
+apps/desktop
+  -> application, chart_integration, design_system, engine_protocol,
+     instruments, local_engine_client, market_data, observability,
+     platform_runtime, terminal_ui
+apps/engine
+  -> coinbase_market_adapter, engine_protocol, local_engine_client,
+     local_history, market_data, market_engine, platform_runtime,
+     provider_history, rithmic_protocol_adapter
+
+application -> instruments, market_data
+chart_integration -> application, design_system, market_data, terminal_ui
+coinbase_market_adapter -> market_data, platform_runtime, provider_history
+engine_protocol -> transport
+local_engine_client -> engine_protocol, platform_runtime
+local_history -> local_storage, market_data, platform_runtime
+local_storage -> provider_history
+market_engine -> market_data
+rithmic_protocol_adapter
+  -> local_storage, market_data, observability, platform_runtime, provider_history
+terminal_ui -> design_system, instruments, market_data
+
+design_system, instruments, market_data, observability, platform_runtime,
+provider_history, transport -> no local workspace dependency
+
+diagnostics_overhead -> coinbase_market_adapter, observability
+market_data_performance
+  -> coinbase_market_adapter, local_storage, market_data, provider_history
+naming_check -> no local workspace dependency
+```
+
+The desktop has no dependency on provider adapters, provider history, storage implementations, or `market_engine`. The engine manifest is the only backend composition root. Origin dependencies remain confined to `chart_integration`.
 
 ### Final source tree
 
+Only package roots and durable responsibility directories are shown:
+
+```text
+apps/
+  desktop/
+  engine/
+crates/
+  adapters/
+    coinbase_market/
+    rithmic_protocol/
+  application/
+  domain/
+    instruments/
+    market_data/
+  engine_protocol/
+  local_engine_client/
+  local_history/
+  local_storage/
+  market_engine/
+  observability/
+  platform_runtime/
+  provider_history/
+  transport/
+  ui/
+    chart_integration/
+    design_system/
+    terminal_ui/
+tools/
+  diagnostics_overhead/
+  market_data_performance/
+  naming_check/
+```
+
 ### Final production LOC by crate
+
+Measured 2026-08-19 from each product package's `src/**/*.rs`, excluding dedicated `tests`/`benches`, generated output, vendor/third-party source, Origin Charts, and trailing embedded `#[cfg(test)] mod ...` modules:
+
+| Package | Production LOC |
+| --- | ---: |
+| `axiusflow_application` | 1,780 |
+| `axiusflow_chart_integration` | 2,031 |
+| `axiusflow_coinbase_market_adapter` | 3,562 |
+| `axiusflow_design_system` | 478 |
+| `axiusflow_desktop` | 10,952 |
+| `axiusflow_engine` | 6,611 |
+| `axiusflow_engine_protocol` | 1,138 |
+| `axiusflow_instruments` | 161 |
+| `axiusflow_local_engine_client` | 648 |
+| `axiusflow_local_history` | 485 |
+| `axiusflow_local_storage` | 3,450 |
+| `axiusflow_market_data` | 1,238 |
+| `axiusflow_market_engine` | 1,864 |
+| `axiusflow_observability` | 1,398 |
+| `axiusflow_platform_runtime` | 2,083 |
+| `axiusflow_provider_history` | 2,009 |
+| `axiusflow_rithmic_protocol_adapter` | 12,450 |
+| `axiusflow_terminal_ui` | 548 |
+| `axiusflow_transport` | 175 |
+| **Total** | **53,061** |
 
 Exclude:
 
@@ -4825,11 +4938,33 @@ Exclude:
 
 ### Deleted legacy files/crates
 
+- Entire crates: `crates/desktop_market_runtime`, `crates/desktop_provider_runtime`, `crates/desktop_history`, `crates/desktop_storage`, `crates/adapters/market_protocol`, and `crates/protocols`.
+- Duplicate execution and protocol paths: `crates/application/src/stream_runtime.rs`, the Rithmic desktop driver/worker/shell/live-chart/transition chain, the unconsumed desktop event/publication queue, the old protobuf market-stream schema and conversion adapter, and the obsolete provider-runtime conformance script.
+- Duplicate storage ownership: `apps/engine/src/local_history.rs` and the desktop-owned Coinbase history/storage workers and caches replaced by `crates/local_history` plus the resident engine coordinator.
+- Cargo workspace members, manifest dependencies, lockfile packages, public exports, fixtures, and tests belonging only to those replaced paths were removed in the same migration slices. No compatibility market runtime remains.
+
 ### Runtime verification results
+
+- Phase 0-7 evidence is recorded in sections 108-115. The migration added the protocol, cohesive `MarketEngine`, resident Coinbase/Rithmic coordination, provider-neutral local history, and desktop engine-client bridges; it moved mutable market demand, provider lifecycle, aggregation, recovery, persistence policy, and canonical publication into their final owners; and it deleted every replaced desktop backend path before advancing.
+- Coinbase release-native evidence covers visible historical and realtime candles, the exact interval/symbol churn sequence, rapid switching, multi-chart close isolation, four consumers across two workspace tabs, same-engine warm reattachment, complete exit, and cold startup.
+- Rithmic release-native evidence covers authenticated Test-system catalog, reference, trades, quotes, depth, heartbeat, time/tick history, clean close, reconnect, and deterministic all-cadence history/live continuation including CME-family calendar weeks/months.
+- Persistence, provider failure, generation fencing, slow-client backpressure, lifecycle cleanup, shared subscriptions, terminal loading/error resolution, and desktop response realignment have deterministic regressions at their real engine/IPC/presentation boundaries.
+- The final zero-warning workspace gate passed on 2026-08-19: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --workspace --all-targets --all-features`, and `cargo test --workspace --all-features` all exited successfully.
 
 ### Performance measurements
 
+- Release engine, 128 measured/32 warmup cached samples, 350 bars: IPC demand-to-snapshot p50/p95/p99 = 65.0/80.6/102.1 microseconds; timeframe switch = 82.3/107.8/139.7 microseconds; symbol switch = 93.5/119.8/141.4 microseconds; attach/restore = 70.7/104.1/160.0 microseconds.
+- Twenty-consumer IPC batch p50/p95/p99 = 1.5062/1.6852/1.6883 ms, or 75.31 microseconds p50 per consumer. Sampled engine-test process growth was 2,330,624 bytes from baseline and 1,159,168 bytes after engine start under the measured workload.
+- Release GPUI window at 2560x1440, 165 Hz, 125% scale: first pixel 24.2556 ms; covering snapshot replacement 6.7611 ms; update-to-frame callback p50/p95/p99 = 5.9801/6.5554/6.7742 ms; frame callback interval p99 = 6.8429 ms; chart snapshot installation maximum = 0.2964 ms; queue depth after submission = 1 with zero overflows across 256 measured frames.
+- Native workspace-tab stress retained one responsive desktop, one engine PID, two visible chart panes in either active tab, and unchanged engine ownership through ten rapid alternations. This is runtime responsiveness evidence, not a physical scanout or end-to-end exchange latency measurement.
+
 ### Known remaining limitations
+
+- Persisted user-authored multi-tab/pane layouts and deterministic restore ordering are not yet implemented; `--workspace-tabs` is the real native migration-proof surface, while section 174 remains the later persistence/restore feature.
+- Lifetime mode is selected per launch; durable in-product policy selection and optional user-controlled OS autostart remain unfinished.
+- The credentialed Rithmic run targets Rithmic Test with the available account/entitlements. Production account rollout and future order execution require their own safety and conformance gates.
+- The GPUI benchmark uses deterministic disconnected market input and compositor timing; it does not measure physical panel scanout, tab-switch latency inside that benchmark, macOS/Linux native behavior, or exchange-to-screen latency.
+- These limitations do not retain a legacy market owner or weaken the final dependency, ownership, bounded-work, generation, persistence, or lifecycle contracts.
 
 ---
 
@@ -4867,7 +5002,7 @@ The final system should have fewer owners than the current one.
 
 # 153. FINAL ARCHITECTURAL CONTRACT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
 When implementation is complete, these statements must all be true:
 
@@ -4896,6 +5031,8 @@ When implementation is complete, these statements must all be true:
 23. No per-chart runtime exists.
 24. No hidden dead code remains solely because it existed before.
 25. Runtime correctness, not compilation, defines success.
+
+Completion evidence (2026-08-19): statements 1-4, 7-10, 13-14, 18-20, and 22-24 are enforced by the workspace manifests and `axiusflow_naming_check`: the desktop is presentation-only, the engine is the backend composition root, `MarketEngine` is the sole demand/state owner, adapters contain provider protocols, Origin imports stop at chart integration, retired runtime/protocol/storage crates cannot return, and no provider session or runtime is owned per chart. Statements 5-6, 11-12, 17, and 21 are covered by deterministic memory-before-persistence, degraded-storage, restart/hot-set, rapid-switch cancellation, stale-generation, snapshot-before-tail, and bounded terminal-state regressions. Statements 15-16 are proven by the same-PID warm close/reattach sequence and the zero-process `--exit-with-desktop` sequence. The native workspace run proves statement 8 with presentation tabs retaining four independent consumers over one coordinator and one engine. The credentialed Rithmic smoke plus release Coinbase, workspace, lifecycle, and GPUI performance runs satisfy statement 25 with observable runtime behavior. The bounded `local_engine_client` response demultiplexer and its command-fault regression preserve multi-consumer IPC alignment without creating another market owner.
 
 Build toward this architecture incrementally, prove each stage with running behavior, remove the architecture it replaces, and stop adding layers unless measured requirements actually demand them. 
 
