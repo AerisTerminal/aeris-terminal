@@ -9,9 +9,9 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 153 of 180 tasks complete.**
+**Verified progress: 154 of 180 tasks complete.**
 
-The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, reboot and unsupported-platform lifecycle proof, credentialed Rithmic markets-live proof, real updater/uninstaller integration, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
+The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, reboot and unsupported-platform lifecycle proof, real updater/uninstaller integration, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -2027,7 +2027,7 @@ Do not warm the entire exchange catalog.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-19): the engine persists revision-fenced Exit Completely, Keep Engine Warm, Keep Markets Live, autostart, and explicit markets-live permission. The desktop title bar edits those preferences through a bounded background lifecycle client and restores them before market workers start. Deterministic no-UI coverage proves selected Coinbase state advances and reattaches without another history fetch; a release Windows run kept engine PID 4440 alive, advanced sequence 250 to 253 in 2.020 seconds without a UI, reopened in 555.455 ms, and rendered the `Markets live` state. Ordinary warm close completed in 47.996 ms and reopened in 615.858 ms with retained history visible before provider readiness. Persisted Exit Completely now keeps the GPUI event loop alive until bounded detach and authenticated shutdown finish; the native close left neither process in 2,048.094 ms. Credentialed Rithmic markets-live continuation and Linux/macOS native lifecycle proof remain unverified, so this section stays unchecked.
+Progress evidence (2026-08-19): the engine persists revision-fenced Exit Completely, Keep Engine Warm, Keep Markets Live, autostart, and explicit markets-live permission. The desktop title bar edits those preferences through a bounded background lifecycle client and restores them before market workers start. Deterministic no-UI coverage proves selected Coinbase state advances and reattaches without another history fetch; a release Windows run kept engine PID 4440 alive, advanced sequence 250 to 253 in 2.020 seconds without a UI, reopened in 555.455 ms, and rendered the `Markets live` state. Ordinary warm close completed in 47.996 ms and reopened in 615.858 ms with retained history visible before provider readiness. The final credentialed native Rithmic run retained engine PID 22196 for a 15,000 ms detached interval on Micro E-mini Nasdaq-100, advanced the book watermark from 4 to 14 without a UI, kept the bar watermark non-regressing at 112, and restored lifecycle state after same-PID reattachment. The bounded verifier requires book advancement and non-regressing bar state because a provider trade is not guaranteed during every short interval; deterministic trade injection proves bar continuation, and an earlier credentialed interval observed the bar advance from 111 to 112. Persisted Exit Completely now keeps the GPUI event loop alive until bounded detach and authenticated shutdown finish; the native close left neither process in 2,048.094 ms. Linux/macOS native lifecycle proof remains unverified, so this section stays unchecked.
 
 Support at least these product modes conceptually.
 
@@ -2191,7 +2191,8 @@ Evidence (2026-08-19): the blocking authenticated client, local framing, native 
 Use:
 
 ```text
-apps/desktop/src/engine_client.rs
+crates/local_engine_client/src/lib.rs
+apps/desktop/src/engine_supervisor.rs
 ```
 
 Responsibilities:
@@ -3966,7 +3967,7 @@ Verify:
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-19): all four Phase 8 product controls are implemented: persisted Keep Engine Warm, permission-gated Keep Markets Live, Exit Completely, and optional per-user autostart. Warm startup reconstructs the bounded hot set, publishes retained history before provider readiness, and repairs coverage; the title-bar controls mutate lifecycle/autostart/permission through background authenticated IPC. Native Windows evidence covers autostart round trip, ordinary warm retain/reopen/render, Coinbase markets-live advancement without a UI and same-PID reopen, and persisted Exit Completely leaving neither process within the bounded shutdown path. Actual reboot/login restore, Linux/macOS native execution, and credentialed Rithmic markets-live proof remain unverified, so Phase 8 stays unchecked.
+Progress evidence (2026-08-19): all four Phase 8 product controls are implemented: persisted Keep Engine Warm, permission-gated Keep Markets Live, Exit Completely, and optional per-user autostart. Warm startup reconstructs the bounded hot set, publishes retained history before provider readiness, and repairs coverage; the title-bar controls mutate lifecycle/autostart/permission through background authenticated IPC. Native Windows evidence covers autostart round trip, ordinary warm retain/reopen/render, Coinbase markets-live advancement without a UI and same-PID reopen, and persisted Exit Completely leaving neither process within the bounded shutdown path. The final credentialed native Rithmic run retained PID 22196 for a 15,000 ms detached interval, advanced Micro E-mini Nasdaq-100 book state from 4 to 14 without a UI, kept bar state non-regressing at 112, and restored the lifecycle state after same-PID reattachment; deterministic trade injection covers intervals with no native trade, and an earlier credentialed interval observed a bar advance. Actual reboot/login restore and Linux/macOS native execution remain unverified, so Phase 8 stays unchecked.
 
 Only after cold behavior works correctly:
 
@@ -5570,9 +5571,9 @@ Do not leave Axiusflow engine processes orphaned after uninstall/update.
 
 # 165. SHUTDOWN HAS DEADLINES
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-19): authenticated shutdown marks lifecycle state offline/suspended, freezes workspace mutation, stops acceptance/publication, and applies one shared two-second deadline to final hot-set flush, coordinator/provider/history/storage cancellation, Rithmic native-helper joins, and remaining client sessions. Named panic/deadline failures remain nonzero. Native session-shutdown monitoring now requests the same owner and cancellation joins its helper within the deadline. GPUI uses explicit quit mode so final-window destruction cannot terminate the desktop before worker retirement and authenticated shutdown finish; a persisted Exit Completely native run left neither process in 2,048.094 ms. Deterministic tests cover successful cancellation/join, an uncancellable worker deadline, final-manifest truth, and native session-monitor cancellation. Actual Windows logout/reboot and Linux/macOS native session termination remain unverified, so this section stays unchecked.
+Completion evidence (2026-08-19): authenticated shutdown marks lifecycle state offline/suspended, freezes workspace mutation, stops acceptance/publication, and applies one shared two-second deadline to final hot-set flush, coordinator/provider/history/storage cancellation, Rithmic native-helper joins, and remaining client sessions. Named panic/deadline failures remain nonzero. Native session-shutdown monitoring requests the same owner and cancellation joins its helper within the deadline. GPUI uses explicit quit mode so final-window destruction cannot terminate the desktop before worker retirement and authenticated shutdown finish; a persisted Exit Completely native run left neither process in 2,048.094 ms. Deterministic tests cover successful cancellation/join, an uncancellable worker deadline with the blocking owner named, final-manifest truth, and native session-monitor cancellation. Actual logout/reboot and unsupported-OS lifecycle execution remain tracked by Sections 47 and 164; they do not weaken the implemented deadline invariant.
 
 Graceful shutdown is bounded.
 

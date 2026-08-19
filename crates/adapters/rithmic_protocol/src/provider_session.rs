@@ -47,6 +47,7 @@ const MAXIMUM_IDENTITY_BYTES: usize = 256;
 const SESSION_COMMAND_CAPACITY: usize = 8;
 const SESSION_COMMAND_BATCH: usize = 4;
 const SESSION_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES: usize = 256;
 const MAXIMUM_CALLBACK_EVENTS: usize = 4_096;
 const MAXIMUM_CALLBACK_BYTES: usize = 256 * 1024 * 1024;
 const MAXIMUM_SILENCE_TIMEOUT: Duration = Duration::from_mins(5);
@@ -1014,15 +1015,20 @@ impl SessionEmitter {
     }
 
     fn send(&self, event: ProviderSessionEvent) -> bool {
-        if event_generation(&event).is_some_and(|generation| generation != self.generation)
-            || event
-                .validate(
-                    NonZeroUsize::MIN,
-                    self.callbacks.maximum_instruments,
-                    self.callbacks.limits.maximum_depth.get(),
-                )
-                .is_err()
-        {
+        let generation_mismatch =
+            event_generation(&event).is_some_and(|generation| generation != self.generation);
+        let invalid = event
+            .validate(
+                NonZeroUsize::MIN,
+                self.callbacks.maximum_instruments,
+                self.callbacks.limits.maximum_depth.get(),
+            )
+            .is_err();
+        if generation_mismatch || invalid {
+            eprintln!(
+                "Rithmic callback validation failed: event={} generation_mismatch={generation_mismatch}",
+                provider_event_kind(&event)
+            );
             self.invalid(
                 ProviderInvalidationReason::MalformedMessage,
                 RetryDisposition::Terminal,
@@ -1738,13 +1744,17 @@ fn direct_session_task() -> Arc<SessionTask> {
                 let _ = connection.close();
                 return;
             }
-            if let Err(error) = install_subscriptions(&mut connection, &config, &stop) {
-                if error != RithmicSessionError::Cancelled && !stop.load(Ordering::Acquire) {
-                    let (reason, retry) = session_failure(error);
-                    emitter.invalid(reason, retry);
+            let initial_messages = install_subscriptions(&mut connection, &config, &stop);
+            let initial_messages = match initial_messages {
+                Ok(messages) => messages,
+                Err(error) => {
+                    if error != RithmicSessionError::Cancelled && !stop.load(Ordering::Acquire) {
+                        let (reason, retry) = session_failure(error);
+                        emitter.invalid(reason, retry);
+                    }
+                    return;
                 }
-                return;
-            }
+            };
             if !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
                 generation,
                 instruments: config
@@ -1765,6 +1775,7 @@ fn direct_session_task() -> Arc<SessionTask> {
                     &stop,
                     &commands,
                     &emitter,
+                    initial_messages,
                 )
             };
             if stop.load(Ordering::Acquire) {
@@ -1797,25 +1808,41 @@ fn install_subscriptions(
     connection: &mut crate::RithmicTickerConnection,
     config: &RithmicProviderConfig,
     stop: &AtomicBool,
-) -> Result<(), RithmicSessionError> {
+) -> Result<VecDeque<RithmicSessionMessage>, RithmicSessionError> {
+    let mut initial_messages = VecDeque::new();
+    let mut messages_read = 0_usize;
     for instrument in &config.instruments {
         connection.update_market_data(instrument.as_request())?;
         if stop.load(Ordering::Acquire) {
             return Err(RithmicSessionError::Cancelled);
         }
-        match connection.read_next_until(Instant::now() + config.session_limits.response_timeout)? {
-            RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
-                accepted: true,
-            }) => {}
-            RithmicSessionMessage::Control(
-                DecodedControlMessage::MarketDataSubscription { accepted: false }
-                | DecodedControlMessage::Reject
-                | DecodedControlMessage::ForcedLogout,
-            ) => return Err(RithmicSessionError::Protocol),
-            _ => return Err(RithmicSessionError::UnexpectedMessage),
+        let deadline = Instant::now() + config.session_limits.response_timeout;
+        let mut accepted = false;
+        while messages_read < MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES {
+            match connection.read_next_until(deadline)? {
+                RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
+                    accepted: true,
+                }) => {
+                    messages_read += 1;
+                    accepted = true;
+                    break;
+                }
+                RithmicSessionMessage::Control(
+                    DecodedControlMessage::MarketDataSubscription { accepted: false }
+                    | DecodedControlMessage::Reject
+                    | DecodedControlMessage::ForcedLogout,
+                ) => return Err(RithmicSessionError::Protocol),
+                message => {
+                    messages_read += 1;
+                    initial_messages.push_back(message);
+                }
+            }
+        }
+        if !accepted {
+            return Err(RithmicSessionError::Deadline);
         }
     }
-    Ok(())
+    Ok(initial_messages)
 }
 
 enum PendingCatalogCommand {
@@ -1863,6 +1890,7 @@ fn collect_market(
     stop: &AtomicBool,
     commands: &Receiver<RithmicSessionCommand>,
     emitter: &SessionEmitter,
+    mut initial_messages: VecDeque<RithmicSessionMessage>,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let mut canonical = CanonicalSessionState::try_new(config, generation)?;
     let heartbeat_interval = connection.heartbeat_interval();
@@ -1908,11 +1936,16 @@ fn collect_market(
         } else {
             deadline = deadline.min(state.next_heartbeat);
         }
-        let message = match connection.read_next_until(deadline) {
-            Ok(message) => message,
-            Err(RithmicSessionError::Deadline) => continue,
-            Err(RithmicSessionError::Cancelled) if stop.load(Ordering::Acquire) => return Ok(()),
-            Err(error) => return Err(session_failure(error)),
+        let message = match initial_messages.pop_front() {
+            Some(message) => message,
+            None => match connection.read_next_until(deadline) {
+                Ok(message) => message,
+                Err(RithmicSessionError::Deadline) => continue,
+                Err(RithmicSessionError::Cancelled) if stop.load(Ordering::Acquire) => {
+                    return Ok(());
+                }
+                Err(error) => return Err(session_failure(error)),
+            },
         };
         state.last_message = Instant::now();
         state.source_ordinal = state.source_ordinal.checked_add(1).ok_or_else(malformed)?;
@@ -2819,6 +2852,24 @@ fn event_generation(event: &ProviderSessionEvent) -> Option<SessionGeneration> {
         ProviderSessionEvent::DiscoveryStarted
         | ProviderSessionEvent::SystemsDiscovered { .. }
         | ProviderSessionEvent::Stopped => None,
+    }
+}
+
+const fn provider_event_kind(event: &ProviderSessionEvent) -> &'static str {
+    match event {
+        ProviderSessionEvent::DiscoveryStarted => "discovery_started",
+        ProviderSessionEvent::SystemsDiscovered { .. } => "systems_discovered",
+        ProviderSessionEvent::AuthenticationChanged { .. } => "authentication_changed",
+        ProviderSessionEvent::InstrumentsDiscovered { .. } => "instruments_discovered",
+        ProviderSessionEvent::Market { event, .. } => match event {
+            MarketEvent::Trade(_) => "trade",
+            MarketEvent::Quote(_) => "quote",
+            MarketEvent::DepthSnapshot(_) => "depth",
+            MarketEvent::DepthDelta(_) => "depth_delta",
+        },
+        ProviderSessionEvent::Heartbeat { .. } => "heartbeat",
+        ProviderSessionEvent::Invalidated { .. } => "invalidated",
+        ProviderSessionEvent::Stopped => "stopped",
     }
 }
 

@@ -714,7 +714,10 @@ mod tests {
     };
 
     use axiusflow_engine_protocol::{
-        EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, encode_envelope, envelope,
+        EngineLifetimeMode, EngineReady, Envelope, EnvelopeDecoder, InstallProviderInstrument,
+        OrderBookState, PROTOCOL_VERSION, ResourceMode, SearchProviderInstruments,
+        SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceState, encode_envelope,
+        envelope,
     };
 
     use super::{
@@ -1080,5 +1083,295 @@ mod tests {
         client
             .remove_market_consumer(consumer_id)
             .expect("remove native probe consumer");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn select_native_rithmic_instrument(
+        client: &mut EngineClient,
+        consumer_id: u64,
+        requested_symbol: &str,
+    ) -> Result<InstallProviderInstrument, String> {
+        const SEARCH_GENERATION: u64 = 1;
+        const SELECTION_GENERATION: u64 = 1;
+        client.search_provider_instruments(SearchProviderInstruments {
+            consumer_id,
+            search_generation: SEARCH_GENERATION,
+            provider: "rithmic".to_string(),
+            query: requested_symbol.to_string(),
+            maximum_results: 16,
+        })?;
+        let search_deadline = Instant::now() + Duration::from_secs(20);
+        let selected = loop {
+            if Instant::now() >= search_deadline {
+                return Err("Rithmic native search timed out".to_string());
+            }
+            if let Some(envelope::Payload::ProviderInstrumentSearchResult(result)) =
+                client.poll_market_event(consumer_id)?
+                && result.search_generation == SEARCH_GENERATION
+            {
+                break result
+                    .instruments
+                    .into_iter()
+                    .find(|instrument| instrument.symbol == requested_symbol)
+                    .ok_or_else(|| {
+                        "Rithmic native search returned no exact requested contract".to_string()
+                    })?;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        client.select_provider_instrument(SelectProviderInstrument {
+            consumer_id,
+            selection_generation: SELECTION_GENERATION,
+            search_generation: SEARCH_GENERATION,
+            provider: "rithmic".to_string(),
+            entitlement_id: format!("rithmic-test:{}:{}", selected.exchange, selected.symbol),
+            symbol: selected.symbol,
+            exchange: selected.exchange,
+        })?;
+        let selection_deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if Instant::now() >= selection_deadline {
+                return Err("Rithmic native selection timed out".to_string());
+            }
+            if let Some(envelope::Payload::ProviderInstrumentSelection(selection)) =
+                client.poll_market_event(consumer_id)?
+                && selection.consumer_id == consumer_id
+            {
+                return selection
+                    .instrument
+                    .ok_or_else(|| "Rithmic native selection omitted identity".to_string());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn await_native_rithmic_baseline(
+        client: &mut EngineClient,
+        consumer_id: u64,
+    ) -> Result<(u64, u64), String> {
+        const SERIES_GENERATION: u64 = 1;
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut bar_sequence = None;
+        let mut book_watermark = None;
+        let mut provider_state = None;
+        let mut series_state = None;
+        let mut demand_error = None;
+        while Instant::now() < deadline && (bar_sequence.is_none() || book_watermark.is_none()) {
+            match client.poll_market_event(consumer_id)? {
+                Some(envelope::Payload::SeriesSnapshot(snapshot))
+                    if snapshot.generation == SERIES_GENERATION =>
+                {
+                    bar_sequence = snapshot.bars.last().map(|bar| bar.source_sequence);
+                }
+                Some(envelope::Payload::SeriesUpdate(update))
+                    if update.generation == SERIES_GENERATION =>
+                {
+                    bar_sequence = update.bar.map(|bar| bar.source_sequence);
+                }
+                Some(envelope::Payload::OrderBookSnapshot(book))
+                    if book.generation == SERIES_GENERATION
+                        && book.state == OrderBookState::Ready as i32 =>
+                {
+                    book_watermark = Some(book.source_watermark);
+                }
+                Some(envelope::Payload::ProviderState(state)) if state.provider == "rithmic" => {
+                    provider_state = Some(state.state);
+                }
+                Some(envelope::Payload::SeriesState(state))
+                    if state.generation == SERIES_GENERATION =>
+                {
+                    series_state = Some(state.state);
+                }
+                Some(envelope::Payload::DemandError(error))
+                    if error.generation == SERIES_GENERATION =>
+                {
+                    demand_error = Some(error.detail);
+                }
+                _ => {}
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let detail = || {
+            format!("provider={provider_state:?}, series={series_state:?}, demand={demand_error:?}")
+        };
+        Ok((
+            bar_sequence
+                .ok_or_else(|| format!("Rithmic native bar did not arrive ({})", detail()))?,
+            book_watermark.ok_or_else(|| {
+                format!("Rithmic native ready book did not arrive ({})", detail())
+            })?,
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn await_advanced_native_rithmic(
+        client: &mut EngineClient,
+        consumer_id: u64,
+        baseline_bar_sequence: u64,
+        baseline_book_watermark: u64,
+    ) -> Result<(u64, u64), String> {
+        const SERIES_GENERATION: u64 = 1;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut bar_sequence = None;
+        let mut book_watermark = None;
+        while Instant::now() < deadline
+            && (bar_sequence.is_none()
+                || book_watermark.is_none_or(|watermark| watermark <= baseline_book_watermark))
+        {
+            match client.poll_market_event(consumer_id)? {
+                Some(envelope::Payload::SeriesSnapshot(snapshot))
+                    if snapshot.generation == SERIES_GENERATION =>
+                {
+                    bar_sequence = snapshot.bars.last().map(|bar| bar.source_sequence);
+                }
+                Some(envelope::Payload::SeriesUpdate(update))
+                    if update.generation == SERIES_GENERATION =>
+                {
+                    bar_sequence = update.bar.map(|bar| bar.source_sequence);
+                }
+                Some(envelope::Payload::OrderBookSnapshot(book))
+                    if book.generation == SERIES_GENERATION
+                        && book.state == OrderBookState::Ready as i32 =>
+                {
+                    book_watermark = Some(book.source_watermark);
+                }
+                _ => {}
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let bar_sequence =
+            bar_sequence.ok_or_else(|| "Rithmic native resumed bar did not arrive".to_string())?;
+        let book_watermark = book_watermark
+            .ok_or_else(|| "Rithmic native resumed book did not arrive".to_string())?;
+        if bar_sequence < baseline_bar_sequence || book_watermark <= baseline_book_watermark {
+            return Err(format!(
+                "Rithmic state regressed or the book did not advance while the UI was detached (bar {baseline_bar_sequence}->{bar_sequence}, book {baseline_book_watermark}->{book_watermark})"
+            ));
+        }
+        Ok((bar_sequence, book_watermark))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn restore_native_lifecycle(token: &[u8], original: &WorkspaceState) {
+        let mut cleanup = EngineClient::connect(ENGINE_SOCKET_NAME, token)
+            .expect("reconnect resident engine for lifecycle restoration");
+        let current = cleanup
+            .restore_workspace()
+            .expect("read current lifecycle state");
+        let original_mode = EngineLifetimeMode::try_from(original.lifetime_mode)
+            .expect("persisted original lifecycle mode is valid");
+        cleanup
+            .set_engine_lifecycle(
+                current.workspace_revision,
+                original_mode,
+                original.autostart_enabled,
+                original.markets_live_permitted,
+            )
+            .expect("restore original lifecycle state");
+        let original_resource_mode = match original_mode {
+            EngineLifetimeMode::ExitCompletely => ResourceMode::OfflineSuspended,
+            EngineLifetimeMode::KeepMarketsLive if original.markets_live_permitted => {
+                ResourceMode::MarketsLive
+            }
+            EngineLifetimeMode::KeepEngineWarm | EngineLifetimeMode::KeepMarketsLive => {
+                ResourceMode::Warm
+            }
+        };
+        cleanup
+            .set_engine_resource_mode(original_resource_mode)
+            .expect("restore original engine resource mode");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine and credentialed Rithmic Test access"]
+    fn native_release_rithmic_markets_live_round_trip() {
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        let original = client.restore_workspace().expect("restore lifecycle state");
+        client
+            .set_engine_resource_mode(ResourceMode::Interactive)
+            .expect("enable interactive provider work for native probe");
+        let engine_pid = client
+            .engine_status()
+            .expect("read initial engine status")
+            .process_id;
+        let client_id = u64::from(std::process::id()).saturating_mul(10) + 1;
+        let consumer_id = client_id;
+        client
+            .attach_client(client_id)
+            .expect("attach native probe");
+        client
+            .register_consumer(client_id, 1, consumer_id)
+            .expect("register native probe consumer");
+        let requested_symbol = std::env::var("AXIUSFLOW_NATIVE_RITHMIC_SYMBOL")
+            .expect("AXIUSFLOW_NATIVE_RITHMIC_SYMBOL is required");
+
+        let result = (|| -> Result<(String, u64, u64, u64, u64), String> {
+            const SERIES_GENERATION: u64 = 1;
+            let instrument =
+                select_native_rithmic_instrument(&mut client, consumer_id, &requested_symbol)?;
+            let series = SeriesKey {
+                provider: "rithmic".to_string(),
+                instrument_id: instrument.instrument_id.clone(),
+                cadence_value: 100,
+                definition_revision: 1,
+                entitlement_id: instrument.entitlement_id.clone(),
+                cadence: SeriesCadence::Trades as i32,
+            };
+            client.set_series_demand(consumer_id, SERIES_GENERATION, series.clone())?;
+            client.set_market_visibility(consumer_id, true)?;
+            let (baseline_bar_sequence, baseline_book_watermark) =
+                await_native_rithmic_baseline(&mut client, consumer_id)?;
+
+            let workspace = client.restore_workspace()?;
+            client.set_engine_lifecycle(
+                workspace.workspace_revision,
+                EngineLifetimeMode::KeepMarketsLive,
+                workspace.autostart_enabled,
+                true,
+            )?;
+            client.set_engine_resource_mode(ResourceMode::MarketsLive)?;
+            client.detach_client(client_id)?;
+            drop(client);
+            thread::sleep(Duration::from_secs(15));
+
+            let mut reattached = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())?;
+            let status = reattached.engine_status()?;
+            if status.process_id != engine_pid {
+                return Err("resident engine PID changed during markets-live detach".to_string());
+            }
+            let reattached_client_id = client_id + 1;
+            let reattached_consumer_id = consumer_id + 1;
+            reattached.attach_client(reattached_client_id)?;
+            reattached.register_consumer(reattached_client_id, 1, reattached_consumer_id)?;
+            reattached.set_series_demand(reattached_consumer_id, SERIES_GENERATION, series)?;
+            reattached.set_market_visibility(reattached_consumer_id, true)?;
+            let (resumed_bar_sequence, resumed_book_watermark) = await_advanced_native_rithmic(
+                &mut reattached,
+                reattached_consumer_id,
+                baseline_bar_sequence,
+                baseline_book_watermark,
+            )?;
+            reattached.remove_market_consumer(reattached_consumer_id)?;
+            reattached.detach_client(reattached_client_id)?;
+            Ok((
+                instrument.display_symbol,
+                baseline_bar_sequence,
+                resumed_bar_sequence,
+                baseline_book_watermark,
+                resumed_book_watermark,
+            ))
+        })();
+
+        restore_native_lifecycle(token.as_slice(), &original);
+
+        let (symbol, bar_before, bar_after, book_before, book_after) =
+            result.expect("credentialed Rithmic markets-live round trip");
+        println!(
+            "native_rithmic_markets_live pid={engine_pid} symbol={symbol} bar={bar_before}->{bar_after} book={book_before}->{book_after} detached_ms=15000"
+        );
     }
 }

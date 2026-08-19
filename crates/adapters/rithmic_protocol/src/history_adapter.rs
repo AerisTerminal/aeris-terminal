@@ -200,6 +200,16 @@ impl RithmicHistorySessionTransport {
             maximum_control_messages,
         })
     }
+
+    /// Logs out and closes the authenticated history session within its native deadline.
+    ///
+    /// # Errors
+    /// Returns a redacted transport failure when logout or socket close is not confirmed.
+    pub fn close(self) -> Result<(), RithmicHistoryAdapterError> {
+        self.connection
+            .close()
+            .map_err(|_| RithmicHistoryAdapterError::Transport)
+    }
 }
 
 impl RithmicHistoryTransport for RithmicHistorySessionTransport {

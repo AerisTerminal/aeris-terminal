@@ -1470,21 +1470,19 @@ fn start_rithmic_workers(
     if !enabled {
         return Ok(Vec::new());
     }
-    let catalog = thread::Builder::new()
-        .name("axiusflow-rithmic-catalog".to_string())
+    let provider = thread::Builder::new()
+        .name("axiusflow-rithmic-provider".to_string())
         .spawn(move || {
-            crate::rithmic_realtime::run_catalog(
+            crate::rithmic_realtime::run(
                 &catalog_controls,
                 &catalog_events,
+                &realtime_controls,
+                &realtime_events,
                 reconnect_delay,
             );
         })
         .map_err(|error| error.to_string())?;
-    let realtime = thread::Builder::new()
-        .name("axiusflow-rithmic-realtime".to_string())
-        .spawn(move || crate::rithmic_realtime::run(&realtime_controls, &realtime_events))
-        .map_err(|error| error.to_string())?;
-    Ok(vec![catalog, realtime])
+    Ok(vec![provider])
 }
 
 fn run_history_worker(
@@ -2350,7 +2348,6 @@ impl Coordinator<'_> {
                 .cloned()
         {
             self.retained_live.insert(series.clone());
-            let _ = self.ensure_realtime(&series);
             let _ = self.enqueue_history(&series, provider_generation);
         }
         Ok(())
@@ -2447,7 +2444,11 @@ impl Coordinator<'_> {
                     return;
                 }
             };
-        let realtime = self.ensure_realtime(series);
+        let realtime = if series.provider_id == "rithmic" {
+            Ok(())
+        } else {
+            self.ensure_realtime(series)
+        };
         self.prune_unused_live_series();
         self.stop_realtime_if_idle();
         if let Err(error) = realtime {
@@ -2476,6 +2477,13 @@ impl Coordinator<'_> {
     ) -> Result<(), String> {
         let needs_covering_repair = publication.snapshot.provider_generation != provider_generation
             || self.prewarmed.remove(series);
+        if series.provider_id == "rithmic"
+            && !needs_covering_repair
+            && let Err(error) =
+                self.start_rithmic_realtime_from_snapshot(series, &publication.snapshot)
+        {
+            return Err(error);
+        }
         if series.provider_id == "coinbase"
             && !self.live.get_mut(series).is_none_or(|live| {
                 if live.history_ready {
@@ -2998,6 +3006,11 @@ impl Coordinator<'_> {
                 PersistenceState::Durable,
                 Some("Retained local history is usable; provider repair is unavailable"),
             );
+            if series.provider_id == "rithmic"
+                && let Some(snapshot) = self.engine.series_snapshot(series)
+            {
+                let _ = self.start_rithmic_realtime_from_snapshot(series, &snapshot);
+            }
         } else if let Some(waiters) = self.pending.remove(series) {
             fail_waiters(
                 &mut self.events,
@@ -3088,7 +3101,7 @@ impl Coordinator<'_> {
             false,
             "Local history persistence is unavailable",
         );
-        if !self.seed_rithmic_history(
+        if let Err(error) = self.finish_rithmic_history_handoff(
             series,
             generation,
             price_scale,
@@ -3096,6 +3109,9 @@ impl Coordinator<'_> {
             handoff_boundary_unix_nanos,
             &bars,
         ) {
+            if let Some(waiters) = self.pending.remove(series) {
+                fail_waiters(&mut self.events, waiters, &error);
+            }
             return;
         }
         if let Some(live) = self.live.get_mut(series) {
@@ -3143,6 +3159,55 @@ impl Coordinator<'_> {
         self.local_loaded.remove(&(series.clone(), generation));
         self.engine.invalidate_series(series);
         Some(snapshot)
+    }
+
+    fn start_rithmic_realtime_from_snapshot(
+        &mut self,
+        series: &BarSeriesKey,
+        snapshot: &axiusflow_market_engine::SeriesSnapshot,
+    ) -> Result<(), String> {
+        self.ensure_realtime(series)?;
+        let handoff_boundary_unix_nanos = snapshot
+            .bars
+            .last()
+            .map(|bar| bar.exchange_timestamp_unix_nanos);
+        if self.seed_rithmic_history(
+            series,
+            snapshot.provider_generation,
+            snapshot.price_scale,
+            snapshot.quantity_scale,
+            handoff_boundary_unix_nanos,
+            &snapshot.bars,
+        ) {
+            Ok(())
+        } else {
+            Err("Rithmic cached history/live handoff failed".to_string())
+        }
+    }
+
+    fn finish_rithmic_history_handoff(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        handoff_boundary_unix_nanos: Option<i64>,
+        bars: &[MarketBar],
+    ) -> Result<(), String> {
+        if series.provider_id != "rithmic" {
+            return Ok(());
+        }
+        self.ensure_realtime(series)?;
+        self.seed_rithmic_history(
+            series,
+            generation,
+            price_scale,
+            quantity_scale,
+            handoff_boundary_unix_nanos,
+            bars,
+        )
+        .then_some(())
+        .ok_or_else(|| "Rithmic history/live handoff failed".to_string())
     }
 
     fn seed_rithmic_history(

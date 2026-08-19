@@ -67,14 +67,16 @@ pub(super) fn fetch(
     )
     .map_err(|_| "Rithmic history transport is unavailable".to_string())?;
     let instrument = provider_instrument(installed)?;
-    let mut bars = collect_rithmic_chart_history(
+    let collected = collect_rithmic_chart_history(
         &mut transport,
         &instrument,
         interval,
         replay.range,
         replay.maximum_bars,
-    )
-    .map_err(|error| error.to_string())?;
+    );
+    let closed = transport.close();
+    let mut bars = collected.map_err(|error| error.to_string())?;
+    closed.map_err(|error| error.to_string())?;
     bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
     if bars.len() > maximum_visible_bars {
         bars.drain(..bars.len() - maximum_visible_bars);
