@@ -11,7 +11,7 @@ axiusflow_engine_protocol = { path = "../engine_protocol" }
 axiusflow_platform_runtime = { path = "../platform_runtime" }
 getrandom.workspace = true
 interprocess.workspace = true
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["alloc"] }
 
 [lints]
 workspace = true

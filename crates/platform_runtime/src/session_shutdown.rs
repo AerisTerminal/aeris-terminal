@@ -24,8 +24,9 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use zbus::{
-    MatchRule, MessageType,
+    MatchRule,
     blocking::{Connection, MessageIterator},
+    message::Type as MessageType,
 };
 
 const EVENT_CAPACITY: usize = 1;
@@ -69,8 +70,8 @@ impl NativeSessionShutdownCancellation {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.inner.signal_handle.close();
         #[cfg(target_os = "linux")]
-        if let Ok(connection) = self.inner.logind_connection.lock()
-            && let Some(connection) = connection.as_ref()
+        if let Ok(mut connection) = self.inner.logind_connection.lock()
+            && let Some(connection) = connection.take()
         {
             let _ = connection.close();
         }
@@ -144,7 +145,7 @@ impl Drop for NativeSessionShutdownMonitor {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn unix_monitor() -> Result<NativeSessionShutdownMonitor, SessionShutdownError> {
-    let mut signals = Signals::new([SIGTERM, SIGINT, SIGHUP])
+    let signals = Signals::new([SIGTERM, SIGINT, SIGHUP])
         .map_err(|_| SessionShutdownError::NativeRegistration)?;
     let signal_handle = signals.handle();
     let (events, receiver) = sync_channel(EVENT_CAPACITY);
@@ -216,7 +217,7 @@ fn spawn_logind_worker(
     let cancellation = Arc::clone(cancellation);
     thread::Builder::new()
         .name("axiusflow-session-logind".to_string())
-        .spawn(move || run_logind(messages, events, &cancellation))
+        .spawn(move || run_logind(messages, &events, &cancellation))
         .map(Some)
         .map_err(|_| SessionShutdownError::ThreadStart)
 }
@@ -224,7 +225,7 @@ fn spawn_logind_worker(
 #[cfg(target_os = "linux")]
 fn run_logind(
     mut messages: MessageIterator,
-    events: SyncSender<()>,
+    events: &SyncSender<()>,
     cancellation: &CancellationInner,
 ) {
     while !cancellation.cancelled.load(Ordering::Acquire) {

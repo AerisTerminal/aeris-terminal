@@ -713,16 +713,19 @@ mod tests {
         GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*,
     };
 
+    #[cfg(target_os = "windows")]
     use axiusflow_engine_protocol::{
-        EngineLifetimeMode, EngineReady, Envelope, EnvelopeDecoder, InstallProviderInstrument,
-        OrderBookState, PROTOCOL_VERSION, ResourceMode, SearchProviderInstruments,
-        SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceState, encode_envelope,
-        envelope,
+        EngineLifetimeMode, InstallProviderInstrument, OrderBookState, ResourceMode,
+        SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
+        WorkspaceState,
+    };
+    use axiusflow_engine_protocol::{
+        EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, encode_envelope, envelope,
     };
 
-    use super::{
-        ENGINE_SOCKET_NAME, EngineClient, connect_or_start_engine_named, native_installation_token,
-    };
+    use super::{ENGINE_SOCKET_NAME, connect_or_start_engine_named};
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    use super::{EngineClient, native_installation_token};
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
@@ -856,10 +859,71 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn assert_native_autostart_enabled(executable: &Path) {
+        let query = std::process::Command::new("reg.exe")
+            .args([
+                "QUERY",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Axiusflow Engine",
+            ])
+            .output()
+            .expect("query Windows autostart value");
+        assert!(query.status.success());
+        let expected = format!("\"{}\"", executable.display());
+        assert!(String::from_utf8_lossy(&query.stdout).contains(&expected));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_native_autostart_enabled(executable: &Path) {
+        let config_root = std::path::PathBuf::from(
+            std::env::var_os("XDG_CONFIG_HOME").expect("XDG_CONFIG_HOME is required"),
+        );
+        let entry = config_root.join("autostart/axiusflow-engine.desktop");
+        let escaped = executable
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let expected = format!(
+            "[Desktop Entry]\nType=Application\nName=Axiusflow Engine\nExec=\"{escaped}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(entry).expect("read Linux autostart entry"),
+            expected
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn assert_native_autostart_disabled() {
+        let query = std::process::Command::new("reg.exe")
+            .args([
+                "QUERY",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Axiusflow Engine",
+            ])
+            .output()
+            .expect("query removed Windows autostart value");
+        assert!(!query.status.success());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_native_autostart_disabled() {
+        let config_root = std::path::PathBuf::from(
+            std::env::var_os("XDG_CONFIG_HOME").expect("XDG_CONFIG_HOME is required"),
+        );
+        assert!(
+            !config_root
+                .join("autostart/axiusflow-engine.desktop")
+                .exists()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
-    #[ignore = "requires the optimized resident engine and mutates then restores HKCU autostart"]
+    #[ignore = "requires the optimized resident engine and mutates then restores native per-user autostart"]
     fn native_release_status_and_autostart_round_trip() {
-        use std::{path::PathBuf, process::Command};
+        use std::path::PathBuf;
 
         use axiusflow_engine_protocol::{EngineLifetimeMode, EngineShutdownState, ResourceMode};
 
@@ -925,18 +989,7 @@ mod tests {
         assert_eq!(status.shutdown_state, EngineShutdownState::Running as i32);
         assert!(status.autostart_enabled);
 
-        let query = Command::new("reg.exe")
-            .args([
-                "QUERY",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "Axiusflow Engine",
-            ])
-            .output()
-            .expect("query Windows autostart value");
-        assert!(query.status.success());
-        let expected = format!("\"{}\"", executable.display());
-        assert!(String::from_utf8_lossy(&query.stdout).contains(&expected));
+        assert_native_autostart_enabled(&executable);
 
         let disabled = client
             .set_engine_lifecycle(
@@ -947,16 +1000,7 @@ mod tests {
             )
             .expect("disable native autostart");
         assert!(!disabled.autostart_enabled);
-        let query = Command::new("reg.exe")
-            .args([
-                "QUERY",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "Axiusflow Engine",
-            ])
-            .output()
-            .expect("query removed Windows autostart value");
-        assert!(!query.status.success());
+        assert_native_autostart_disabled();
         println!(
             "native_engine_status pid={} clients={} retained_series={} retained_bars={} bytes={}",
             status.process_id,

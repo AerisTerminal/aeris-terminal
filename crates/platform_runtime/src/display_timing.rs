@@ -695,8 +695,10 @@ fn probe_wayland() -> Result<DisplayEnvironment, DisplayTimingError> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     use super::DisplayTimingError;
+    #[cfg(target_os = "linux")]
+    use super::MONOTONIC_CLOCK_ID;
     use super::{DisplayEnvironment, DisplayOutput, NativeDisplayProbe, PresentationClock};
     use crate::CapabilityAvailability;
 
@@ -797,10 +799,13 @@ mod tests {
                     }
                 }
                 if let Some(clock) = environment.presentation_clock() {
-                    assert!(
-                        clock.is_monotonic(),
-                        "this host's compositor announces a non-monotonic presentation clock"
-                    );
+                    match clock {
+                        PresentationClock::Monotonic => assert!(clock.is_monotonic()),
+                        PresentationClock::Unrecognized(clock_id) => {
+                            assert_ne!(clock_id, MONOTONIC_CLOCK_ID);
+                            assert!(!clock.is_monotonic());
+                        }
+                    }
                 }
             }
             Err(DisplayTimingError::NoSession | DisplayTimingError::Transport) => {}
