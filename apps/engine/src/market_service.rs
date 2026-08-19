@@ -2164,10 +2164,71 @@ impl Coordinator<'_> {
             maximum_decoded_bars,
             &protected,
         );
-        if !self.resource_policy.retain_hidden_depth
-            && self.engine.visible_consumer_count() < metrics.active_consumers
-        {
-            self.rithmic_order_books.clear();
+        self.reconcile_rithmic_order_books();
+    }
+
+    fn reconcile_rithmic_order_books(&mut self) {
+        let mut required_identities = BTreeSet::new();
+        if self.resource_mode != ResourceMode::OfflineSuspended {
+            for consumer_id in self.events.keys() {
+                let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                    continue;
+                };
+                let Some(series) = demand.series.as_ref() else {
+                    continue;
+                };
+                if series.provider_id == "rithmic"
+                    && demand.streams.is_some_and(|streams| {
+                        streams.contains(MarketStream::Depth)
+                            && (demand.visible || self.resource_policy.retain_hidden_depth)
+                    })
+                {
+                    required_identities
+                        .insert((series.instrument_id.clone(), series.entitlement_id.clone()));
+                }
+            }
+            if self.resource_mode == ResourceMode::MarketsLive {
+                required_identities.extend(
+                    self.retained_live
+                        .iter()
+                        .filter(|series| {
+                            series.provider_id == "rithmic"
+                                && chart_stream_requirements(series).contains(MarketStream::Depth)
+                        })
+                        .map(|series| {
+                            (series.instrument_id.clone(), series.entitlement_id.clone())
+                        }),
+                );
+            }
+        }
+        let required = self
+            .catalog
+            .values()
+            .filter(|instrument| {
+                instrument.provider == "rithmic"
+                    && required_identities.contains(&(
+                        instrument.instrument_id.clone(),
+                        instrument.entitlement_id.clone(),
+                    ))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.rithmic_order_books.retain(|instrument_id, book| {
+            required.iter().any(|instrument| {
+                instrument.instrument_id == *instrument_id && instrument == &book.instrument
+            })
+        });
+        for instrument in required {
+            let replace = self
+                .rithmic_order_books
+                .get(&instrument.instrument_id)
+                .is_none_or(|book| book.instrument != instrument);
+            if replace {
+                self.rithmic_order_books.insert(
+                    instrument.instrument_id.clone(),
+                    RithmicOrderBook::new(instrument),
+                );
+            }
         }
     }
 
@@ -2328,15 +2389,9 @@ impl Coordinator<'_> {
         }
         self.catalog_selections
             .insert(provider.clone(), instrument.selection_generation);
-        if provider == "rithmic" {
-            self.rithmic_order_books.clear();
-            self.rithmic_order_books.insert(
-                instrument.instrument_id.clone(),
-                RithmicOrderBook::new(instrument.clone()),
-            );
-        }
         let instrument_id = instrument.instrument_id.clone();
         self.catalog.insert(key, instrument.clone());
+        self.reconcile_rithmic_order_books();
         self.activate_retained_instrument(instrument, provider_generation);
         if self.resource_mode == ResourceMode::MarketsLive
             && let Some(series) = self
@@ -2414,6 +2469,7 @@ impl Coordinator<'_> {
             .engine
             .set_series_demand_with_streams(waiter.consumer_id, waiter.generation, series, streams)
             .map_err(|error| error.to_string())?;
+        self.reconcile_rithmic_order_books();
         self.remove_waiter(waiter.consumer_id);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             events.snapshot = None;
@@ -5175,6 +5231,53 @@ mod tests {
         }
     }
 
+    fn rithmic_depth_snapshot(
+        series: &BarSeriesKey,
+        source_sequence: u64,
+        bid_quantity: i64,
+    ) -> DepthSnapshot {
+        let timestamp = i64::try_from(source_sequence).unwrap_or(i64::MAX);
+        DepthSnapshot {
+            metadata: EventMetadata {
+                provider_id: "rithmic".to_string(),
+                instrument_id: series.instrument_id.clone(),
+                entitlement_id: series.entitlement_id.clone(),
+                source_sequence,
+                session_generation: 7,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(timestamp),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: timestamp,
+                },
+            },
+            bids: vec![DepthLevel {
+                price: 20_000,
+                quantity: bid_quantity,
+                order_count: Some(3),
+            }],
+            asks: vec![DepthLevel {
+                price: 20_025,
+                quantity: 4,
+                order_count: Some(2),
+            }],
+        }
+    }
+
+    fn pop_order_book(
+        coordinator: &mut Coordinator<'_>,
+        consumer_id: ConsumerId,
+    ) -> IpcOrderBookSnapshot {
+        let envelope::Payload::OrderBookSnapshot(snapshot) = coordinator
+            .events
+            .get_mut(&consumer_id)
+            .and_then(ConsumerEvents::pop)
+            .expect("order book publishes")
+        else {
+            panic!("expected order-book publication");
+        };
+        snapshot
+    }
+
     #[test]
     fn pending_covering_snapshot_is_never_replaced_by_an_out_of_order_tail() {
         let series = btc();
@@ -5395,12 +5498,13 @@ mod tests {
             )
             .expect("consumer registers");
         engine
-            .set_series_demand(
+            .set_series_demand_with_streams(
                 consumer_id,
                 GenerationId(id(3).expect("generation")),
                 &series,
+                chart_stream_requirements(&series),
             )
-            .expect("demand installs");
+            .expect("depth demand installs");
         let (history_tx, _history_rx) = mpsc::sync_channel(1);
         let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
         let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
@@ -5461,6 +5565,113 @@ mod tests {
         assert_eq!(snapshot.state, IpcOrderBookState::Ready as i32);
         assert_eq!(snapshot.bids[0].quantity, 7);
         assert_eq!(snapshot.asks[0].price, 20_025);
+    }
+
+    #[test]
+    fn unrelated_hidden_consumer_cannot_evict_visible_rithmic_depth() {
+        let depth_consumer = ConsumerId(id(9).expect("depth consumer"));
+        let unrelated_consumer = ConsumerId(id(10).expect("unrelated consumer"));
+        let client_id = ClientId(id(7).expect("client"));
+        let series = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        let mut engine = configured_engine().expect("engine");
+        for consumer_id in [depth_consumer, unrelated_consumer] {
+            engine
+                .register_consumer(
+                    ConsumerIdentity {
+                        client_id,
+                        workspace_id: WorkspaceId(id(1).expect("workspace")),
+                        consumer_id,
+                    },
+                    true,
+                )
+                .expect("consumer registers");
+        }
+        engine
+            .set_series_demand_with_streams(
+                depth_consumer,
+                GenerationId(id(3).expect("generation")),
+                &series,
+                chart_stream_requirements(&series),
+            )
+            .expect("depth demand installs");
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &stop,
+            depth_consumer,
+            &series,
+        );
+        coordinator
+            .events
+            .insert(unrelated_consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&provider_instrument(7, 2))
+            .expect("instrument installs");
+        coordinator.rithmic_depth(7, &rithmic_depth_snapshot(&series, 11, 7));
+        let first = pop_order_book(&mut coordinator, depth_consumer);
+        assert_eq!(first.source_watermark, 11);
+        assert_eq!(first.bids[0].quantity, 7);
+
+        coordinator
+            .engine
+            .set_visibility(unrelated_consumer, false)
+            .expect("unrelated consumer hides");
+        coordinator.refresh_resource_policy();
+        assert!(
+            coordinator
+                .rithmic_order_books
+                .contains_key(&series.instrument_id)
+        );
+        coordinator.rithmic_depth(7, &rithmic_depth_snapshot(&series, 12, 9));
+        let advanced = pop_order_book(&mut coordinator, depth_consumer);
+        assert_eq!(advanced.source_watermark, 12);
+        assert_eq!(advanced.bids[0].quantity, 9);
+
+        coordinator
+            .engine
+            .set_visibility(depth_consumer, false)
+            .expect("final visible depth reference hides");
+        coordinator.refresh_resource_policy();
+        assert!(coordinator.rithmic_order_books.is_empty());
+
+        coordinator.apply_resource_mode(ResourceMode::MarketsLive);
+        assert!(
+            coordinator
+                .rithmic_order_books
+                .contains_key(&series.instrument_id)
+        );
+        coordinator.apply_resource_mode(ResourceMode::Warm);
+        assert!(coordinator.rithmic_order_books.is_empty());
+
+        coordinator
+            .engine
+            .set_visibility(depth_consumer, true)
+            .expect("depth demand returns");
+        coordinator.refresh_resource_policy();
+        assert!(matches!(
+            coordinator
+                .rithmic_order_books
+                .get(&series.instrument_id)
+                .map(|book| book.book.state()),
+            Some(CanonicalOrderBookState::Recovering(
+                OrderBookRecoveryReason::AwaitingSnapshot
+            ))
+        ));
+        coordinator.rithmic_depth(7, &rithmic_depth_snapshot(&series, 20, 12));
+        let recovered = pop_order_book(&mut coordinator, depth_consumer);
+        assert_eq!(recovered.source_watermark, 20);
+        assert_eq!(recovered.state, IpcOrderBookState::Ready as i32);
+
+        assert!(coordinator.engine.remove_consumer(depth_consumer));
+        coordinator.events.remove(&depth_consumer);
+        coordinator.refresh_resource_policy();
+        assert!(coordinator.rithmic_order_books.is_empty());
     }
 
     #[test]

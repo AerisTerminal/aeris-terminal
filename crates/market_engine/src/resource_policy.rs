@@ -79,10 +79,7 @@ pub fn decide(input: ResourcePolicyInput) -> ResourcePolicyDecision {
     ResourcePolicyDecision {
         maximum_decoded_bars,
         maximum_derived_series,
-        retain_hidden_depth: matches!(
-            input.mode,
-            EngineResourceMode::Interactive | EngineResourceMode::MarketsLive
-        ) && input.visible_consumer_count == input.consumer_count,
+        retain_hidden_depth: input.mode == EngineResourceMode::MarketsLive,
         history_prefetch_bars,
         warm_retention_seconds: match input.mode {
             EngineResourceMode::Interactive => 15 * 60,
@@ -127,12 +124,12 @@ mod tests {
     }
 
     #[test]
-    fn markets_live_is_bounded_and_keeps_depth_only_when_every_consumer_is_visible() {
+    fn markets_live_is_bounded_and_explicitly_retains_hidden_depth() {
         let live = decide(ResourcePolicyInput {
             mode: EngineResourceMode::MarketsLive,
             available_memory_bytes: 16 * 1024 * 1024 * 1024,
             consumer_count: 2,
-            visible_consumer_count: 2,
+            visible_consumer_count: 1,
             provider_series_limit: 64,
             hot_set_priority_count: 10,
         });

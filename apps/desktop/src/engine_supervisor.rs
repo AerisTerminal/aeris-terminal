@@ -1,7 +1,7 @@
 //! Desktop-owned recovery for authenticated resident-engine IPC sessions.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     thread,
     time::{Duration, Instant},
@@ -41,6 +41,7 @@ pub(super) struct EngineSupervisor {
     client: EngineClient,
     consumers: BTreeMap<u64, ConsumerRestore>,
     instruments: BTreeMap<(String, String), InstallProviderInstrument>,
+    pending_instruments: BTreeSet<(String, String)>,
     #[cfg(test)]
     reconnect_fixture: Option<Box<dyn FnMut() -> Result<EngineClient, String>>>,
 }
@@ -56,6 +57,7 @@ impl EngineSupervisor {
             client,
             consumers: BTreeMap::new(),
             instruments: BTreeMap::new(),
+            pending_instruments: BTreeSet::new(),
             #[cfg(test)]
             reconnect_fixture: None,
         })
@@ -84,13 +86,7 @@ impl EngineSupervisor {
     ) -> Result<(), String> {
         self.client
             .install_provider_instrument(instrument.clone())?;
-        self.instruments.insert(
-            (
-                instrument.provider.clone(),
-                instrument.instrument_id.clone(),
-            ),
-            instrument,
-        );
+        self.record_provider_instrument(instrument);
         Ok(())
     }
 
@@ -102,7 +98,21 @@ impl EngineSupervisor {
     ) -> Result<(), String> {
         self.client
             .set_series_demand(consumer_id, generation, series.clone())?;
+        let previous_provider = self
+            .consumers
+            .get(&consumer_id)
+            .and_then(|consumer| consumer.demand.as_ref())
+            .map(|(_, current)| current.provider.clone());
+        let provider = series.provider.clone();
+        self.pending_instruments
+            .remove(&(provider.clone(), series.instrument_id.clone()));
         self.consumer_mut(consumer_id)?.demand = Some((generation, series));
+        if let Some(previous_provider) = previous_provider
+            && previous_provider != provider
+        {
+            self.prune_provider_instruments(&previous_provider);
+        }
+        self.prune_provider_instruments(&provider);
         Ok(())
     }
 
@@ -175,6 +185,7 @@ impl EngineSupervisor {
 
     pub fn remove_market_consumer(&mut self, consumer_id: u64) -> Result<(), String> {
         self.consumers.remove(&consumer_id);
+        self.prune_provider_instruments_for_current_demands();
         self.client.remove_market_consumer(consumer_id)
     }
 
@@ -184,6 +195,8 @@ impl EngineSupervisor {
 
     pub fn detach_client(&mut self) -> Result<(), String> {
         self.consumers.clear();
+        self.instruments.clear();
+        self.pending_instruments.clear();
         self.client.detach_client(self.client_id)
     }
 
@@ -232,6 +245,139 @@ impl EngineSupervisor {
         }
     }
 
+    fn record_provider_instrument(&mut self, instrument: InstallProviderInstrument) {
+        let provider = instrument.provider.clone();
+        let current_session = self
+            .instruments
+            .values()
+            .filter(|installed| installed.provider == provider)
+            .map(|installed| installed.session_generation)
+            .max();
+        let newer_session =
+            current_session.is_none_or(|session| instrument.session_generation > session);
+        if newer_session {
+            self.instruments
+                .retain(|_, installed| installed.provider != provider);
+            self.pending_instruments
+                .retain(|(installed_provider, _)| installed_provider != &provider);
+        }
+        if provider == "rithmic" {
+            self.instruments
+                .retain(|_, installed| installed.provider != provider);
+            self.pending_instruments
+                .retain(|(installed_provider, _)| installed_provider != &provider);
+            for consumer in self.consumers.values_mut() {
+                let obsolete = consumer.demand.as_ref().is_some_and(|(_, series)| {
+                    series.provider == provider
+                        && (series.instrument_id != instrument.instrument_id
+                            || series.entitlement_id != instrument.entitlement_id)
+                });
+                if obsolete {
+                    consumer.demand = None;
+                    consumer.viewport = None;
+                }
+                if consumer
+                    .pending_selection
+                    .as_ref()
+                    .is_some_and(|selection| {
+                        selection.provider == provider
+                            && (newer_session
+                                || selection.selection_generation
+                                    <= instrument.selection_generation)
+                    })
+                {
+                    consumer.pending_selection = None;
+                }
+            }
+        }
+        let key = (provider.clone(), instrument.instrument_id.clone());
+        let demanded = self.consumers.values().any(|consumer| {
+            consumer.demand.as_ref().is_some_and(|(_, series)| {
+                series.provider == instrument.provider
+                    && series.instrument_id == instrument.instrument_id
+                    && series.entitlement_id == instrument.entitlement_id
+            })
+        });
+        self.instruments.insert(key.clone(), instrument);
+        if demanded {
+            self.pending_instruments.remove(&key);
+        } else {
+            self.pending_instruments.insert(key);
+        }
+        self.prune_provider_instruments(&provider);
+    }
+
+    fn prune_provider_instruments_for_current_demands(&mut self) {
+        let providers = self
+            .instruments
+            .values()
+            .map(|instrument| instrument.provider.clone())
+            .collect::<Vec<_>>();
+        for provider in providers {
+            self.prune_provider_instruments(&provider);
+        }
+    }
+
+    fn prune_provider_instruments(&mut self, provider: &str) {
+        let pending = self.pending_instruments.clone();
+        let demanded = self
+            .consumers
+            .values()
+            .filter_map(|consumer| consumer.demand.as_ref())
+            .map(|(_, series)| {
+                (
+                    series.provider.clone(),
+                    series.instrument_id.clone(),
+                    series.entitlement_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let current_session = self
+            .instruments
+            .values()
+            .filter(|instrument| instrument.provider == provider)
+            .map(|instrument| instrument.session_generation)
+            .max();
+        let latest_selection = current_session.and_then(|session| {
+            self.instruments
+                .values()
+                .filter(|instrument| {
+                    instrument.provider == provider && instrument.session_generation == session
+                })
+                .map(|instrument| instrument.selection_generation)
+                .max()
+        });
+        self.instruments.retain(|_, instrument| {
+            if instrument.provider != provider {
+                return true;
+            }
+            if Some(instrument.session_generation) != current_session {
+                return false;
+            }
+            if provider == "rithmic" {
+                return Some(instrument.selection_generation) == latest_selection
+                    && (demanded.contains(&(
+                        instrument.provider.clone(),
+                        instrument.instrument_id.clone(),
+                        instrument.entitlement_id.clone(),
+                    )) || pending.contains(&(
+                        instrument.provider.clone(),
+                        instrument.instrument_id.clone(),
+                    )));
+            }
+            demanded.contains(&(
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+                instrument.entitlement_id.clone(),
+            )) || pending.contains(&(
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ))
+        });
+        self.pending_instruments
+            .retain(|key| self.instruments.contains_key(key));
+    }
+
     fn reconnect_and_restore(&mut self) -> Result<(), String> {
         let deadline = Instant::now()
             .checked_add(RESTORE_DEADLINE)
@@ -266,8 +412,23 @@ impl EngineSupervisor {
         for (consumer_id, consumer) in &self.consumers {
             client.register_consumer(self.client_id, consumer.workspace_id, *consumer_id)?;
         }
-        for instrument in self.instruments.values() {
-            client.install_provider_instrument(instrument.clone())?;
+        let mut instruments = self.instruments.values().cloned().collect::<Vec<_>>();
+        instruments.sort_by(|left, right| {
+            (
+                left.provider.as_str(),
+                left.session_generation,
+                left.selection_generation,
+                left.instrument_id.as_str(),
+            )
+                .cmp(&(
+                    right.provider.as_str(),
+                    right.session_generation,
+                    right.selection_generation,
+                    right.instrument_id.as_str(),
+                ))
+        });
+        for instrument in instruments {
+            client.install_provider_instrument(instrument)?;
         }
         for (consumer_id, consumer) in &self.consumers {
             if let Some(search) = &consumer.pending_search {
@@ -291,12 +452,12 @@ impl EngineSupervisor {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{BTreeMap, VecDeque},
+        collections::{BTreeMap, BTreeSet, VecDeque},
         io::{Read, Write},
         path::PathBuf,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
         thread,
     };
@@ -467,6 +628,37 @@ mod tests {
         }
     }
 
+    fn provider_instrument(
+        provider: &str,
+        instrument_id: &str,
+        session_generation: u64,
+        selection_generation: u64,
+    ) -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: provider.to_string(),
+            session_generation,
+            selection_generation,
+            instrument_id: instrument_id.to_string(),
+            provider_symbol: instrument_id.to_string(),
+            display_symbol: instrument_id.to_string(),
+            venue_id: provider.to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+            entitlement_id: format!("{provider}:{instrument_id}"),
+        }
+    }
+
+    fn provider_series(instrument: &InstallProviderInstrument, cadence_value: u32) -> SeriesKey {
+        SeriesKey {
+            provider: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            cadence_value,
+            definition_revision: 1,
+            entitlement_id: instrument.entitlement_id.clone(),
+            cadence: SeriesCadence::FixedSeconds as i32,
+        }
+    }
+
     fn configure_restore_state(supervisor: &mut EngineSupervisor, requested: &SeriesKey) {
         supervisor
             .register_consumer(101, 11)
@@ -510,6 +702,125 @@ mod tests {
             .expect("hide second consumer");
     }
 
+    fn configure_generation_ordered_restore(supervisor: &mut EngineSupervisor) {
+        let coinbase_old_z = provider_instrument("coinbase", "z-contract", 4, 1);
+        let coinbase_old_a = provider_instrument("coinbase", "a-contract", 4, 2);
+        let coinbase_current_z = provider_instrument("coinbase", "z-contract", 5, 1);
+        let coinbase_current_a = provider_instrument("coinbase", "a-contract", 5, 2);
+        let rithmic_old_z = provider_instrument("rithmic", "z-obsolete", 7, 1);
+        let rithmic_old_a = provider_instrument("rithmic", "a-obsolete", 7, 2);
+        let rithmic_new_z = provider_instrument("rithmic", "z-replaced-session", 8, 1);
+        let rithmic_current = provider_instrument("rithmic", "a-current", 8, 2);
+        for consumer_id in 11..=14 {
+            supervisor
+                .register_consumer(100 + consumer_id, consumer_id)
+                .expect("register restore consumer");
+        }
+        supervisor
+            .install_provider_instrument(coinbase_old_z)
+            .expect("install first concurrent instrument");
+        supervisor
+            .set_series_demand(11, 1, provider_series(&coinbase_current_z, 60))
+            .expect("set first concurrent demand");
+        supervisor
+            .install_provider_instrument(coinbase_old_a)
+            .expect("install second concurrent instrument");
+        supervisor
+            .set_series_demand(12, 1, provider_series(&coinbase_current_a, 300))
+            .expect("set second concurrent demand");
+        supervisor
+            .install_provider_instrument(coinbase_current_z)
+            .expect("advance concurrent provider session");
+        supervisor
+            .install_provider_instrument(coinbase_current_a)
+            .expect("restore second current-session instrument");
+        for instrument in [rithmic_old_z, rithmic_old_a] {
+            supervisor
+                .install_provider_instrument(instrument)
+                .expect("advance Rithmic selection state");
+        }
+        supervisor
+            .select_provider_instrument(SelectProviderInstrument {
+                consumer_id: 14,
+                selection_generation: 3,
+                search_generation: 2,
+                provider: "rithmic".to_string(),
+                symbol: "OBSOLETE".to_string(),
+                exchange: "CME".to_string(),
+                entitlement_id: "rithmic:obsolete".to_string(),
+            })
+            .expect("queue old-session selection");
+        supervisor
+            .install_provider_instrument(rithmic_new_z)
+            .expect("advance Rithmic provider session");
+        supervisor
+            .install_provider_instrument(rithmic_current.clone())
+            .expect("install authoritative Rithmic selection");
+        supervisor
+            .set_series_demand(13, 4, provider_series(&rithmic_current, 60))
+            .expect("set current Rithmic chart demand");
+        supervisor
+            .set_series_demand(14, 9, provider_series(&rithmic_current, 300))
+            .expect("set concurrent current Rithmic demand");
+        assert_eq!(supervisor.instruments.len(), 3);
+    }
+
+    fn assert_generation_ordered_restore(commands: &[envelope::Payload]) {
+        let installed = commands
+            .iter()
+            .filter_map(|payload| match payload {
+                envelope::Payload::InstallProviderInstrument(instrument) => Some((
+                    instrument.provider.as_str(),
+                    instrument.session_generation,
+                    instrument.selection_generation,
+                    instrument.instrument_id.as_str(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            installed,
+            vec![
+                ("coinbase", 5, 1, "z-contract"),
+                ("coinbase", 5, 2, "a-contract"),
+                ("rithmic", 8, 2, "a-current"),
+            ]
+        );
+        let demands = commands
+            .iter()
+            .filter_map(|payload| match payload {
+                envelope::Payload::SeriesDemand(demand) => demand.series.as_ref().map(|series| {
+                    (
+                        demand.consumer_id,
+                        demand.generation,
+                        series.provider.as_str(),
+                        series.instrument_id.as_str(),
+                    )
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            demands,
+            vec![
+                (11, 1, "coinbase", "z-contract"),
+                (12, 1, "coinbase", "a-contract"),
+                (13, 4, "rithmic", "a-current"),
+                (14, 9, "rithmic", "a-current"),
+            ]
+        );
+        assert!(!commands.iter().any(|payload| matches!(
+            payload,
+            envelope::Payload::InstallProviderInstrument(instrument)
+                if instrument.provider == "rithmic" && instrument.instrument_id != "a-current"
+        )));
+        assert!(
+            !commands
+                .iter()
+                .any(|payload| matches!(payload, envelope::Payload::SelectProviderInstrument(_)))
+        );
+    }
+
     #[test]
     fn restart_restores_every_consumer_and_resumes_a_covering_snapshot() {
         let token = [23_u8; 32];
@@ -524,6 +835,7 @@ mod tests {
             client: first,
             consumers: BTreeMap::default(),
             instruments: BTreeMap::default(),
+            pending_instruments: BTreeSet::default(),
             reconnect_fixture: Some(Box::new(move || {
                 EngineClient::connect(&replacement_name, &token)
             })),
@@ -594,5 +906,48 @@ mod tests {
                 .iter()
                 .any(|payload| matches!(payload, envelope::Payload::InstallProviderInstrument(_)))
         );
+    }
+
+    #[test]
+    fn reconnect_restores_only_current_generation_ordered_provider_state() {
+        let token = [29_u8; 32];
+        let requested = series();
+        let (first_name, _, first_server) = start_fixture(1, true, requested.clone());
+        let (second_name, restored, second_server) = start_fixture(2, false, requested.clone());
+        let first = EngineClient::connect(&first_name, &token).expect("connect first engine");
+        let reconnects = Arc::new(AtomicUsize::new(0));
+        let reconnect_count = Arc::clone(&reconnects);
+        let replacement_name = second_name.clone();
+        let mut supervisor = EngineSupervisor {
+            executable: PathBuf::from("unused-test-engine"),
+            client_id: 9,
+            client: first,
+            consumers: BTreeMap::default(),
+            instruments: BTreeMap::default(),
+            pending_instruments: BTreeSet::default(),
+            reconnect_fixture: Some(Box::new(move || {
+                reconnect_count.fetch_add(1, Ordering::Relaxed);
+                EngineClient::connect(&replacement_name, &token)
+            })),
+        };
+        supervisor
+            .client
+            .attach_client(9)
+            .expect("attach first client");
+        configure_generation_ordered_restore(&mut supervisor);
+
+        let recovered = supervisor.poll_market_event(11).expect("recover engine");
+        assert!(recovered.reconnected);
+        assert_eq!(reconnects.load(Ordering::Relaxed), 1);
+        let _ = supervisor
+            .poll_market_event(11)
+            .expect("poll restored current demand");
+        first_server.join().expect("join first fixture");
+        second_server.join().expect("join second fixture");
+
+        let commands = restored
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_generation_ordered_restore(&commands);
     }
 }

@@ -11,7 +11,7 @@ Partial implementation remains unchecked. Existing desktop-owned behavior does n
 
 **Verified progress: 154 of 180 tasks complete.**
 
-The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, reboot and unsupported-platform lifecycle proof, real updater/uninstaller integration, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
+The 180-section ledger was recalculated on 2026-08-19 as 154 checked and 26 unchecked sections. The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, reboot and unsupported-platform lifecycle proof, real updater/uninstaller integration, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -2162,7 +2162,7 @@ Do not spread Windows/macOS/Linux service APIs through the product.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): `apps/desktop/src/engine_supervisor.rs` owns authenticated connection/start/recovery without owning market state. On transport loss it reconnects through the real `local_engine_client`, waits only for engine readiness, reattaches the desktop client, restores every consumer, installed provider instrument, pending catalog search/selection, generation-fenced series demand, viewport, and visibility, then resumes polling. A two-engine socket fixture forces failure of the first session and proves the replacement receives the complete restore set and publishes a covering snapshot for the existing consumer.
+Evidence (2026-08-19): `apps/desktop/src/engine_supervisor.rs` owns authenticated connection/start/recovery without owning market state. Its restore cache is bounded by current consumer demand plus just-installed transitional identities. Rithmic retains only the authoritative instrument from the newest provider session and selection, clears obsolete Rithmic demand/selection restore state, and never replays older selections. Providers whose contracts allow concurrent instruments retain every currently demanded canonical identity. Restore sorts instruments by provider, session generation, and selection generation before replaying pending catalog work, generation-fenced demand, viewport, and visibility. `reconnect_restores_only_current_generation_ordered_provider_state` covers sequential selections whose lexical order opposes generation order, a provider-session generation change, two legitimate concurrent instruments, two current Rithmic consumer demands, one replacement connection attempt, and a three-entry bounded restore set after eight installs. The existing two-engine fixture still proves the replacement resumes a covering snapshot.
 
 Desktop uses:
 
@@ -2186,7 +2186,7 @@ It does NOT own engine market state.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): the blocking authenticated client, local framing, native installation-token access, sibling-engine discovery/start, typed workspace/market/lifecycle/status commands, consumer-aware response realignment, and complete shutdown live in `crates/local_engine_client`. Desktop workers and the reconnecting `EngineSupervisor` use it off GPUI; no client code performs provider work. Tests cover protocol/socket fencing, occupied-endpoint handling, incompatible resident replacement, authentication, typed round trips, response alignment, lifecycle/status/shutdown, and full active-consumer restoration after reconnect.
+Evidence (2026-08-19): the blocking authenticated client, local framing, native installation-token access, sibling-engine discovery/start, typed workspace/market/lifecycle/status commands, consumer-aware response realignment, and complete shutdown live in `crates/local_engine_client`. Desktop workers and the reconnecting `EngineSupervisor` use it off GPUI; no client code performs provider work. Tests cover protocol/socket fencing, occupied-endpoint handling, incompatible resident replacement, authentication, typed round trips, response alignment, lifecycle/status/shutdown, and reconnect transport behavior. The client transports restore commands but does not decide which provider instruments are authoritative; bounded generation-safe restore ownership and evidence belong to Section 49.
 
 Use:
 
@@ -2883,7 +2883,7 @@ Persist enough identity/coverage information to rebuild efficiently.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): `market_engine::resource_policy::decide` computes one deterministic bounded decision from lifecycle mode, available memory, total/visible consumers, provider series limits, and hot-set priority. The coordinator applies its decoded-bar, derived-series, hidden-depth, history-prefetch, and warm-retention outputs to real provider requests and eviction. Offline mode admits no retained work; constrained mode reduces prefetch/derived retention without dropping the active-history minimum; markets-live remains bounded. Tests prove provider history receives the policy bound and eviction preserves active subscriptions plus explicitly retained series.
+Evidence (2026-08-19): `market_engine::resource_policy::decide` computes one deterministic bounded decision from lifecycle mode, available memory, total/visible consumers, provider series limits, and hot-set priority. The coordinator applies decoded-bar, derived-series, explicit hidden-depth, history-prefetch, and warm-retention outputs to real provider requests and eviction. Canonical Rithmic book retention is evaluated per matching provider/instrument/entitlement depth demand: visible depth always retains its book, hidden depth is retained only by the explicit Markets Live policy, and unrelated consumer visibility has no effect. `unrelated_hidden_consumer_cannot_evict_visible_rithmic_depth` proves a visible book advances from watermark 11 to 12 while an unrelated consumer hides, the final unretained visible reference evicts the book, Markets Live explicitly restores the hidden reference, returning to Warm releases it, renewed visible demand recreates an AwaitingSnapshot book, and a covering watermark-20 snapshot returns it to Ready before final consumer removal releases it again. Offline mode admits no retained work; constrained mode reduces prefetch/derived retention without dropping the active-history minimum; Markets Live remains bounded.
 
 `market_engine/src/resource_policy.rs`
 
@@ -2902,7 +2902,7 @@ Outputs may include:
 
 - how much history remains decoded,
 - which derived intervals remain cached,
-- whether hidden depth views stay subscribed,
+- which hidden depth demands are explicitly retained,
 - prefetch size,
 - warm retention duration.
 
