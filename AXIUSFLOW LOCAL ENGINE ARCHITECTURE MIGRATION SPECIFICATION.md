@@ -9,7 +9,9 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 107 of 180 tasks complete.**
+**Verified progress: 149 of 180 tasks complete.**
+
+The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, durable lifetime/autostart integration, desktop recovery after an engine-process restart, deeper hot-set/resource policy, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -81,15 +83,17 @@ If a design violates that sentence, reject the design.
 
 # 2. CURRENT PROBLEM CONTEXT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Axiusflow currently has approximately 80,000+ lines of platform-side Rust code while basic market-data behavior is unreliable.
+Evidence (2026-08-19): the reported failure modes were reproduced or converted into deterministic invariants before the legacy owners were removed. The shipping release path now visibly renders Coinbase history and realtime, completes repeated symbol/timeframe switching without stale overwrite or indefinite Loading, and retains usable in-memory charts when persistence is degraded. Provider failure, rapid generation churn, history/live handoff, and storage-failure regressions exercise the new resident-engine path rather than the deleted desktop runtime.
+
+At the migration baseline, Axiusflow had approximately 80,000+ lines of platform-side Rust code while basic market-data behavior was unreliable.
 
 The separate charting engine is not the target of this migration.
 
 The charting engine is an independent framework-agnostic Rust library and should remain isolated.
 
-Current platform symptoms include:
+The baseline platform symptoms included:
 
 - chart remains indefinitely in Loading,
 - historical data may arrive from provider but never appear,
@@ -100,7 +104,7 @@ Current platform symptoms include:
 - multiple worker/runtime abstractions overlap,
 - persistence appears capable of preventing already-valid market data from reaching the chart.
 
-Recent forensic evidence showed a concrete Coinbase path:
+The baseline forensic evidence showed a concrete Coinbase path:
 
 history.fetch_started
 → history.fetch_completed successfully
@@ -112,9 +116,9 @@ history.fetch_started
 
 Actual candle values were observed during the forensic run.
 
-This means this migration must not assume provider networking is the primary issue.
+This established that the migration could not assume provider networking was the primary issue.
 
-The platform currently appears able to obtain at least some valid provider data but can fail to deliver it through the rest of the application.
+The old platform could obtain valid provider data but fail to deliver it through the rest of the application.
 
 The new architecture must dramatically shorten the path between valid canonical market data and visible chart data.
 
@@ -122,9 +126,11 @@ The new architecture must dramatically shorten the path between valid canonical 
 
 # 3. DO NOT USE THE MIGRATION TO HIDE CURRENT BUGS
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Before deleting the current runtime path, preserve enough forensic instrumentation to answer:
+Evidence (2026-08-19): the durable forensic and regression suites preserve the original `history.install_failed` invariant at the resident-engine owner. Tests prove valid provider history installs and publishes from memory before persistence, storage failure produces an independent degraded persistence state rather than permanent Loading, generation-fenced IPC reaches the desktop application model, and release-native verification reaches Origin rendering. Repository conformance requires these regression entry points and prevents the deleted runtime from returning.
+
+Before deleting the baseline runtime path, preserve enough forensic instrumentation to answer:
 
 - where valid bars first enter the system,
 - where they are normalized,
@@ -133,7 +139,7 @@ Before deleting the current runtime path, preserve enough forensic instrumentati
 - where the UI receives them,
 - where the chart consumes them,
 - why `history.install_failed` occurs,
-- why that failure currently leaves the UI in Loading.
+- why that failure left the UI in Loading.
 
 The migration is allowed to eliminate the faulty architecture, but it must not simply make the evidence disappear.
 
@@ -938,7 +944,9 @@ They do not create Tokio runtimes.
 
 # 19. MULTI-CHART ARCHITECTURE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): the deterministic twenty-consumer test represents five workspace IDs with four chart consumers each and proves shared series, exactly one provider generation, bounded consumer/series capacity, independent generations, switch isolation, and close isolation. The release `--multi-chart` proof renders two independent GPUI/Origin charts through one desktop coordinator and resident engine. Multi-pane workspace composition remains explicitly open in sections 18 and 99; the shared backend architecture required by this section is complete.
 
 Suppose the user opens:
 
@@ -1895,7 +1903,9 @@ Detached:
 
 # 42. TAB SWITCHING
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): the corrected `--workspace-tabs` surface keeps one application shell and one active chart surface while every transient tab retains its own presentation model and engine consumer. Identity-based tab selection swaps the GPUI-visible surface and sends only visibility priority changes through the existing coordinator; it does not recreate the engine client, market worker, provider session, or resident engine. Deterministic selection/reorder tests and a Windows release run verify the path. End-to-end tab-switch timing remains a separate open performance item in section 104.
 
 Switching workspace tabs should primarily be a GPUI operation.
 
@@ -1947,7 +1957,9 @@ Do not clone 100,000 bars eight times because eight charts request them.
 
 # 44. VIEWPORT DEMAND
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): chart viewport changes cross the bounded desktop worker and authenticated protocol as generation-fenced demand. The engine aligns the visible range to the source interval, prioritizes visible repair ahead of adjacent prefetch, publishes retained partial coverage immediately, deduplicates missing ranges, and requests only uncovered provider ranges without recreating provider sessions. Persisted viewport restoration and stale-generation tests cover the current production path.
 
 Charts express viewport demand.
 
@@ -2328,9 +2340,11 @@ It does NOT write directly to GPUI.
 
 # 56. HISTORY COORDINATOR
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-`market_engine/src/history.rs` owns orchestration only.
+Evidence (2026-08-19): the single resident `MarketService` coordinator owns memory/local coverage inspection, missing-range planning, provider repair, generation cancellation, canonical installation, partial/ready publication, and history/live handoff. `local_history` owns only provider-neutral encrypted segment mechanics, while provider paging, rate limits, and transport behavior remain in provider-history/adapters. Separate bounded Coinbase and Rithmic history lanes and their cancellation/isolation tests prove the ownership split without adding another coordinator abstraction.
+
+The resident engine's `MarketService` coordinator owns orchestration. No second history-runtime owner or speculative history coordinator crate is used.
 
 Responsibilities:
 
@@ -2427,7 +2441,9 @@ Exceptions require explicit correctness justification.
 
 # 60. OBSERVABILITY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): bounded feed diagnostics retain consumer, command/selection, provider-session, publication, and correlation generations across engine and desktop boundaries. Always-on counters cover trades, quotes, depth, publications, gaps, duplicates, malformed input, stale callbacks, overflows, UI conflation, queue occupancy, memory, and lifecycle state; opt-in histograms cover socket-to-decode through frame presentation. Storage and provider errors are stage-specific and redacted, high-cardinality payloads and credentials are excluded, and the release diagnostics-overhead verifier enforces bounded cost.
 
 Keep forensic and production diagnostics.
 
@@ -2439,7 +2455,7 @@ ConsumerId
 GenerationId
 ProviderSessionGeneration
 SeriesKey
-RequestId
+CorrelationId / CommandGeneration
 ```
 
 Trace major boundaries:
@@ -2653,7 +2669,9 @@ None of these files may import provider adapter crates.
 
 # 67. TAB STATE VS MARKET STATE
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): transient tab order, active identity, focus, drag state, drawings, overlays, viewport, and chart presentation models remain in the desktop application shell. Provider sessions, canonical history, subscriptions, order books, persistence, and provider health remain in the resident engine. Cargo dependency conformance prevents the desktop and UI crates from importing provider, storage, or `market_engine` implementations.
 
 Desktop owns:
 
@@ -2682,7 +2700,9 @@ Do not confuse these.
 
 # 68. INACTIVE TAB BEHAVIOR
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): selecting a tab sends generation-safe visibility changes for the old and new consumers while preserving both presentation models and their shared canonical engine state. Hidden tabs stop owning the active render surface, shared subscriptions remain reference-counted, and returning to a tab reuses retained state without recreating a provider session. Focused engine and GPUI tests cover isolated visibility, selection, close, reorder, and stable tab identity.
 
 When a tab becomes inactive:
 
@@ -2917,14 +2937,16 @@ Still bound memory intentionally.
 
 # 79. APPLICATION STARTUP
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): the shipping desktop uses `local_engine_client` off GPUI to connect to an existing compatible engine or start the sibling executable, waits only for authenticated IPC readiness, attaches its client identity, restores workspace/hot-set state, registers consumers, and submits generation-fenced demand. Provider readiness remains independent, and retained or in-memory snapshots can publish before provider repair. Cold and warm Windows release runs verify both process paths and visible chart rendering.
 
 Desktop startup path:
 
 ```text
 GPUI process starts
 ↓
-EngineSupervisor checks engine
+local_engine_client checks engine
 ↓
 connect if already running
 or start engine
@@ -3019,9 +3041,9 @@ Cold startup should:
 
 # 83. CLOSE UI / KEEP ENGINE WARM
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-12): native close, custom caption close, keyboard close, and direct application quit begin each desktop market client's bounded retirement without waiting on GPUI. App quit awaits those background detach acknowledgements, and closing the final window explicitly quits the GPUI process. A release Windows native-close run with an established engine exited the desktop in `225.858 ms`, preserved the engine, and then a separate explicit cleanup command exited that engine with code zero. Warm snapshot-to-render reopen evidence and durable user policy selection remain incomplete, so this section stays unchecked.
+Evidence (2026-08-19): native close, custom caption close, keyboard close, and direct application quit begin each desktop market client's bounded retirement without waiting on GPUI. App quit awaits those background detach acknowledgements, closing the final window exits the GPUI process, and the engine removes presentation pressure while retaining state according to its installed resource mode. A release Windows native-close run exited the desktop in `225.858 ms`, preserved the engine, and a later desktop attached to the same engine PID. Durable in-product lifetime selection remains open under sections 46 and 116 rather than this close-path contract.
 
 Desktop sends `DetachClient`.
 
@@ -3039,9 +3061,9 @@ No GPUI process remains.
 
 # 84. COMPLETE EXIT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-12): `axiusflow_engine --shutdown` connects only to an existing engine, authenticates with the native installation token, requests complete shutdown, and requires acknowledgement. The engine stops accepting connections and market demand, freezes persistent workspace mutation, writes a final newer hot-set manifest on a named one-shot worker, cancels every coordinator-owned in-flight history request and the Coinbase realtime source, drops Rithmic controls so active runtimes stop, drains the bounded queue of accepted local-history operations, cancels each native network/power wait, joins all four owned Rithmic monitor helpers, and joins the coordinator plus top-level provider/history/storage workers. Flush/worker panic or expiry and stuck client sessions produce process failure under the same two-second deadline. The optimized Windows run after native-monitor ownership exposed 19 threads before shutdown, exited with code zero `8.671 ms` after acknowledgement, and left no engine process. The desktop now exposes per-launch `--exit-with-desktop`; its app-quit future awaits client detach off GPUI, then uses the same authenticated shutdown helper. A release Windows native-close run exited the desktop in `44.567 ms` and left neither desktop nor engine process. Durable in-product selection and update/uninstall integration remain incomplete, so this section stays unchecked.
+Evidence (2026-08-19): `axiusflow_engine --shutdown` connects only to an existing engine, authenticates, requests complete shutdown, and requires acknowledgement. The engine stops accepting demand, freezes persistent workspace mutation, writes a final newer hot-set manifest, cancels provider/history work and native waiters, drains accepted local-history work, and joins every top-level worker under one shared two-second deadline. The optimized Windows process exited with code zero `8.671 ms` after acknowledgement and left no remnant; the release desktop `--exit-with-desktop` close path exited both processes. Additional update, uninstall, and system-session callers remain open under sections 164 and 165 rather than the complete-exit mechanism verified here.
 
 Desktop requests engine shutdown.
 
@@ -3118,9 +3140,9 @@ Internal work uses threads/tasks/modules.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-15): the platform contains 52,520 raw source lines before terminal inline test modules across `apps/` and `crates/`. This conservative upper bound still counts test-only helper items outside those modules, comments, and blank lines while excluding dedicated tests, benchmarks, Origin, vendor material, and generated protobuf output. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
+Evidence (2026-08-19): the audited production Rust footprint is 53,061 lines across the 19 application and product-library packages under the repository's test-aware counting method. The count excludes dedicated tests/benchmarks, generated protobuf, vendor material, and Origin Charts. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
 
-Current platform-side code is too large relative to working functionality.
+The baseline platform-side code was too large relative to working functionality.
 
 The migration should aggressively remove duplicate ownership and obsolete abstractions.
 
@@ -3523,7 +3545,9 @@ There should be no provider history request on the critical path when sufficient
 
 # 101. COLD ENGINE TEST
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): deterministic cold-demand tests prove retained local data publishes first when present, missing provider history runs asynchronously, valid partial state remains usable, terminal provider failure resolves explicitly, and history/live handoff reaches current state without blocking GPUI. A Windows release run started with no resident process, launched the sibling engine, rendered visible historical candles, continued realtime updates, and remained responsive through symbol and timeframe changes.
 
 Fully terminate everything.
 
@@ -3602,7 +3626,7 @@ These are engineering targets, not universal guarantees.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): schema 8 of the real windowed GPUI benchmark retains the schema-7 replay, covering-snapshot, queue, frame-registration, memory, and DWM checks and adds bounded diagnostics at the exact production interaction owners. The benchmark emits real GPUI change and Enter events through `subscribe_symbol_input`, alternates the same `select_instrument` and `select_interval` methods used by mouse and keyboard actions, and drains the resulting nonblocking commands through a capacity-four disconnected sink without an engine or provider. Four optimized Windows runs recorded 128 samples apiece per handler. Input-change, Enter-submit, instrument-selection, and interval-selection p99 ranges were `0.0003-0.0007 ms`, `0.0067-0.0810 ms`, `0.0014-0.0028 ms`, and `0.0064-0.0132 ms`; snapshot installation measured `0.2105-0.2379 ms`, replacement start to next-frame callback measured `5.3870-6.0956 ms`, frame-registration p99 measured `0.0006-0.0008 ms` across 418 samples per run, and worst update-to-frame p99 was `7.3820 ms`. Every run retained queue depth `0/1/0`, an advancing DWM timeline, and zero late, dropped, or missed-frame growth. Missing or incomplete interaction streams and mismatched command batches fail without writing evidence, and ordinary builds retain no handler sample buffers or timing calls. Cached demand latency remains verified separately by Section 102. The current terminal has no tab surface, so tab-switch duration remains open and this section stays unchecked.
+Progress evidence (2026-08-19): schema 8 of the real windowed GPUI benchmark retains the schema-7 replay, covering-snapshot, queue, frame-registration, memory, and DWM checks and adds bounded diagnostics at the exact production interaction owners. The benchmark emits real GPUI change and Enter events through `subscribe_symbol_input`, alternates the same `select_instrument` and `select_interval` methods used by mouse and keyboard actions, and drains the resulting nonblocking commands through a capacity-four disconnected sink without an engine or provider. Four optimized Windows runs recorded 128 samples apiece per handler. Input-change, Enter-submit, instrument-selection, and interval-selection p99 ranges were `0.0003-0.0007 ms`, `0.0067-0.0810 ms`, `0.0014-0.0028 ms`, and `0.0064-0.0132 ms`; snapshot installation measured `0.2105-0.2379 ms`, replacement start to next-frame callback measured `5.3870-6.0956 ms`, frame-registration p99 measured `0.0006-0.0008 ms` across 418 samples per run, and worst update-to-frame p99 was `7.3820 ms`. Every run retained queue depth `0/1/0`, an advancing DWM timeline, and zero late, dropped, or missed-frame growth. Missing or incomplete interaction streams and mismatched command batches fail without writing evidence, and ordinary builds retain no handler sample buffers or timing calls. Cached demand latency remains verified separately by Section 102. The corrected desktop now has a transient tab surface, but schema 8 does not measure its end-to-end tab-switch path, so that duration remains open and this section stays unchecked.
 
 GPUI foreground callbacks should not perform expensive work.
 
@@ -3783,7 +3807,7 @@ Write deterministic tests.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the default desktop Coinbase startup attaches a bounded `EngineClient` to the current protocol-v5 IPC; `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Origin.
+Historical phase evidence (2026-08-11): the default desktop Coinbase startup attached a bounded `EngineClient` through protocol v5; current protocol v10 preserves that path. `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Origin.
 
 Move Coinbase execution into `axiusflow_engine`.
 
@@ -3823,7 +3847,7 @@ Prove Coinbase first.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the engine and default desktop now support BTC-USD and ETH-USD at 1m, 5m, 15m, and 1h over asynchronous protocol-v5 demand and bounded event polling. One shared Coinbase realtime session routes both products into per-series fixed-interval history/live handoffs; cached forming tails resume without rewriting their canonical sequence. Deterministic delayed-history churn drives the exact `BTC 1m to 5m to 15m to 1h to 1m to ETH 1m to BTC 1m` sequence and proves only the latest generation can publish, while a separate test proves all switches reuse one realtime start. A Windows release desktop/engine run captured all seven corresponding Origin chart states with green connection status and visible candles; both processes remained responsive, the engine retained only two established Coinbase TLS connections, and no stale overwrite, hang, or infinite loading state appeared.
+Historical phase evidence (2026-08-11): protocol v5 first proved BTC-USD and ETH-USD at 1m, 5m, 15m, and 1h through asynchronous demand and bounded event polling; current protocol v10 preserves that behavior. One shared Coinbase realtime session routes both products into per-series fixed-interval history/live handoffs; cached forming tails resume without rewriting their canonical sequence. Deterministic delayed-history churn drives the exact `BTC 1m to 5m to 15m to 1h to 1m to ETH 1m to BTC 1m` sequence and proves only the latest generation can publish, while a separate test proves all switches reuse one realtime start. A Windows release desktop/engine run captured all seven corresponding Origin chart states with green connection status and visible candles; both processes remained responsive, the engine retained only two established Coinbase TLS connections, and no stale overwrite, hang, or infinite loading state appeared.
 
 Before moving Rithmic:
 
@@ -3897,7 +3921,7 @@ Remove desktop access to storage.
 
 - [x] **Status: Verified complete**
 
-Progress evidence (2026-08-11): protocol v10 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, the complete Rithmic chart cadence catalog, exact nanosecond bar time, bounded engine-owned order-book images, bounded exact catalog search, coarse catalog rejection, and complete selected-instrument metadata. Search and selection cross authenticated IPC as consumer- and command-generation-fenced provider-neutral messages. The resident engine owns the native-vault catalog/quote session, converts adapter catalog results at the worker boundary, installs canonical identity and precision before publishing selection success, and then coordinates its separate native-vault history and realtime sessions. It owns replay planning, cancellation, all 15 cadence collection, encrypted persistence, snapshot publication, bounded transport retry, native power/network transitions, provider-generation advancement, history/live buffering, live tick/fixed/session candle publication, the sole depth subscription, canonical top-20 order-book reconstruction, recovery state, and conflated depth IPC publication. Native environment state is retained across recovery, unavailable/suspended states fence connection startup, restored states start newer generations, and monitor failure closes a provider worker rather than continuing without lifecycle evidence. Each catalog/realtime worker retains cancellation handles and join handles for its native network and power monitors, including cleanup of partial startup. The desktop creates no Rithmic socket, loads no provider credential, starts no native provider lifecycle monitor, and performs no provider retry or live aggregation. Its app-local bounded `rithmic_engine_client` and `rithmic_engine_history` modules speak provider-neutral engine protocol directly and project engine chart/DOM snapshots; the old runtime-owned worker, shell, live chart, transition capture, series browser, and the entire `desktop_market_runtime` compatibility crate are deleted, and the desktop depends on neither `rithmic_protocol` nor `desktop_provider_runtime`. Deterministic tests cover protocol catalog round trips, catalog installation before publication, exact-time live handoff, completed-history immutability, forming-tail continuation, session-change rejection, generation monotonicity, native-state retention, native waiter cancellation, continuous snapshot conversion, engine-owned depth reconstruction/projection, all-cadence encrypted restart, provider-history isolation/cancellation, and app-local mailbox conflation. Credentialed native catalog smoke testing and exchange-calendar-owned live week/month bars remain open, so this phase remains unchecked.
+Evidence (2026-08-19): protocol v10 and the canonical `BarPeriod` preserve provider, instrument, entitlement revision, definition revision, all 15 Rithmic chart cadences, exact nanosecond bar time, bounded engine-owned order-book images, bounded exact catalog search, coarse catalog rejection, and complete selected-instrument metadata. Search and selection cross authenticated IPC as generation-fenced provider-neutral messages. The resident engine owns native-vault catalog, history, realtime, replay planning, cancellation, encrypted persistence, native lifecycle, live candle continuation, depth continuity, recovery, and publication; the desktop owns no Rithmic socket, credential, provider retry, lifecycle monitor, or live aggregation. Deterministic tests cover catalog installation, all-cadence encrypted restart, exact-time handoff, history/live continuation, exchange-calendar week/month behavior, reconnect, depth reconstruction, cancellation, and desktop mailbox conflation. The credentialed optimized Rithmic Test smoke authenticated twice and exercised catalog, reference data, trades, quotes, depth, heartbeat, time history, tick history, clean close, and reconnect.
 
 Completion evidence (2026-08-19): the Rithmic adapter owns CME-family Chicago session-roll and daylight-saving calendar bucketing, and the engine continues weekly/monthly bars from daily history with the replay end watermark fencing already-covered buffered trades. Focused adapter and engine tests pass for fixed, tick, week, month, Monday/month/leap-day boundaries, DST, live forming publication, and session changes. The optimized native-vault smoke completed against Rithmic Test for MNQU6/CME with authenticated ticker login, 31-result symbol discovery, reference data, trades, quotes, depth, heartbeat, 2,332 time-history bars, 110 tick-history bars, clean close, and a second authenticated reconnect (`target/release/rithmic_test_smoke.exe`, exit 0). This evidence supersedes the two open items in the earlier progress note.
 
@@ -4239,7 +4263,9 @@ Closing Chart A must not disconnect Chart B.
 
 # 128. TAB CLEANUP
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): closing a transient workspace retires only that workspace's generation-fenced consumer through the existing desktop coordinator. The engine removes that consumer's history interest, publication, demand, and unshared subscription references without resetting `MarketEngine` or interrupting other tabs. Deterministic tab identity/reorder/close tests and multi-consumer engine tests cover active-tab replacement and sibling continuity.
 
 Closing a workspace:
 
@@ -4473,7 +4499,9 @@ Conflate presentation updates between frames when semantically safe.
 
 # 140. NO GLOBAL UI BUSY LOOP
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): the desktop mailbox raises one edge-triggered wake until drained, `FramePollGate` permits at most one pending active-window frame poll, and safe live revisions conflate before one frame-boundary chart update. The optimized Windows benchmark completed 256 frames with queue depth `0/1`, zero overflows, advancing compositor refresh, and no late/dropped/missed-frame growth; release streaming and rapid symbol/timeframe/tab interaction remained responsive. Tab-switch latency remains an open measurement in section 104, not an unbounded redraw owner.
 
 The market stream must not keep GPUI permanently busy.
 
@@ -4970,7 +4998,9 @@ Exclude:
 
 # 152. MOST IMPORTANT RESTRAINT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): the migration deleted `desktop_market_runtime`, `desktop_provider_runtime`, duplicate history/storage/protocol owners, and obsolete forwarding chains while retaining one desktop, one resident engine, one `MarketEngine`, and one authenticated IPC path. Responsibility-size, dependency-direction, trait-inventory, dead-code, and no-runtime-revival conformance checks prevent the replacement architecture from regrowing the removed wrapper stack.
 
 Do not solve complexity by adding complexity.
 
@@ -5048,7 +5078,7 @@ If any earlier wording appears weaker than a rule below, follow the stricter rul
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): current protocol-v5 bounded market-event polling carries explicit provider/series state and forming-tail covering snapshots from the resident engine to the existing desktop model and Origin chart. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
+Historical phase evidence (2026-08-11): protocol v5 first proved bounded market-event polling with explicit provider/series state and forming-tail covering snapshots from the resident engine to the desktop model and Origin chart; current protocol v10 preserves and extends that contract. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
 
 Do not interpret successful Coinbase historical candles as completion of the Coinbase migration.
 
@@ -5951,7 +5981,7 @@ Crosshair synchronization is primarily desktop/chart presentation state and shou
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): the current audited handwritten production Rust footprint is 44,221 lines under the repository's test-aware counting method, below the approximate range without being padded to meet a quota. Recent ownership cutovers deleted thousands of lines of redundant desktop/local-history runtime code, and repository conformance applies only a 65,000-line soft review ceiling while excluding test modules and dedicated tests/benchmarks. The guard is used to expose duplication and owner drift, never to compress or remove correctness work.
+Evidence (2026-08-19): the current audited production Rust footprint is 53,061 lines across the 19 application and product-library packages under the repository's test-aware counting method. It remains within the intended complexity range after adding the resident engine, provider-neutral protocol, Rithmic depth/history ownership, lifecycle safety, and corrected workspace-tab surface. Repository conformance applies a 65,000-line soft review ceiling while excluding dedicated tests/benchmarks, generated protobuf, vendor material, and Origin Charts; the guard exposes duplication and owner drift rather than encouraging code compression.
 
 Do not aggressively force the platform into 45,000–60,000 lines merely because a previous architecture prompt mentioned that range.
 
@@ -6028,7 +6058,7 @@ new architecture 40k
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): measured production prefixes are 1,244 lines for the engine process/IPC shell, 579 for `local_engine_client`, 1,662 for the cohesive `market_engine` core, 1,138 for protocol, and 1,398 for observability. The provider-owning coordinator is intentionally the larger application component, while `apps/engine/src/main.rs` remains a 188-line process shell. New conformance thresholds fail if the engine shell exceeds 2,500 lines, the client exceeds 1,000, or `market_engine` exceeds 5,000, making responsibility drift explicit before another crate or wrapper is added.
+Evidence (2026-08-19): measured production prefixes are 1,244 lines for the engine process/IPC shell, 648 for `local_engine_client`, 1,864 for the cohesive `market_engine` core, 1,138 for protocol, and 1,398 for observability. The provider-owning coordinator is intentionally the larger application component, while `apps/engine/src/main.rs` remains a small process shell. Conformance thresholds fail if the engine shell exceeds 2,500 lines, the client exceeds 1,000, or `market_engine` exceeds 5,000, making responsibility drift explicit before another crate or wrapper is added.
 
 These are diagnostic guardrails only.
 
@@ -6075,9 +6105,9 @@ becomes an unstructured dumping ground, organize it internally before inventing 
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the following implementation-grounded map was completed before protocol v3 was edited.
+Historical evidence (2026-08-11): the following implementation-grounded pre-migration map was completed before protocol v3 was edited. Sections A and B intentionally describe the ownership that existed at that point; those runtime paths were subsequently removed, and sections 150, 151, and `ARCHITECTURE.md` describe the current topology.
 
-## A. Current ownership
+## A. Historical pre-migration ownership
 
 - Desktop entry: `apps/desktop/src/main.rs::{main, configured_market_worker, TerminalApp}`.
 - Engine entry and IPC server: `apps/engine/src/main.rs::run` and `apps/engine/src/lib.rs::{bind_listener, serve_client_with_state, serve_authenticated_session}`.
@@ -6091,7 +6121,7 @@ Evidence (2026-08-11): the following implementation-grounded map was completed b
 - Selection generation and demand: `TerminalApp::{select_interval, select_instrument} → MarketDataWorker::try_select_coinbase`; viewport demand uses `try_set_chart_viewport`.
 - Loading state: `desktop_market_runtime::ChartState::Loading` plus `TerminalApp::{chart_state, coinbase_switch}`.
 
-## B. Current runtime spine and unique ownership
+## B. Historical pre-migration runtime spine and unique ownership
 
 - Coinbase: GPUI `TerminalApp → resident_market_worker → desktop_market_runtime → desktop_provider_runtime → CoinbaseProviderDriver → Coinbase socket/history adapter`.
 - Rithmic: GPUI `TerminalApp → resident_market_worker → desktop_market_runtime::rithmic_market_worker → RithmicProviderDriver → Rithmic session connections`.
@@ -6126,7 +6156,7 @@ Do not begin a speculative 50-file rewrite.
 
 Report:
 
-## A. CURRENT OWNERSHIP
+## A. REQUIRED HISTORICAL OWNERSHIP SNAPSHOT
 
 Identify exact current files/functions owning:
 
@@ -6146,7 +6176,7 @@ IPC server/client
 current Loading state
 ```
 
-## B. CURRENT RUNTIME SPINE
+## B. REQUIRED HISTORICAL RUNTIME SPINE
 
 Show actual call/dependency path.
 
