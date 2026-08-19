@@ -11,8 +11,8 @@ use axiusflow_application::{
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
 use axiusflow_engine_protocol::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderInstrumentSearchResult,
-    SearchProviderInstruments, SelectProviderInstrument,
+    ConsumerResourceClass, InstallProviderInstrument, ProviderCatalogRejected,
+    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::DomFrame;
@@ -96,6 +96,8 @@ pub enum MarketWorkerStartup {
 
 pub struct CoinbaseWorkerStartup {
     pub coinbase_product: InstallProviderInstrument,
+    pub coinbase_interval: ChartInterval,
+    pub restored_viewport: Option<(i64, i64)>,
     pub subscription_id: String,
     pub worker_label: String,
 }
@@ -220,6 +222,7 @@ struct MarketWorkerMailbox {
     coalesced_updates: Mutex<GenerationCoalescingQueue>,
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     wake_pending: AtomicBool,
+    market_publications_enabled: AtomicBool,
 }
 
 fn fire_mailbox_wake(mailbox: &MarketWorkerMailbox) {
@@ -280,6 +283,9 @@ impl MarketWorkerSender {
     fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(MailboxDisconnected);
+        }
+        if !self.accepts_message(&message) {
+            return Ok(());
         }
         let mut queue = self
             .mailbox
@@ -372,6 +378,13 @@ impl MarketWorkerSender {
         }
         self.replace_overflowed_queue(&mut queue, message);
         Ok(())
+    }
+
+    fn accepts_message(&self, message: &MarketWorkerMessage) -> bool {
+        self.mailbox
+            .market_publications_enabled
+            .load(Ordering::Acquire)
+            || !is_market_publication(message)
     }
 
     fn send_conflated(
@@ -838,6 +851,16 @@ fn market_publication_generation(message: &MarketWorkerMessage) -> Option<u64> {
     }
 }
 
+fn is_market_publication(message: &MarketWorkerMessage) -> bool {
+    matches!(
+        message,
+        MarketWorkerMessage::Update(_)
+            | MarketWorkerMessage::RithmicLive { .. }
+            | MarketWorkerMessage::RithmicDom(_)
+            | MarketWorkerMessage::CoinbaseDom(_)
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CoalescedUiUpdates {
     pub generation: NonZeroU64,
@@ -912,6 +935,18 @@ fn take_covering_snapshot(
 }
 
 impl MarketWorkerReceiver {
+    fn set_market_publications_enabled(&self, enabled: bool) {
+        let mut queue = self
+            .mailbox
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.retain(|message| !is_market_publication(message));
+        self.mailbox
+            .market_publications_enabled
+            .store(enabled, Ordering::Release);
+    }
+
     pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         *self
             .mailbox
@@ -982,6 +1017,7 @@ pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, Mar
         coalesced_updates: Mutex::new(GenerationCoalescingQueue::new(capacity.get())),
         wake: Mutex::new(None),
         wake_pending: AtomicBool::new(false),
+        market_publications_enabled: AtomicBool::new(true),
     });
     (
         MarketWorkerSender {
@@ -1006,7 +1042,7 @@ pub enum MarketWorkerCommand {
     EngineSeries(EngineSeriesRequest),
     CoinbaseSelect(Box<CoinbaseSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
-    Visibility(bool),
+    ResourceClass(ConsumerResourceClass),
     Shutdown,
 }
 
@@ -1207,6 +1243,7 @@ fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> NonZeroU64 {
 
 pub struct MarketDataWorker {
     commands: Option<SyncSender<MarketWorkerCommand>>,
+    resource_class: Option<Arc<Mutex<Option<ConsumerResourceClass>>>>,
     messages: Option<MarketWorkerReceiver>,
     shutdown_complete: Option<Receiver<()>>,
     connected: bool,
@@ -1216,7 +1253,7 @@ pub struct MarketDataWorker {
 
 impl MarketDataWorker {
     #[must_use]
-    pub const fn from_channels(
+    pub fn from_channels(
         commands: SyncSender<MarketWorkerCommand>,
         messages: MarketWorkerReceiver,
         shutdown_complete: Receiver<()>,
@@ -1225,12 +1262,22 @@ impl MarketDataWorker {
     ) -> Self {
         Self {
             commands: Some(commands),
+            resource_class: None,
             messages: Some(messages),
             shutdown_complete: Some(shutdown_complete),
             connected: true,
             ui_diagnostics,
             coinbase_sequence,
         }
+    }
+
+    #[must_use]
+    pub fn with_resource_class_slot(
+        mut self,
+        resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
+    ) -> Self {
+        self.resource_class = Some(resource_class);
+        self
     }
 
     /// Requests a Coinbase selection without blocking.
@@ -1326,17 +1373,51 @@ impl MarketDataWorker {
     /// # Errors
     /// Returns the requested state when the bounded worker mailbox is full or disconnected.
     pub fn try_set_market_visibility(&self, visible: bool) -> Result<(), TrySendError<bool>> {
+        self.try_set_market_resource_class(if visible {
+            ConsumerResourceClass::Foreground
+        } else {
+            ConsumerResourceClass::Background
+        })
+        .map_err(|error| match error {
+            TrySendError::Full(_) => TrySendError::Full(visible),
+            TrySendError::Disconnected(_) => TrySendError::Disconnected(visible),
+        })
+    }
+
+    /// Updates the exact engine resource class for this consumer.
+    ///
+    /// # Errors
+    /// Returns the requested class when the worker boundary is disconnected. Engine-backed
+    /// workers conflate rapid transitions into one bounded latest-value slot.
+    pub fn try_set_market_resource_class(
+        &self,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<(), TrySendError<ConsumerResourceClass>> {
+        if let Some(slot) = &self.resource_class {
+            if self.commands.is_none() {
+                return Err(TrySendError::Disconnected(resource_class));
+            }
+            if let Some(messages) = &self.messages {
+                messages.set_market_publications_enabled(
+                    resource_class == ConsumerResourceClass::Foreground,
+                );
+            }
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource_class);
+            return Ok(());
+        }
         let Some(commands) = self.commands.as_ref() else {
-            return Err(TrySendError::Disconnected(visible));
+            return Err(TrySendError::Disconnected(resource_class));
         };
         commands
-            .try_send(MarketWorkerCommand::Visibility(visible))
+            .try_send(MarketWorkerCommand::ResourceClass(resource_class))
             .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::Visibility(visible)) => {
-                    TrySendError::Full(visible)
+                TrySendError::Full(MarketWorkerCommand::ResourceClass(resource_class)) => {
+                    TrySendError::Full(resource_class)
                 }
-                TrySendError::Disconnected(MarketWorkerCommand::Visibility(visible)) => {
-                    TrySendError::Disconnected(visible)
+                TrySendError::Disconnected(MarketWorkerCommand::ResourceClass(resource_class)) => {
+                    TrySendError::Disconnected(resource_class)
                 }
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                     unreachable!("visibility send errors retain the visibility command")
@@ -1382,7 +1463,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
-                    | MarketWorkerCommand::Visibility(_),
+                    | MarketWorkerCommand::ResourceClass(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
@@ -1391,7 +1472,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::CoinbaseSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
-                    | MarketWorkerCommand::Visibility(_),
+                    | MarketWorkerCommand::ResourceClass(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }
@@ -1636,15 +1717,15 @@ impl FixtureMarketWorker {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, EngineSeriesRequest, FixtureMarketWorker, MarketDataWorker,
-        MarketPublicationGeneration, MarketWorkerCommand, MarketWorkerMessage,
+        ChartState, ChartViewportUpdate, EngineSeriesRequest, FixtureMarketWorker,
+        MarketDataWorker, MarketPublicationGeneration, MarketWorkerCommand, MarketWorkerMessage,
         MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
     use axiusflow_application::{Provenanced, ReplayStreamUpdate, ReplayTailUpdate};
     use axiusflow_engine_protocol::{
-        ProviderCatalogRejected, ProviderCatalogRejectionReason, SearchProviderInstruments,
-        SelectProviderInstrument,
+        ConsumerResourceClass, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+        SearchProviderInstruments, SelectProviderInstrument,
     };
     use axiusflow_market_data::DomFrame;
     use axiusflow_market_data::{ChartInterval, OrderBookRecoveryReason, OrderBookState};
@@ -1652,7 +1733,7 @@ mod tests {
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
@@ -1771,7 +1852,103 @@ mod tests {
             .expect("visibility command is accepted");
         assert!(matches!(
             command_rx.recv(),
-            Ok(MarketWorkerCommand::Visibility(false))
+            Ok(MarketWorkerCommand::ResourceClass(
+                ConsumerResourceClass::Background
+            ))
+        ));
+
+        drop(command_rx);
+        let _ = worker.begin_retirement();
+    }
+
+    #[test]
+    fn engine_resource_class_transitions_conflate_when_command_mailbox_is_full() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        command_tx
+            .try_send(MarketWorkerCommand::ChartViewport(ChartViewportUpdate {
+                start_unix_nanos: 1,
+                end_unix_nanos: 2,
+                selection_generation: 3,
+            }))
+            .expect("command mailbox is filled");
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let resource_class = Arc::new(Mutex::new(None));
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None)
+                .with_resource_class_slot(Arc::clone(&resource_class));
+
+        worker
+            .try_set_market_resource_class(ConsumerResourceClass::Background)
+            .expect("background transition is conflated");
+        worker
+            .try_set_market_resource_class(ConsumerResourceClass::Foreground)
+            .expect("foreground transition replaces background");
+
+        assert_eq!(
+            resource_class
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+            Some(ConsumerResourceClass::Foreground)
+        );
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::ChartViewport(_))
+        ));
+        drop(command_rx);
+        let _ = worker.begin_retirement();
+    }
+
+    #[test]
+    fn engine_background_transition_discards_stale_ui_market_publications() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let resource_class = Arc::new(Mutex::new(None));
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None)
+                .with_resource_class_slot(Arc::clone(&resource_class));
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let make_publication = |bootstrap: super::MarketWorkerBootstrap| MarketWorkerPublication {
+            generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+            update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
+            subscription_id: bootstrap.subscription_id,
+            worker_label: bootstrap.worker_label,
+            ui_diagnostics: None,
+        };
+        let publication =
+            make_publication(fixture.publish_snapshot(2).expect("snapshot publishes"));
+        message_tx
+            .send(MarketWorkerMessage::Update(publication))
+            .expect("foreground publication queues");
+
+        worker
+            .try_set_market_resource_class(ConsumerResourceClass::Background)
+            .expect("background transition is accepted");
+        let (messages, _) = worker.drain_messages();
+        assert!(messages.is_empty());
+
+        let publication =
+            make_publication(fixture.publish_snapshot(2).expect("snapshot republishes"));
+        message_tx
+            .send(MarketWorkerMessage::Update(publication))
+            .expect("hidden publication is harmlessly suppressed");
+        let (messages, _) = worker.drain_messages();
+        assert!(messages.is_empty());
+
+        worker
+            .try_set_market_resource_class(ConsumerResourceClass::Foreground)
+            .expect("foreground transition is accepted");
+        let publication =
+            make_publication(fixture.publish_snapshot(2).expect("snapshot republishes"));
+        message_tx
+            .send(MarketWorkerMessage::Update(publication))
+            .expect("foreground publication queues");
+        let (messages, _) = worker.drain_messages();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Update(_)]
         ));
 
         drop(command_rx);

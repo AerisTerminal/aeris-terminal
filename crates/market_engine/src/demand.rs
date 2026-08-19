@@ -10,6 +10,27 @@ pub enum MarketStream {
     Depth,
 }
 
+/// Exact presentation/retention state for one engine consumer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsumerResourceClass {
+    Foreground,
+    Background,
+    Warm,
+    Detached,
+}
+
+impl ConsumerResourceClass {
+    #[must_use]
+    pub const fn publishes_ui(self) -> bool {
+        matches!(self, Self::Foreground)
+    }
+
+    #[must_use]
+    pub const fn retains_subscription(self) -> bool {
+        matches!(self, Self::Foreground | Self::Background)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamRequirements(u8);
 
@@ -69,7 +90,7 @@ pub struct ConsumerDemand {
     pub series: Option<BarSeriesKey>,
     pub streams: Option<StreamRequirements>,
     pub viewport: Option<Viewport>,
-    pub visible: bool,
+    pub resource_class: ConsumerResourceClass,
 }
 
 pub(crate) struct DemandRegistry {
@@ -88,7 +109,7 @@ impl DemandRegistry {
     pub(crate) fn register(
         &mut self,
         identity: ConsumerIdentity,
-        visible: bool,
+        resource_class: ConsumerResourceClass,
     ) -> Result<(), EngineError> {
         if self.consumers.contains_key(&identity.consumer_id) {
             return Err(EngineError::DuplicateConsumer(identity.consumer_id));
@@ -106,7 +127,7 @@ impl DemandRegistry {
                 series: None,
                 streams: None,
                 viewport: None,
-                visible,
+                resource_class,
             },
         );
         Ok(())
@@ -173,17 +194,20 @@ impl DemandRegistry {
         Ok(())
     }
 
-    pub(crate) fn set_visible(
+    pub(crate) fn set_resource_class(
         &mut self,
         consumer_id: ConsumerId,
-        visible: bool,
-    ) -> Result<(), EngineError> {
+        resource_class: ConsumerResourceClass,
+    ) -> Result<bool, EngineError> {
         let demand = self
             .consumers
             .get_mut(&consumer_id)
             .ok_or(EngineError::UnknownConsumer(consumer_id))?;
-        demand.visible = visible;
-        Ok(())
+        if demand.resource_class == resource_class {
+            return Ok(false);
+        }
+        demand.resource_class = resource_class;
+        Ok(true)
     }
 
     pub(crate) fn current(&self, consumer_id: ConsumerId) -> Option<&ConsumerDemand> {
@@ -194,7 +218,7 @@ impl DemandRegistry {
         self.consumers
             .values()
             .filter_map(|demand| {
-                (demand.series.as_ref() == Some(series))
+                (demand.resource_class.publishes_ui() && demand.series.as_ref() == Some(series))
                     .then_some(demand.generation)
                     .flatten()
                     .map(|generation| (demand.identity.consumer_id, generation))
@@ -222,10 +246,10 @@ impl DemandRegistry {
         self.consumers.len()
     }
 
-    pub(crate) fn visible_len(&self) -> usize {
+    pub(crate) fn foreground_len(&self) -> usize {
         self.consumers
             .values()
-            .filter(|demand| demand.visible)
+            .filter(|demand| demand.resource_class == ConsumerResourceClass::Foreground)
             .count()
     }
 }

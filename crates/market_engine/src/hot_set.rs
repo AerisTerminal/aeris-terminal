@@ -28,6 +28,20 @@ pub struct HotSetEntry {
     pub coverage: Option<(i64, i64)>,
 }
 
+/// Measured retention tier for one bounded hot-set identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HotSetTier {
+    Hot,
+    Warm,
+    Cold,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HotSetRetention {
+    pub entry: HotSetEntry,
+    pub tier: HotSetTier,
+}
+
 /// Single bounded owner for recent/pinned series identities used by warm startup.
 #[derive(Clone)]
 pub struct HotSetManager {
@@ -191,6 +205,48 @@ impl HotSetManager {
         entries
     }
 
+    /// Classifies every bounded identity from active workspace membership, exact
+    /// watchlist identity, explicit pins, recency, and a measured memory budget.
+    #[must_use]
+    pub fn classify(
+        &self,
+        active_workspaces: &BTreeSet<WorkspaceId>,
+        watchlist: &BTreeSet<BarSeriesKey>,
+        memory_budget_bytes: usize,
+        estimated_entry_bytes: usize,
+    ) -> Vec<HotSetRetention> {
+        let capacity = memory_budget_bytes
+            .checked_div(estimated_entry_bytes)
+            .unwrap_or(0);
+        let mut ranked = self.ranked();
+        ranked.sort_unstable_by(|left, right| {
+            hot_priority(right, active_workspaces, watchlist)
+                .cmp(&hot_priority(left, active_workspaces, watchlist))
+                .then_with(|| right.score.cmp(&left.score))
+                .then_with(|| left.descriptor.series.cmp(&right.descriptor.series))
+        });
+        ranked
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let active = entry
+                    .workspaces
+                    .iter()
+                    .any(|workspace| active_workspaces.contains(workspace));
+                HotSetRetention {
+                    tier: if active {
+                        HotSetTier::Hot
+                    } else if index < capacity {
+                        HotSetTier::Warm
+                    } else {
+                        HotSetTier::Cold
+                    },
+                    entry,
+                }
+            })
+            .collect()
+    }
+
     fn enforce_capacity(&mut self) -> Result<(), EngineError> {
         while self.entries.len() > self.capacity.get() {
             let removable = self
@@ -210,7 +266,7 @@ impl HotSetManager {
 
     fn validate_entry(entry: &HotSetEntry) -> Result<(), EngineError> {
         Self::validate_descriptor(&entry.descriptor)?;
-        if entry.score == 0 || entry.workspaces.is_empty() {
+        if entry.score == 0 {
             return Err(EngineError::InvalidHotSeries);
         }
         if entry.viewport.is_some_and(|(start, end)| start >= end)
@@ -236,9 +292,27 @@ impl HotSetManager {
     }
 }
 
+fn hot_priority(
+    entry: &HotSetEntry,
+    active_workspaces: &BTreeSet<WorkspaceId>,
+    watchlist: &BTreeSet<BarSeriesKey>,
+) -> u8 {
+    if entry
+        .workspaces
+        .iter()
+        .any(|workspace| active_workspaces.contains(workspace))
+    {
+        3
+    } else if entry.pinned {
+        2
+    } else {
+        u8::from(watchlist.contains(&entry.descriptor.series))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HotSetDescriptor, HotSetEntry, HotSetManager};
+    use super::{HotSetDescriptor, HotSetEntry, HotSetManager, HotSetTier};
     use crate::WorkspaceId;
     use axiusflow_market_data::{BarPeriod, BarSeriesKey};
     use std::{collections::BTreeSet, num::NonZeroU64, num::NonZeroUsize};
@@ -297,5 +371,71 @@ mod tests {
             coverage: Some((5, 4)),
         };
         assert!(hot.restore(vec![entry]).is_err());
+    }
+
+    #[test]
+    fn active_workspace_stays_hot_ahead_of_pins_watchlists_and_recency_under_pressure() {
+        let mut hot = HotSetManager::new(NonZeroUsize::new(4).expect("bound"));
+        hot.touch(workspace(1), descriptor("BTC-USD"), 1)
+            .expect("active series");
+        hot.touch(workspace(2), descriptor("ETH-USD"), 2)
+            .expect("pinned series");
+        hot.touch(workspace(3), descriptor("SOL-USD"), 3)
+            .expect("watchlist series");
+        hot.touch(workspace(4), descriptor("DOGE-USD"), 4)
+            .expect("recent series");
+        hot.set_pinned(&descriptor("ETH-USD").series, true)
+            .expect("pin");
+        let retained = hot.classify(
+            &BTreeSet::from([workspace(1)]),
+            &BTreeSet::from([descriptor("SOL-USD").series]),
+            2_000,
+            1_000,
+        );
+        assert_eq!(retained[0].entry.descriptor.provider_symbol, "BTC-USD");
+        assert_eq!(retained[0].tier, HotSetTier::Hot);
+        assert_eq!(retained[1].entry.descriptor.provider_symbol, "ETH-USD");
+        assert_eq!(retained[1].tier, HotSetTier::Warm);
+        assert!(
+            retained[2..]
+                .iter()
+                .all(|entry| entry.tier == HotSetTier::Cold)
+        );
+    }
+
+    #[test]
+    fn recency_only_entry_remains_warm_when_memory_capacity_remains() {
+        let mut hot = HotSetManager::new(NonZeroUsize::new(2).expect("bound"));
+        hot.restore(vec![
+            HotSetEntry {
+                descriptor: descriptor("BTC-USD"),
+                score: 1,
+                last_used_unix_seconds: 1,
+                provider_watermark: 1,
+                series_watermark: 1,
+                pinned: false,
+                workspaces: BTreeSet::new(),
+                viewport: None,
+                coverage: None,
+            },
+            HotSetEntry {
+                descriptor: descriptor("ETH-USD"),
+                score: 2,
+                last_used_unix_seconds: 2,
+                provider_watermark: 1,
+                series_watermark: 1,
+                pinned: false,
+                workspaces: BTreeSet::new(),
+                viewport: None,
+                coverage: None,
+            },
+        ])
+        .expect("recency-only entries restore");
+
+        let retained = hot.classify(&BTreeSet::new(), &BTreeSet::new(), 1_000, 1_000);
+
+        assert_eq!(retained[0].entry.descriptor.provider_symbol, "ETH-USD");
+        assert_eq!(retained[0].tier, HotSetTier::Warm);
+        assert_eq!(retained[1].tier, HotSetTier::Cold);
     }
 }

@@ -6,14 +6,21 @@
 
 mod demand;
 mod hot_set;
+mod order_flow;
 mod provider_manager;
 mod publication;
 mod resource_policy;
 mod series_store;
 mod subscription_registry;
 
-pub use demand::{ConsumerDemand, ConsumerIdentity, MarketStream, StreamRequirements};
-pub use hot_set::{HotSetDescriptor, HotSetEntry, HotSetManager};
+pub use demand::{
+    ConsumerDemand, ConsumerIdentity, ConsumerResourceClass, MarketStream, StreamRequirements,
+};
+pub use hot_set::{HotSetDescriptor, HotSetEntry, HotSetManager, HotSetRetention, HotSetTier};
+pub use order_flow::{
+    ConsumerOrderFlowPublication, OrderFlowLevel, OrderFlowPublicationKind, OrderFlowSnapshot,
+    OrderFlowTrade, OrderFlowUpdate,
+};
 pub use provider_manager::{
     ProviderCapabilities, ProviderConfig, ProviderHealth, ProviderRequest, ProviderStatus,
 };
@@ -25,7 +32,7 @@ pub use resource_policy::{
 pub use series_store::SeriesSnapshot;
 pub use subscription_registry::SubscriptionStatus;
 
-use axiusflow_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
+use axiusflow_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError, MarketTrade};
 use demand::DemandRegistry;
 use provider_manager::ProviderManager;
 use publication::PublicationManager;
@@ -145,6 +152,14 @@ pub enum EngineError {
     },
     ConflictingSeriesGeneration(ProviderGeneration),
     CapacityOverflow,
+    OrderFlowIdentityMismatch,
+    NonIncreasingOrderFlowSequence,
+    OrderFlowLevelLimitExceeded {
+        maximum: usize,
+    },
+    OrderFlowHistoryLimitExceeded {
+        maximum: usize,
+    },
     InvalidMarketData(MarketDataValidationError),
 }
 
@@ -231,6 +246,21 @@ impl fmt::Display for EngineError {
             Self::CapacityOverflow => {
                 formatter.write_str("market engine capacity arithmetic overflowed")
             }
+            Self::OrderFlowIdentityMismatch => {
+                formatter.write_str("order-flow trade identity does not match its series")
+            }
+            Self::NonIncreasingOrderFlowSequence => {
+                formatter.write_str("order-flow source sequence did not increase")
+            }
+            Self::OrderFlowLevelLimitExceeded { maximum } => {
+                write!(formatter, "order-flow level limit {maximum} exceeded")
+            }
+            Self::OrderFlowHistoryLimitExceeded { maximum } => {
+                write!(
+                    formatter,
+                    "order-flow reconstruction limit {maximum} exceeded"
+                )
+            }
             Self::InvalidMarketData(error) => {
                 write!(formatter, "canonical market data is invalid: {error}")
             }
@@ -253,6 +283,7 @@ pub struct MarketEngine {
     series: SeriesStore,
     subscriptions: SubscriptionRegistry,
     publications: PublicationManager,
+    order_flow: order_flow::OrderFlowStore,
 }
 
 impl MarketEngine {
@@ -264,6 +295,7 @@ impl MarketEngine {
             series: SeriesStore::new(config.maximum_series, config.maximum_bars),
             subscriptions: SubscriptionRegistry::new(),
             publications: PublicationManager::new(),
+            order_flow: order_flow::OrderFlowStore::new(),
         }
     }
 
@@ -352,7 +384,26 @@ impl MarketEngine {
         identity: ConsumerIdentity,
         visible: bool,
     ) -> Result<(), EngineError> {
-        self.demands.register(identity, visible)
+        self.register_consumer_with_class(
+            identity,
+            if visible {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            },
+        )
+    }
+
+    /// Registers one independently generated consumer with an exact resource class.
+    ///
+    /// # Errors
+    /// Returns an error for duplicate identity or the configured consumer bound.
+    pub fn register_consumer_with_class(
+        &mut self,
+        identity: ConsumerIdentity,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<(), EngineError> {
+        self.demands.register(identity, resource_class)
     }
 
     /// Makes a newer series generation authoritative immediately.
@@ -399,15 +450,32 @@ impl MarketEngine {
             .demands
             .set_series(consumer_id, generation, series.clone(), streams)?;
         if changed {
-            self.subscriptions.replace(
-                consumer_id,
-                previous
-                    .as_ref()
-                    .map(|(series, streams)| (series, *streams)),
-                series,
-                streams,
-            );
+            let resource_class = self
+                .demands
+                .current(consumer_id)
+                .map(|demand| demand.resource_class)
+                .ok_or(EngineError::UnknownConsumer(consumer_id))?;
+            if resource_class.retains_subscription() {
+                self.subscriptions.replace(
+                    consumer_id,
+                    previous
+                        .as_ref()
+                        .map(|(series, streams)| (series, *streams)),
+                    series,
+                    streams,
+                );
+            } else if let Some((previous_series, _)) = previous.as_ref() {
+                self.subscriptions.remove(consumer_id, previous_series);
+            }
             self.publications.remove(consumer_id);
+            self.order_flow.remove_consumer(consumer_id);
+        }
+        if !self
+            .demands
+            .current(consumer_id)
+            .is_some_and(|demand| demand.resource_class.publishes_ui())
+        {
+            return Ok(None);
         }
         self.series.get(series).map_or(Ok(None), |snapshot| {
             self.publications
@@ -438,7 +506,68 @@ impl MarketEngine {
         consumer_id: ConsumerId,
         visible: bool,
     ) -> Result<(), EngineError> {
-        self.demands.set_visible(consumer_id, visible)
+        self.set_resource_class(
+            consumer_id,
+            if visible {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Applies a resource-class transition without recreating provider state.
+    ///
+    /// Background consumers retain shared upstream demand without UI publication.
+    /// Warm and detached consumers also release the upstream subscription. Re-entering
+    /// foreground publishes a cached covering snapshot immediately.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown consumer or publication generation overflow.
+    pub fn set_resource_class(
+        &mut self,
+        consumer_id: ConsumerId,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<Option<ConsumerPublication>, EngineError> {
+        let previous = self
+            .demands
+            .current(consumer_id)
+            .cloned()
+            .ok_or(EngineError::UnknownConsumer(consumer_id))?;
+        if !self
+            .demands
+            .set_resource_class(consumer_id, resource_class)?
+        {
+            return Ok(None);
+        }
+        let Some(series) = previous.series.as_ref() else {
+            return Ok(None);
+        };
+        let streams = previous.streams.unwrap_or(StreamRequirements::NONE);
+        if previous.resource_class.retains_subscription() && !resource_class.retains_subscription()
+        {
+            self.subscriptions.remove(consumer_id, series);
+        } else if !previous.resource_class.retains_subscription()
+            && resource_class.retains_subscription()
+            && !streams.is_empty()
+        {
+            self.subscriptions
+                .replace(consumer_id, None, series, streams);
+        }
+        if !resource_class.publishes_ui() {
+            self.publications.suspend(consumer_id);
+            self.order_flow.suspend_consumer(consumer_id);
+            return Ok(None);
+        }
+        let Some(generation) = previous.generation else {
+            return Ok(None);
+        };
+        self.series.get(series).map_or(Ok(None), |snapshot| {
+            self.publications
+                .publish(consumer_id, generation, snapshot)
+                .map(Some)
+        })
     }
 
     /// Installs one canonical covering snapshot and publishes it to every current matching demand.
@@ -593,6 +722,98 @@ impl MarketEngine {
             .collect()
     }
 
+    /// Applies one canonical trade to bounded engine-owned order-flow state and
+    /// publishes a covering image for a new series or an incremental update thereafter.
+    ///
+    /// # Errors
+    /// Returns an error for provider generation, identity, sequence, validation, or capacity.
+    pub fn install_order_flow_trade(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        trade: &MarketTrade,
+    ) -> Result<Vec<ConsumerOrderFlowPublication>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::Trades)?;
+        let (covering, update, snapshot) =
+            self.order_flow
+                .apply_trade(series, provider_generation, trade)?;
+        let consumers = self
+            .demands
+            .matching(series)
+            .into_iter()
+            .filter(|(consumer_id, _)| {
+                self.demands.current(*consumer_id).is_some_and(|demand| {
+                    demand
+                        .streams
+                        .is_some_and(|streams| streams.contains(MarketStream::Trades))
+                })
+            })
+            .collect::<Vec<_>>();
+        consumers
+            .into_iter()
+            .map(|(consumer_id, generation)| {
+                let (publication_generation, first_for_consumer) =
+                    self.order_flow.next_publication_generation(consumer_id)?;
+                Ok(ConsumerOrderFlowPublication {
+                    consumer_id,
+                    generation,
+                    publication_generation,
+                    series: series.clone(),
+                    kind: if covering || first_for_consumer {
+                        OrderFlowPublicationKind::Snapshot(Arc::clone(&snapshot))
+                    } else {
+                        OrderFlowPublicationKind::Update(update)
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically reconstructs bounded engine-owned order-flow state from canonical
+    /// historical trades and publishes a covering image to current trade consumers.
+    ///
+    /// # Errors
+    /// Returns an error for provider generation, identity, ordering, validation, or bounds.
+    pub fn install_order_flow_history(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        trades: &[MarketTrade],
+    ) -> Result<Vec<ConsumerOrderFlowPublication>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::Trades)?;
+        let snapshot = self
+            .order_flow
+            .replace_history(series, provider_generation, trades)?;
+        self.demands
+            .matching(series)
+            .into_iter()
+            .filter(|(consumer_id, _)| {
+                self.demands.current(*consumer_id).is_some_and(|demand| {
+                    demand
+                        .streams
+                        .is_some_and(|streams| streams.contains(MarketStream::Trades))
+                })
+            })
+            .map(|(consumer_id, generation)| {
+                let (publication_generation, _) =
+                    self.order_flow.next_publication_generation(consumer_id)?;
+                Ok(ConsumerOrderFlowPublication {
+                    consumer_id,
+                    generation,
+                    publication_generation,
+                    series: series.clone(),
+                    kind: OrderFlowPublicationKind::Snapshot(Arc::clone(&snapshot)),
+                })
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn current_demand(&self, consumer_id: ConsumerId) -> Option<&ConsumerDemand> {
         self.demands.current(consumer_id)
@@ -641,6 +862,7 @@ impl MarketEngine {
 
     pub fn remove_consumer(&mut self, consumer_id: ConsumerId) -> bool {
         self.publications.remove(consumer_id);
+        self.order_flow.remove_consumer(consumer_id);
         let Some(removed) = self.demands.remove(consumer_id) else {
             return false;
         };
@@ -659,6 +881,7 @@ impl MarketEngine {
                 self.subscriptions.remove(consumer_id, series);
             }
             self.publications.remove(consumer_id);
+            self.order_flow.remove_consumer(consumer_id);
             consumer_ids.push(consumer_id);
         }
         consumer_ids
@@ -666,6 +889,7 @@ impl MarketEngine {
 
     pub fn invalidate_series(&mut self, series: &BarSeriesKey) -> bool {
         self.publications.invalidate_series(series);
+        self.order_flow.invalidate(series);
         self.series.invalidate(series)
     }
 
@@ -687,7 +911,7 @@ impl MarketEngine {
             })
             .collect::<Vec<_>>();
         let mut removed = Vec::new();
-        while cached.len() > maximum_cached_series
+        while self.series.len() > maximum_cached_series
             || self.series.total_bars() > maximum_decoded_bars
         {
             let Some((series, _)) = cached.first().cloned() else {
@@ -716,7 +940,7 @@ impl MarketEngine {
 
     #[must_use]
     pub fn visible_consumer_count(&self) -> usize {
-        self.demands.visible_len()
+        self.demands.foreground_len()
     }
 }
 
@@ -725,7 +949,7 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::BarPeriod;
+    use axiusflow_market_data::{AggressorSide, BarPeriod, EventMetadata, QualifiedTimestamp};
 
     fn nonzero(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).expect("test identity is non-zero")
@@ -806,16 +1030,45 @@ mod tests {
     }
 
     fn register(engine: &mut MarketEngine, consumer: u64, client: u64) {
+        register_workspace(engine, consumer, client, 1);
+    }
+
+    fn register_workspace(engine: &mut MarketEngine, consumer: u64, client: u64, workspace: u64) {
         engine
             .register_consumer(
                 ConsumerIdentity {
                     client_id: ClientId(nonzero(client)),
-                    workspace_id: WorkspaceId(nonzero(1)),
+                    workspace_id: WorkspaceId(nonzero(workspace)),
                     consumer_id: id(consumer),
                 },
                 true,
             )
             .expect("consumer registers");
+    }
+
+    fn trade(series: &BarSeriesKey, sequence: u64, price: i64, side: AggressorSide) -> MarketTrade {
+        MarketTrade {
+            metadata: EventMetadata {
+                provider_id: series.provider_id.clone(),
+                instrument_id: series.instrument_id.clone(),
+                entitlement_id: series.entitlement_id.clone(),
+                source_sequence: sequence,
+                session_generation: 1,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(
+                        1_700_000_000_000_000_000
+                            + i64::try_from(sequence).expect("test sequence fits"),
+                    ),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: 1_700_000_000_000_000_000
+                        + i64::try_from(sequence).expect("test sequence fits"),
+                },
+            },
+            trade_id: format!("trade-{sequence}"),
+            price,
+            quantity: 2,
+            aggressor: side,
+        }
     }
 
     #[test]
@@ -856,7 +1109,7 @@ mod tests {
         let mut engine = engine(20, 1, 10);
         let btc = series("coinbase:spot:BTC-USD");
         for consumer in 1..=20 {
-            register(&mut engine, consumer, consumer);
+            register_workspace(&mut engine, consumer, consumer, ((consumer - 1) / 4) + 1);
             assert!(
                 engine
                     .set_series_demand(id(consumer), generation(1), &btc)
@@ -876,6 +1129,14 @@ mod tests {
         }
         assert_eq!(engine.metrics().stored_series, 1);
         assert_eq!(engine.metrics().stored_bars, 3);
+        assert_eq!(
+            (1..=20)
+                .filter_map(|consumer| engine.current_demand(id(consumer)))
+                .map(|demand| demand.identity.workspace_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            5
+        );
     }
 
     #[test]
@@ -1011,12 +1272,16 @@ mod tests {
             .set_visibility(id(1), false)
             .expect("first consumer becomes hidden");
         assert_eq!(
-            engine.current_demand(id(1)).map(|demand| demand.visible),
-            Some(false)
+            engine
+                .current_demand(id(1))
+                .map(|demand| demand.resource_class),
+            Some(ConsumerResourceClass::Background)
         );
         assert_eq!(
-            engine.current_demand(id(2)).map(|demand| demand.visible),
-            Some(true)
+            engine
+                .current_demand(id(2))
+                .map(|demand| demand.resource_class),
+            Some(ConsumerResourceClass::Foreground)
         );
         assert_eq!(
             engine
@@ -1250,6 +1515,285 @@ mod tests {
         assert_eq!(engine.detach_client(ClientId(nonzero(1))), vec![id(1)]);
         assert!(!engine.has_subscription(&eth));
         assert!(engine.current_demand(id(3)).is_some());
+    }
+
+    #[test]
+    fn warm_and_detached_consumers_release_publication_and_reattach_from_cached_state() {
+        let mut engine = engine(2, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand_with_streams(
+                id(1),
+                generation(1),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("demand installs");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history publishes");
+        assert!(engine.has_subscription(&btc));
+        assert!(engine.has_publication(id(1)));
+
+        assert_eq!(
+            engine
+                .set_resource_class(id(1), ConsumerResourceClass::Warm)
+                .expect("consumer becomes warm"),
+            None
+        );
+        assert!(!engine.has_subscription(&btc));
+        assert!(!engine.has_publication(id(1)));
+        assert!(
+            engine
+                .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+                .expect("warm state remains cacheable")
+                .is_empty()
+        );
+
+        assert_eq!(
+            engine
+                .set_resource_class(id(1), ConsumerResourceClass::Background)
+                .expect("background consumer reattaches upstream"),
+            None
+        );
+        assert!(engine.has_subscription(&btc));
+        assert!(!engine.has_publication(id(1)));
+        assert!(
+            engine
+                .install_realtime(provider_generation(1), &btc, 2, 8, bars(4), true)
+                .expect("background state remains current without UI publication")
+                .is_empty()
+        );
+
+        let publication = engine
+            .set_resource_class(id(1), ConsumerResourceClass::Foreground)
+            .expect("foreground consumer reattaches presentation")
+            .expect("cached covering state publishes immediately");
+        assert_eq!(publication.snapshot.bars.len(), 4);
+        assert_eq!(publication.publication_generation, 2);
+        assert!(engine.has_subscription(&btc));
+
+        engine
+            .set_resource_class(id(1), ConsumerResourceClass::Detached)
+            .expect("consumer detaches");
+        assert!(!engine.has_subscription(&btc));
+        assert!(!engine.has_publication(id(1)));
+    }
+
+    #[test]
+    fn order_flow_reconstructs_bounded_view_ready_state_and_resnapshots_each_consumer() {
+        let mut engine = engine(2, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        register_workspace(&mut engine, 1, 1, 1);
+        engine
+            .set_series_demand_with_streams(
+                id(1),
+                generation(1),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("first trade consumer installs");
+        let first = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 1, 10_000, AggressorSide::Buy),
+            )
+            .expect("first trade applies");
+        assert!(matches!(
+            first.as_slice(),
+            [ConsumerOrderFlowPublication {
+                consumer_id,
+                publication_generation: 1,
+                kind: OrderFlowPublicationKind::Snapshot(snapshot),
+                ..
+            }] if *consumer_id == id(1)
+                && snapshot.cumulative_delta == 2
+                && snapshot.levels[0].ask_volume == 2
+        ));
+
+        let second = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 2, 10_000, AggressorSide::Sell),
+            )
+            .expect("second trade applies");
+        assert!(matches!(
+            second[0].kind,
+            OrderFlowPublicationKind::Update(OrderFlowUpdate {
+                cumulative_delta: 0,
+                level: OrderFlowLevel {
+                    bid_volume: 2,
+                    ask_volume: 2,
+                    trade_count: 2,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        register_workspace(&mut engine, 2, 2, 2);
+        engine
+            .set_series_demand_with_streams(
+                id(2),
+                generation(7),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("late trade consumer installs");
+        let publications = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 3, 10_100, AggressorSide::Buy),
+            )
+            .expect("third trade applies");
+        let late = publications
+            .iter()
+            .find(|publication| publication.consumer_id == id(2))
+            .expect("late consumer publishes");
+        assert_eq!(late.generation, generation(7));
+        assert!(matches!(
+            &late.kind,
+            OrderFlowPublicationKind::Snapshot(snapshot)
+                if snapshot.source_watermark == 3
+                    && snapshot.cumulative_delta == 2
+                    && snapshot.levels.len() == 2
+                    && snapshot.tape.len() == 3
+        ));
+
+        engine
+            .set_resource_class(id(2), ConsumerResourceClass::Detached)
+            .expect("late consumer detaches");
+        let detached = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 4, 10_100, AggressorSide::Buy),
+            )
+            .expect("detached state still accumulates for shared demand");
+        assert!(
+            detached
+                .iter()
+                .all(|publication| publication.consumer_id != id(2))
+        );
+    }
+
+    #[test]
+    fn order_flow_tape_and_price_levels_are_strictly_bounded() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand_with_streams(
+                id(1),
+                generation(1),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("trade demand installs");
+        for sequence in 1..=2_048 {
+            engine
+                .install_order_flow_trade(
+                    provider_generation(1),
+                    &btc,
+                    &trade(
+                        &btc,
+                        sequence,
+                        10_000 + i64::try_from(sequence).expect("sequence fits"),
+                        AggressorSide::Unknown,
+                    ),
+                )
+                .expect("bounded level applies");
+        }
+        assert!(matches!(
+            engine.install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 2_049, 20_000, AggressorSide::Unknown),
+            ),
+            Err(EngineError::OrderFlowLevelLimitExceeded { maximum: 2_048 })
+        ));
+
+        engine
+            .set_resource_class(id(1), ConsumerResourceClass::Warm)
+            .expect("publication generation resets");
+        engine
+            .set_resource_class(id(1), ConsumerResourceClass::Foreground)
+            .expect("consumer reattaches to presentation");
+        let snapshot = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 2_049, 10_001, AggressorSide::Buy),
+            )
+            .expect("existing level remains writable")
+            .pop()
+            .expect("reattached order-flow snapshot publishes");
+        assert!(matches!(
+            snapshot.kind,
+            OrderFlowPublicationKind::Snapshot(ref state) if state.tape.len() == 256
+        ));
+    }
+
+    #[test]
+    fn historical_order_flow_reconstruction_is_atomic_and_publishes_a_covering_image() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand_with_streams(
+                id(1),
+                generation(1),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("trade demand installs");
+        let history = [
+            trade(&btc, 1, 10_000, AggressorSide::Buy),
+            trade(&btc, 2, 10_000, AggressorSide::Sell),
+        ];
+        let covering = engine
+            .install_order_flow_history(provider_generation(1), &btc, &history)
+            .expect("historical trades reconstruct")
+            .pop()
+            .expect("consumer receives covering image");
+        assert!(matches!(
+            covering.kind,
+            OrderFlowPublicationKind::Snapshot(ref snapshot)
+                if snapshot.source_watermark == 2
+                    && snapshot.cumulative_delta == 0
+                    && snapshot.levels[0].bid_volume == 2
+                    && snapshot.levels[0].ask_volume == 2
+                    && snapshot.tape.len() == 2
+        ));
+
+        let invalid = [
+            trade(&btc, 4, 10_000, AggressorSide::Buy),
+            trade(&btc, 3, 10_000, AggressorSide::Buy),
+        ];
+        assert!(matches!(
+            engine.install_order_flow_history(provider_generation(1), &btc, &invalid),
+            Err(EngineError::NonIncreasingOrderFlowSequence)
+        ));
+        let continued = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 3, 10_000, AggressorSide::Buy),
+            )
+            .expect("failed replacement preserves the prior accumulator")
+            .pop()
+            .expect("consumer receives the continuation");
+        assert!(matches!(
+            continued.kind,
+            OrderFlowPublicationKind::Update(OrderFlowUpdate {
+                cumulative_delta: 2,
+                ..
+            })
+        ));
     }
 
     #[test]

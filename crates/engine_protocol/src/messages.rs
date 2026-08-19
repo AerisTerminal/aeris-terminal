@@ -26,6 +26,58 @@ pub enum ResourceMode {
     MarketsLive = 4,
 }
 
+/// Per-consumer presentation and retention priority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum ConsumerResourceClass {
+    /// Visible pane in the selected workspace.
+    Foreground = 0,
+    /// Pane in another open workspace; publication may use a lower cadence.
+    Background = 1,
+    /// Recent or pinned demand retained without continuous UI publication.
+    Warm = 2,
+    /// The UI no longer owns publication or an upstream subscription.
+    Detached = 3,
+}
+
+/// Persisted split direction for one workspace pane grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceSplitAxis {
+    Horizontal = 0,
+    Vertical = 1,
+}
+
+/// Persisted terminal component kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspacePaneKind {
+    Chart = 0,
+    Dom = 1,
+    Watchlist = 2,
+    OrderEntry = 3,
+}
+
+/// Stable processing stage for actionable, redacted failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum FailureStage {
+    Unspecified = 0,
+    ProviderHistory = 1,
+    CanonicalValidation = 2,
+    MemoryInstall = 3,
+    Aggregation = 4,
+    SegmentEncode = 5,
+    Encryption = 6,
+    FilesystemWrite = 7,
+    CatalogCommit = 8,
+    Handoff = 9,
+    Publication = 10,
+    IpcSend = 11,
+    ChartInstall = 12,
+    ProviderRealtime = 13,
+}
+
 /// Durable user-selected resident-engine lifetime policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
@@ -296,6 +348,70 @@ pub struct WorkspaceState {
     /// Explicit user permission to retain provider sessions without a desktop.
     #[prost(bool, tag = "13")]
     pub markets_live_permitted: bool,
+    /// Monotonic generation of user-authored workspace composition.
+    #[prost(uint64, tag = "14")]
+    pub layout_generation: u64,
+    /// Selected workspace identity.
+    #[prost(uint64, tag = "15")]
+    pub active_workspace_id: u64,
+    /// Bounded deterministic workspace/tab/pane composition.
+    #[prost(message, repeated, tag = "16")]
+    pub workspace_tabs: Vec<WorkspaceTabState>,
+}
+
+/// Persisted presentation state for one pane.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspacePaneState {
+    #[prost(uint64, tag = "1")]
+    pub pane_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub consumer_id: u64,
+    #[prost(enumeration = "WorkspacePaneKind", tag = "3")]
+    pub kind: i32,
+    #[prost(message, optional, tag = "4")]
+    pub instrument: Option<InstallProviderInstrument>,
+    #[prost(message, optional, tag = "5")]
+    pub series: Option<SeriesKey>,
+    #[prost(sint64, optional, tag = "6")]
+    pub viewport_start_unix_nanos: Option<i64>,
+    #[prost(sint64, optional, tag = "7")]
+    pub viewport_end_unix_nanos: Option<i64>,
+    /// Normalized pane size; all panes in a tab sum to 10,000.
+    #[prost(uint32, tag = "8")]
+    pub size_basis_points: u32,
+    /// Per-pane selection/layout generation.
+    #[prost(uint64, tag = "9")]
+    pub generation: u64,
+}
+
+/// Persisted presentation state for one workspace tab.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceTabState {
+    #[prost(uint64, tag = "1")]
+    pub workspace_id: u64,
+    #[prost(string, tag = "2")]
+    pub label: String,
+    #[prost(enumeration = "WorkspaceSplitAxis", tag = "3")]
+    pub split_axis: i32,
+    #[prost(message, repeated, tag = "4")]
+    pub panes: Vec<WorkspacePaneState>,
+    #[prost(uint64, tag = "5")]
+    pub active_pane_id: u64,
+    #[prost(uint64, tag = "6")]
+    pub generation: u64,
+}
+
+/// Revision- and generation-fenced workspace composition replacement.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct SetWorkspaceLayout {
+    #[prost(uint64, tag = "1")]
+    pub workspace_revision: u64,
+    #[prost(uint64, tag = "2")]
+    pub layout_generation: u64,
+    #[prost(uint64, tag = "3")]
+    pub active_workspace_id: u64,
+    #[prost(message, repeated, tag = "4")]
+    pub workspace_tabs: Vec<WorkspaceTabState>,
 }
 
 /// Revision-fenced selection persistence request.
@@ -436,6 +552,9 @@ pub struct VisibilityDemand {
     /// Whether this consumer is currently visible.
     #[prost(bool, tag = "2")]
     pub visible: bool,
+    /// Exact foreground/background/warm/detached resource class.
+    #[prost(enumeration = "ConsumerResourceClass", tag = "3")]
+    pub resource_class: i32,
 }
 
 /// Removes one consumer without affecting consumers sharing its upstream state.
@@ -885,6 +1004,102 @@ pub struct DemandError {
     /// Redacted error detail.
     #[prost(string, tag = "5")]
     pub detail: String,
+    /// Canonical series identity when the failure belongs to market demand.
+    #[prost(message, optional, tag = "6")]
+    pub series: Option<SeriesKey>,
+    /// Stable machine-readable stage.
+    #[prost(enumeration = "FailureStage", tag = "7")]
+    pub stage_code: i32,
+    /// Redacted causal context safe for diagnostics and presentation.
+    #[prost(string, tag = "8")]
+    pub cause: String,
+    /// Elapsed time in milliseconds when the stage is timed.
+    #[prost(uint64, optional, tag = "9")]
+    pub elapsed_millis: Option<u64>,
+}
+
+/// Aggressor side carried by provider-neutral order-flow publications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum OrderFlowAggressor {
+    Unknown = 0,
+    Buy = 1,
+    Sell = 2,
+}
+
+/// View-ready fixed-point footprint/profile level.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct OrderFlowLevel {
+    #[prost(sint64, tag = "1")]
+    pub price: i64,
+    #[prost(sint64, tag = "2")]
+    pub bid_volume: i64,
+    #[prost(sint64, tag = "3")]
+    pub ask_volume: i64,
+    #[prost(uint64, tag = "4")]
+    pub trade_count: u64,
+    /// Bounded time-at-price observations for future market-profile rendering.
+    #[prost(uint64, tag = "5")]
+    pub time_at_price_count: u64,
+}
+
+/// One bounded view-ready tape item.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct OrderFlowTrade {
+    #[prost(uint64, tag = "1")]
+    pub source_sequence: u64,
+    #[prost(sint64, tag = "2")]
+    pub exchange_timestamp_unix_nanos: i64,
+    #[prost(sint64, tag = "3")]
+    pub price: i64,
+    #[prost(sint64, tag = "4")]
+    pub quantity: i64,
+    #[prost(enumeration = "OrderFlowAggressor", tag = "5")]
+    pub aggressor: i32,
+}
+
+/// Covering engine-owned footprint, delta, volume-profile, market-profile, and tape image.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct OrderFlowSnapshot {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub generation: u64,
+    #[prost(message, optional, tag = "3")]
+    pub series: Option<SeriesKey>,
+    #[prost(uint64, tag = "4")]
+    pub provider_generation: u64,
+    #[prost(uint64, tag = "5")]
+    pub publication_generation: u64,
+    #[prost(uint64, tag = "6")]
+    pub source_watermark: u64,
+    #[prost(sint64, tag = "7")]
+    pub cumulative_delta: i64,
+    #[prost(message, repeated, tag = "8")]
+    pub levels: Vec<OrderFlowLevel>,
+    #[prost(message, repeated, tag = "9")]
+    pub tape: Vec<OrderFlowTrade>,
+}
+
+/// Incremental engine-owned order-flow update.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct OrderFlowUpdate {
+    #[prost(uint64, tag = "1")]
+    pub consumer_id: u64,
+    #[prost(uint64, tag = "2")]
+    pub generation: u64,
+    #[prost(message, optional, tag = "3")]
+    pub series: Option<SeriesKey>,
+    #[prost(uint64, tag = "4")]
+    pub provider_generation: u64,
+    #[prost(uint64, tag = "5")]
+    pub publication_generation: u64,
+    #[prost(sint64, tag = "6")]
+    pub cumulative_delta: i64,
+    #[prost(message, optional, tag = "7")]
+    pub level: Option<OrderFlowLevel>,
+    #[prost(message, optional, tag = "8")]
+    pub trade: Option<OrderFlowTrade>,
 }
 
 /// Redacted engine fault.
@@ -919,7 +1134,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1040,5 +1255,14 @@ pub mod envelope {
         /// Engine status snapshot. Tag 51.
         #[prost(message, tag = "51")]
         EngineStatus(super::EngineStatus),
+        /// Persisted workspace composition replacement. Tag 52.
+        #[prost(message, tag = "52")]
+        SetWorkspaceLayout(super::SetWorkspaceLayout),
+        /// Covering order-flow image. Tag 53.
+        #[prost(message, tag = "53")]
+        OrderFlowSnapshot(super::OrderFlowSnapshot),
+        /// Incremental order-flow update. Tag 54.
+        #[prost(message, tag = "54")]
+        OrderFlowUpdate(super::OrderFlowUpdate),
     }
 }

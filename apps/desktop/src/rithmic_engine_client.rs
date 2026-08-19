@@ -198,8 +198,11 @@ fn process_command(
                 });
             }
         }
-        MarketWorkerCommand::Visibility(visible) => {
-            let _ = state.history.set_visibility(visible);
+        MarketWorkerCommand::ResourceClass(resource_class) => {
+            let _ = state.history.set_visibility(matches!(
+                resource_class,
+                axiusflow_engine_protocol::ConsumerResourceClass::Foreground
+            ));
         }
         MarketWorkerCommand::Shutdown
         | MarketWorkerCommand::Recovery(_)

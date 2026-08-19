@@ -83,7 +83,7 @@ fn run() -> Result<(), String> {
     let state = EngineState::open(default_engine_state_root()?)?;
     let workspace = state.workspace();
     install_background_service(&state, workspace.autostart_enabled)?;
-    let market = MarketService::start(&workspace.hot_series)?;
+    let market = MarketService::start(&workspace)?;
     market.set_resource_mode(lifetime_resource_mode(&workspace)?)?;
     let active_clients = Arc::new(AtomicUsize::new(0));
     let shutdown = EngineShutdown::default();

@@ -28,6 +28,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
+num-traits = "=0.2.19"
 
 [dev-dependencies]
 interprocess.workspace = true

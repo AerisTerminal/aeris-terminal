@@ -713,6 +713,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "interprocess",
+ "num-traits",
  "serde",
  "serde_json",
  "sysinfo",

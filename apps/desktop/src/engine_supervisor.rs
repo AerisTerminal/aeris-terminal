@@ -8,8 +8,8 @@ use std::{
 };
 
 use axiusflow_engine_protocol::{
-    InstallProviderInstrument, SearchProviderInstruments, SelectProviderInstrument, SeriesKey,
-    envelope,
+    ConsumerResourceClass, InstallProviderInstrument, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesKey, envelope,
 };
 use axiusflow_local_engine_client::{
     EngineClient, connect_or_start_engine, sibling_engine_executable,
@@ -23,7 +23,7 @@ struct ConsumerRestore {
     workspace_id: u64,
     demand: Option<(u64, SeriesKey)>,
     viewport: Option<(u64, i64, i64)>,
-    visible: bool,
+    resource_class: ConsumerResourceClass,
     pending_search: Option<SearchProviderInstruments>,
     pending_selection: Option<SelectProviderInstrument>,
 }
@@ -72,7 +72,7 @@ impl EngineSupervisor {
                 workspace_id,
                 demand: None,
                 viewport: None,
-                visible: true,
+                resource_class: ConsumerResourceClass::Foreground,
                 pending_search: None,
                 pending_selection: None,
             },
@@ -135,8 +135,24 @@ impl EngineSupervisor {
     }
 
     pub fn set_market_visibility(&mut self, consumer_id: u64, visible: bool) -> Result<(), String> {
-        self.client.set_market_visibility(consumer_id, visible)?;
-        self.consumer_mut(consumer_id)?.visible = visible;
+        self.set_market_resource_class(
+            consumer_id,
+            if visible {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            },
+        )
+    }
+
+    pub fn set_market_resource_class(
+        &mut self,
+        consumer_id: u64,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<(), String> {
+        self.client
+            .set_market_resource_class(consumer_id, resource_class)?;
+        self.consumer_mut(consumer_id)?.resource_class = resource_class;
         Ok(())
     }
 
@@ -443,7 +459,7 @@ impl EngineSupervisor {
             if let Some((generation, start, end)) = consumer.viewport {
                 client.set_market_viewport(*consumer_id, generation, start, end)?;
             }
-            client.set_market_visibility(*consumer_id, consumer.visible)?;
+            client.set_market_resource_class(*consumer_id, consumer.resource_class)?;
         }
         Ok(())
     }

@@ -13,12 +13,13 @@ use std::{
 };
 
 use axiusflow_engine_protocol::{
-    AttachClient, ClientHello, ClientKind, DetachClient, EngineLifetimeMode, EngineReady,
-    EngineStatus, Envelope, EnvelopeDecoder, GetEngineStatus, InstallProviderInstrument,
-    LIFECYCLE_CONTRACT_REVISION, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
-    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineLifecycle, SetEngineResourceMode,
-    SetSelection, SetViewport, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState,
+    AttachClient, ClientHello, ClientKind, ConsumerResourceClass, DetachClient, EngineLifetimeMode,
+    EngineReady, EngineStatus, Envelope, EnvelopeDecoder, GetEngineStatus,
+    InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION, PROTOCOL_VERSION, PollMarketEvent,
+    ProviderInstrumentInstalled, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesDemand, SeriesKey,
+    SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWorkspaceLayout,
+    ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, WorkspaceTabState,
     encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{BackgroundService, CredentialVault, NativeCredentialVault};
@@ -26,7 +27,7 @@ use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
 /// Stable per-user local socket endpoint generation.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v8";
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v9";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 /// Maximum time allowed for a newly spawned engine to publish readiness.
@@ -299,6 +300,27 @@ impl EngineClient {
         self.receive_workspace()
     }
 
+    /// Persists the complete bounded workspace/tab/pane composition.
+    ///
+    /// # Errors
+    /// Returns an error when the revision/generation is stale or persistence fails.
+    pub fn set_workspace_layout(
+        &mut self,
+        workspace_revision: u64,
+        layout_generation: u64,
+        active_workspace_id: u64,
+        workspace_tabs: Vec<WorkspaceTabState>,
+    ) -> Result<WorkspaceState, String> {
+        self.connection
+            .send(envelope::Payload::SetWorkspaceLayout(SetWorkspaceLayout {
+                workspace_revision,
+                layout_generation,
+                active_workspace_id,
+                workspace_tabs,
+            }))?;
+        self.receive_workspace()
+    }
+
     fn receive_workspace(&mut self) -> Result<WorkspaceState, String> {
         match self.connection.receive()? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
@@ -422,10 +444,30 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the authenticated local connection cannot send the command.
     pub fn set_market_visibility(&mut self, consumer_id: u64, visible: bool) -> Result<(), String> {
+        self.set_market_resource_class(
+            consumer_id,
+            if visible {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            },
+        )
+    }
+
+    /// Updates one consumer's exact foreground/background/warm/detached class.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send the command.
+    pub fn set_market_resource_class(
+        &mut self,
+        consumer_id: u64,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<(), String> {
         self.connection
             .send(envelope::Payload::VisibilityDemand(VisibilityDemand {
                 consumer_id,
-                visible,
+                visible: resource_class == ConsumerResourceClass::Foreground,
+                resource_class: resource_class as i32,
             }))
     }
 
@@ -519,6 +561,8 @@ fn market_response_consumer_id(payload: &envelope::Payload) -> Option<u64> {
         envelope::Payload::DemandError(error) => Some(error.consumer_id),
         envelope::Payload::MarketEventIdle(idle) => Some(idle.consumer_id),
         envelope::Payload::OrderBookSnapshot(snapshot) => Some(snapshot.consumer_id),
+        envelope::Payload::OrderFlowSnapshot(snapshot) => Some(snapshot.consumer_id),
+        envelope::Payload::OrderFlowUpdate(update) => Some(update.consumer_id),
         envelope::Payload::ProviderInstrumentSearchResult(result) => Some(result.consumer_id),
         envelope::Payload::ProviderCatalogRejected(rejection) => Some(rejection.consumer_id),
         envelope::Payload::ProviderInstrumentSelection(selection) => Some(selection.consumer_id),
@@ -665,32 +709,34 @@ impl FramedConnection {
             protocol_version: PROTOCOL_VERSION,
             payload: Some(payload),
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
         self.stream
             .write_all(&frame)
-            .map_err(|error| error.to_string())?;
-        self.stream.flush().map_err(|error| error.to_string())
+            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())?;
+        self.stream
+            .flush()
+            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
     }
 
     fn receive(&mut self) -> Result<envelope::Payload, String> {
         loop {
             if let Some(envelope) = self.pending.pop_front() {
-                return envelope
-                    .payload
-                    .ok_or_else(|| "engine message has no payload".to_string());
+                return envelope.payload.ok_or_else(|| {
+                    "ipc_receive failed: engine message has no payload".to_string()
+                });
             }
             let mut chunk = [0_u8; 16 * 1024];
             let count = self
                 .stream
                 .read(&mut chunk)
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
             if count == 0 {
-                return Err("local engine connection closed".to_string());
+                return Err("ipc_receive failed: local engine connection closed".to_string());
             }
             self.pending.extend(
                 self.decoder
                     .push(&chunk[..count])
-                    .map_err(|error| error.to_string())?,
+                    .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?,
             );
         }
     }
@@ -731,7 +777,7 @@ mod tests {
 
     #[test]
     fn protocol_socket_name_tracks_the_active_version() {
-        assert_eq!(ENGINE_SOCKET_NAME, "axiusflow-engine-v8");
+        assert_eq!(ENGINE_SOCKET_NAME, "axiusflow-engine-v9");
     }
 
     #[test]

@@ -22,9 +22,10 @@ use axiusflow_chart_integration::{
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_engine_protocol::{
-    EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejectionReason,
-    ProviderInstrumentSummary, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
-    WorkspaceState,
+    ConsumerResourceClass, EngineLifetimeMode, InstallProviderInstrument,
+    ProviderCatalogRejectionReason, ProviderInstrumentSummary, ResourceMode,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
+    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
@@ -40,33 +41,35 @@ use gpui_component::{
     button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
-    resizable::{h_resizable, resizable_panel},
+    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement,
     spinner::Spinner,
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
 };
 use gpui_platform::application;
+use num_traits::ToPrimitive;
 use resident_market_worker::{
     ChartState, EngineSeriesRequest, MarketDataWorker, MarketPublicationGeneration,
     MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
     MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
     UiDiagnosticsFeedback,
 };
-#[cfg(feature = "diagnostics")]
-use std::time::Instant;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     pin::Pin,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     task::{Context as TaskContext, Poll, Waker},
     time::Duration,
 };
+
+#[cfg(feature = "diagnostics")]
+use std::time::Instant;
 
 #[derive(Default)]
 struct UiWakeState {
@@ -131,6 +134,7 @@ const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
+const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_TAB_WIDTH: f32 = 132.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
@@ -414,6 +418,137 @@ fn run_lifecycle_preferences(
     }
 }
 
+#[derive(Clone)]
+struct WorkspaceLayoutRequest {
+    layout_generation: u64,
+    active_workspace_id: u64,
+    workspace_tabs: Vec<WorkspaceTabState>,
+}
+
+#[derive(Clone)]
+struct WorkspaceLayoutPersistence {
+    latest: Arc<Mutex<Option<WorkspaceLayoutRequest>>>,
+    wake: SyncSender<()>,
+    result: Arc<Mutex<Option<Result<WorkspaceState, String>>>>,
+    workspace_revision: Rc<Cell<u64>>,
+    layout_generation: Rc<Cell<u64>>,
+    pending: Rc<Cell<bool>>,
+    error: Rc<RefCell<Option<String>>>,
+}
+
+impl WorkspaceLayoutPersistence {
+    fn new(workspace_revision: u64, layout_generation: u64) -> Result<Self, String> {
+        let latest = Arc::new(Mutex::new(None));
+        let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+        let result = Arc::new(Mutex::new(None));
+        let worker_latest = Arc::clone(&latest);
+        let worker_result = Arc::clone(&result);
+        std::thread::Builder::new()
+            .name("axiusflow-workspace-layout-client".to_string())
+            .spawn(move || {
+                run_workspace_layout_persistence(&worker_latest, &wake_rx, &worker_result);
+            })
+            .map_err(|_| "workspace layout client could not start".to_string())?;
+        Ok(Self {
+            latest,
+            wake: wake_tx,
+            result,
+            workspace_revision: Rc::new(Cell::new(workspace_revision)),
+            layout_generation: Rc::new(Cell::new(layout_generation)),
+            pending: Rc::new(Cell::new(false)),
+            error: Rc::new(RefCell::new(None)),
+        })
+    }
+
+    fn request(
+        &self,
+        active_workspace_id: u64,
+        workspace_tabs: Vec<WorkspaceTabState>,
+    ) -> Result<(), String> {
+        let generation = self.layout_generation.get().saturating_add(1);
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutRequest {
+            layout_generation: generation,
+            active_workspace_id,
+            workspace_tabs,
+        });
+        match self.wake.try_send(()) {
+            Ok(()) | Err(mpsc::TrySendError::Full(())) => {
+                self.pending.set(true);
+                self.error.borrow_mut().take();
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(())) => {
+                Err("workspace layout client is unavailable".to_string())
+            }
+        }
+    }
+
+    fn poll(&self) -> bool {
+        let Some(result) = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return false;
+        };
+        match result {
+            Ok(workspace) => {
+                self.workspace_revision.set(workspace.workspace_revision);
+                self.layout_generation.set(workspace.layout_generation);
+                self.error.borrow_mut().take();
+            }
+            Err(error) => {
+                *self.error.borrow_mut() = Some(error);
+            }
+        }
+        self.pending.set(false);
+        true
+    }
+
+    fn error(&self) -> Option<String> {
+        self.error.borrow().clone()
+    }
+}
+
+fn run_workspace_layout_persistence(
+    latest: &Mutex<Option<WorkspaceLayoutRequest>>,
+    wake: &Receiver<()>,
+    result: &Mutex<Option<Result<WorkspaceState, String>>>,
+) {
+    while wake.recv().is_ok() {
+        while wake.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        let Some(request) = latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            continue;
+        };
+        let completed = axiusflow_local_engine_client::sibling_engine_executable()
+            .and_then(|executable| {
+                axiusflow_local_engine_client::connect_or_start_engine(&executable)
+            })
+            .and_then(|mut client| {
+                let current = client.restore_workspace()?;
+                client.set_workspace_layout(
+                    current.workspace_revision,
+                    request
+                        .layout_generation
+                        .max(current.layout_generation.saturating_add(1)),
+                    request.active_workspace_id,
+                    request.workspace_tabs,
+                )
+            });
+        *result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(completed);
+    }
+}
+
 actions!(
     axiusflow,
     [
@@ -421,11 +556,15 @@ actions!(
         ZoomWindow,
         ToggleFullscreen,
         CloseWindow,
+        NewWorkspace,
         SelectNextWorkspace,
         SelectPreviousWorkspace,
         MoveWorkspaceLeft,
         MoveWorkspaceRight,
         CloseWorkspace,
+        SplitPaneHorizontal,
+        SplitPaneVertical,
+        ClosePane,
     ]
 );
 
@@ -586,6 +725,7 @@ struct WorkspaceSurface {
     coinbase_pending_sequence: Option<u64>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
+    resource_class: ConsumerResourceClass,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
 }
@@ -1057,6 +1197,12 @@ impl WorkspaceSurface {
         indicator_input: Entity<InputState>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
+        let restored_coinbase = match &startup {
+            MarketWorkerStartup::Loading(startup) => {
+                Some((startup.coinbase_interval, startup.restored_viewport))
+            }
+            MarketWorkerStartup::Rithmic => None,
+        };
         let TerminalStartupState {
             chart,
             chart_state,
@@ -1114,13 +1260,15 @@ impl WorkspaceSurface {
             coinbase_products: coinbase_product.clone().into_iter().collect(),
             coinbase_product,
             coinbase_switch: CoinbaseSwitchState::Idle,
-            coinbase_interval: ChartInterval::Minute1,
+            coinbase_interval: restored_coinbase
+                .map_or(ChartInterval::Minute1, |restored| restored.0),
             coinbase_catalog: CoinbaseCatalogState::Loading,
             coinbase_pending_interval: None,
             coinbase_pending_product: None,
             coinbase_pending_sequence: None,
-            restored_viewport: None,
+            restored_viewport: restored_coinbase.and_then(|restored| restored.1),
             last_persisted_viewport: None,
+            resource_class: ConsumerResourceClass::Foreground,
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
         };
@@ -1131,7 +1279,11 @@ impl WorkspaceSurface {
                 loop {
                     ui_wake.notified().await;
                     if this
-                        .update(&mut async_cx, |_app, app_cx| app_cx.notify())
+                        .update(&mut async_cx, |app, app_cx| {
+                            if market_wake_requests_render(app.resource_class) {
+                                app_cx.notify();
+                            }
+                        })
                         .is_err()
                     {
                         break;
@@ -1148,8 +1300,15 @@ impl WorkspaceSurface {
         }
     }
 
-    fn set_market_visibility(&mut self, visible: bool) {
-        let _ = self.market_worker.try_set_market_visibility(visible);
+    fn set_market_resource_class(&mut self, resource_class: ConsumerResourceClass) {
+        self.resource_class = resource_class;
+        let _ = self
+            .market_worker
+            .try_set_market_resource_class(resource_class);
+    }
+
+    fn should_poll_market(&self) -> bool {
+        self.resource_class == ConsumerResourceClass::Foreground
     }
 
     fn available_intervals(&self) -> &'static [ChartInterval] {
@@ -2480,37 +2639,33 @@ fn timeframe_overlay_content(
 }
 
 struct MarketWorkspaceState<'a> {
-    terminal: Entity<TerminalApp>,
     app: Entity<WorkspaceSurface>,
+    pane_id: u64,
     chart: Option<&'a Entity<OriginChartView>>,
     chart_has_market_data: bool,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     chart_state: ChartState,
     chart_status_detail: String,
-    drawing_state: DrawingToolbarState,
-    drawing_toolbar_collapsed: bool,
     theme: &'a AxiusflowTheme,
 }
 
 fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<> {
     let MarketWorkspaceState {
-        terminal,
         app,
+        pane_id,
         chart,
         chart_has_market_data,
         dom,
         side_panel,
         chart_state,
         chart_status_detail,
-        drawing_state,
-        drawing_toolbar_collapsed,
         theme,
     } = state;
     let colors = theme.colors;
     let notice = chart_surface_notice(chart_state, chart_has_market_data, &chart_status_detail);
     let chart_surface = div()
-        .id("primary_chart")
+        .id(("primary_chart", pane_id))
         .relative()
         .v_flex()
         .flex_1()
@@ -2537,23 +2692,9 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
                         .children((side_panel == Some(SidePanel::Dom)).then_some(dom)),
                 ),
         );
-    let chart_workspace = div()
-        .relative()
-        .flex()
-        .size_full()
-        .children((!drawing_toolbar_collapsed).then(|| {
-            drawing_toolbar(terminal.clone(), &app, drawing_state, theme).into_any_element()
-        }))
-        .child(chart_surface.when(!drawing_toolbar_collapsed, |chart| {
-            chart.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
-        }))
-        .children(
-            drawing_toolbar_collapsed
-                .then(|| drawing_toolbar_expander(terminal, theme).into_any_element()),
-        );
     div().size_full().overflow_hidden().child(
-        h_resizable("market_workspace")
-            .child(resizable_panel().child(chart_workspace))
+        h_resizable(("market_workspace", pane_id))
+            .child(resizable_panel().child(chart_surface))
             .child(side_panel_content),
     )
 }
@@ -3173,6 +3314,7 @@ fn workspace_title_bar(
                         .child("Axiusflow"),
                 )
                 .child(tabs)
+                .child(workspace_pane_controls(terminal, state, &theme))
                 .child(drag_region()),
         )
         .child(engine_lifecycle_controls(
@@ -3182,6 +3324,60 @@ fn workspace_title_bar(
             &theme,
         ))
         .child(workspace_window_controls(terminal, window, &theme))
+}
+
+fn workspace_pane_controls(
+    terminal: &Entity<TerminalApp>,
+    state: &WorkspaceTabBarState<'_>,
+    theme: &AxiusflowTheme,
+) -> Div {
+    let colors = theme.colors;
+    let pane_count = state.workspaces[state.active].panes.len();
+    let button = |id: &'static str, label: &'static str| {
+        Button::new(id)
+            .label(label)
+            .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+            .h(px(chart_chrome::CHART_CONTROL_SIZE))
+            .px_2()
+            .border_1()
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.muted))
+            .text_color(gpui_color(colors.foreground))
+    };
+    let horizontal_terminal = terminal.clone();
+    let vertical_terminal = terminal.clone();
+    let close_terminal = terminal.clone();
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(button_activation(
+            button("split_pane_horizontal", "Split H"),
+            pane_count < MAXIMUM_PANES_PER_WORKSPACE,
+            move |window, cx| {
+                horizontal_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.split_active_pane(WorkspaceSplitAxis::Horizontal, window, terminal_cx);
+                });
+            },
+        ))
+        .child(button_activation(
+            button("split_pane_vertical", "Split V"),
+            pane_count < MAXIMUM_PANES_PER_WORKSPACE,
+            move |window, cx| {
+                vertical_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.split_active_pane(WorkspaceSplitAxis::Vertical, window, terminal_cx);
+                });
+            },
+        ))
+        .child(button_activation(
+            button("close_pane", "Close pane"),
+            pane_count > 1,
+            move |window, cx| {
+                close_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_active_pane(&ClosePane, window, terminal_cx);
+                });
+            },
+        ))
 }
 
 fn engine_lifecycle_controls(
@@ -4359,10 +4555,22 @@ fn workspace_surface_entity(
     workspace
 }
 
+struct WorkspacePane {
+    id: u64,
+    consumer_id: u64,
+    surface: Entity<WorkspaceSurface>,
+    focus: FocusHandle,
+    size_basis_points: u32,
+}
+
 struct WorkspaceTab {
     id: u64,
     label: String,
-    surface: Entity<WorkspaceSurface>,
+    panes: Vec<WorkspacePane>,
+    active_pane: usize,
+    split_axis: WorkspaceSplitAxis,
+    resize_state: Entity<ResizableState>,
+    generation: u64,
     focus: FocusHandle,
 }
 
@@ -4384,8 +4592,10 @@ struct TerminalApp {
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    workspace_persistence: Option<WorkspaceLayoutPersistence>,
+    persisted_layout: Vec<WorkspaceTabState>,
+    persisted_active_workspace_id: u64,
     workspace_error: Option<String>,
-    next_workspace_id: u64,
     workspace_drag: Option<WorkspaceDragState>,
 }
 
@@ -4414,6 +4624,82 @@ fn wrapped_workspace_index(
 
 fn workspace_label(index: usize) -> String {
     format!("Workspace {}", index + 1)
+}
+
+fn workspace_series(interval: ChartInterval, instrument: &InstallProviderInstrument) -> SeriesKey {
+    let (cadence, cadence_value) = match interval.aggregation() {
+        ChartAggregation::Trades(value) => (SeriesCadence::Trades, value.get()),
+        ChartAggregation::FixedSeconds(value) => (SeriesCadence::FixedSeconds, value.get()),
+        ChartAggregation::CalendarMonth => (SeriesCadence::CalendarMonths, 1),
+    };
+    SeriesKey {
+        provider: instrument.provider.clone(),
+        instrument_id: instrument.instrument_id.clone(),
+        cadence_value,
+        definition_revision: 1,
+        entitlement_id: instrument.entitlement_id.clone(),
+        cadence: cadence as i32,
+    }
+}
+
+fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
+    workspaces
+        .iter()
+        .map(|workspace| WorkspaceTabState {
+            workspace_id: workspace.id,
+            label: workspace.label.clone(),
+            split_axis: workspace.split_axis as i32,
+            panes: workspace
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    let surface = pane.surface.read(cx);
+                    let instrument = surface.coinbase_product.clone()?;
+                    let viewport =
+                        surface
+                            .chart
+                            .as_ref()
+                            .map_or(surface.restored_viewport, |chart| {
+                                let chart = chart.read(cx);
+                                durable_workspace_viewport(
+                                    surface.restored_viewport,
+                                    chart.has_market_data(),
+                                    chart.is_at_latest(),
+                                    chart.visible_time_range_unix_nanos(),
+                                )
+                            });
+                    Some(WorkspacePaneState {
+                        pane_id: pane.id,
+                        consumer_id: pane.consumer_id,
+                        kind: WorkspacePaneKind::Chart as i32,
+                        instrument: Some(instrument.clone()),
+                        series: Some(workspace_series(surface.coinbase_interval, &instrument)),
+                        viewport_start_unix_nanos: viewport.map(|range| range.0),
+                        viewport_end_unix_nanos: viewport.map(|range| range.1),
+                        size_basis_points: pane.size_basis_points,
+                        generation: workspace.generation.max(1),
+                    })
+                })
+                .collect(),
+            active_pane_id: workspace.panes[workspace.active_pane].id,
+            generation: workspace.generation.max(1),
+        })
+        .collect()
+}
+
+const fn durable_workspace_viewport(
+    restored: Option<(i64, i64)>,
+    chart_has_market_data: bool,
+    chart_is_at_latest: bool,
+    current: Option<(i64, i64)>,
+) -> Option<(i64, i64)> {
+    if !chart_has_market_data {
+        restored
+    } else if chart_is_at_latest {
+        None
+    } else {
+        current
+    }
 }
 
 fn reorder_workspace_ids(ids: &mut Vec<u64>, dragged_id: u64, destination_index: usize) -> bool {
@@ -4477,9 +4763,67 @@ fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) ->
         .copied()
 }
 
+fn normalized_pane_basis_points(sizes: &[f32]) -> Option<Vec<u32>> {
+    if sizes.is_empty() || sizes.iter().any(|size| !size.is_finite() || *size <= 0.0) {
+        return None;
+    }
+    let total = sizes.iter().sum::<f32>();
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+    let mut remaining = 10_000_u32;
+    let last = sizes.len().saturating_sub(1);
+    let mut normalized = Vec::with_capacity(sizes.len());
+    for (index, size) in sizes.iter().enumerate() {
+        let basis = if index == last {
+            remaining
+        } else {
+            let remaining_panes = u32::try_from(last - index).ok()?;
+            let scaled = ((*size / total) * 10_000.0).round().max(1.0).to_u32()?;
+            let basis = scaled.min(remaining.checked_sub(remaining_panes)?);
+            remaining = remaining.checked_sub(basis)?;
+            basis
+        };
+        normalized.push(basis);
+    }
+    (normalized.iter().sum::<u32>() == 10_000 && normalized.iter().all(|basis| *basis > 0))
+        .then_some(normalized)
+}
+
+fn changed_pane_basis_points(current: &[u32], sizes: &[f32]) -> Option<Vec<u32>> {
+    let normalized = normalized_pane_basis_points(sizes)?;
+    (normalized != current).then_some(normalized)
+}
+
+fn split_pane_basis_points(sizes: &[u32], active: usize) -> Option<Vec<u32>> {
+    let source = *sizes.get(active)?;
+    if source < 2 {
+        return None;
+    }
+    let inserted = (source / 2).max(1);
+    let mut split = sizes.to_vec();
+    split[active] = source.checked_sub(inserted)?;
+    split.insert(active + 1, inserted);
+    Some(split)
+}
+
+fn close_pane_basis_points(sizes: &[u32], closing: usize) -> Option<(Vec<u32>, usize)> {
+    if sizes.len() <= 1 || closing >= sizes.len() {
+        return None;
+    }
+    let mut closed = sizes.to_vec();
+    let removed = closed.remove(closing);
+    let active = closing.min(closed.len().saturating_sub(1));
+    closed[active] = closed[active].checked_add(removed)?;
+    Some((closed, active))
+}
+
 impl TerminalApp {
     fn new(
         mut workspaces: Vec<WorkspaceTab>,
+        active_workspace_id: Option<u64>,
+        workspace_revision: u64,
+        layout_generation: u64,
         lifecycle: DesktopLifecycle,
         workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
         cx: &mut Context<Self>,
@@ -4492,15 +4836,38 @@ impl TerminalApp {
                 .tab_stop(true);
         }
         for workspace in &workspaces {
-            cx.observe(&workspace.surface, |_, _, cx| cx.notify())
-                .detach();
+            for pane in &workspace.panes {
+                cx.observe(&pane.surface, |_, _, cx| cx.notify()).detach();
+            }
         }
+        let active = active_workspace_id
+            .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
+            .unwrap_or(0);
+        for (index, workspace) in workspaces.iter().enumerate() {
+            let resource_class = if index == active {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            };
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.set_market_resource_class(resource_class);
+                });
+            }
+        }
+        let workspace_persistence = workspace_factory
+            .as_ref()
+            .map(|_| WorkspaceLayoutPersistence::new(workspace_revision, layout_generation))
+            .transpose()
+            .unwrap_or_else(|error| {
+                eprintln!("Axiusflow workspace persistence could not start: {error}");
+                None
+            });
+        let persisted_layout = workspace_layout_tabs(&workspaces, cx);
+        let persisted_active_workspace_id = workspaces[active].id;
         Self {
-            next_workspace_id: u64::try_from(workspaces.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
             workspaces,
-            active: 0,
+            active,
             theme: AxiusflowTheme::dark(),
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
             window_active: true,
@@ -4508,13 +4875,32 @@ impl TerminalApp {
             chrome_focus: cx.focus_handle().tab_stop(true),
             lifecycle,
             workspace_factory,
+            workspace_persistence,
+            persisted_layout,
+            persisted_active_workspace_id,
             workspace_error: None,
             workspace_drag: None,
         }
     }
 
     fn active_surface(&self) -> Entity<WorkspaceSurface> {
-        self.workspaces[self.active].surface.clone()
+        let workspace = &self.workspaces[self.active];
+        workspace.panes[workspace.active_pane].surface.clone()
+    }
+
+    fn set_workspace_resource_class(
+        &self,
+        workspace_index: usize,
+        resource_class: ConsumerResourceClass,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspaces.get(workspace_index) {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.set_market_resource_class(resource_class);
+                });
+            }
+        }
     }
 
     fn refresh_workspace_focus_order(&mut self) {
@@ -4527,17 +4913,82 @@ impl TerminalApp {
         }
     }
 
+    fn select_pane(&mut self, workspace_id: u64, pane_id: u64, cx: &mut Context<Self>) {
+        let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        let Some(index) = workspace.panes.iter().position(|pane| pane.id == pane_id) else {
+            return;
+        };
+        if workspace.active_pane != index {
+            workspace.active_pane = index;
+            workspace.generation = workspace.generation.saturating_add(1);
+            cx.notify();
+        }
+    }
+
+    fn apply_pane_sizes(
+        &mut self,
+        workspace_id: u64,
+        sizes: &[gpui::Pixels],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        if sizes.len() != workspace.panes.len() {
+            return;
+        }
+        let current = workspace
+            .panes
+            .iter()
+            .map(|pane| pane.size_basis_points)
+            .collect::<Vec<_>>();
+        let measured = sizes.iter().map(|size| size.as_f32()).collect::<Vec<_>>();
+        let Some(normalized) = changed_pane_basis_points(&current, &measured) else {
+            return;
+        };
+        for (pane, basis) in workspace.panes.iter_mut().zip(normalized) {
+            pane.size_basis_points = basis;
+        }
+        workspace.generation = workspace.generation.saturating_add(1);
+        cx.notify();
+    }
+
+    fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
+        let Some(persistence) = self.workspace_persistence.as_ref() else {
+            return;
+        };
+        let layout = workspace_layout_tabs(&self.workspaces, cx);
+        let active_workspace_id = self.workspaces[self.active].id;
+        if layout == self.persisted_layout
+            && active_workspace_id == self.persisted_active_workspace_id
+        {
+            return;
+        }
+        if let Err(error) = persistence.request(active_workspace_id, layout.clone()) {
+            self.workspace_error = Some(error);
+            return;
+        }
+        self.persisted_layout = layout;
+        self.persisted_active_workspace_id = active_workspace_id;
+    }
+
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
         let Some((previous, next)) = workspace_switch(self.active, next, self.workspaces.len())
         else {
             return;
         };
-        self.workspaces[previous]
-            .surface
-            .update(cx, |workspace, _| workspace.set_market_visibility(false));
-        self.workspaces[next]
-            .surface
-            .update(cx, |workspace, _| workspace.set_market_visibility(true));
+        self.set_workspace_resource_class(previous, ConsumerResourceClass::Background, cx);
+        self.set_workspace_resource_class(next, ConsumerResourceClass::Foreground, cx);
         self.active = next;
         self.workspace_error = None;
         cx.notify();
@@ -4759,19 +5210,19 @@ impl TerminalApp {
             self.workspace_drag = None;
             cx.stop_active_drag(window);
         }
-        removed.surface.update(cx, |workspace, workspace_cx| {
-            workspace.set_market_visibility(false);
-            workspace.retire_market_worker(workspace_cx);
-        });
+        for pane in removed.panes {
+            pane.surface.update(cx, |workspace, workspace_cx| {
+                workspace.set_market_resource_class(ConsumerResourceClass::Detached);
+                workspace.retire_market_worker(workspace_cx);
+            });
+        }
         self.active = self
             .workspaces
             .iter()
             .position(|workspace| workspace.id == next_active_id)
             .unwrap_or(0);
         self.refresh_workspace_focus_order();
-        self.workspaces[self.active]
-            .surface
-            .update(cx, |workspace, _| workspace.set_market_visibility(true));
+        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Foreground, cx);
         if focus_next_tab {
             self.workspaces[self.active].focus.focus(window, cx);
         }
@@ -4801,7 +5252,7 @@ impl TerminalApp {
             };
             (product, active.coinbase_interval)
         };
-        let (startup, worker) = match factory.create_workspace(product) {
+        let pane = match factory.create_workspace(product, interval) {
             Ok(worker) => worker,
             Err(error) => {
                 self.workspace_error = Some(error);
@@ -4809,26 +5260,161 @@ impl TerminalApp {
                 return;
             }
         };
-        let surface = workspace_surface_entity(startup, worker, &self.lifecycle, window, cx);
+        let workspace_id = pane.workspace_id;
+        let pane_id = pane.pane_id;
+        let consumer_id = pane.consumer_id;
+        let surface =
+            workspace_surface_entity(pane.startup, pane.worker, &self.lifecycle, window, cx);
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
-            if interval != ChartInterval::Minute1 {
-                workspace.select_interval(interval, workspace_cx);
-            }
+            let _ = workspace_cx;
         });
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
-        self.workspaces[self.active]
-            .surface
-            .update(cx, |workspace, _| workspace.set_market_visibility(false));
+        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
         self.workspaces.push(WorkspaceTab {
-            id: self.next_workspace_id,
-            label: format!("Workspace {}", self.next_workspace_id),
-            surface,
+            id: workspace_id,
+            label: format!("Workspace {workspace_id}"),
+            panes: vec![WorkspacePane {
+                id: pane_id,
+                consumer_id,
+                surface,
+                focus: cx.focus_handle(),
+                size_basis_points: 10_000,
+            }],
+            active_pane: 0,
+            split_axis: WorkspaceSplitAxis::Horizontal,
+            resize_state: cx.new(|_| ResizableState::default()),
+            generation: 1,
             focus: cx.focus_handle(),
         });
         self.refresh_workspace_focus_order();
-        self.next_workspace_id = self.next_workspace_id.saturating_add(1);
         self.active = self.workspaces.len() - 1;
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    fn new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_workspace(window, cx);
+    }
+
+    fn split_active_pane(
+        &mut self,
+        split_axis: WorkspaceSplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(factory) = self.workspace_factory.clone() else {
+            return;
+        };
+        let workspace = &self.workspaces[self.active];
+        if workspace.panes.len() >= MAXIMUM_PANES_PER_WORKSPACE {
+            self.workspace_error = Some(format!(
+                "A workspace supports at most {MAXIMUM_PANES_PER_WORKSPACE} panes"
+            ));
+            cx.notify();
+            return;
+        }
+        let sizes = workspace
+            .panes
+            .iter()
+            .map(|pane| pane.size_basis_points)
+            .collect::<Vec<_>>();
+        let Some(split_sizes) = split_pane_basis_points(&sizes, workspace.active_pane) else {
+            self.workspace_error = Some("The active pane is too small to split".to_string());
+            cx.notify();
+            return;
+        };
+        let (product, interval) = {
+            let source = workspace.panes[workspace.active_pane].surface.read(cx);
+            let Some(product) = source.coinbase_product.clone() else {
+                self.workspace_error = Some("The active pane has no market to copy".to_string());
+                cx.notify();
+                return;
+            };
+            (product, source.coinbase_interval)
+        };
+        let workspace_id = workspace.id;
+        let insertion_index = workspace.active_pane.saturating_add(1);
+        let pane = match factory.create_pane(workspace_id, product, interval) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.workspace_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let surface =
+            workspace_surface_entity(pane.startup, pane.worker, &self.lifecycle, window, cx);
+        surface.update(cx, |surface, surface_cx| {
+            surface.apply_theme(&self.theme, surface_cx);
+            surface.set_market_resource_class(ConsumerResourceClass::Foreground);
+        });
+        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+        let workspace = &mut self.workspaces[self.active];
+        for (pane, basis) in workspace.panes.iter_mut().zip(&split_sizes) {
+            pane.size_basis_points = *basis;
+        }
+        workspace.panes.insert(
+            insertion_index,
+            WorkspacePane {
+                id: pane.pane_id,
+                consumer_id: pane.consumer_id,
+                surface,
+                focus: cx.focus_handle(),
+                size_basis_points: split_sizes[insertion_index],
+            },
+        );
+        workspace.active_pane = insertion_index;
+        workspace.split_axis = split_axis;
+        workspace.generation = workspace.generation.saturating_add(1);
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    fn split_pane_horizontal(
+        &mut self,
+        _: &SplitPaneHorizontal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_active_pane(WorkspaceSplitAxis::Horizontal, window, cx);
+    }
+
+    fn split_pane_vertical(
+        &mut self,
+        _: &SplitPaneVertical,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_active_pane(WorkspaceSplitAxis::Vertical, window, cx);
+    }
+
+    fn close_active_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = &mut self.workspaces[self.active];
+        if workspace.panes.len() == 1 {
+            return;
+        }
+        let sizes = workspace
+            .panes
+            .iter()
+            .map(|pane| pane.size_basis_points)
+            .collect::<Vec<_>>();
+        let Some((closed_sizes, recipient)) =
+            close_pane_basis_points(&sizes, workspace.active_pane)
+        else {
+            return;
+        };
+        let removed = workspace.panes.remove(workspace.active_pane);
+        for (pane, basis) in workspace.panes.iter_mut().zip(closed_sizes) {
+            pane.size_basis_points = basis;
+        }
+        workspace.active_pane = recipient;
+        workspace.generation = workspace.generation.saturating_add(1);
+        removed.surface.update(cx, |surface, surface_cx| {
+            surface.set_market_resource_class(ConsumerResourceClass::Detached);
+            surface.retire_market_worker(surface_cx);
+        });
+        workspace.panes[recipient].focus.focus(window, cx);
         self.workspace_error = None;
         cx.notify();
     }
@@ -4837,9 +5423,11 @@ impl TerminalApp {
         self.theme = self.theme.toggled();
         sync_component_theme(&self.theme, Some(window), cx);
         for workspace in &self.workspaces {
-            workspace.surface.update(cx, |workspace, workspace_cx| {
-                workspace.apply_theme(&self.theme, workspace_cx);
-            });
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |workspace, workspace_cx| {
+                    workspace.apply_theme(&self.theme, workspace_cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -4897,9 +5485,11 @@ impl TerminalApp {
 
     fn retire_workspaces<C: gpui::AppContext>(&mut self, cx: &mut C) {
         for workspace in &self.workspaces {
-            workspace.surface.update(cx, |workspace, workspace_cx| {
-                workspace.retire_market_worker(workspace_cx);
-            });
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |workspace, workspace_cx| {
+                    workspace.retire_market_worker(workspace_cx);
+                });
+            }
         }
     }
 
@@ -4946,19 +5536,35 @@ impl TerminalApp {
                 {
                     cx.notify();
                 }
+                if terminal
+                    .workspace_persistence
+                    .as_ref()
+                    .is_some_and(WorkspaceLayoutPersistence::poll)
+                {
+                    terminal.workspace_error = terminal
+                        .workspace_persistence
+                        .as_ref()
+                        .and_then(WorkspaceLayoutPersistence::error);
+                    cx.notify();
+                }
                 let mut diagnostics = Vec::new();
                 for workspace in &terminal.workspaces {
-                    let surface = workspace.surface.clone();
-                    let pending = surface.update(cx, |workspace, workspace_cx| {
-                        if workspace.poll_market_worker(workspace_cx) > 0 {
-                            workspace_cx.notify();
+                    for pane in &workspace.panes {
+                        let surface = pane.surface.clone();
+                        let pending = surface.update(cx, |workspace, workspace_cx| {
+                            if workspace.should_poll_market()
+                                && workspace.poll_market_worker(workspace_cx) > 0
+                            {
+                                workspace_cx.notify();
+                            }
+                            workspace.pending_ui_diagnostics.take()
+                        });
+                        if let Some(pending) = pending {
+                            diagnostics.push((surface, pending));
                         }
-                        workspace.pending_ui_diagnostics.take()
-                    });
-                    if let Some(pending) = pending {
-                        diagnostics.push((surface, pending));
                     }
                 }
+                terminal.persist_workspace_layout_if_changed(cx);
                 diagnostics
             });
             if !diagnostics.is_empty() {
@@ -4975,6 +5581,10 @@ impl TerminalApp {
             }
         });
     }
+}
+
+const fn market_wake_requests_render(resource_class: ConsumerResourceClass) -> bool {
+    matches!(resource_class, ConsumerResourceClass::Foreground)
 }
 
 fn active_header_state(
@@ -5058,6 +5668,124 @@ impl TerminalApp {
     }
 }
 
+fn workspace_pane_grid(
+    terminal: &Entity<TerminalApp>,
+    workspace: &WorkspaceTab,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> AnyElement {
+    let panels = workspace
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| {
+            let surface = pane.surface.read(cx);
+            let connection_state = surface
+                .connection_state
+                .unwrap_or(FeedConnectionState::Disconnected);
+            let chart_has_market_data = surface
+                .chart
+                .as_ref()
+                .is_some_and(|chart| chart.read(cx).has_market_data());
+            let content = market_workspace(MarketWorkspaceState {
+                app: pane.surface.clone(),
+                pane_id: pane.id,
+                chart: surface.chart.as_ref(),
+                chart_has_market_data,
+                dom: surface.dom.clone(),
+                side_panel: surface.side_panel,
+                chart_state: surface.chart_state,
+                chart_status_detail: chart_status_detail(
+                    surface.chart_state,
+                    connection_state,
+                    &surface.chart_state_message,
+                    surface.connection_message.as_deref(),
+                )
+                .to_string(),
+                theme,
+            });
+            let workspace_id = workspace.id;
+            let pane_id = pane.id;
+            let pane_focus = pane.focus.clone();
+            let select_terminal = terminal.clone();
+            resizable_panel()
+                .size(px(
+                    pane.size_basis_points.to_f32().unwrap_or(10_000.0) / 10.0
+                ))
+                .child(
+                    div()
+                        .id(("workspace_pane", pane.id))
+                        .relative()
+                        .size_full()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(gpui_color(if index == workspace.active_pane {
+                            theme.colors.ring
+                        } else {
+                            theme.colors.border
+                        }))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            select_terminal.update(cx, |terminal, terminal_cx| {
+                                terminal.select_pane(workspace_id, pane_id, terminal_cx);
+                            });
+                            pane_focus.focus(window, cx);
+                        })
+                        .child(content),
+                )
+        })
+        .collect::<Vec<_>>();
+    let workspace_id = workspace.id;
+    let resize_terminal = terminal.clone();
+    let group = match workspace.split_axis {
+        WorkspaceSplitAxis::Horizontal => h_resizable(("workspace_grid", workspace.id)),
+        WorkspaceSplitAxis::Vertical => v_resizable(("workspace_grid", workspace.id)),
+    }
+    .with_state(&workspace.resize_state)
+    .children(panels)
+    .on_resize(move |state, _, cx| {
+        let sizes = state.read(cx).sizes().clone();
+        resize_terminal.update(cx, |terminal, terminal_cx| {
+            terminal.apply_pane_sizes(workspace_id, &sizes, terminal_cx);
+        });
+    });
+    group.into_any_element()
+}
+
+fn workspace_market_area(
+    terminal: &Entity<TerminalApp>,
+    workspace: &WorkspaceTab,
+    active_surface: &Entity<WorkspaceSurface>,
+    drawing_toolbar_collapsed: bool,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let grid = workspace_pane_grid(terminal, workspace, theme, cx);
+    let drawing_state = active_surface.read(cx).drawing_toolbar_state(cx);
+    let grid = div()
+        .size_full()
+        .min_w_0()
+        .when(!drawing_toolbar_collapsed, |grid| {
+            grid.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
+        })
+        .child(grid);
+    div()
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .child(grid)
+        .when(drawing_toolbar_collapsed, |market| {
+            market.child(drawing_toolbar_expander(terminal.clone(), theme))
+        })
+        .when(!drawing_toolbar_collapsed, |market| {
+            market.child(drawing_toolbar(
+                terminal.clone(),
+                active_surface,
+                drawing_state,
+                theme,
+            ))
+        })
+}
+
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.workspace_drag.is_some() && !cx.has_active_drag() {
@@ -5068,14 +5796,10 @@ impl Render for TerminalApp {
         let terminal = cx.entity();
         let active = self.active_surface();
         let workspace = active.read(cx);
-        let connection_state = workspace
-            .connection_state
-            .unwrap_or(FeedConnectionState::Disconnected);
         let chart_has_market_data = workspace
             .chart
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
-        let drawing_state = workspace.drawing_toolbar_state(cx);
         let fullscreen = window.is_fullscreen();
         let overlay = chrome_overlay_layer(
             workspace,
@@ -5095,25 +5819,14 @@ impl Render for TerminalApp {
             &active,
             active_header_state(workspace, &self.theme, chart_has_market_data, cx),
         );
-        let market = market_workspace(MarketWorkspaceState {
-            terminal: terminal.clone(),
-            app: active.clone(),
-            chart: workspace.chart.as_ref(),
-            chart_has_market_data,
-            dom: workspace.dom.clone(),
-            side_panel: workspace.side_panel,
-            chart_state: workspace.chart_state,
-            chart_status_detail: chart_status_detail(
-                workspace.chart_state,
-                connection_state,
-                &workspace.chart_state_message,
-                workspace.connection_message.as_deref(),
-            )
-            .to_string(),
-            drawing_state,
-            drawing_toolbar_collapsed: self.drawing_toolbar.is_collapsed(),
-            theme: &self.theme,
-        });
+        let market = workspace_market_area(
+            &terminal,
+            &self.workspaces[self.active],
+            &active,
+            self.drawing_toolbar.is_collapsed(),
+            &self.theme,
+            cx,
+        );
         let fullscreen_focus = self.chrome_focus.clone();
         div()
             .relative()
@@ -5151,11 +5864,15 @@ impl Render for TerminalApp {
 }
 
 fn workspace_action_handlers(root: Div, cx: &mut Context<TerminalApp>) -> Div {
-    root.on_action(cx.listener(TerminalApp::select_next_workspace))
+    root.on_action(cx.listener(TerminalApp::new_workspace))
+        .on_action(cx.listener(TerminalApp::select_next_workspace))
         .on_action(cx.listener(TerminalApp::select_previous_workspace))
         .on_action(cx.listener(TerminalApp::move_workspace_left))
         .on_action(cx.listener(TerminalApp::move_workspace_right))
         .on_action(cx.listener(TerminalApp::close_active_workspace))
+        .on_action(cx.listener(TerminalApp::split_pane_horizontal))
+        .on_action(cx.listener(TerminalApp::split_pane_vertical))
+        .on_action(cx.listener(TerminalApp::close_active_pane))
 }
 
 #[derive(Clone)]
@@ -5491,29 +6208,60 @@ fn terminal_root(
 ) -> Entity<Root> {
     let surface = workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx);
     terminal_shell_root(
-        vec![WorkspaceTab {
-            id: 1,
-            label: workspace_label(0),
-            surface,
-            focus: cx.focus_handle(),
-        }],
-        None,
+        TerminalShellInit {
+            workspaces: vec![WorkspaceTab {
+                id: 1,
+                label: workspace_label(0),
+                panes: vec![WorkspacePane {
+                    id: 1,
+                    consumer_id: 1,
+                    surface,
+                    focus: cx.focus_handle(),
+                    size_basis_points: 10_000,
+                }],
+                active_pane: 0,
+                split_axis: WorkspaceSplitAxis::Horizontal,
+                resize_state: cx.new(|_| ResizableState::default()),
+                generation: 1,
+                focus: cx.focus_handle(),
+            }],
+            active_workspace_id: Some(1),
+            workspace_revision: 0,
+            layout_generation: 1,
+            workspace_factory: None,
+        },
         lifecycle,
         window,
         cx,
     )
 }
 
-fn terminal_shell_root(
+struct TerminalShellInit {
     workspaces: Vec<WorkspaceTab>,
+    active_workspace_id: Option<u64>,
+    workspace_revision: u64,
+    layout_generation: u64,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+}
+
+fn terminal_shell_root(
+    init: TerminalShellInit,
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
     let terminal_lifecycle = lifecycle.clone();
-    let terminal =
-        cx.new(move |cx| TerminalApp::new(workspaces, terminal_lifecycle, workspace_factory, cx));
+    let terminal = cx.new(move |cx| {
+        TerminalApp::new(
+            init.workspaces,
+            init.active_workspace_id,
+            init.workspace_revision,
+            init.layout_generation,
+            terminal_lifecycle,
+            init.workspace_factory,
+            cx,
+        )
+    });
     let closing_terminal = terminal.clone();
     window.on_window_should_close(cx, move |_, cx| {
         closing_terminal.update(cx, |terminal, cx| terminal.retire_workspaces(cx));
@@ -5529,27 +6277,68 @@ fn terminal_shell_root(
 }
 
 fn workspace_tabs_root(
-    market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    mut market_panes: Vec<engine_market_worker::WorkspaceMarketPane>,
+    restored: &WorkspaceState,
     workspace_factory: engine_market_worker::WorkspaceMarketFactory,
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
-    let workspaces = market_workers
-        .into_iter()
-        .enumerate()
-        .map(|(index, (bootstrap, market_worker))| WorkspaceTab {
-            id: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
-            label: workspace_label(index),
-            surface: workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx),
+    let mut workspaces = Vec::with_capacity(restored.workspace_tabs.len());
+    for tab in &restored.workspace_tabs {
+        let mut panes = Vec::with_capacity(tab.panes.len());
+        for persisted in &tab.panes {
+            let Some(index) = market_panes.iter().position(|pane| {
+                pane.workspace_id == tab.workspace_id && pane.pane_id == persisted.pane_id
+            }) else {
+                continue;
+            };
+            let pane = market_panes.remove(index);
+            panes.push(WorkspacePane {
+                id: pane.pane_id,
+                consumer_id: pane.consumer_id,
+                surface: workspace_surface_entity(pane.startup, pane.worker, lifecycle, window, cx),
+                focus: cx.focus_handle(),
+                size_basis_points: persisted.size_basis_points,
+            });
+        }
+        if panes.is_empty() {
+            continue;
+        }
+        let active_pane = panes
+            .iter()
+            .position(|pane| pane.id == tab.active_pane_id)
+            .unwrap_or(0);
+        workspaces.push(WorkspaceTab {
+            id: tab.workspace_id,
+            label: tab.label.clone(),
+            panes,
+            active_pane,
+            split_axis: WorkspaceSplitAxis::try_from(tab.split_axis)
+                .unwrap_or(WorkspaceSplitAxis::Horizontal),
+            resize_state: cx.new(|_| ResizableState::default()),
+            generation: tab.generation,
             focus: cx.focus_handle(),
-        })
-        .collect::<Vec<_>>();
-    terminal_shell_root(workspaces, Some(workspace_factory), lifecycle, window, cx)
+        });
+    }
+    terminal_shell_root(
+        TerminalShellInit {
+            workspaces,
+            active_workspace_id: Some(restored.active_workspace_id),
+            workspace_revision: restored.workspace_revision,
+            layout_generation: restored.layout_generation,
+            workspace_factory: Some(workspace_factory),
+        },
+        lifecycle,
+        window,
+        cx,
+    )
 }
 
 struct ConfiguredDesktop {
     market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    workspace_panes: Vec<engine_market_worker::WorkspaceMarketPane>,
+    restored_workspace: WorkspaceState,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     lifetime_mode: DesktopLifetimeMode,
     autostart_enabled: bool,
@@ -5581,6 +6370,7 @@ struct ConfiguredLifecycle {
     mode: DesktopLifetimeMode,
     autostart_enabled: bool,
     markets_live_permitted: bool,
+    workspace: WorkspaceState,
 }
 
 fn configure_engine_lifecycle(
@@ -5596,6 +6386,7 @@ fn configure_engine_lifecycle(
         mode,
         autostart_enabled: workspace.autostart_enabled,
         markets_live_permitted: workspace.markets_live_permitted,
+        workspace,
     })
 }
 
@@ -5605,7 +6396,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let (lifetime_mode, command) = split_lifetime_mode(first, &mut arguments);
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
-    let (market_workers, lifecycle) = if let Some(argument) = command {
+    let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
             let report_path = arguments.next().ok_or_else(|| {
@@ -5631,14 +6422,22 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 std::process::exit(2);
             }
             let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-            (vec![resident_market_worker::start_rithmic()?], lifecycle)
+            (
+                vec![resident_market_worker::start_rithmic()?],
+                Vec::new(),
+                lifecycle,
+            )
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
                 std::process::exit(2);
             }
             let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-            (engine_market_worker::start_multi_chart()?, lifecycle)
+            (
+                engine_market_worker::start_multi_chart()?,
+                Vec::new(),
+                lifecycle,
+            )
         } else if argument == "--workspace-tabs" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --workspace-tabs");
@@ -5646,19 +6445,25 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             }
             let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
             layout = DesktopLayout::WorkspaceTabs;
-            let group = engine_market_worker::start_workspace_tabs()?;
+            let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
             workspace_factory = Some(group.factory);
-            (group.initial, lifecycle)
+            (Vec::new(), group.initial, lifecycle)
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
         }
     } else {
         let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-        (vec![resident_market_worker::start()?], lifecycle)
+        (
+            vec![resident_market_worker::start()?],
+            Vec::new(),
+            lifecycle,
+        )
     };
     Ok(Some(ConfiguredDesktop {
         market_workers,
+        workspace_panes,
+        restored_workspace: lifecycle.workspace.clone(),
         workspace_factory,
         lifetime_mode: lifecycle.mode,
         autostart_enabled: lifecycle.autostart_enabled,
@@ -5687,7 +6492,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    run_desktop(configured, lifecycle);
+}
+
+fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
     let market_workers = configured.market_workers;
+    let workspace_panes = configured.workspace_panes;
+    let restored_workspace = configured.restored_workspace;
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     application()
@@ -5706,11 +6517,15 @@ fn main() {
                 KeyBinding::new("alt-f9", MinimizeWindow, None),
                 KeyBinding::new("alt-f10", ZoomWindow, None),
                 KeyBinding::new("alt-f4", CloseWindow, None),
+                KeyBinding::new("ctrl-t", NewWorkspace, None),
                 KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
                 KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
                 KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
                 KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
                 KeyBinding::new("ctrl-w", CloseWorkspace, None),
+                KeyBinding::new("ctrl-alt-h", SplitPaneHorizontal, None),
+                KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
+                KeyBinding::new("ctrl-shift-w", ClosePane, None),
             ]);
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
             let quit_lifecycle = lifecycle.clone();
@@ -5752,7 +6567,8 @@ fn main() {
                         workspace_factory.expect("workspace layout has a market workspace factory");
                     cx.open_window(options, move |window, cx| {
                         workspace_tabs_root(
-                            market_workers,
+                            workspace_panes,
+                            &restored_workspace,
                             workspace_factory,
                             &window_lifecycle,
                             window,
@@ -5774,14 +6590,15 @@ mod tests {
         RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
         TerminalProvider, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH,
         WindowCommand, WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
-        catalog_rejection_domain, chart_status_detail, chart_surface_notice,
-        chrome_control_foreground, connection_presentation, default_rithmic_contract_index,
+        catalog_rejection_domain, changed_pane_basis_points, chart_status_detail,
+        chart_surface_notice, chrome_control_foreground, close_pane_basis_points,
+        connection_presentation, default_rithmic_contract_index, durable_workspace_viewport,
         finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
-        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
-        reorder_workspace_ids, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop, split_lifetime_mode, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_switch, workspace_title_bar_visible,
-        wrapped_workspace_index,
+        normalized_pane_basis_points, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index, reorder_workspace_ids, rithmic_ready_action,
+        series_selector_label, should_apply_rithmic_worker_stop, split_lifetime_mode,
+        split_pane_basis_points, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -5943,6 +6760,63 @@ mod tests {
         assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
         assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
         assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
+    }
+
+    #[test]
+    fn pane_split_resize_and_close_keep_exact_normalized_layout_state() {
+        assert_eq!(
+            split_pane_basis_points(&[10_000], 0),
+            Some(vec![5_000, 5_000])
+        );
+        assert_eq!(
+            split_pane_basis_points(&[6_501, 3_499], 0),
+            Some(vec![3_251, 3_250, 3_499])
+        );
+        assert_eq!(split_pane_basis_points(&[1, 9_999], 0), None);
+        assert_eq!(
+            normalized_pane_basis_points(&[640.0, 320.0, 240.0]),
+            Some(vec![5_333, 2_667, 2_000])
+        );
+        assert_eq!(normalized_pane_basis_points(&[640.0, f32::NAN]), None);
+        assert_eq!(
+            close_pane_basis_points(&[5_333, 2_667, 2_000], 1),
+            Some((vec![5_333, 4_667], 1))
+        );
+        assert_eq!(
+            close_pane_basis_points(&[5_333, 4_667], 1),
+            Some((vec![10_000], 0))
+        );
+        assert_eq!(close_pane_basis_points(&[10_000], 0), None);
+    }
+
+    #[test]
+    fn pane_resize_only_persists_real_geometry_changes() {
+        assert_eq!(
+            changed_pane_basis_points(&[5_000, 5_000], &[640.0, 640.0]),
+            None
+        );
+        assert_eq!(
+            changed_pane_basis_points(&[5_000, 5_000], &[720.0, 480.0]),
+            Some(vec![6_000, 4_000])
+        );
+    }
+
+    #[test]
+    fn workspace_viewport_persistence_ignores_automatic_live_scrolling() {
+        let restored = Some((100, 200));
+        let current = Some((300, 400));
+        assert_eq!(
+            durable_workspace_viewport(restored, false, false, current),
+            restored
+        );
+        assert_eq!(
+            durable_workspace_viewport(restored, true, true, current),
+            None
+        );
+        assert_eq!(
+            durable_workspace_viewport(restored, true, false, current),
+            current
+        );
     }
 
     #[test]

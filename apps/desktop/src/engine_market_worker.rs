@@ -3,7 +3,7 @@
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -16,10 +16,12 @@ use axiusflow_application::{
     ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
 };
 use axiusflow_engine_protocol::{
-    DemandError, EngineFaultCode, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesUpdate,
-    envelope,
+    ConsumerResourceClass, DemandError, EngineFaultCode, FailureStage, InstallProviderInstrument,
+    ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey, SeriesLoadState,
+    SeriesSnapshot, SeriesUpdate, WorkspacePaneKind, WorkspaceState, envelope,
 };
+#[cfg(test)]
+use axiusflow_engine_protocol::{WorkspacePaneState, WorkspaceTabState};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -41,12 +43,26 @@ const MODEL_CAPACITY: usize = 350;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const WORKSPACE_ADDITION_CAPACITY: usize = 8;
 
-type EndpointRecord = (u64, InstallProviderInstrument, WorkerEndpoint);
+struct EndpointRecord {
+    workspace_id: u64,
+    product: InstallProviderInstrument,
+    interval: ChartInterval,
+    endpoint: WorkerEndpoint,
+}
+
+pub(super) struct WorkspaceMarketPane {
+    pub workspace_id: u64,
+    pub pane_id: u64,
+    pub consumer_id: u64,
+    pub startup: MarketWorkerStartup,
+    pub worker: MarketDataWorker,
+}
 
 pub(super) struct WorkspaceMarketGroup {
-    pub initial: Vec<(MarketWorkerStartup, MarketDataWorker)>,
+    pub initial: Vec<WorkspaceMarketPane>,
     pub factory: WorkspaceMarketFactory,
 }
 
@@ -54,6 +70,7 @@ pub(super) struct WorkspaceMarketGroup {
 pub(super) struct WorkspaceMarketFactory {
     additions: mpsc::SyncSender<EndpointRecord>,
     next_workspace_id: Arc<AtomicU64>,
+    next_pane_id: Arc<AtomicU64>,
     next_consumer_id: Arc<AtomicU64>,
 }
 
@@ -61,10 +78,29 @@ impl WorkspaceMarketFactory {
     pub fn create_workspace(
         &self,
         product: InstallProviderInstrument,
-    ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+        interval: ChartInterval,
+    ) -> Result<WorkspaceMarketPane, String> {
         let workspace_id = allocate_workspace_id(&self.next_workspace_id)?;
+        self.create_pane(workspace_id, product, interval)
+    }
+
+    pub fn create_pane(
+        &self,
+        workspace_id: u64,
+        product: InstallProviderInstrument,
+        interval: ChartInterval,
+    ) -> Result<WorkspaceMarketPane, String> {
+        let pane_id = allocate_pane_id(&self.next_pane_id)?;
         let consumer_id = allocate_consumer_id(&self.next_consumer_id)?;
-        let (worker, endpoint) = worker_endpoint(workspace_id, product, consumer_id);
+        let (worker, endpoint) = worker_endpoint(
+            workspace_id,
+            pane_id,
+            product,
+            consumer_id,
+            interval,
+            None,
+            INITIAL_GENERATION,
+        );
         self.additions
             .try_send(endpoint)
             .map_err(|error| match error {
@@ -90,6 +126,12 @@ fn allocate_consumer_id(next_consumer_id: &AtomicU64) -> Result<u64, String> {
     next_consumer_id
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
         .map_err(|_| "market consumer identity space is exhausted".to_string())
+}
+
+fn allocate_pane_id(next_pane_id: &AtomicU64) -> Result<u64, String> {
+    next_pane_id
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .map_err(|_| "workspace pane identity space is exhausted".to_string())
 }
 
 const fn checked_add_one(value: u64) -> Option<u64> {
@@ -121,36 +163,101 @@ pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketData
     start_group(vec![(1, btc), (2, eth)])
 }
 
-pub(super) fn start_workspace_tabs() -> Result<WorkspaceMarketGroup, String> {
-    let products = coinbase_products();
-    let btc = products
-        .first()
-        .cloned()
-        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
+pub(super) fn start_workspace_tabs(
+    workspace: &WorkspaceState,
+) -> Result<WorkspaceMarketGroup, String> {
     let client_id = random_identity()?;
-    let first_consumer_id = random_identity()?;
-    let next_consumer_id = Arc::new(AtomicU64::new(first_consumer_id.saturating_add(1)));
-    let (initial_worker, initial_endpoint) = worker_endpoint(1, btc, first_consumer_id);
+    let mut initial = Vec::new();
+    let mut endpoints = Vec::new();
+    let (maximum_workspace_id, maximum_pane_id, maximum_consumer_id) =
+        workspace_identity_high_watermarks(workspace);
+    for tab in &workspace.workspace_tabs {
+        for pane in &tab.panes {
+            if WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart) {
+                continue;
+            }
+            let instrument = pane
+                .instrument
+                .clone()
+                .ok_or_else(|| "workspace chart instrument is missing".to_string())?;
+            let interval = pane_interval(pane.series.as_ref())?;
+            let (worker, endpoint) = worker_endpoint(
+                tab.workspace_id,
+                pane.pane_id,
+                instrument,
+                pane.consumer_id,
+                interval,
+                pane.viewport_start_unix_nanos
+                    .zip(pane.viewport_end_unix_nanos),
+                pane.generation,
+            );
+            initial.push(worker);
+            endpoints.push(endpoint);
+        }
+    }
+    if initial.is_empty() {
+        return Err("persisted workspace contains no chart panes".to_string());
+    }
     let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
-    spawn_group(client_id, vec![initial_endpoint], Some(addition_rx))?;
+    spawn_group(client_id, endpoints, Some(addition_rx))?;
     Ok(WorkspaceMarketGroup {
-        initial: vec![initial_worker],
+        initial,
         factory: WorkspaceMarketFactory {
             additions: addition_tx,
-            next_workspace_id: Arc::new(AtomicU64::new(2)),
-            next_consumer_id,
+            next_workspace_id: Arc::new(AtomicU64::new(maximum_workspace_id.saturating_add(1))),
+            next_pane_id: Arc::new(AtomicU64::new(maximum_pane_id.saturating_add(1))),
+            next_consumer_id: Arc::new(AtomicU64::new(maximum_consumer_id.saturating_add(1))),
         },
     })
+}
+
+fn workspace_identity_high_watermarks(workspace: &WorkspaceState) -> (u64, u64, u64) {
+    workspace.workspace_tabs.iter().fold(
+        (0, 0, 0),
+        |(maximum_workspace, maximum_pane, maximum_consumer), tab| {
+            tab.panes.iter().fold(
+                (
+                    maximum_workspace.max(tab.workspace_id),
+                    maximum_pane,
+                    maximum_consumer,
+                ),
+                |(maximum_workspace, maximum_pane, maximum_consumer), pane| {
+                    (
+                        maximum_workspace,
+                        maximum_pane.max(pane.pane_id),
+                        maximum_consumer.max(pane.consumer_id),
+                    )
+                },
+            )
+        },
+    )
+}
+
+fn pane_interval(series: Option<&SeriesKey>) -> Result<ChartInterval, String> {
+    let series = series.ok_or_else(|| "workspace chart series is missing".to_string())?;
+    match SeriesCadence::try_from(series.cadence) {
+        Ok(SeriesCadence::FixedSeconds) => match series.cadence_value {
+            60 => Ok(ChartInterval::Minute1),
+            300 => Ok(ChartInterval::Minute5),
+            900 => Ok(ChartInterval::Minute15),
+            3_600 => Ok(ChartInterval::Hour1),
+            _ => Err("workspace chart cadence is unsupported by Coinbase".to_string()),
+        },
+        _ => Err("workspace chart cadence is unsupported by Coinbase".to_string()),
+    }
 }
 
 struct WorkerEndpoint {
     consumer_id: u64,
     messages: MarketWorkerSender,
     commands: mpsc::Receiver<MarketWorkerCommand>,
+    pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
     shutdown: mpsc::SyncSender<()>,
     model: MarketBarClientModel,
     publication: Option<MarketPublicationGeneration>,
     active_generation: u64,
+    resource_class: ConsumerResourceClass,
+    last_market_poll: std::time::Instant,
     active: bool,
 }
 
@@ -162,8 +269,17 @@ fn start_group(
     let mut endpoints = Vec::with_capacity(configurations.len());
     for (workspace_id, product) in configurations {
         let consumer_id = random_identity()?;
-        let (worker, endpoint) = worker_endpoint(workspace_id, product, consumer_id);
-        workers.push(worker);
+        let pane_id = random_identity()?;
+        let (worker, endpoint) = worker_endpoint(
+            workspace_id,
+            pane_id,
+            product,
+            consumer_id,
+            ChartInterval::Minute1,
+            None,
+            INITIAL_GENERATION,
+        );
+        workers.push((worker.startup, worker.worker));
         endpoints.push(endpoint);
     }
     spawn_group(client_id, endpoints, None)?;
@@ -172,12 +288,18 @@ fn start_group(
 
 fn worker_endpoint(
     workspace_id: u64,
+    pane_id: u64,
     product: InstallProviderInstrument,
     consumer_id: u64,
-) -> ((MarketWorkerStartup, MarketDataWorker), EndpointRecord) {
+    interval: ChartInterval,
+    restored_viewport: Option<(i64, i64)>,
+    initial_generation: u64,
+) -> (WorkspaceMarketPane, EndpointRecord) {
     let startup = MarketWorkerStartup::Loading(Box::new(
         axiusflow_desktop::market_worker::CoinbaseWorkerStartup {
             coinbase_product: product.clone(),
+            coinbase_interval: interval,
+            restored_viewport,
             subscription_id: SUBSCRIPTION_ID.to_string(),
             worker_label: WORKER_LABEL.to_string(),
         },
@@ -186,31 +308,42 @@ fn worker_endpoint(
         market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-    let selection_sequence = Arc::new(AtomicU64::new(INITIAL_GENERATION));
-    let worker = (
+    let selection_sequence = Arc::new(AtomicU64::new(initial_generation));
+    let pending_resource_class = Arc::new(Mutex::new(None));
+    let worker = WorkspaceMarketPane {
+        workspace_id,
+        pane_id,
+        consumer_id,
         startup,
-        MarketDataWorker::from_channels(
+        worker: MarketDataWorker::from_channels(
             command_tx,
             message_rx,
             shutdown_rx,
             None,
             Some(selection_sequence),
-        ),
-    );
-    let endpoint = (
+        )
+        .with_resource_class_slot(Arc::clone(&pending_resource_class)),
+    };
+    let endpoint = EndpointRecord {
         workspace_id,
         product,
-        WorkerEndpoint {
+        interval,
+        endpoint: WorkerEndpoint {
             consumer_id,
             messages: message_tx,
             commands: command_rx,
+            pending_resource_class,
             shutdown: shutdown_tx,
             model: empty_model(),
             publication: None,
-            active_generation: INITIAL_GENERATION,
+            active_generation: initial_generation,
+            resource_class: ConsumerResourceClass::Foreground,
+            last_market_poll: std::time::Instant::now()
+                .checked_sub(BACKGROUND_POLL_INTERVAL)
+                .unwrap_or_else(std::time::Instant::now),
             active: true,
         },
-    );
+    };
     (worker, endpoint)
 }
 
@@ -223,15 +356,15 @@ fn spawn_group(
         .name("axiusflow-engine-market-client".to_string())
         .spawn(move || {
             if let Err(error) = run_workers(client_id, &mut endpoints, additions) {
-                for (_, _, endpoint) in &endpoints {
-                    let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                for record in &endpoints {
+                    let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                         state: ChartState::Error,
                         message: error.clone(),
                     });
                 }
             }
-            for (_, _, endpoint) in endpoints {
-                let _ = endpoint.shutdown.try_send(());
+            for record in endpoints {
+                let _ = record.endpoint.shutdown.try_send(());
             }
         })
         .map_err(|error| error.to_string())?;
@@ -243,21 +376,21 @@ fn run_workers(
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
-    for (_, _, endpoint) in endpoints.iter() {
-        let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-            state: FeedConnectionState::Discovering,
-            message: "Connecting to the resident market engine".to_string(),
-        });
+    for record in endpoints.iter() {
+        let _ = record
+            .endpoint
+            .messages
+            .send(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Discovering,
+                message: "Connecting to the resident market engine".to_string(),
+            });
     }
     let mut supervisor = EngineSupervisor::connect(client_id)?;
     let result = run_attached_workers(&mut supervisor, endpoints, additions);
-    for (_, _, endpoint) in endpoints
-        .iter_mut()
-        .filter(|(_, _, endpoint)| endpoint.active)
-    {
-        let _ = supervisor.remove_market_consumer(endpoint.consumer_id);
-        endpoint.active = false;
-        let _ = endpoint.shutdown.try_send(());
+    for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
+        let _ = supervisor.remove_market_consumer(record.endpoint.consumer_id);
+        record.endpoint.active = false;
+        let _ = record.endpoint.shutdown.try_send(());
     }
     let detach_result = supervisor.detach();
     result.and(detach_result)
@@ -268,24 +401,36 @@ fn run_attached_workers(
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
-    for (workspace_id, product, endpoint) in endpoints.iter_mut() {
-        initialize_endpoint(client, *workspace_id, product, endpoint)?;
+    for record in endpoints.iter_mut() {
+        initialize_endpoint(
+            client,
+            record.workspace_id,
+            &record.product,
+            record.interval,
+            &mut record.endpoint,
+        )?;
     }
 
     let mut additions = additions;
-    while additions.is_some() || endpoints.iter().any(|(_, _, endpoint)| endpoint.active) {
+    while additions.is_some() || endpoints.iter().any(|record| record.endpoint.active) {
         if let Some(receiver) = additions.as_ref() {
             loop {
                 match receiver.try_recv() {
                     Ok(mut record) => {
-                        match initialize_endpoint(client, record.0, &record.1, &mut record.2) {
+                        match initialize_endpoint(
+                            client,
+                            record.workspace_id,
+                            &record.product,
+                            record.interval,
+                            &mut record.endpoint,
+                        ) {
                             Ok(()) => endpoints.push(record),
                             Err(error) => {
-                                let _ = record.2.messages.send(MarketWorkerMessage::State {
+                                let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                                     state: ChartState::Error,
                                     message: error,
                                 });
-                                retire_endpoint(client, &mut record.2);
+                                retire_endpoint(client, &mut record.endpoint);
                             }
                         }
                     }
@@ -297,10 +442,9 @@ fn run_attached_workers(
                 }
             }
         }
-        for (_, _, endpoint) in endpoints
-            .iter_mut()
-            .filter(|(_, _, endpoint)| endpoint.active)
-        {
+        for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
+            let endpoint = &mut record.endpoint;
+            process_pending_resource_class(client, endpoint);
             match endpoint.commands.try_recv() {
                 Ok(command) => {
                     if let Err(error) = process_command(client, endpoint, command) {
@@ -316,8 +460,10 @@ fn run_attached_workers(
                     continue;
                 }
             }
-            if endpoint.active {
+            let now = std::time::Instant::now();
+            if endpoint.active && endpoint.market_poll_due(now) {
                 let poll = client.poll_market_event(endpoint.consumer_id)?;
+                endpoint.last_market_poll = now;
                 if poll.reconnected {
                     let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
                         state: FeedConnectionState::Recovering,
@@ -341,16 +487,33 @@ fn run_attached_workers(
                 }
             }
         }
-        endpoints.retain(|(_, _, endpoint)| endpoint.active);
+        endpoints.retain(|record| record.endpoint.active);
         thread::sleep(POLL_INTERVAL);
     }
     Ok(())
+}
+
+fn process_pending_resource_class(client: &mut EngineSupervisor, endpoint: &mut WorkerEndpoint) {
+    let pending = endpoint
+        .pending_resource_class
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(resource_class) = pending
+        && let Err(error) = set_resource_class(client, endpoint, resource_class)
+    {
+        let _ = endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: error,
+        });
+    }
 }
 
 fn initialize_endpoint(
     client: &mut EngineSupervisor,
     workspace_id: u64,
     product: &InstallProviderInstrument,
+    interval: ChartInterval,
     endpoint: &mut WorkerEndpoint,
 ) -> Result<(), String> {
     let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
@@ -364,8 +527,8 @@ fn initialize_endpoint(
     match request_snapshot(
         client,
         endpoint.consumer_id,
-        INITIAL_GENERATION,
-        series_key(product, ChartInterval::Minute1)?,
+        endpoint.active_generation,
+        series_key(product, interval)?,
         &mut endpoint.model,
         &endpoint.messages,
     ) {
@@ -443,8 +606,8 @@ fn process_command(
             }
             Ok(())
         }
-        MarketWorkerCommand::Visibility(visible) => {
-            client.set_market_visibility(endpoint.consumer_id, visible)
+        MarketWorkerCommand::ResourceClass(resource_class) => {
+            set_resource_class(client, endpoint, resource_class)
         }
         MarketWorkerCommand::Shutdown => {
             retire_endpoint(client, endpoint);
@@ -455,6 +618,33 @@ fn process_command(
         | MarketWorkerCommand::EngineSeries(_) => {
             Err("Rithmic commands cannot enter the Coinbase engine client".to_string())
         }
+    }
+}
+
+fn set_resource_class(
+    client: &mut EngineSupervisor,
+    endpoint: &mut WorkerEndpoint,
+    resource_class: ConsumerResourceClass,
+) -> Result<(), String> {
+    client.set_market_resource_class(endpoint.consumer_id, resource_class)?;
+    endpoint.resource_class = resource_class;
+    Ok(())
+}
+
+impl WorkerEndpoint {
+    fn market_poll_due(&self, now: std::time::Instant) -> bool {
+        consumer_market_poll_due(
+            self.resource_class,
+            now.duration_since(self.last_market_poll),
+        )
+    }
+}
+
+fn consumer_market_poll_due(resource_class: ConsumerResourceClass, elapsed: Duration) -> bool {
+    match resource_class {
+        ConsumerResourceClass::Foreground => true,
+        ConsumerResourceClass::Background => elapsed >= BACKGROUND_POLL_INTERVAL,
+        ConsumerResourceClass::Warm | ConsumerResourceClass::Detached => false,
     }
 }
 
@@ -548,6 +738,7 @@ fn apply_polled_event(
             }
         }
         envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+        envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => Ok(()),
         envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
         _ => Err("engine returned an unexpected polled market event".to_string()),
     }
@@ -937,7 +1128,33 @@ fn demand_error(error: &DemandError) -> String {
         EngineFaultCode::MalformedMessage => "malformed message",
         EngineFaultCode::OversizedFrame => "oversized frame",
     });
-    format!("{} failed ({class}): {}", error.stage, error.detail)
+    let stage = match FailureStage::try_from(error.stage_code) {
+        Ok(stage) => failure_stage_label(stage),
+        Err(_) => error.stage.as_str(),
+    };
+    let elapsed = error
+        .elapsed_millis
+        .map_or(String::new(), |elapsed| format!(" after {elapsed} ms"));
+    format!("{stage} failed ({class}){elapsed}: {}", error.detail)
+}
+
+const fn failure_stage_label(stage: FailureStage) -> &'static str {
+    match stage {
+        FailureStage::Unspecified => "market demand",
+        FailureStage::ProviderHistory => "provider history",
+        FailureStage::CanonicalValidation => "canonical validation",
+        FailureStage::MemoryInstall => "memory install",
+        FailureStage::Aggregation => "aggregation",
+        FailureStage::SegmentEncode => "segment encode",
+        FailureStage::Encryption => "encryption",
+        FailureStage::FilesystemWrite => "filesystem write",
+        FailureStage::CatalogCommit => "catalog commit",
+        FailureStage::Handoff => "history/live handoff",
+        FailureStage::Publication => "publication",
+        FailureStage::IpcSend => "local IPC send",
+        FailureStage::ChartInstall => "chart install",
+        FailureStage::ProviderRealtime => "provider realtime",
+    }
 }
 
 fn now_unix_nanos() -> i64 {
@@ -964,18 +1181,54 @@ mod tests {
     #[test]
     fn workspace_creation_allocates_one_consumer_per_tab_without_identity_wraparound() {
         let next_workspace_id = AtomicU64::new(2);
+        let next_pane_id = AtomicU64::new(9);
         assert_eq!(allocate_workspace_id(&next_workspace_id), Ok(2));
         assert_eq!(allocate_workspace_id(&next_workspace_id), Ok(3));
         let exhausted = AtomicU64::new(u64::MAX);
         assert!(allocate_workspace_id(&exhausted).is_err());
         assert!(allocate_consumer_id(&exhausted).is_err());
+        assert_eq!(allocate_pane_id(&next_pane_id), Ok(9));
 
         let product = coinbase_products().remove(0);
-        let (_worker, (workspace_id, endpoint_product, endpoint)) =
-            worker_endpoint(2, product.clone(), 41);
-        assert_eq!(workspace_id, 2);
-        assert_eq!(endpoint.consumer_id, 41);
-        assert_eq!(endpoint_product.instrument_id, product.instrument_id);
+        let (_worker, record) =
+            worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
+        assert_eq!(record.workspace_id, 2);
+        assert_eq!(record.endpoint.consumer_id, 41);
+        assert_eq!(record.product.instrument_id, product.instrument_id);
+        assert_eq!(record.interval, ChartInterval::Minute5);
+    }
+
+    #[test]
+    fn restored_workspace_ids_remain_stable_and_new_ids_begin_above_every_high_watermark() {
+        let workspace = WorkspaceState {
+            workspace_tabs: vec![
+                WorkspaceTabState {
+                    workspace_id: 9,
+                    panes: vec![WorkspacePaneState {
+                        pane_id: 21,
+                        consumer_id: 31,
+                        ..WorkspacePaneState::default()
+                    }],
+                    ..WorkspaceTabState::default()
+                },
+                WorkspaceTabState {
+                    workspace_id: 4,
+                    panes: vec![WorkspacePaneState {
+                        pane_id: 17,
+                        consumer_id: 44,
+                        ..WorkspacePaneState::default()
+                    }],
+                    ..WorkspaceTabState::default()
+                },
+            ],
+            ..WorkspaceState::default()
+        };
+        assert_eq!(workspace_identity_high_watermarks(&workspace), (9, 21, 44));
+        assert_eq!(allocate_workspace_id(&AtomicU64::new(10)), Ok(10));
+        assert_eq!(allocate_pane_id(&AtomicU64::new(22)), Ok(22));
+        assert_eq!(allocate_consumer_id(&AtomicU64::new(45)), Ok(45));
+        assert_eq!(workspace.workspace_tabs[0].panes[0].consumer_id, 31);
+        assert_eq!(workspace.workspace_tabs[1].panes[0].consumer_id, 44);
     }
 
     #[test]
@@ -1092,5 +1345,24 @@ mod tests {
         let mut product = coinbase_products().remove(0);
         product.provider = "rithmic".to_string();
         assert!(series_key(&product, ChartInterval::Minute1).is_err());
+    }
+
+    #[test]
+    fn structured_demand_errors_render_stage_and_elapsed_context() {
+        let error = DemandError {
+            consumer_id: 1,
+            generation: 2,
+            code: EngineFaultCode::Retryable as i32,
+            stage: "handoff".to_string(),
+            detail: "history/live handoff failed".to_string(),
+            series: None,
+            stage_code: FailureStage::Handoff as i32,
+            cause: "history and realtime state could not be joined safely".to_string(),
+            elapsed_millis: Some(17),
+        };
+        assert_eq!(
+            demand_error(&error),
+            "history/live handoff failed (retryable) after 17 ms: history/live handoff failed"
+        );
     }
 }

@@ -5,14 +5,17 @@ use axiusflow_engine_protocol::{
     EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope,
     EnvelopeDecoder, Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument,
     LIFECYCLE_CONTRACT_REVISION, MAX_FRAME_BYTES, MarketBar, MarketEventIdle, OrderBookLevel,
-    OrderBookSnapshot, OrderBookState, PROTOCOL_VERSION, PersistenceState, PollMarketEvent,
+    OrderBookSnapshot, OrderBookState, OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot,
+    OrderFlowTrade, OrderFlowUpdate, PROTOCOL_VERSION, PersistenceState, PollMarketEvent,
     ProtocolError, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderConnectionState, ProviderInstrumentSearchResult, ProviderInstrumentSelection,
     ProviderInstrumentSummary, ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode,
     RestoreWorkspace, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
     SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate,
     SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist,
-    ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, encode_envelope, envelope,
+    SetWorkspaceLayout, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope,
+    envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -29,6 +32,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 }
 
 fn workspace_payloads() -> Vec<envelope::Payload> {
+    let tab = workspace_tab();
     vec![
         envelope::Payload::ClientHello(ClientHello {
             protocol_version: PROTOCOL_VERSION,
@@ -43,6 +47,12 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
         }),
         envelope::Payload::RestoreWorkspace(RestoreWorkspace {}),
         envelope::Payload::WorkspaceState(workspace_state()),
+        envelope::Payload::SetWorkspaceLayout(SetWorkspaceLayout {
+            workspace_revision: 3,
+            layout_generation: 4,
+            active_workspace_id: 5,
+            workspace_tabs: vec![tab],
+        }),
         envelope::Payload::SetSelection(SetSelection {
             market: "ETH-USD".into(),
             interval_seconds: 300,
@@ -95,6 +105,47 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
     ]
 }
 
+fn workspace_tab() -> WorkspaceTabState {
+    let instrument = InstallProviderInstrument {
+        provider: "coinbase".into(),
+        session_generation: 2,
+        selection_generation: 3,
+        instrument_id: "coinbase:spot:BTC-USD".into(),
+        provider_symbol: "BTC-USD".into(),
+        display_symbol: "BTC/USD".into(),
+        venue_id: "coinbase".into(),
+        price_scale: 2,
+        quantity_scale: 8,
+        entitlement_id: "coinbase-public-market-data".into(),
+    };
+    let series = SeriesKey {
+        provider: "coinbase".into(),
+        instrument_id: instrument.instrument_id.clone(),
+        cadence_value: 60,
+        definition_revision: 1,
+        entitlement_id: instrument.entitlement_id.clone(),
+        cadence: SeriesCadence::FixedSeconds as i32,
+    };
+    WorkspaceTabState {
+        workspace_id: 5,
+        label: "Crypto".into(),
+        split_axis: WorkspaceSplitAxis::Vertical as i32,
+        panes: vec![WorkspacePaneState {
+            pane_id: 7,
+            consumer_id: 11,
+            kind: WorkspacePaneKind::Chart as i32,
+            instrument: Some(instrument),
+            series: Some(series),
+            viewport_start_unix_nanos: Some(1),
+            viewport_end_unix_nanos: Some(2),
+            size_basis_points: 10_000,
+            generation: 4,
+        }],
+        active_pane_id: 7,
+        generation: 6,
+    }
+}
+
 fn workspace_state() -> WorkspaceState {
     WorkspaceState {
         provider: "coinbase".into(),
@@ -135,6 +186,7 @@ fn workspace_state() -> WorkspaceState {
         lifetime_mode: EngineLifetimeMode::KeepEngineWarm as i32,
         autostart_enabled: true,
         markets_live_permitted: false,
+        ..WorkspaceState::default()
     }
 }
 
@@ -179,6 +231,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
         envelope::Payload::VisibilityDemand(VisibilityDemand {
             consumer_id: 13,
             visible: true,
+            resource_class: axiusflow_engine_protocol::ConsumerResourceClass::Foreground as i32,
         }),
         envelope::Payload::RemoveConsumer(RemoveConsumer { consumer_id: 13 }),
         envelope::Payload::PollMarketEvent(PollMarketEvent { consumer_id: 13 }),
@@ -227,11 +280,64 @@ fn market_payloads() -> Vec<envelope::Payload> {
             code: EngineFaultCode::Retryable as i32,
             stage: "provider_history".into(),
             detail: "request timed out".into(),
+            series: None,
+            stage_code: axiusflow_engine_protocol::FailureStage::ProviderHistory as i32,
+            cause: "provider timeout".into(),
+            elapsed_millis: Some(2_000),
         }),
     ];
     payloads.push(order_book_payload());
+    payloads.extend(order_flow_payloads());
     payloads.extend(catalog_payloads());
     payloads
+}
+
+fn order_flow_payloads() -> Vec<envelope::Payload> {
+    let series = SeriesKey {
+        provider: "rithmic".into(),
+        instrument_id: "rithmic:CME:MNQU6".into(),
+        cadence_value: 100,
+        definition_revision: 1,
+        entitlement_id: "rithmic-test:CME:MNQU6".into(),
+        cadence: SeriesCadence::Trades as i32,
+    };
+    let level = OrderFlowLevel {
+        price: 20_000,
+        bid_volume: 3,
+        ask_volume: 5,
+        trade_count: 4,
+        time_at_price_count: 4,
+    };
+    let trade = OrderFlowTrade {
+        source_sequence: 9,
+        exchange_timestamp_unix_nanos: 10,
+        price: 20_000,
+        quantity: 2,
+        aggressor: OrderFlowAggressor::Buy as i32,
+    };
+    vec![
+        envelope::Payload::OrderFlowSnapshot(OrderFlowSnapshot {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series.clone()),
+            provider_generation: 2,
+            publication_generation: 3,
+            source_watermark: 9,
+            cumulative_delta: 2,
+            levels: vec![level],
+            tape: vec![trade],
+        }),
+        envelope::Payload::OrderFlowUpdate(OrderFlowUpdate {
+            consumer_id: 13,
+            generation: 14,
+            series: Some(series),
+            provider_generation: 2,
+            publication_generation: 4,
+            cumulative_delta: 4,
+            level: Some(level),
+            trade: Some(trade),
+        }),
+    ]
 }
 
 fn catalog_payloads() -> Vec<envelope::Payload> {

@@ -21,12 +21,14 @@ use std::{
 
 use axiusflow_coinbase_market_adapter::{COINBASE_PUBLIC_ACCOUNT_ID, ENTITLEMENT_CLASS};
 use axiusflow_engine_protocol::{
-    ClientKind, EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState,
-    EngineStatus, Envelope, EnvelopeDecoder, Fault, Goodbye, HotSeries, InstallProviderInstrument,
-    LIFECYCLE_CONTRACT_REVISION, MarketEventIdle, PROTOCOL_VERSION, PollMarketEvent,
-    ProviderInstrumentInstalled, RegisterConsumer, RemoveConsumer, ResourceMode, SeriesCadence,
-    SeriesDemand, SeriesKey, SetEngineLifecycle, SetSelection, SetViewport, SetWatchlist,
-    ViewportDemand, VisibilityDemand, WorkspaceState, encode_envelope, envelope,
+    ClientKind, ConsumerResourceClass as IpcConsumerResourceClass, EngineFaultCode,
+    EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder,
+    Fault, Goodbye, HotSeries, InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION,
+    MarketEventIdle, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
+    RegisterConsumer, RemoveConsumer, ResourceMode, SeriesCadence, SeriesDemand, SeriesKey,
+    SetEngineLifecycle, SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout,
+    ViewportDemand, VisibilityDemand, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
 use axiusflow_market_data::{BarPeriod, BarSeriesKey};
@@ -34,9 +36,11 @@ use axiusflow_market_engine::{HotSetDescriptor, HotSetEntry, HotSetManager, Work
 use axiusflow_platform_runtime::BackgroundService;
 use axiusflow_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
-const WORKSPACE_SCHEMA_REVISION: u32 = 3;
+const WORKSPACE_SCHEMA_REVISION: u32 = 4;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
+const COINBASE_PRICE_SCALE: u32 = 2;
+const COINBASE_QUANTITY_SCALE: u32 = 8;
 const WORKSPACE_SHUTTING_DOWN: &str = "engine workspace is shutting down";
 
 /// Process-wide resident-engine shutdown state shared with authenticated sessions.
@@ -538,6 +542,30 @@ impl EngineState {
         Ok(candidate)
     }
 
+    fn apply_workspace_layout(&self, layout: SetWorkspaceLayout) -> Result<WorkspaceState, String> {
+        let mut workspace = self
+            .workspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_mutable()?;
+        if layout.workspace_revision != workspace.workspace_revision {
+            return Err("workspace revision is stale".to_string());
+        }
+        if layout.layout_generation <= workspace.layout_generation {
+            return Err("workspace layout generation is stale".to_string());
+        }
+        let mut candidate = workspace.clone();
+        candidate.layout_generation = layout.layout_generation;
+        candidate.active_workspace_id = layout.active_workspace_id;
+        candidate.workspace_tabs = layout.workspace_tabs;
+        candidate.workspace_revision = candidate.workspace_revision.saturating_add(1);
+        sync_layout_hot_series(&mut candidate);
+        validate_workspace(&candidate)?;
+        self.persist(&candidate)?;
+        *workspace = candidate.clone();
+        Ok(candidate)
+    }
+
     fn persist(&self, workspace: &WorkspaceState) -> Result<(), String> {
         let Some(root) = &self.workspace_root else {
             return Ok(());
@@ -547,6 +575,7 @@ impl EngineState {
 }
 
 fn default_workspace() -> WorkspaceState {
+    let primary = coinbase_hot_series("BTC-USD", 60, 1, unix_seconds());
     WorkspaceState {
         provider: "coinbase".to_string(),
         market: "BTC-USD".to_string(),
@@ -557,10 +586,52 @@ fn default_workspace() -> WorkspaceState {
         resource_mode: ResourceMode::Warm as i32,
         schema_revision: WORKSPACE_SCHEMA_REVISION,
         cache_manifest_revision: CACHE_MANIFEST_REVISION,
-        hot_series: vec![coinbase_hot_series("BTC-USD", 60, 1, unix_seconds())],
+        hot_series: vec![primary.clone()],
         lifetime_mode: EngineLifetimeMode::KeepEngineWarm as i32,
         autostart_enabled: false,
         markets_live_permitted: false,
+        layout_generation: 1,
+        active_workspace_id: 1,
+        workspace_tabs: vec![default_workspace_tab(&primary)],
+    }
+}
+
+fn default_workspace_tab(series: &HotSeries) -> WorkspaceTabState {
+    WorkspaceTabState {
+        workspace_id: 1,
+        label: "Workspace 1".to_string(),
+        split_axis: WorkspaceSplitAxis::Horizontal as i32,
+        panes: vec![WorkspacePaneState {
+            pane_id: 1,
+            consumer_id: 1,
+            kind: WorkspacePaneKind::Chart as i32,
+            instrument: Some(InstallProviderInstrument {
+                provider: series.provider.clone(),
+                session_generation: series.provider_watermark.max(1),
+                selection_generation: 1,
+                instrument_id: series.instrument_id.clone(),
+                provider_symbol: series.provider_symbol.clone(),
+                display_symbol: series.display_symbol.clone(),
+                venue_id: series.venue_id.clone(),
+                price_scale: series.price_scale,
+                quantity_scale: series.quantity_scale,
+                entitlement_id: series.entitlement_id.clone(),
+            }),
+            series: Some(SeriesKey {
+                provider: series.provider.clone(),
+                instrument_id: series.instrument_id.clone(),
+                cadence_value: series.cadence_value,
+                definition_revision: series.definition_revision,
+                entitlement_id: series.entitlement_id.clone(),
+                cadence: series.cadence,
+            }),
+            viewport_start_unix_nanos: series.viewport_start_unix_nanos,
+            viewport_end_unix_nanos: series.viewport_end_unix_nanos,
+            size_basis_points: 10_000,
+            generation: 1,
+        }],
+        active_pane_id: 1,
+        generation: 1,
     }
 }
 
@@ -568,6 +639,9 @@ fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
     const MAXIMUM_MARKET_BYTES: usize = 128;
     const MAXIMUM_WATCHLIST_ITEMS: usize = 256;
     let mut hot_identities = BTreeSet::new();
+    let mut workspace_ids = BTreeSet::new();
+    let mut pane_ids = BTreeSet::new();
+    let mut consumer_ids = BTreeSet::new();
 
     if workspace.provider.trim().is_empty()
         || workspace.market.trim().is_empty()
@@ -606,7 +680,146 @@ fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
     if lifetime_mode == EngineLifetimeMode::KeepMarketsLive && !workspace.markets_live_permitted {
         return Err("markets-live mode requires explicit permission".to_string());
     }
+    if workspace.schema_revision >= 4
+        && (workspace.layout_generation == 0
+            || workspace.workspace_tabs.is_empty()
+            || workspace.workspace_tabs.len() > 8
+            || workspace.active_workspace_id == 0
+            || workspace.workspace_tabs.iter().any(|tab| {
+                tab.workspace_id == 0
+                    || !workspace_ids.insert(tab.workspace_id)
+                    || tab.label.trim().is_empty()
+                    || tab.label.len() > 128
+                    || WorkspaceSplitAxis::try_from(tab.split_axis).is_err()
+                    || tab.panes.is_empty()
+                    || tab.panes.len() > 4
+                    || tab.active_pane_id == 0
+                    || tab.generation == 0
+                    || tab
+                        .panes
+                        .iter()
+                        .map(|pane| pane.size_basis_points)
+                        .sum::<u32>()
+                        != 10_000
+                    || !tab
+                        .panes
+                        .iter()
+                        .any(|pane| pane.pane_id == tab.active_pane_id)
+                    || tab.panes.iter().any(|pane| {
+                        pane.pane_id == 0
+                            || pane.consumer_id == 0
+                            || !pane_ids.insert(pane.pane_id)
+                            || !consumer_ids.insert(pane.consumer_id)
+                            || pane.generation == 0
+                            || pane.size_basis_points == 0
+                            || WorkspacePaneKind::try_from(pane.kind).is_err()
+                            || !valid_workspace_pane(pane)
+                    })
+            })
+            || !workspace_ids.contains(&workspace.active_workspace_id))
+    {
+        return Err("workspace layout is invalid".to_string());
+    }
     Ok(())
+}
+
+fn valid_workspace_pane(pane: &WorkspacePaneState) -> bool {
+    let viewport_valid = match (pane.viewport_start_unix_nanos, pane.viewport_end_unix_nanos) {
+        (None, None) => true,
+        (Some(start), Some(end)) => start < end,
+        _ => false,
+    };
+    let Some(instrument) = pane.instrument.as_ref() else {
+        return false;
+    };
+    let Some(series) = pane.series.as_ref() else {
+        return false;
+    };
+    viewport_valid
+        && !instrument.provider.trim().is_empty()
+        && instrument.provider == series.provider
+        && instrument.instrument_id == series.instrument_id
+        && instrument.entitlement_id == series.entitlement_id
+        && SeriesCadence::try_from(series.cadence)
+            .is_ok_and(|cadence| cadence != SeriesCadence::Unspecified)
+        && series.cadence_value > 0
+        && series.definition_revision > 0
+        && instrument.price_scale <= 18
+        && instrument.quantity_scale <= 18
+}
+
+fn sync_layout_hot_series(workspace: &mut WorkspaceState) {
+    for hot in &mut workspace.hot_series {
+        hot.workspace_ids.clear();
+    }
+    let mut next_score = workspace
+        .hot_series
+        .iter()
+        .map(|series| series.score)
+        .max()
+        .unwrap_or(0);
+    for tab in &workspace.workspace_tabs {
+        for pane in &tab.panes {
+            let (Some(instrument), Some(series)) = (&pane.instrument, &pane.series) else {
+                continue;
+            };
+            if let Some(hot) = workspace.hot_series.iter_mut().find(|hot| {
+                hot.provider == series.provider
+                    && hot.instrument_id == series.instrument_id
+                    && hot.entitlement_id == series.entitlement_id
+                    && hot.cadence == series.cadence
+                    && hot.cadence_value == series.cadence_value
+                    && hot.definition_revision == series.definition_revision
+            }) {
+                if !hot.workspace_ids.contains(&tab.workspace_id) {
+                    hot.workspace_ids.push(tab.workspace_id);
+                }
+                continue;
+            }
+            next_score = next_score.saturating_add(1).max(1);
+            workspace.hot_series.push(HotSeries {
+                provider: series.provider.clone(),
+                market: instrument.provider_symbol.clone(),
+                interval_seconds: series.cadence_value,
+                score: next_score,
+                last_used_unix_seconds: unix_seconds(),
+                provider_watermark: instrument.session_generation,
+                series_watermark: 0,
+                viewport_start_unix_nanos: pane.viewport_start_unix_nanos,
+                viewport_end_unix_nanos: pane.viewport_end_unix_nanos,
+                account_id: provider_account_id(&series.provider).to_string(),
+                instrument_id: series.instrument_id.clone(),
+                entitlement_id: series.entitlement_id.clone(),
+                cadence: series.cadence,
+                cadence_value: series.cadence_value,
+                definition_revision: series.definition_revision,
+                pinned: false,
+                workspace_ids: vec![tab.workspace_id],
+                coverage_start_unix_nanos: None,
+                coverage_end_unix_nanos: None,
+                provider_symbol: instrument.provider_symbol.clone(),
+                venue_id: instrument.venue_id.clone(),
+                display_symbol: instrument.display_symbol.clone(),
+                price_scale: instrument.price_scale,
+                quantity_scale: instrument.quantity_scale,
+            });
+        }
+    }
+    workspace.hot_series.sort_unstable_by(|left, right| {
+        right
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.score.cmp(&left.score))
+    });
+    workspace.hot_series.truncate(MAXIMUM_HOT_SERIES);
+}
+
+fn provider_account_id(provider: &str) -> &str {
+    match provider {
+        "coinbase" => COINBASE_PUBLIC_ACCOUNT_ID,
+        "rithmic" => RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
+        _ => "provider-account-unavailable",
+    }
 }
 
 fn valid_viewport(series: &HotSeries) -> bool {
@@ -715,7 +928,36 @@ fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
             };
             true
         });
+        workspace.schema_revision = 3;
+        migrated = true;
+    }
+    if workspace.schema_revision < 4 {
+        let primary = workspace
+            .hot_series
+            .iter()
+            .find(|series| {
+                series.provider == workspace.provider
+                    && series.market == workspace.market
+                    && series.interval_seconds == workspace.interval_seconds
+            })
+            .cloned()
+            .or_else(|| workspace.hot_series.first().cloned())
+            .or_else(|| {
+                (workspace.provider == "coinbase").then(|| {
+                    coinbase_hot_series(
+                        &workspace.market,
+                        workspace.interval_seconds,
+                        1,
+                        unix_seconds(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| coinbase_hot_series("BTC-USD", 60, 1, unix_seconds()));
+        workspace.layout_generation = 1;
+        workspace.active_workspace_id = 1;
+        workspace.workspace_tabs = vec![default_workspace_tab(&primary)];
         workspace.schema_revision = WORKSPACE_SCHEMA_REVISION;
+        sync_layout_hot_series(workspace);
         migrated = true;
     }
     if workspace.cache_manifest_revision == 0 {
@@ -726,7 +968,48 @@ fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
         touch_hot_series(workspace);
         migrated = true;
     }
+    if repair_supported_coinbase_precision(workspace) {
+        migrated = true;
+    }
     migrated
+}
+
+fn repair_supported_coinbase_precision(workspace: &mut WorkspaceState) -> bool {
+    let mut repaired = false;
+    for series in &mut workspace.hot_series {
+        if series.provider == "coinbase"
+            && matches!(
+                series.instrument_id.as_str(),
+                "instrument:coinbase:btc:usd" | "instrument:coinbase:eth:usd"
+            )
+            && (series.price_scale != COINBASE_PRICE_SCALE
+                || series.quantity_scale != COINBASE_QUANTITY_SCALE)
+        {
+            series.price_scale = COINBASE_PRICE_SCALE;
+            series.quantity_scale = COINBASE_QUANTITY_SCALE;
+            repaired = true;
+        }
+    }
+    for instrument in workspace
+        .workspace_tabs
+        .iter_mut()
+        .flat_map(|tab| &mut tab.panes)
+        .filter_map(|pane| pane.instrument.as_mut())
+    {
+        if instrument.provider == "coinbase"
+            && matches!(
+                instrument.instrument_id.as_str(),
+                "instrument:coinbase:btc:usd" | "instrument:coinbase:eth:usd"
+            )
+            && (instrument.price_scale != COINBASE_PRICE_SCALE
+                || instrument.quantity_scale != COINBASE_QUANTITY_SCALE)
+        {
+            instrument.price_scale = COINBASE_PRICE_SCALE;
+            instrument.quantity_scale = COINBASE_QUANTITY_SCALE;
+            repaired = true;
+        }
+    }
+    repaired
 }
 
 fn touch_hot_series(workspace: &mut WorkspaceState) {
@@ -800,8 +1083,8 @@ fn coinbase_hot_series(
         provider_symbol: market.to_string(),
         venue_id: "coinbase".to_string(),
         display_symbol: market.replace('-', "/"),
-        price_scale: 0,
-        quantity_scale: 0,
+        price_scale: COINBASE_PRICE_SCALE,
+        quantity_scale: COINBASE_QUANTITY_SCALE,
     }
 }
 
@@ -1167,32 +1450,34 @@ impl FramedConnection {
             protocol_version: PROTOCOL_VERSION,
             payload: Some(payload),
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
         self.stream
             .write_all(&frame)
-            .map_err(|error| error.to_string())?;
-        self.stream.flush().map_err(|error| error.to_string())
+            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())?;
+        self.stream
+            .flush()
+            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
     }
 
     fn receive(&mut self) -> Result<envelope::Payload, String> {
         loop {
             if let Some(envelope) = self.pending.pop_front() {
-                return envelope
-                    .payload
-                    .ok_or_else(|| "engine message has no payload".to_string());
+                return envelope.payload.ok_or_else(|| {
+                    "ipc_receive failed: engine message has no payload".to_string()
+                });
             }
             let mut chunk = [0_u8; 16 * 1024];
             let count = self
                 .stream
                 .read(&mut chunk)
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
             if count == 0 {
-                return Err("local engine connection closed".to_string());
+                return Err("ipc_receive failed: local engine connection closed".to_string());
             }
             self.pending.extend(
                 self.decoder
                     .push(&chunk[..count])
-                    .map_err(|error| error.to_string())?,
+                    .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?,
             );
         }
     }
@@ -1340,7 +1625,9 @@ fn serve_authenticated_messages(
     loop {
         let payload = match connection.receive() {
             Ok(payload) => payload,
-            Err(error) if error == "local engine connection closed" => return Ok(()),
+            Err(error) if error == "ipc_receive failed: local engine connection closed" => {
+                return Ok(());
+            }
             Err(error) => return Err(error),
         };
         if shutdown.is_some_and(EngineShutdown::is_requested) {
@@ -1351,7 +1638,8 @@ fn serve_authenticated_messages(
             payload @ (envelope::Payload::RestoreWorkspace(_)
             | envelope::Payload::SetSelection(_)
             | envelope::Payload::SetWatchlist(_)
-            | envelope::Payload::SetViewport(_)) => {
+            | envelope::Payload::SetViewport(_)
+            | envelope::Payload::SetWorkspaceLayout(_)) => {
                 handle_workspace_message(connection, state, payload)?;
             }
             payload @ (envelope::Payload::SetEngineResourceMode(_)
@@ -1394,6 +1682,9 @@ fn handle_workspace_message(
         envelope::Payload::SetSelection(selection) => apply_selection(state, selection, connection),
         envelope::Payload::SetWatchlist(watchlist) => apply_watchlist(state, watchlist, connection),
         envelope::Payload::SetViewport(viewport) => apply_viewport(state, viewport, connection),
+        envelope::Payload::SetWorkspaceLayout(layout) => {
+            apply_workspace_layout(state, layout, connection)
+        }
         _ => unreachable!("only workspace messages reach workspace dispatch"),
     }
 }
@@ -1668,7 +1959,21 @@ fn dispatch_visibility_demand(
     let Some(client_id) = attached_client else {
         return send_market_fault(connection, "client must attach before setting visibility");
     };
-    if let Err(error) = market.set_visibility(client_id, visibility.consumer_id, visibility.visible)
+    let resource_class = IpcConsumerResourceClass::try_from(visibility.resource_class)
+        .map_err(|_| "consumer resource class is invalid".to_string())?;
+    let resource_class = match resource_class {
+        IpcConsumerResourceClass::Foreground => {
+            axiusflow_market_engine::ConsumerResourceClass::Foreground
+        }
+        IpcConsumerResourceClass::Background => {
+            axiusflow_market_engine::ConsumerResourceClass::Background
+        }
+        IpcConsumerResourceClass::Warm => axiusflow_market_engine::ConsumerResourceClass::Warm,
+        IpcConsumerResourceClass::Detached => {
+            axiusflow_market_engine::ConsumerResourceClass::Detached
+        }
+    };
+    if let Err(error) = market.set_resource_class(client_id, visibility.consumer_id, resource_class)
     {
         send_market_fault(connection, error)?;
     }
@@ -1813,6 +2118,28 @@ fn apply_viewport(
     }
 }
 
+fn apply_workspace_layout(
+    state: &EngineState,
+    layout: SetWorkspaceLayout,
+    connection: &mut FramedConnection,
+) -> Result<(), String> {
+    match state.apply_workspace_layout(layout) {
+        Ok(workspace) => connection.send(envelope::Payload::WorkspaceState(workspace)),
+        Err(error) if error == WORKSPACE_SHUTTING_DOWN => {
+            connection.send(cancelled_mutation_fault(error))
+        }
+        Err(error)
+            if matches!(
+                error.as_str(),
+                "workspace revision is stale" | "workspace layout generation is stale"
+            ) =>
+        {
+            connection.send(stale_workspace_fault())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn stale_workspace_fault() -> envelope::Payload {
     cancelled_mutation_fault("workspace revision is stale")
 }
@@ -1883,7 +2210,8 @@ mod tests {
 
     use super::{
         EngineShutdown, EngineState, MarketService, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
-        bind_listener, serve_client_with_market, serve_client_with_market_and_shutdown,
+        bind_listener, default_workspace, serve_client_with_market,
+        serve_client_with_market_and_shutdown, sync_layout_hot_series,
     };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
@@ -2693,5 +3021,18 @@ mod tests {
         drop(client);
         server.join().expect("join market server");
         assert_rithmic_hot_metadata(&state);
+    }
+
+    #[test]
+    fn closing_a_workspace_preserves_bounded_recency_metadata() {
+        let mut workspace = default_workspace();
+        let mut recent = workspace.hot_series[0].clone();
+        recent.workspace_ids.clear();
+        workspace.workspace_tabs.clear();
+
+        sync_layout_hot_series(&mut workspace);
+
+        assert_eq!(workspace.hot_series, vec![recent]);
+        assert!(workspace.hot_series[0].workspace_ids.is_empty());
     }
 }

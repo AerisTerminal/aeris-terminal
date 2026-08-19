@@ -25,6 +25,7 @@ pub struct ConsumerSeriesUpdate {
 struct PublicationState {
     series: BarSeriesKey,
     publication_generation: u64,
+    active: bool,
 }
 
 pub(crate) struct PublicationManager {
@@ -56,6 +57,7 @@ impl PublicationManager {
             PublicationState {
                 series: publication.snapshot.series.clone(),
                 publication_generation,
+                active: true,
             },
         );
         Ok(publication)
@@ -76,6 +78,7 @@ impl PublicationManager {
             PublicationState {
                 series: series.clone(),
                 publication_generation,
+                active: true,
             },
         );
         Ok(ConsumerSeriesUpdate {
@@ -90,7 +93,15 @@ impl PublicationManager {
     }
 
     pub(crate) fn contains(&self, consumer_id: ConsumerId) -> bool {
-        self.latest.contains_key(&consumer_id)
+        self.latest
+            .get(&consumer_id)
+            .is_some_and(|publication| publication.active)
+    }
+
+    pub(crate) fn suspend(&mut self, consumer_id: ConsumerId) {
+        if let Some(publication) = self.latest.get_mut(&consumer_id) {
+            publication.active = false;
+        }
     }
 
     pub(crate) fn remove(&mut self, consumer_id: ConsumerId) {

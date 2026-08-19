@@ -9,6 +9,10 @@ pub enum LocalHistoryError {
     EmptySeries,
     InvalidRange,
     InvalidSegment,
+    SegmentEncode,
+    Encryption,
+    FilesystemWrite,
+    CatalogCommit,
     Unavailable,
 }
 
@@ -23,6 +27,10 @@ impl fmt::Display for LocalHistoryError {
             }
             Self::InvalidRange => formatter.write_str("local history range is invalid"),
             Self::InvalidSegment => formatter.write_str("local history segment is invalid"),
+            Self::SegmentEncode => formatter.write_str("local history segment encoding failed"),
+            Self::Encryption => formatter.write_str("local history encryption failed"),
+            Self::FilesystemWrite => formatter.write_str("local history filesystem write failed"),
+            Self::CatalogCommit => formatter.write_str("local history catalog commit failed"),
             Self::Unavailable => formatter.write_str("local history is unavailable"),
         }
     }

@@ -1063,6 +1063,8 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     ];
     let interaction_startup = MarketWorkerStartup::Loading(Box::new(CoinbaseWorkerStartup {
         coinbase_product: coinbase_products[0].clone(),
+        coinbase_interval: ChartInterval::Minute1,
+        restored_viewport: None,
         subscription_id: "benchmark-interaction".to_string(),
         worker_label: "bounded disconnected benchmark sink".to_string(),
     }));

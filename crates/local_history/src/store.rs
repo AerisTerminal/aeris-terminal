@@ -9,8 +9,8 @@ use std::{
 };
 
 use axiusflow_local_storage::{
-    CatalogKey, DataKind, HistoryRead, HistorySeriesIdentity, HistoryStore, PublicationRequest,
-    RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
+    CatalogKey, DataKind, HistoryRead, HistorySeriesIdentity, HistoryStore, LocalStorageError,
+    PublicationRequest, RecoveryAction, RetentionPolicy, SegmentEncryptionKey, SegmentIdentity,
 };
 use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
@@ -185,7 +185,8 @@ impl LocalHistoryStore {
             adjustment_revision: 1,
             correction_revision: 1,
         };
-        let payload = encode_local_history_segment(bars)?;
+        let payload =
+            encode_local_history_segment(bars).map_err(|_| LocalHistoryError::SegmentEncode)?;
         self.store
             .publish(PublicationRequest {
                 identity: &identity,
@@ -196,7 +197,27 @@ impl LocalHistoryStore {
                 now_unix_seconds: now_seconds(),
             })
             .map(|_| ())
-            .map_err(redacted)
+            .map_err(|error| persistence_failure(&error))
+    }
+}
+
+fn persistence_failure(error: &LocalStorageError) -> LocalHistoryError {
+    match error {
+        LocalStorageError::Io(_) => LocalHistoryError::FilesystemWrite,
+        LocalStorageError::Sqlite(_)
+        | LocalStorageError::CatalogFull { .. }
+        | LocalStorageError::CatalogKeyMismatch
+        | LocalStorageError::StoreAlreadyOpen
+        | LocalStorageError::SegmentAlreadyExists
+        | LocalStorageError::KeyRevocationMissing { .. }
+        | LocalStorageError::SharedKeyStillReferenced { .. } => LocalHistoryError::CatalogCommit,
+        LocalStorageError::Random(_)
+        | LocalStorageError::AuthenticationFailed
+        | LocalStorageError::SegmentKeyMismatch => LocalHistoryError::Encryption,
+        LocalStorageError::InvalidConfiguration(_)
+        | LocalStorageError::InvalidIdentity(_)
+        | LocalStorageError::SegmentTooLarge { .. }
+        | LocalStorageError::CorruptSegment(_) => LocalHistoryError::SegmentEncode,
     }
 }
 
@@ -461,6 +482,25 @@ mod tests {
                 unique
             )))
         }
+    }
+
+    #[test]
+    fn persistence_failures_keep_stage_without_exposing_storage_details() {
+        assert_eq!(
+            persistence_failure(&LocalStorageError::SegmentTooLarge {
+                requested: 10,
+                maximum: 9,
+            }),
+            LocalHistoryError::SegmentEncode
+        );
+        assert_eq!(
+            persistence_failure(&LocalStorageError::AuthenticationFailed),
+            LocalHistoryError::Encryption
+        );
+        assert_eq!(
+            persistence_failure(&LocalStorageError::CatalogKeyMismatch),
+            LocalHistoryError::CatalogCommit
+        );
     }
 
     impl Drop for TempRoot {

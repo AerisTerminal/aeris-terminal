@@ -5,9 +5,9 @@ use axiusflow_application::{
     ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
 };
 use axiusflow_engine_protocol::{
-    DemandError, InstallProviderInstrument, OrderBookSnapshot as IpcOrderBookSnapshot,
-    OrderBookState as IpcOrderBookState, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
-    SeriesUpdate, envelope,
+    DemandError, FailureStage, InstallProviderInstrument,
+    OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState, SeriesCadence,
+    SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesUpdate, envelope,
 };
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
@@ -368,6 +368,9 @@ impl EngineHistorySession {
                 dom_from_snapshot(request, &snapshot)
                     .map(EngineUpdate::Dom)
                     .map(Some)
+            }
+            envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => {
+                Ok(None)
             }
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             envelope::Payload::ProviderState(_) | envelope::Payload::MarketEventIdle(_) => Ok(None),
@@ -819,7 +822,33 @@ fn ipc_depth_levels(
 }
 
 fn demand_error(error: &DemandError) -> String {
-    format!("{} failed: {}", error.stage, error.detail)
+    let stage = match FailureStage::try_from(error.stage_code) {
+        Ok(stage) => failure_stage_label(stage),
+        Err(_) => error.stage.as_str(),
+    };
+    let elapsed = error
+        .elapsed_millis
+        .map_or(String::new(), |elapsed| format!(" after {elapsed} ms"));
+    format!("{stage} failed{elapsed}: {}", error.detail)
+}
+
+const fn failure_stage_label(stage: FailureStage) -> &'static str {
+    match stage {
+        FailureStage::Unspecified => "market demand",
+        FailureStage::ProviderHistory => "provider history",
+        FailureStage::CanonicalValidation => "canonical validation",
+        FailureStage::MemoryInstall => "memory install",
+        FailureStage::Aggregation => "aggregation",
+        FailureStage::SegmentEncode => "segment encode",
+        FailureStage::Encryption => "encryption",
+        FailureStage::FilesystemWrite => "filesystem write",
+        FailureStage::CatalogCommit => "catalog commit",
+        FailureStage::Handoff => "history/live handoff",
+        FailureStage::Publication => "publication",
+        FailureStage::IpcSend => "local IPC send",
+        FailureStage::ChartInstall => "chart install",
+        FailureStage::ProviderRealtime => "provider realtime",
+    }
 }
 
 fn unix_nanos_now() -> Result<i64, String> {

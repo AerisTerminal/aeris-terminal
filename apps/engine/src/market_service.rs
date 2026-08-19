@@ -22,25 +22,28 @@ use axiusflow_coinbase_market_adapter::{
     ENTITLEMENT_CLASS, aggregate_coinbase_bars, decode_history_bar,
 };
 use axiusflow_engine_protocol::{
-    DemandError, EngineFaultCode, HotSeries, InstallProviderInstrument, MarketBar as IpcMarketBar,
-    OrderBookLevel as IpcOrderBookLevel, OrderBookSnapshot as IpcOrderBookSnapshot,
-    OrderBookState as IpcOrderBookState, PersistenceState, ProviderCatalogRejected,
+    DemandError, EngineFaultCode, FailureStage, HotSeries, InstallProviderInstrument,
+    MarketBar as IpcMarketBar, OrderBookLevel as IpcOrderBookLevel,
+    OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState,
+    OrderFlowAggressor, OrderFlowLevel as IpcOrderFlowLevel,
+    OrderFlowSnapshot as IpcOrderFlowSnapshot, OrderFlowTrade as IpcOrderFlowTrade,
+    OrderFlowUpdate as IpcOrderFlowUpdate, PersistenceState, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSelection,
     ProviderState, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
     SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
-    envelope,
+    WorkspaceState, envelope,
 };
-use axiusflow_local_history::{HistoryScope, LocalHistoryStore, StoredHistory};
+use axiusflow_local_history::{HistoryScope, LocalHistoryError, LocalHistoryStore, StoredHistory};
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
     OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState as CanonicalOrderBookState,
 };
 use axiusflow_market_engine::{
-    ClientId, ConsumerId, ConsumerIdentity, EngineError, EngineResourceMode, GenerationId,
-    MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig,
-    ProviderGeneration, ProviderHealth, ProviderRequest, ResourcePolicyDecision,
-    ResourcePolicyInput, SeriesSnapshot, StreamRequirements, Viewport, WorkspaceId,
-    decide_resource_policy,
+    ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, EngineResourceMode,
+    GenerationId, HotSetManager, HotSetTier, MarketEngine, MarketEngineConfig, MarketStream,
+    OrderFlowPublicationKind, ProviderCapabilities, ProviderConfig, ProviderGeneration,
+    ProviderHealth, ProviderRequest, ResourcePolicyDecision, ResourcePolicyInput, SeriesSnapshot,
+    StreamRequirements, Viewport, WorkspaceId, decide_resource_policy,
 };
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 use axiusflow_rithmic_protocol_adapter::{
@@ -113,7 +116,7 @@ enum Command {
     Register(ConsumerIdentity, Reply<()>),
     Remove(ClientId, ConsumerId, Reply<()>),
     Viewport(ClientId, ConsumerId, GenerationId, Viewport, Reply<()>),
-    Visibility(ClientId, ConsumerId, bool, Reply<()>),
+    ResourceClass(ClientId, ConsumerId, ConsumerResourceClass, Reply<()>),
     Demand(ClientId, ConsumerId, GenerationId, BarSeriesKey, Reply<()>),
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
@@ -129,7 +132,12 @@ enum Command {
         ProviderGeneration,
         Result<Option<StoredHistory>, String>,
     ),
-    PersistenceCompleted(BarSeriesKey, ProviderGeneration, Result<(), String>),
+    PersistenceCompleted(
+        BarSeriesKey,
+        ProviderGeneration,
+        Result<(), LocalHistoryError>,
+        u64,
+    ),
 }
 
 struct HistoryRequest {
@@ -149,7 +157,13 @@ struct WarmSeries {
 
 enum StorageRequest {
     Read(BarSeriesKey, ProviderGeneration),
-    Persist(BarSeriesKey, ProviderGeneration, Vec<MarketBar>, bool),
+    Persist(
+        BarSeriesKey,
+        ProviderGeneration,
+        Vec<MarketBar>,
+        bool,
+        Instant,
+    ),
 }
 
 struct HistorySnapshot {
@@ -162,6 +176,7 @@ struct HistorySnapshot {
 struct DemandWaiter {
     consumer_id: ConsumerId,
     generation: GenerationId,
+    started_at: Instant,
 }
 
 enum RealtimeControl {
@@ -183,6 +198,7 @@ struct ConsumerEvents {
     series_state: Option<envelope::Payload>,
     demand_error: Option<envelope::Payload>,
     order_book: Option<envelope::Payload>,
+    order_flow: Option<envelope::Payload>,
     catalog_search: Option<envelope::Payload>,
     catalog_selection: Option<envelope::Payload>,
 }
@@ -195,6 +211,7 @@ impl ConsumerEvents {
             .or_else(|| self.series_state.take())
             .or_else(|| self.demand_error.take())
             .or_else(|| self.order_book.take())
+            .or_else(|| self.order_flow.take())
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
     }
@@ -902,7 +919,8 @@ impl MarketService {
     ///
     /// # Errors
     /// Returns an error when provider configuration or either bounded worker cannot start.
-    pub fn start(hot_series: &[HotSeries]) -> Result<Self, String> {
+    pub fn start(workspace: &WorkspaceState) -> Result<Self, String> {
+        let hot_series = retained_hot_series(workspace, available_memory_bytes())?;
         let storage = LocalHistoryStore::open(
             &crate::default_engine_state_root()?
                 .join("market-history")
@@ -919,7 +937,7 @@ impl MarketService {
             true,
             hot_series.len(),
         )?;
-        service.restore_hot_set(hot_series)?;
+        service.restore_hot_set(&hot_series)?;
         Ok(service)
     }
 
@@ -1269,11 +1287,32 @@ impl MarketService {
         consumer_id: u64,
         visible: bool,
     ) -> Result<(), String> {
+        self.set_resource_class(
+            client_id,
+            consumer_id,
+            if visible {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            },
+        )
+    }
+
+    /// Updates one consumer's exact resource class.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, missing consumer, or coordinator failure.
+    pub fn set_resource_class(
+        &self,
+        client_id: u64,
+        consumer_id: u64,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<(), String> {
         self.request(|reply| {
-            Ok(Command::Visibility(
+            Ok(Command::ResourceClass(
                 ClientId(id(client_id)?),
                 ConsumerId(id(consumer_id)?),
-                visible,
+                resource_class,
                 reply,
             ))
         })
@@ -1529,13 +1568,18 @@ fn run_storage_worker(
                 };
                 Command::LocalHistoryCompleted(series, generation, result)
             }
-            StorageRequest::Persist(series, generation, bars, derived) => {
+            StorageRequest::Persist(series, generation, bars, derived, started_at) => {
                 let result = match storage.as_mut() {
                     Some(Ok(storage)) => persist_local_history(storage, &series, &bars, derived),
-                    Some(Err(error)) => Err(error.clone()),
+                    Some(Err(_)) => Err(LocalHistoryError::Unavailable),
                     None => Ok(()),
                 };
-                Command::PersistenceCompleted(series, generation, result)
+                Command::PersistenceCompleted(
+                    series,
+                    generation,
+                    result,
+                    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                )
             }
         };
         if !shutdown.load(Ordering::Acquire)
@@ -1594,11 +1638,9 @@ fn persist_local_history(
     series: &BarSeriesKey,
     bars: &[MarketBar],
     derived: bool,
-) -> Result<(), String> {
-    let scope = local_history_scope(series)?;
-    storage
-        .persist(&scope, series, bars, derived)
-        .map_err(|error| error.to_string())
+) -> Result<(), LocalHistoryError> {
+    let scope = local_history_scope(series).map_err(|_| LocalHistoryError::InvalidSeries)?;
+    storage.persist(&scope, series, bars, derived)
 }
 
 fn local_history_scope(series: &BarSeriesKey) -> Result<HistoryScope, String> {
@@ -1818,7 +1860,8 @@ fn run_coordinator(
             }
         }
         if realtime_overflow.swap(false, Ordering::AcqRel) {
-            coordinator.realtime_interrupted("Coinbase realtime queue overflowed");
+            coordinator
+                .realtime_interrupted(FailureStage::Handoff, "Coinbase realtime queue overflowed");
         }
         coordinator.publish_live();
         coordinator.publish_rithmic_live();
@@ -1900,8 +1943,8 @@ impl Coordinator<'_> {
             Command::LocalHistoryCompleted(series, generation, result) => {
                 self.local_history_completed(&series, generation, result);
             }
-            Command::PersistenceCompleted(series, generation, result) => {
-                self.persistence_completed(&series, generation, &result);
+            Command::PersistenceCompleted(series, generation, result, elapsed_millis) => {
+                self.persistence_completed(&series, generation, result, elapsed_millis);
             }
             command @ (Command::RestoreHotSet(..)
             | Command::SetResourceMode(..)
@@ -1974,13 +2017,22 @@ impl Coordinator<'_> {
                     });
                 let _ = reply.send(result);
             }
-            Command::Visibility(client_id, consumer_id, visible, reply) => {
+            Command::ResourceClass(client_id, consumer_id, resource_class, reply) => {
                 let result =
                     authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
-                        self.engine
-                            .set_visibility(consumer_id, visible)
-                            .map_err(|error| error.to_string())
+                        let publication = self
+                            .engine
+                            .set_resource_class(consumer_id, resource_class)
+                            .map_err(|error| error.to_string())?;
+                        if let Some(publication) = publication
+                            && let Some(events) = self.events.get_mut(&consumer_id)
+                        {
+                            publish_ready(events, &publication);
+                        }
+                        Ok(())
                     });
+                self.reconcile_rithmic_order_books();
+                self.release_unused_live_market_data();
                 let _ = reply.send(result);
             }
             Command::Demand(client_id, consumer_id, generation, series, reply) => {
@@ -1990,6 +2042,7 @@ impl Coordinator<'_> {
                     DemandWaiter {
                         consumer_id,
                         generation,
+                        started_at: Instant::now(),
                     },
                     &reply,
                 );
@@ -2153,10 +2206,16 @@ impl Coordinator<'_> {
         } else {
             self.resource_policy.maximum_decoded_bars
         };
+        let warm_limit = if retention_expired {
+            0
+        } else {
+            self.resource_policy.maximum_derived_series
+        };
         let protected = self
             .live
             .keys()
             .chain(self.rithmic_live.keys())
+            .chain(self.warm_priority.iter().take(warm_limit))
             .cloned()
             .collect::<Vec<_>>();
         self.engine.evict_unsubscribed_series(
@@ -2180,7 +2239,8 @@ impl Coordinator<'_> {
                 if series.provider_id == "rithmic"
                     && demand.streams.is_some_and(|streams| {
                         streams.contains(MarketStream::Depth)
-                            && (demand.visible || self.resource_policy.retain_hidden_depth)
+                            && (demand.resource_class == ConsumerResourceClass::Foreground
+                                || self.resource_policy.retain_hidden_depth)
                     })
                 {
                     required_identities
@@ -2514,8 +2574,13 @@ impl Coordinator<'_> {
         self.publish_order_book_to_consumer(waiter.consumer_id);
         let result = match publication {
             None => {
-                self.start_uncached_demand(series, provider_generation, waiter);
-                Ok(())
+                if let Some(snapshot) = self.engine.series_snapshot(series) {
+                    self.prepare_cached_demand(series, provider_generation, &snapshot)
+                        .map(|_| ())
+                } else {
+                    self.start_uncached_demand(series, provider_generation, waiter);
+                    Ok(())
+                }
             }
             Some(publication) => {
                 self.publish_cached_demand(series, provider_generation, &waiter, &publication)
@@ -2531,36 +2596,8 @@ impl Coordinator<'_> {
         waiter: &DemandWaiter,
         publication: &axiusflow_market_engine::ConsumerPublication,
     ) -> Result<(), String> {
-        let needs_covering_repair = publication.snapshot.provider_generation != provider_generation
-            || self.prewarmed.remove(series);
-        if series.provider_id == "rithmic"
-            && !needs_covering_repair
-            && let Err(error) =
-                self.start_rithmic_realtime_from_snapshot(series, &publication.snapshot)
-        {
-            return Err(error);
-        }
-        if series.provider_id == "coinbase"
-            && !self.live.get_mut(series).is_none_or(|live| {
-                if live.history_ready {
-                    return true;
-                }
-                live.aggregator.reset();
-                let seeded = if publication.snapshot.forming {
-                    live.aggregator
-                        .seed_canonical_backfill(&publication.snapshot.bars)
-                } else {
-                    live.aggregator
-                        .seed_canonical_history(&publication.snapshot.bars)
-                };
-                if seeded.is_ok() {
-                    live.history_ready = true;
-                }
-                seeded.is_ok()
-            })
-        {
-            return Err("Coinbase cached history/live handoff failed".to_string());
-        }
+        let needs_covering_repair =
+            self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             if needs_covering_repair {
                 publish_state(
@@ -2573,6 +2610,42 @@ impl Coordinator<'_> {
             } else {
                 publish_ready(events, publication);
             }
+        }
+        Ok(())
+    }
+
+    fn prepare_cached_demand(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        snapshot: &Arc<axiusflow_market_engine::SeriesSnapshot>,
+    ) -> Result<bool, String> {
+        let needs_covering_repair =
+            snapshot.provider_generation != provider_generation || self.prewarmed.remove(series);
+        if series.provider_id == "rithmic"
+            && !needs_covering_repair
+            && let Err(error) = self.start_rithmic_realtime_from_snapshot(series, snapshot)
+        {
+            return Err(error);
+        }
+        if series.provider_id == "coinbase"
+            && !self.live.get_mut(series).is_none_or(|live| {
+                if live.history_ready {
+                    return true;
+                }
+                live.aggregator.reset();
+                let seeded = if snapshot.forming {
+                    live.aggregator.seed_canonical_backfill(&snapshot.bars)
+                } else {
+                    live.aggregator.seed_canonical_history(&snapshot.bars)
+                };
+                if seeded.is_ok() {
+                    live.history_ready = true;
+                }
+                seeded.is_ok()
+            })
+        {
+            return Err("Coinbase cached history/live handoff failed".to_string());
         }
         if needs_covering_repair {
             self.engine.invalidate_series(series);
@@ -2589,7 +2662,7 @@ impl Coordinator<'_> {
         } else {
             self.series_live_if_ready(series);
         }
-        Ok(())
+        Ok(needs_covering_repair)
     }
 
     fn start_uncached_demand(
@@ -2625,7 +2698,13 @@ impl Coordinator<'_> {
             && let Err(detail) = self.enqueue_history(series, provider_generation)
             && let Some(waiters) = self.pending.remove(series)
         {
-            fail_waiters(&mut self.events, waiters, detail);
+            fail_waiters(
+                &mut self.events,
+                waiters,
+                series,
+                FailureStage::ProviderHistory,
+                detail,
+            );
         }
     }
 
@@ -2701,10 +2780,17 @@ impl Coordinator<'_> {
                 generation,
                 bars,
                 derived,
+                Instant::now(),
             ))
             .is_err()
         {
             self.broadcast_persistence_for(series, PersistenceState::Degraded, Some(unavailable));
+            self.broadcast_demand_error_for(
+                series,
+                FailureStage::FilesystemWrite,
+                unavailable,
+                Some(0),
+            );
         }
     }
 
@@ -2829,7 +2915,13 @@ impl Coordinator<'_> {
         if let Err(detail) = self.enqueue_history(series, generation)
             && let Some(waiters) = self.pending.remove(series)
         {
-            fail_waiters(&mut self.events, waiters, detail);
+            fail_waiters(
+                &mut self.events,
+                waiters,
+                series,
+                FailureStage::ProviderHistory,
+                detail,
+            );
         }
     }
 
@@ -2852,7 +2944,13 @@ impl Coordinator<'_> {
             if let Err(detail) = self.enqueue_history(&series, generation)
                 && let Some(waiters) = self.pending.remove(&series)
             {
-                fail_waiters(&mut self.events, waiters, detail);
+                fail_waiters(
+                    &mut self.events,
+                    waiters,
+                    &series,
+                    FailureStage::ProviderHistory,
+                    detail,
+                );
             }
         }
     }
@@ -3071,6 +3169,8 @@ impl Coordinator<'_> {
             fail_waiters(
                 &mut self.events,
                 waiters,
+                series,
+                FailureStage::ProviderHistory,
                 if series.provider_id == "rithmic" {
                     "Rithmic historical bars are unavailable"
                 } else {
@@ -3119,6 +3219,41 @@ impl Coordinator<'_> {
         let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot) else {
             return;
         };
+        let Some(bars) = self.install_completed_history(series, generation, snapshot) else {
+            return;
+        };
+        if let Some(live) = self.live.get_mut(series) {
+            let connected = live.connected;
+            let buffered = std::mem::take(&mut live.buffered);
+            live.aggregator.reset();
+            if live.aggregator.seed_canonical_history(&bars).is_err()
+                || buffered
+                    .iter()
+                    .any(|trade| live.aggregator.apply_trade(trade).is_err())
+            {
+                self.realtime_interrupted(
+                    FailureStage::Handoff,
+                    "Coinbase history/live handoff failed",
+                );
+                return;
+            }
+            live.connected = connected;
+            live.history_ready = true;
+            live.dirty = live.aggregator.in_flight().is_some();
+            live.published = bars
+                .last()
+                .map(|bar| PublishedTailState::Covering(bar.source_sequence));
+        }
+        self.pending.remove(series);
+        self.series_live_if_ready(series);
+    }
+
+    fn install_completed_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        snapshot: HistorySnapshot,
+    ) -> Option<Vec<MarketBar>> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
@@ -3134,9 +3269,15 @@ impl Coordinator<'_> {
             Ok(publications) => publications,
             Err(error) => {
                 if let Some(waiters) = self.pending.remove(series) {
-                    fail_waiters(&mut self.events, waiters, &error.to_string());
+                    fail_waiters(
+                        &mut self.events,
+                        waiters,
+                        series,
+                        engine_install_failure_stage(&error),
+                        &error.to_string(),
+                    );
                 }
-                return;
+                return None;
             }
         };
         for publication in publications {
@@ -3166,31 +3307,17 @@ impl Coordinator<'_> {
             &bars,
         ) {
             if let Some(waiters) = self.pending.remove(series) {
-                fail_waiters(&mut self.events, waiters, &error);
+                fail_waiters(
+                    &mut self.events,
+                    waiters,
+                    series,
+                    FailureStage::Handoff,
+                    &error,
+                );
             }
-            return;
+            return None;
         }
-        if let Some(live) = self.live.get_mut(series) {
-            let connected = live.connected;
-            let buffered = std::mem::take(&mut live.buffered);
-            live.aggregator.reset();
-            if live.aggregator.seed_canonical_history(&bars).is_err()
-                || buffered
-                    .iter()
-                    .any(|trade| live.aggregator.apply_trade(trade).is_err())
-            {
-                self.realtime_interrupted("Coinbase history/live handoff failed");
-                return;
-            }
-            live.connected = connected;
-            live.history_ready = true;
-            live.dirty = live.aggregator.in_flight().is_some();
-            live.published = bars
-                .last()
-                .map(|bar| PublishedTailState::Covering(bar.source_sequence));
-        }
-        self.pending.remove(series);
-        self.series_live_if_ready(series);
+        Some(bars)
     }
 
     fn prepare_history_repair(
@@ -3303,7 +3430,8 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        result: &Result<(), String>,
+        result: Result<(), LocalHistoryError>,
+        elapsed_millis: u64,
     ) {
         if self
             .engine
@@ -3322,6 +3450,14 @@ impl Coordinator<'_> {
             )
         };
         self.broadcast_persistence_for(series, state, detail);
+        if let Err(error) = result {
+            self.broadcast_demand_error_for(
+                series,
+                local_history_failure_stage(error),
+                &error.to_string(),
+                Some(elapsed_millis),
+            );
+        }
     }
 
     fn broadcast_persistence_for(
@@ -3372,6 +3508,37 @@ impl Coordinator<'_> {
         }
     }
 
+    fn broadcast_demand_error_for(
+        &mut self,
+        selected: &BarSeriesKey,
+        stage: FailureStage,
+        detail: &str,
+        elapsed_millis: Option<u64>,
+    ) {
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            if series == selected {
+                events.demand_error = Some(envelope::Payload::DemandError(DemandError {
+                    consumer_id: consumer_id.0.get(),
+                    generation: generation.0.get(),
+                    code: EngineFaultCode::Retryable as i32,
+                    stage: failure_stage_name(stage).to_string(),
+                    detail: detail.to_string(),
+                    series: Some(ipc_series(series)),
+                    stage_code: stage as i32,
+                    cause: failure_stage_cause(stage).to_string(),
+                    elapsed_millis,
+                }));
+            }
+        }
+    }
+
     fn broadcast_series_resolution_for(
         &mut self,
         selected: &BarSeriesKey,
@@ -3408,7 +3575,10 @@ impl Coordinator<'_> {
             RealtimeEvent::Heartbeat(generation) => self.realtime_heartbeat(generation),
             RealtimeEvent::Disconnected(generation) => {
                 if generation == self.coinbase_provider_generation() {
-                    self.realtime_interrupted("Coinbase realtime disconnected");
+                    self.realtime_interrupted(
+                        FailureStage::ProviderRealtime,
+                        "Coinbase realtime disconnected",
+                    );
                 }
             }
         }
@@ -3673,6 +3843,41 @@ impl Coordinator<'_> {
             }
             return;
         }
+        let order_flow_series = self
+            .rithmic_live
+            .keys()
+            .filter(|series| {
+                series.instrument_id == trade.metadata.instrument_id
+                    && series.entitlement_id == trade.metadata.entitlement_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut order_flow_failed = BTreeSet::new();
+        for series in order_flow_series {
+            match self
+                .engine
+                .install_order_flow_trade(generation, &series, trade)
+            {
+                Ok(publications) => {
+                    for publication in publications {
+                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                            events.order_flow = Some(order_flow_payload(&publication));
+                        }
+                    }
+                }
+                Err(_) => {
+                    order_flow_failed.insert(series);
+                }
+            }
+        }
+        for series in &order_flow_failed {
+            self.rithmic_series_recovering(
+                series,
+                generation,
+                FailureStage::CanonicalValidation,
+                "Rithmic order-flow reconstruction requires covering history",
+            );
+        }
         let failed = self
             .rithmic_live
             .iter_mut()
@@ -3681,6 +3886,7 @@ impl Coordinator<'_> {
                     && live.connected
                     && live.series.instrument_id == trade.metadata.instrument_id
                     && live.series.entitlement_id == trade.metadata.entitlement_id
+                    && !order_flow_failed.contains(&live.series)
             })
             .filter_map(|(series, live)| live.accept_trade(trade).is_err().then(|| series.clone()))
             .collect::<Vec<_>>();
@@ -3688,6 +3894,7 @@ impl Coordinator<'_> {
             self.rithmic_series_recovering(
                 &series,
                 generation,
+                FailureStage::Aggregation,
                 "Rithmic instrument aggregation requires covering history",
             );
         }
@@ -3697,6 +3904,7 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
+        stage: FailureStage,
         detail: &str,
     ) {
         if let Some(live) = self.rithmic_live.get_mut(series) {
@@ -3704,6 +3912,7 @@ impl Coordinator<'_> {
             live.dirty = false;
             live.buffered.clear();
         }
+        self.broadcast_demand_error_for(series, stage, detail, None);
         self.broadcast_series_recovery_for(series, detail);
         if !self
             .history_inflight
@@ -3925,7 +4134,7 @@ impl Coordinator<'_> {
             }
         }
         if let Some(detail) = interrupted {
-            self.realtime_interrupted(detail);
+            self.realtime_interrupted(FailureStage::Aggregation, detail);
         }
     }
 
@@ -3943,12 +4152,16 @@ impl Coordinator<'_> {
         }
     }
 
-    fn realtime_interrupted(&mut self, detail: &str) {
+    fn realtime_interrupted(&mut self, stage: FailureStage, detail: &str) {
         let generation = self.coinbase_provider_generation();
         let _ = self
             .engine
             .set_provider_health("coinbase", generation, ProviderHealth::Recovering);
         self.realtime_connected = false;
+        let affected = self.live.keys().cloned().collect::<Vec<_>>();
+        for series in &affected {
+            self.broadcast_demand_error_for(series, stage, detail, None);
+        }
         for live in self.live.values_mut() {
             live.connected = false;
             live.history_ready = false;
@@ -4041,7 +4254,10 @@ impl Coordinator<'_> {
                     }),
             };
             if published.is_err() {
-                self.realtime_interrupted("Coinbase live publication failed");
+                self.realtime_interrupted(
+                    FailureStage::Publication,
+                    "Coinbase live publication failed",
+                );
                 return;
             }
         }
@@ -4113,6 +4329,12 @@ impl Coordinator<'_> {
                     ProviderConnectionState::Recovering,
                     generation,
                     Some("Rithmic live publication requires covering history"),
+                );
+                self.broadcast_demand_error_for(
+                    &series,
+                    FailureStage::Publication,
+                    "Rithmic live publication requires covering history",
+                    None,
                 );
             }
         }
@@ -4404,6 +4626,8 @@ fn configured_engine() -> Result<MarketEngine, String> {
 fn fail_waiters(
     events: &mut BTreeMap<ConsumerId, ConsumerEvents>,
     waiters: Vec<DemandWaiter>,
+    series: &BarSeriesKey,
+    stage: FailureStage,
     detail: &str,
 ) {
     for waiter in waiters {
@@ -4411,7 +4635,7 @@ fn fail_waiters(
             events.series_state = Some(series_state(
                 waiter.consumer_id,
                 waiter.generation,
-                SeriesKey::default(),
+                ipc_series(series),
                 SeriesLoadState::Failed,
                 Some(detail.to_string()),
             ));
@@ -4419,10 +4643,82 @@ fn fail_waiters(
                 consumer_id: waiter.consumer_id.0.get(),
                 generation: waiter.generation.0.get(),
                 code: EngineFaultCode::Retryable as i32,
-                stage: "provider_history".to_string(),
+                stage: failure_stage_name(stage).to_string(),
                 detail: detail.to_string(),
+                series: Some(ipc_series(series)),
+                stage_code: stage as i32,
+                cause: failure_stage_cause(stage).to_string(),
+                elapsed_millis: Some(
+                    u64::try_from(waiter.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
             }));
         }
+    }
+}
+
+const fn failure_stage_name(stage: FailureStage) -> &'static str {
+    match stage {
+        FailureStage::Unspecified => "unspecified",
+        FailureStage::ProviderHistory => "provider_history",
+        FailureStage::CanonicalValidation => "canonical_validation",
+        FailureStage::MemoryInstall => "memory_install",
+        FailureStage::Aggregation => "aggregation",
+        FailureStage::SegmentEncode => "segment_encode",
+        FailureStage::Encryption => "encryption",
+        FailureStage::FilesystemWrite => "filesystem_write",
+        FailureStage::CatalogCommit => "catalog_commit",
+        FailureStage::Handoff => "handoff",
+        FailureStage::Publication => "publication",
+        FailureStage::IpcSend => "ipc_send",
+        FailureStage::ChartInstall => "chart_install",
+        FailureStage::ProviderRealtime => "provider_realtime",
+    }
+}
+
+const fn failure_stage_cause(stage: FailureStage) -> &'static str {
+    match stage {
+        FailureStage::ProviderHistory => "provider history did not produce usable canonical bars",
+        FailureStage::CanonicalValidation => "market data failed canonical validation",
+        FailureStage::MemoryInstall => "validated market data could not enter bounded memory",
+        FailureStage::Aggregation => "canonical events could not be aggregated",
+        FailureStage::SegmentEncode => "canonical history could not be encoded for persistence",
+        FailureStage::Encryption => "history encryption could not complete",
+        FailureStage::FilesystemWrite => "encrypted history could not be written durably",
+        FailureStage::CatalogCommit => "history catalog publication could not commit",
+        FailureStage::Handoff => "history and realtime state could not be joined safely",
+        FailureStage::Publication => "validated market state could not be published",
+        FailureStage::IpcSend => "local protocol delivery could not complete",
+        FailureStage::ChartInstall => "desktop presentation rejected the engine publication",
+        FailureStage::ProviderRealtime => "provider realtime delivery was interrupted",
+        FailureStage::Unspecified => "the owning processing stage is unavailable",
+    }
+}
+
+const fn engine_install_failure_stage(error: &EngineError) -> FailureStage {
+    match error {
+        EngineError::EmptySeries
+        | EngineError::DiscontinuousSeries { .. }
+        | EngineError::NonIncreasingSeriesTime
+        | EngineError::ConflictingSeriesGeneration(_)
+        | EngineError::InvalidMarketData(_) => FailureStage::CanonicalValidation,
+        _ => FailureStage::MemoryInstall,
+    }
+}
+
+const fn local_history_failure_stage(error: LocalHistoryError) -> FailureStage {
+    match error {
+        LocalHistoryError::SegmentEncode
+        | LocalHistoryError::InvalidSeries
+        | LocalHistoryError::EmptySeries
+        | LocalHistoryError::InvalidRange
+        | LocalHistoryError::InvalidSegment => FailureStage::SegmentEncode,
+        LocalHistoryError::Encryption | LocalHistoryError::InvalidVaultKey => {
+            FailureStage::Encryption
+        }
+        LocalHistoryError::FilesystemWrite
+        | LocalHistoryError::InvalidRoot
+        | LocalHistoryError::Unavailable => FailureStage::FilesystemWrite,
+        LocalHistoryError::CatalogCommit => FailureStage::CatalogCommit,
     }
 }
 
@@ -4492,6 +4788,72 @@ fn series_update_message(
         forming: publication.forming,
         publication_generation: publication.publication_generation,
     })
+}
+
+fn order_flow_payload(
+    publication: &axiusflow_market_engine::ConsumerOrderFlowPublication,
+) -> envelope::Payload {
+    match &publication.kind {
+        OrderFlowPublicationKind::Snapshot(snapshot) => {
+            envelope::Payload::OrderFlowSnapshot(IpcOrderFlowSnapshot {
+                consumer_id: publication.consumer_id.0.get(),
+                generation: publication.generation.0.get(),
+                series: Some(ipc_series(&publication.series)),
+                provider_generation: snapshot.provider_generation.0.get(),
+                publication_generation: publication.publication_generation,
+                source_watermark: snapshot.source_watermark,
+                cumulative_delta: snapshot.cumulative_delta,
+                levels: snapshot
+                    .levels
+                    .iter()
+                    .copied()
+                    .map(ipc_order_flow_level)
+                    .collect(),
+                tape: snapshot
+                    .tape
+                    .iter()
+                    .copied()
+                    .map(ipc_order_flow_trade)
+                    .collect(),
+            })
+        }
+        OrderFlowPublicationKind::Update(update) => {
+            envelope::Payload::OrderFlowUpdate(IpcOrderFlowUpdate {
+                consumer_id: publication.consumer_id.0.get(),
+                generation: publication.generation.0.get(),
+                series: Some(ipc_series(&publication.series)),
+                provider_generation: update.provider_generation.0.get(),
+                publication_generation: publication.publication_generation,
+                cumulative_delta: update.cumulative_delta,
+                level: Some(ipc_order_flow_level(update.level)),
+                trade: Some(ipc_order_flow_trade(update.trade)),
+            })
+        }
+    }
+}
+
+fn ipc_order_flow_level(level: axiusflow_market_engine::OrderFlowLevel) -> IpcOrderFlowLevel {
+    IpcOrderFlowLevel {
+        price: level.price,
+        bid_volume: level.bid_volume,
+        ask_volume: level.ask_volume,
+        trade_count: level.trade_count,
+        time_at_price_count: level.time_at_price_count,
+    }
+}
+
+fn ipc_order_flow_trade(trade: axiusflow_market_engine::OrderFlowTrade) -> IpcOrderFlowTrade {
+    IpcOrderFlowTrade {
+        source_sequence: trade.source_sequence,
+        exchange_timestamp_unix_nanos: trade.exchange_timestamp_unix_nanos,
+        price: trade.price,
+        quantity: trade.quantity,
+        aggressor: match trade.aggressor {
+            axiusflow_market_data::AggressorSide::Unknown => OrderFlowAggressor::Unknown,
+            axiusflow_market_data::AggressorSide::Buy => OrderFlowAggressor::Buy,
+            axiusflow_market_data::AggressorSide::Sell => OrderFlowAggressor::Sell,
+        } as i32,
+    }
 }
 
 fn order_book_snapshot(
@@ -4809,6 +5171,65 @@ fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
     })
 }
 
+fn retained_hot_series(
+    workspace: &WorkspaceState,
+    available_memory_bytes: u64,
+) -> Result<Vec<HotSeries>, String> {
+    const MAXIMUM_HOT_SET_BYTES: u64 = 512 * 1024 * 1024;
+    let estimated_entry_bytes = (HISTORY_BARS_PER_SERIES + 1)
+        .saturating_mul(std::mem::size_of::<MarketBar>())
+        .saturating_add(1_024);
+    let memory_budget_bytes =
+        usize::try_from((available_memory_bytes / 16).min(MAXIMUM_HOT_SET_BYTES))
+            .unwrap_or(usize::MAX);
+    let mut manager =
+        HotSetManager::new(NonZeroUsize::new(MAXIMUM_SERIES).unwrap_or(NonZeroUsize::MIN));
+    manager
+        .restore(
+            workspace
+                .hot_series
+                .iter()
+                .map(crate::protocol_hot_entry)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|error| error.to_string())?;
+    let active_workspaces = NonZeroU64::new(workspace.active_workspace_id)
+        .map(WorkspaceId)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let watchlist = workspace
+        .hot_series
+        .iter()
+        .filter(|series| {
+            workspace
+                .watchlist
+                .iter()
+                .any(|market| market == &series.market || market == &series.provider_symbol)
+        })
+        .map(|series| {
+            internal_series(&SeriesKey {
+                provider: series.provider.clone(),
+                instrument_id: series.instrument_id.clone(),
+                cadence_value: series.cadence_value,
+                definition_revision: series.definition_revision,
+                entitlement_id: series.entitlement_id.clone(),
+                cadence: series.cadence,
+            })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(manager
+        .classify(
+            &active_workspaces,
+            &watchlist,
+            memory_budget_bytes,
+            estimated_entry_bytes,
+        )
+        .into_iter()
+        .filter(|retention| retention.tier != HotSetTier::Cold)
+        .map(|retention| crate::hot_entry_to_protocol(retention.entry))
+        .collect())
+}
+
 fn warm_series(series: &HotSeries) -> Result<WarmSeries, String> {
     let expected_account = match series.provider.as_str() {
         "coinbase" => COINBASE_PUBLIC_ACCOUNT_ID,
@@ -4967,6 +5388,7 @@ mod tests {
                 vec![DemandWaiter {
                     consumer_id,
                     generation: GenerationId(id(1).expect("generation")),
+                    started_at: Instant::now(),
                 }],
             )]),
             history_inflight: BTreeSet::new(),
@@ -5020,6 +5442,117 @@ mod tests {
             price_scale: 2,
             quantity_scale: 8,
         }
+    }
+
+    fn hot_coinbase_series(
+        market: &str,
+        cadence_value: u32,
+        workspace_id: u64,
+        score: u32,
+    ) -> HotSeries {
+        let mut hot = hot_coinbase();
+        let (base, display) = if market == "ETH-USD" {
+            ("eth", "ETH/USD")
+        } else {
+            ("btc", "BTC/USD")
+        };
+        hot.market = market.to_string();
+        hot.instrument_id = format!("instrument:coinbase:{base}:usd");
+        hot.provider_symbol = market.to_string();
+        hot.display_symbol = display.to_string();
+        hot.interval_seconds = cadence_value;
+        hot.cadence_value = cadence_value;
+        hot.workspace_ids = vec![workspace_id];
+        hot.score = score;
+        hot.last_used_unix_seconds = u64::from(score);
+        hot
+    }
+
+    #[test]
+    fn persisted_hot_set_tiers_bound_real_startup_priority_by_workspace_pin_watchlist_and_memory() {
+        let mut active = hot_coinbase_series("BTC-USD", 60, 7, 1);
+        active.last_used_unix_seconds = 1;
+        let mut pinned = hot_coinbase_series("BTC-USD", 300, 8, 2);
+        pinned.pinned = true;
+        let watchlist = hot_coinbase_series("ETH-USD", 60, 9, 3);
+        let recent = hot_coinbase_series("BTC-USD", 900, 10, 4);
+        let workspace = WorkspaceState {
+            watchlist: vec!["ETH-USD".to_string()],
+            active_workspace_id: 7,
+            hot_series: vec![active, pinned, watchlist, recent],
+            ..crate::default_workspace()
+        };
+        let estimated_entry_bytes = (HISTORY_BARS_PER_SERIES + 1)
+            .saturating_mul(std::mem::size_of::<MarketBar>())
+            .saturating_add(1_024);
+        let retained = retained_hot_series(
+            &workspace,
+            u64::try_from(estimated_entry_bytes.saturating_mul(2).saturating_mul(16))
+                .expect("memory budget fits"),
+        )
+        .expect("hot set classifies");
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].workspace_ids, vec![7]);
+        assert_eq!(retained[1].cadence_value, 300);
+        assert!(retained[1].pinned);
+    }
+
+    #[test]
+    fn coordinator_eviction_retains_only_the_current_bounded_warm_priority() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let mut engine = configured_engine().expect("engine configures");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let series = [60, 300, 900]
+            .into_iter()
+            .map(|cadence_value| {
+                internal_series(&SeriesKey {
+                    cadence_value,
+                    ..btc()
+                })
+                .expect("series validates")
+            })
+            .collect::<Vec<_>>();
+        for item in &series {
+            engine
+                .install_history(
+                    ProviderGeneration(id(1).expect("provider generation")),
+                    item,
+                    2,
+                    8,
+                    vec![history_bar()],
+                )
+                .expect("cached history installs");
+        }
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series[0],
+        );
+        coordinator.hot_set_priority_count = 3;
+        coordinator.warm_priority = series.clone();
+        coordinator.apply_resource_mode(ResourceMode::Constrained);
+
+        assert!(coordinator.engine.series_snapshot(&series[0]).is_some());
+        assert!(coordinator.engine.series_snapshot(&series[1]).is_some());
+        assert!(coordinator.engine.series_snapshot(&series[2]).is_none());
+        assert_eq!(coordinator.engine.metrics().stored_series, 2);
     }
 
     #[test]
@@ -5169,10 +5702,11 @@ mod tests {
             )
             .expect("consumer registers");
         engine
-            .set_series_demand(
+            .set_series_demand_with_streams(
                 consumer_id,
                 GenerationId(id(1).expect("generation")),
                 series,
+                chart_stream_requirements(series),
             )
             .expect("demand installs");
         engine
@@ -6214,7 +6748,7 @@ mod tests {
         };
         assert!(matches!(
             request,
-            Ok(StorageRequest::Persist(persisted, current, bars, false))
+            Ok(StorageRequest::Persist(persisted, current, bars, false, _))
                 if persisted == *series && current == generation && bars == [local, reconciled]
         ));
     }
@@ -6561,13 +7095,20 @@ mod tests {
             .service
             .set_demand(2, 2, 2, &btc())
             .expect("new demand remains responsive");
+        harness
+            .service
+            .set_visibility(2, 2, true)
+            .expect("foreground restoration remains responsive");
         assert!(matches!(
-            poll_until(&harness.service, 2, 2, |event| matches!(
-                event,
-                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
-            )),
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.bars.last().is_some_and(|bar| bar.close == 300)
+            poll_until(&harness.service, 2, 2, |event| {
+                matches!(
+                    event,
+                    envelope::Payload::SeriesSnapshot(snapshot)
+                        if snapshot.generation == 2
+                            && snapshot.bars.last().is_some_and(|bar| bar.close == 300)
+                )
+            }),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
         ));
 
         let mut pending = 0;
@@ -6579,10 +7120,15 @@ mod tests {
         {
             pending += 1;
             assert!(pending <= 7, "consumer publication state remains bounded");
-            if let envelope::Payload::SeriesUpdate(update) = event {
-                latest_snapshot =
-                    update.forming && update.bar.as_ref().is_some_and(|bar| bar.close == 300);
-            }
+            latest_snapshot |= match event {
+                envelope::Payload::SeriesSnapshot(snapshot) => {
+                    snapshot.bars.last().is_some_and(|bar| bar.close == 300)
+                }
+                envelope::Payload::SeriesUpdate(update) => {
+                    update.forming && update.bar.as_ref().is_some_and(|bar| bar.close == 300)
+                }
+                _ => false,
+            };
         }
         assert!(
             latest_snapshot,
@@ -6625,6 +7171,17 @@ mod tests {
             envelope::Payload::SeriesState(state)
                 if state.state == SeriesLoadState::Ready as i32
                     && state.persistence == PersistenceState::Degraded as i32
+        ));
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::DemandError(_)
+            )),
+            envelope::Payload::DemandError(error)
+                if error.stage_code == FailureStage::FilesystemWrite as i32
+                    && error.stage == "filesystem_write"
+                    && error.series == Some(btc())
+                    && error.elapsed_millis.is_some()
         ));
         service
             .set_demand(1, 1, 2, &btc())
@@ -6973,7 +7530,7 @@ mod tests {
         ));
         assert!(matches!(
             storage_rx.try_recv(),
-            Ok(StorageRequest::Persist(ref persisted, current, ref bars, false))
+            Ok(StorageRequest::Persist(ref persisted, current, ref bars, false, _))
                 if persisted == &series && current == generation && bars == &[history_bar()]
         ));
     }
@@ -7048,7 +7605,7 @@ mod tests {
         assert_eq!(snapshot.bars[349].exchange_timestamp_seconds, 21_060);
         assert!(matches!(
             storage_rx.try_recv(),
-            Ok(StorageRequest::Persist(_, _, ref bars, false))
+            Ok(StorageRequest::Persist(_, _, ref bars, false, _))
                 if bars.first().is_some_and(|bar| bar.source_sequence == 2)
                     && bars.last().is_some_and(|bar| bar.source_sequence == 351)
         ));
@@ -7321,6 +7878,61 @@ mod tests {
         ));
     }
 
+    fn assert_order_flow_snapshot(coordinator: &Coordinator<'_>, consumer_id: ConsumerId) {
+        assert!(matches!(
+            coordinator.events[&consumer_id].order_flow,
+            Some(envelope::Payload::OrderFlowSnapshot(ref snapshot))
+                if snapshot.consumer_id == consumer_id.0.get()
+                    && snapshot.generation == 1
+                    && snapshot.provider_generation == 7
+                    && snapshot.source_watermark == 1
+                    && snapshot.cumulative_delta == 2
+                    && snapshot.levels.len() == 1
+                    && snapshot.tape.len() == 1
+        ));
+    }
+
+    fn assert_order_flow_update(coordinator: &Coordinator<'_>, consumer_id: ConsumerId) {
+        assert!(matches!(
+            coordinator.events[&consumer_id].order_flow,
+            Some(envelope::Payload::OrderFlowUpdate(ref update))
+                if update.consumer_id == consumer_id.0.get()
+                    && update.provider_generation == 7
+                    && update.publication_generation == 2
+                    && update.cumulative_delta == 4
+                    && update.trade.as_ref().is_some_and(|trade| trade.source_sequence == 2)
+        ));
+    }
+
+    fn assert_rithmic_failure_is_scoped(
+        coordinator: &Coordinator<'_>,
+        affected: &BarSeriesKey,
+        unaffected: &BarSeriesKey,
+        affected_consumer: ConsumerId,
+        unaffected_consumer: ConsumerId,
+    ) {
+        assert!(!coordinator.rithmic_live[affected].history_ready);
+        assert!(coordinator.rithmic_live[unaffected].history_ready);
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .map(|status| status.health),
+            Some(ProviderHealth::Online),
+            "instrument-local failure does not degrade the provider session"
+        );
+        assert!(matches!(
+            coordinator.events[&affected_consumer].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial as i32
+        ));
+        assert!(matches!(
+            coordinator.events[&unaffected_consumer].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Live as i32
+        ));
+    }
+
     #[test]
     fn rithmic_instrument_failure_repairs_only_the_affected_series() {
         let (history_tx, history_rx) = mpsc::sync_channel(2);
@@ -7374,6 +7986,7 @@ mod tests {
         }
         let first = rithmic_trade(1, 7, 121_000_000_000, 110);
         coordinator.rithmic_trade(7, &first);
+        assert_order_flow_snapshot(&coordinator, affected_consumer);
         coordinator.publish_rithmic_live();
         coordinator
             .rithmic_live
@@ -7385,33 +7998,14 @@ mod tests {
             .volume = i64::MAX;
 
         coordinator.rithmic_trade(7, &rithmic_trade(2, 7, 125_000_000_000, 111));
-
-        assert!(
-            !coordinator.rithmic_live[&affected].history_ready,
-            "affected instrument requires covering repair"
+        assert_order_flow_update(&coordinator, affected_consumer);
+        assert_rithmic_failure_is_scoped(
+            &coordinator,
+            &affected,
+            &unaffected,
+            affected_consumer,
+            unaffected_consumer,
         );
-        assert!(
-            coordinator.rithmic_live[&unaffected].history_ready,
-            "unrelated instrument remains live"
-        );
-        assert_eq!(
-            coordinator
-                .engine
-                .provider_status("rithmic")
-                .map(|status| status.health),
-            Some(ProviderHealth::Online),
-            "instrument-local failure does not degrade the provider session"
-        );
-        assert!(matches!(
-            coordinator.events[&affected_consumer].series_state,
-            Some(envelope::Payload::SeriesState(ref state))
-                if state.state == SeriesLoadState::Partial as i32
-        ));
-        assert!(matches!(
-            coordinator.events[&unaffected_consumer].series_state,
-            Some(envelope::Payload::SeriesState(ref state))
-                if state.state == SeriesLoadState::Live as i32
-        ));
         assert!(matches!(
             history_rx.try_recv(),
             Ok(HistoryRequest { series, provider_generation, .. })
@@ -7659,7 +8253,51 @@ mod tests {
                 if error.generation == 1
                     && error.stage == "provider_history"
                     && error.code == EngineFaultCode::Retryable as i32
+                    && error.stage_code == FailureStage::ProviderHistory as i32
+                    && error.series == Some(btc())
+                    && error.cause == "provider history did not produce usable canonical bars"
+                    && error.elapsed_millis.is_some()
         ));
+    }
+
+    #[test]
+    fn demand_failures_preserve_series_stage_cause_and_elapsed_time_without_raw_payloads() {
+        let consumer_id = ConsumerId(id(7).expect("consumer"));
+        let generation = GenerationId(id(9).expect("generation"));
+        let series = internal_series(&btc()).expect("series");
+        let mut events = BTreeMap::from([(consumer_id, ConsumerEvents::default())]);
+        fail_waiters(
+            &mut events,
+            vec![DemandWaiter {
+                consumer_id,
+                generation,
+                started_at: Instant::now()
+                    .checked_sub(Duration::from_millis(5))
+                    .expect("five milliseconds is representable"),
+            }],
+            &series,
+            FailureStage::Handoff,
+            "history/live handoff failed",
+        );
+        let envelope::Payload::DemandError(error) = events
+            .get_mut(&consumer_id)
+            .and_then(ConsumerEvents::pop)
+            .and_then(|_| events.get_mut(&consumer_id).and_then(ConsumerEvents::pop))
+            .expect("structured failure follows terminal state")
+        else {
+            panic!("expected structured demand failure");
+        };
+        assert_eq!(error.consumer_id, 7);
+        assert_eq!(error.generation, 9);
+        assert_eq!(error.series, Some(btc()));
+        assert_eq!(error.stage, "handoff");
+        assert_eq!(error.stage_code, FailureStage::Handoff as i32);
+        assert_eq!(
+            error.cause,
+            "history and realtime state could not be joined safely"
+        );
+        assert!(error.elapsed_millis.is_some_and(|elapsed| elapsed >= 5));
+        assert!(!error.detail.contains("token"));
     }
 
     #[test]
