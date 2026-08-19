@@ -3,6 +3,7 @@
 mod assets;
 mod chart_chrome;
 mod engine_market_worker;
+mod engine_supervisor;
 mod frame_poll_gate;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
@@ -21,16 +22,18 @@ use axiusflow_chart_integration::{
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_engine_protocol::{
-    InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
-    ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
+    EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejectionReason,
+    ProviderInstrumentSummary, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
+    WorkspaceState,
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Hsla, KeyBinding,
-    KeyDownEvent, MouseButton, Orientation, Render, Role, Stateful, Task, WeakEntity, Window,
-    WindowBounds, WindowControlArea, WindowOptions, actions, div, prelude::*, px, rgb, size,
+    KeyDownEvent, MouseButton, Orientation, QuitMode, Render, Role, Stateful, Task, WeakEntity,
+    Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, prelude::*, px, rgb,
+    size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
@@ -53,13 +56,13 @@ use resident_market_worker::{
 use std::time::Instant;
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     pin::Pin,
     rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::TrySendError,
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     task::{Context as TaskContext, Poll, Waker},
     time::Duration,
@@ -150,6 +153,61 @@ impl DesktopLifetimeMode {
             Self::KeepEngineWarm | Self::ExitWithDesktop => ResourceMode::Warm,
         }
     }
+
+    const fn protocol_mode(self) -> EngineLifetimeMode {
+        match self {
+            Self::ExitWithDesktop => EngineLifetimeMode::ExitCompletely,
+            Self::KeepEngineWarm => EngineLifetimeMode::KeepEngineWarm,
+            Self::KeepMarketsLive => EngineLifetimeMode::KeepMarketsLive,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ExitWithDesktop => "Exit fully",
+            Self::KeepEngineWarm => "Engine warm",
+            Self::KeepMarketsLive => "Markets live",
+        }
+    }
+
+    const fn next(self, markets_live_permitted: bool) -> Self {
+        match (self, markets_live_permitted) {
+            (Self::ExitWithDesktop, _) => Self::KeepEngineWarm,
+            (Self::KeepEngineWarm, true) => Self::KeepMarketsLive,
+            (Self::KeepEngineWarm, false) | (Self::KeepMarketsLive, _) => Self::ExitWithDesktop,
+        }
+    }
+
+    fn from_workspace(workspace: &WorkspaceState) -> Result<Self, String> {
+        match EngineLifetimeMode::try_from(workspace.lifetime_mode)
+            .map_err(|_| "resident engine returned an invalid lifetime mode".to_string())?
+        {
+            EngineLifetimeMode::ExitCompletely => Ok(Self::ExitWithDesktop),
+            EngineLifetimeMode::KeepEngineWarm => Ok(Self::KeepEngineWarm),
+            EngineLifetimeMode::KeepMarketsLive if workspace.markets_live_permitted => {
+                Ok(Self::KeepMarketsLive)
+            }
+            EngineLifetimeMode::KeepMarketsLive => {
+                Err("resident engine markets-live mode lacks explicit permission".to_string())
+            }
+        }
+    }
+}
+
+struct LifecyclePreferenceRequest {
+    mode: DesktopLifetimeMode,
+    autostart_enabled: bool,
+    markets_live_permitted: bool,
+}
+
+type LifecyclePreferenceResult = Result<WorkspaceState, String>;
+
+#[derive(Clone, Copy)]
+struct LifecyclePresentation {
+    mode: DesktopLifetimeMode,
+    autostart_enabled: bool,
+    markets_live_permitted: bool,
+    pending: bool,
 }
 
 fn finish_desktop_shutdown(
@@ -176,17 +234,106 @@ fn finish_desktop_shutdown(
 
 #[derive(Clone)]
 struct DesktopLifecycle {
-    mode: DesktopLifetimeMode,
+    mode: Rc<Cell<DesktopLifetimeMode>>,
+    autostart_enabled: Rc<Cell<bool>>,
+    markets_live_permitted: Rc<Cell<bool>>,
+    preference_pending: Rc<Cell<bool>>,
+    preference_error: Rc<RefCell<Option<String>>>,
+    preference_requests: SyncSender<LifecyclePreferenceRequest>,
+    preference_results: Rc<RefCell<Receiver<LifecyclePreferenceResult>>>,
     retirements: Rc<RefCell<Vec<Task<bool>>>>,
     terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
+    shutdown_started: Rc<Cell<bool>>,
 }
 
 impl DesktopLifecycle {
-    fn new(mode: DesktopLifetimeMode) -> Self {
-        Self {
-            mode,
+    fn new(
+        mode: DesktopLifetimeMode,
+        autostart_enabled: bool,
+        markets_live_permitted: bool,
+    ) -> Result<Self, String> {
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("axiusflow-engine-lifecycle-client".to_string())
+            .spawn(move || run_lifecycle_preferences(&request_rx, &result_tx))
+            .map_err(|_| "desktop lifecycle client could not start".to_string())?;
+        Ok(Self {
+            mode: Rc::new(Cell::new(mode)),
+            autostart_enabled: Rc::new(Cell::new(autostart_enabled)),
+            markets_live_permitted: Rc::new(Cell::new(markets_live_permitted)),
+            preference_pending: Rc::new(Cell::new(false)),
+            preference_error: Rc::new(RefCell::new(None)),
+            preference_requests: request_tx,
+            preference_results: Rc::new(RefCell::new(result_rx)),
             retirements: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
+            shutdown_started: Rc::new(Cell::new(false)),
+        })
+    }
+
+    fn presentation(&self) -> LifecyclePresentation {
+        LifecyclePresentation {
+            mode: self.mode.get(),
+            autostart_enabled: self.autostart_enabled.get(),
+            markets_live_permitted: self.markets_live_permitted.get(),
+            pending: self.preference_pending.get(),
+        }
+    }
+
+    fn preference_error(&self) -> Option<String> {
+        self.preference_error.borrow().clone()
+    }
+
+    fn request_preferences(&self, request: LifecyclePreferenceRequest) -> Result<(), String> {
+        if self.preference_pending.get() {
+            return Ok(());
+        }
+        self.preference_requests
+            .try_send(request)
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => {
+                    "engine lifecycle update is already pending".to_string()
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    "engine lifecycle client is unavailable".to_string()
+                }
+            })?;
+        self.preference_pending.set(true);
+        self.preference_error.borrow_mut().take();
+        Ok(())
+    }
+
+    fn poll_preferences(&self) -> bool {
+        match self.preference_results.borrow().try_recv() {
+            Ok(Ok(workspace)) => {
+                match DesktopLifetimeMode::from_workspace(&workspace) {
+                    Ok(mode) => {
+                        self.mode.set(mode);
+                        self.autostart_enabled.set(workspace.autostart_enabled);
+                        self.markets_live_permitted
+                            .set(workspace.markets_live_permitted);
+                        self.preference_error.borrow_mut().take();
+                    }
+                    Err(error) => *self.preference_error.borrow_mut() = Some(error),
+                }
+                self.preference_pending.set(false);
+                true
+            }
+            Ok(Err(error)) => {
+                *self.preference_error.borrow_mut() = Some(error);
+                self.preference_pending.set(false);
+                true
+            }
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if self.preference_pending.replace(false) {
+                    *self.preference_error.borrow_mut() =
+                        Some("engine lifecycle client stopped unexpectedly".to_string());
+                    return true;
+                }
+                false
+            }
         }
     }
 
@@ -201,7 +348,10 @@ impl DesktopLifecycle {
         );
     }
 
-    fn quit(&self, cx: &mut App) -> Task<Result<(), String>> {
+    fn begin_quit(&self, cx: &mut App) -> Option<Task<Result<(), String>>> {
+        if self.shutdown_started.replace(true) {
+            return None;
+        }
         let terminals = self.terminals.borrow_mut().drain(..).collect::<Vec<_>>();
         for terminal in terminals {
             terminal
@@ -211,8 +361,8 @@ impl DesktopLifecycle {
                 .ok();
         }
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
-        let mode = self.mode;
-        cx.background_executor().spawn(async move {
+        let mode = self.mode.get();
+        Some(cx.background_executor().spawn(async move {
             let mut detach_failed = false;
             for retirement in retirements {
                 if !retirement.await {
@@ -222,7 +372,45 @@ impl DesktopLifecycle {
             finish_desktop_shutdown(mode, detach_failed, || {
                 axiusflow_local_engine_client::shutdown_running_engine()
             })
+        }))
+    }
+
+    fn quit_after_shutdown(&self, cx: &mut App) {
+        let Some(shutdown) = self.begin_quit(cx) else {
+            cx.quit();
+            return;
+        };
+        cx.spawn(async move |cx| {
+            if let Err(error) = shutdown.await {
+                eprintln!("Axiusflow desktop shutdown failed: {error}");
+            }
+            cx.update(|cx| cx.quit());
         })
+        .detach();
+    }
+}
+
+fn run_lifecycle_preferences(
+    requests: &Receiver<LifecyclePreferenceRequest>,
+    results: &SyncSender<LifecyclePreferenceResult>,
+) {
+    while let Ok(request) = requests.recv() {
+        let result = axiusflow_local_engine_client::sibling_engine_executable()
+            .and_then(|executable| {
+                axiusflow_local_engine_client::connect_or_start_engine(&executable)
+            })
+            .and_then(|mut client| {
+                let workspace = client.restore_workspace()?;
+                client.set_engine_lifecycle(
+                    workspace.workspace_revision,
+                    request.mode.protocol_mode(),
+                    request.autostart_enabled,
+                    request.markets_live_permitted,
+                )
+            });
+        if results.send(result).is_err() {
+            return;
+        }
     }
 }
 
@@ -2923,6 +3111,8 @@ struct WorkspaceTabBarState<'a> {
     enabled: bool,
     error: Option<&'a str>,
     workspace_drag: Option<WorkspaceDragState>,
+    lifecycle: LifecyclePresentation,
+    lifecycle_error: Option<&'a str>,
     theme: AxiusflowTheme,
 }
 
@@ -2985,7 +3175,94 @@ fn workspace_title_bar(
                 .child(tabs)
                 .child(drag_region()),
         )
+        .child(engine_lifecycle_controls(
+            terminal,
+            state.lifecycle,
+            state.lifecycle_error,
+            &theme,
+        ))
         .child(workspace_window_controls(terminal, window, &theme))
+}
+
+fn engine_lifecycle_controls(
+    terminal: &Entity<TerminalApp>,
+    state: LifecyclePresentation,
+    error: Option<&str>,
+    theme: &AxiusflowTheme,
+) -> Div {
+    let colors = theme.colors;
+    let button = |id: &'static str, label: String| {
+        Button::new(id)
+            .label(label)
+            .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+            .h(px(chart_chrome::CHART_CONTROL_SIZE))
+            .px_2()
+            .border_1()
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.muted))
+            .text_color(gpui_color(colors.foreground))
+            .rounded(px(f32::from(
+                chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
+            )))
+            .disabled(state.pending)
+    };
+    let mode_terminal = terminal.clone();
+    let mode_tooltip = error.map_or_else(
+        || "Choose what happens to the resident engine when Axiusflow closes".to_string(),
+        ToString::to_string,
+    );
+    let mode = button_activation(
+        button("engine_lifetime_mode", state.mode.label().to_string()),
+        !state.pending,
+        move |_, cx| {
+            mode_terminal.update(cx, TerminalApp::cycle_lifetime_mode);
+        },
+    );
+    let mode = chrome_tooltip("engine_lifetime_mode", mode_tooltip, mode);
+    let autostart_terminal = terminal.clone();
+    let autostart = button(
+        "engine_autostart",
+        if state.autostart_enabled {
+            "Login start on"
+        } else {
+            "Login start off"
+        }
+        .to_string(),
+    );
+    let autostart = button_activation(autostart, !state.pending, move |_, cx| {
+        autostart_terminal.update(cx, TerminalApp::toggle_engine_autostart);
+    });
+    let autostart = chrome_tooltip(
+        "engine_autostart",
+        "Start the resident engine with this operating-system user session",
+        autostart,
+    );
+    let permission_terminal = terminal.clone();
+    let permission = button(
+        "markets_live_permission",
+        if state.markets_live_permitted {
+            "Live retention on"
+        } else {
+            "Live retention off"
+        }
+        .to_string(),
+    );
+    let permission = button_activation(permission, !state.pending, move |_, cx| {
+        permission_terminal.update(cx, TerminalApp::toggle_markets_live_permission);
+    });
+    let permission = chrome_tooltip(
+        "markets_live_permission",
+        "Explicitly permit selected provider sessions to remain live without a desktop",
+        permission,
+    );
+    div()
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .children([mode, autostart, permission])
 }
 
 fn workspace_caption_control(
@@ -4567,6 +4844,52 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn cycle_lifetime_mode(&mut self, cx: &mut Context<Self>) {
+        let current = self.lifecycle.presentation();
+        let request = LifecyclePreferenceRequest {
+            mode: current.mode.next(current.markets_live_permitted),
+            autostart_enabled: current.autostart_enabled,
+            markets_live_permitted: current.markets_live_permitted,
+        };
+        self.request_lifecycle_preferences(request, cx);
+    }
+
+    fn toggle_engine_autostart(&mut self, cx: &mut Context<Self>) {
+        let current = self.lifecycle.presentation();
+        let request = LifecyclePreferenceRequest {
+            mode: current.mode,
+            autostart_enabled: !current.autostart_enabled,
+            markets_live_permitted: current.markets_live_permitted,
+        };
+        self.request_lifecycle_preferences(request, cx);
+    }
+
+    fn toggle_markets_live_permission(&mut self, cx: &mut Context<Self>) {
+        let current = self.lifecycle.presentation();
+        let permitted = !current.markets_live_permitted;
+        let request = LifecyclePreferenceRequest {
+            mode: if !permitted && current.mode == DesktopLifetimeMode::KeepMarketsLive {
+                DesktopLifetimeMode::KeepEngineWarm
+            } else {
+                current.mode
+            },
+            autostart_enabled: current.autostart_enabled,
+            markets_live_permitted: permitted,
+        };
+        self.request_lifecycle_preferences(request, cx);
+    }
+
+    fn request_lifecycle_preferences(
+        &mut self,
+        request: LifecyclePreferenceRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.lifecycle.request_preferences(request) {
+            *self.lifecycle.preference_error.borrow_mut() = Some(error);
+        }
+        cx.notify();
+    }
+
     fn toggle_drawing_toolbar(&mut self, cx: &mut Context<Self>) {
         self.drawing_toolbar.toggle();
         cx.notify();
@@ -4618,6 +4941,11 @@ impl TerminalApp {
         window.on_next_frame(move |window, cx| {
             let diagnostics = terminal.update(cx, |terminal, cx| {
                 terminal.frame_poll_gate.complete();
+                if terminal.lifecycle.poll_preferences()
+                    || terminal.lifecycle.presentation().pending
+                {
+                    cx.notify();
+                }
                 let mut diagnostics = Vec::new();
                 for workspace in &terminal.workspaces {
                     let surface = workspace.surface.clone();
@@ -4703,6 +5031,33 @@ fn active_header_state(
     }
 }
 
+impl TerminalApp {
+    fn rendered_title_bar(
+        &self,
+        terminal: &Entity<Self>,
+        window: &Window,
+        fullscreen: bool,
+    ) -> Option<impl IntoElement + use<>> {
+        workspace_title_bar_visible(fullscreen).then(|| {
+            let lifecycle_error = self.lifecycle.preference_error();
+            workspace_title_bar(
+                terminal,
+                &WorkspaceTabBarState {
+                    workspaces: &self.workspaces,
+                    active: self.active,
+                    enabled: self.workspace_factory.is_some(),
+                    error: self.workspace_error.as_deref(),
+                    workspace_drag: self.workspace_drag,
+                    lifecycle: self.lifecycle.presentation(),
+                    lifecycle_error: lifecycle_error.as_deref(),
+                    theme: self.theme,
+                },
+                window,
+            )
+        })
+    }
+}
+
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.workspace_drag.is_some() && !cx.has_active_drag() {
@@ -4734,20 +5089,7 @@ impl Render for TerminalApp {
                 },
             cx,
         );
-        let title_bar = workspace_title_bar_visible(fullscreen).then(|| {
-            workspace_title_bar(
-                &terminal,
-                &WorkspaceTabBarState {
-                    workspaces: &self.workspaces,
-                    active: self.active,
-                    enabled: self.workspace_factory.is_some(),
-                    error: self.workspace_error.as_deref(),
-                    workspace_drag: self.workspace_drag,
-                    theme: self.theme,
-                },
-                window,
-            )
-        });
+        let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
         let header = terminal_header(
             &terminal,
             &active,
@@ -5210,6 +5552,8 @@ struct ConfiguredDesktop {
     market_workers: Vec<(MarketWorkerStartup, MarketDataWorker)>,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     lifetime_mode: DesktopLifetimeMode,
+    autostart_enabled: bool,
+    markets_live_permitted: bool,
     layout: DesktopLayout,
 }
 
@@ -5223,21 +5567,36 @@ enum DesktopLayout {
 fn split_lifetime_mode(
     first: Option<std::ffi::OsString>,
     arguments: &mut impl Iterator<Item = std::ffi::OsString>,
-) -> (DesktopLifetimeMode, Option<std::ffi::OsString>) {
+) -> (Option<DesktopLifetimeMode>, Option<std::ffi::OsString>) {
     if first.as_deref() == Some(std::ffi::OsStr::new("--exit-with-desktop")) {
-        (DesktopLifetimeMode::ExitWithDesktop, arguments.next())
+        (Some(DesktopLifetimeMode::ExitWithDesktop), arguments.next())
     } else if first.as_deref() == Some(std::ffi::OsStr::new("--keep-markets-live")) {
-        (DesktopLifetimeMode::KeepMarketsLive, arguments.next())
+        (Some(DesktopLifetimeMode::KeepMarketsLive), arguments.next())
     } else {
-        (DesktopLifetimeMode::KeepEngineWarm, first)
+        (None, first)
     }
 }
 
-fn configure_engine_resource_mode(mode: DesktopLifetimeMode) -> Result<(), String> {
+struct ConfiguredLifecycle {
+    mode: DesktopLifetimeMode,
+    autostart_enabled: bool,
+    markets_live_permitted: bool,
+}
+
+fn configure_engine_lifecycle(
+    launch_override: Option<DesktopLifetimeMode>,
+) -> Result<ConfiguredLifecycle, String> {
     let executable = axiusflow_local_engine_client::sibling_engine_executable()?;
-    axiusflow_local_engine_client::connect_or_start_engine(&executable)?
-        .set_engine_resource_mode(mode.engine_resource_mode())?;
-    Ok(())
+    let mut client = axiusflow_local_engine_client::connect_or_start_engine(&executable)?;
+    let workspace = client.restore_workspace()?;
+    let persisted = DesktopLifetimeMode::from_workspace(&workspace)?;
+    let mode = launch_override.unwrap_or(persisted);
+    client.set_engine_resource_mode(mode.engine_resource_mode())?;
+    Ok(ConfiguredLifecycle {
+        mode,
+        autostart_enabled: workspace.autostart_enabled,
+        markets_live_permitted: workspace.markets_live_permitted,
+    })
 }
 
 fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
@@ -5246,7 +5605,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let (lifetime_mode, command) = split_lifetime_mode(first, &mut arguments);
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
-    let market_workers = if let Some(argument) = command {
+    let (market_workers, lifecycle) = if let Some(argument) = command {
         #[cfg(feature = "diagnostics")]
         if argument == "--windowed-benchmark" {
             let report_path = arguments.next().ok_or_else(|| {
@@ -5271,37 +5630,39 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
-            configure_engine_resource_mode(lifetime_mode)?;
-            vec![resident_market_worker::start_rithmic()?]
+            let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
+            (vec![resident_market_worker::start_rithmic()?], lifecycle)
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
                 std::process::exit(2);
             }
-            configure_engine_resource_mode(lifetime_mode)?;
-            engine_market_worker::start_multi_chart()?
+            let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
+            (engine_market_worker::start_multi_chart()?, lifecycle)
         } else if argument == "--workspace-tabs" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --workspace-tabs");
                 std::process::exit(2);
             }
-            configure_engine_resource_mode(lifetime_mode)?;
+            let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
             layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs()?;
             workspace_factory = Some(group.factory);
-            group.initial
+            (group.initial, lifecycle)
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
             std::process::exit(2);
         }
     } else {
-        configure_engine_resource_mode(lifetime_mode)?;
-        vec![resident_market_worker::start()?]
+        let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
+        (vec![resident_market_worker::start()?], lifecycle)
     };
     Ok(Some(ConfiguredDesktop {
         market_workers,
         workspace_factory,
-        lifetime_mode,
+        lifetime_mode: lifecycle.mode,
+        autostart_enabled: lifecycle.autostart_enabled,
+        markets_live_permitted: lifecycle.markets_live_permitted,
         layout,
     }))
 }
@@ -5315,12 +5676,23 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let lifecycle = DesktopLifecycle::new(configured.lifetime_mode);
+    let lifecycle = match DesktopLifecycle::new(
+        configured.lifetime_mode,
+        configured.autostart_enabled,
+        configured.markets_live_permitted,
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            eprintln!("Axiusflow lifecycle client could not start: {error}");
+            std::process::exit(1);
+        }
+    };
     let market_workers = configured.market_workers;
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     application()
         .with_assets(assets::DesktopAssets)
+        .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(include_bytes!(
@@ -5343,17 +5715,20 @@ fn main() {
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
             let quit_lifecycle = lifecycle.clone();
             cx.on_app_quit(move |cx| {
-                let quit = quit_lifecycle.quit(cx);
+                let quit = quit_lifecycle.begin_quit(cx);
                 async move {
-                    if let Err(error) = quit.await {
+                    if let Some(quit) = quit
+                        && let Err(error) = quit.await
+                    {
                         eprintln!("Axiusflow desktop shutdown failed: {error}");
                     }
                 }
             })
             .detach();
-            cx.on_window_closed(|cx, _| {
+            let last_window_lifecycle = lifecycle.clone();
+            cx.on_window_closed(move |cx, _| {
                 if cx.windows().is_empty() {
-                    cx.quit();
+                    last_window_lifecycle.quit_after_shutdown(cx);
                 }
             })
             .detach();
@@ -5411,7 +5786,9 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
-    use axiusflow_engine_protocol::{ProviderInstrumentSummary, ResourceMode};
+    use axiusflow_engine_protocol::{
+        EngineLifetimeMode, ProviderInstrumentSummary, ResourceMode, WorkspaceState,
+    };
     use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};
@@ -5421,21 +5798,54 @@ mod tests {
         let mut remaining = vec![OsString::from("--multi-chart")].into_iter();
         let (mode, command) =
             split_lifetime_mode(Some(OsString::from("--exit-with-desktop")), &mut remaining);
-        assert_eq!(mode, DesktopLifetimeMode::ExitWithDesktop);
+        assert_eq!(mode, Some(DesktopLifetimeMode::ExitWithDesktop));
         assert_eq!(command, Some(OsString::from("--multi-chart")));
 
         let mut remaining = vec![OsString::from("--rithmic-test")].into_iter();
         let (mode, command) =
             split_lifetime_mode(Some(OsString::from("--keep-markets-live")), &mut remaining);
-        assert_eq!(mode, DesktopLifetimeMode::KeepMarketsLive);
-        assert_eq!(mode.engine_resource_mode(), ResourceMode::MarketsLive);
+        assert_eq!(mode, Some(DesktopLifetimeMode::KeepMarketsLive));
+        assert_eq!(
+            mode.expect("launch override exists").engine_resource_mode(),
+            ResourceMode::MarketsLive
+        );
         assert_eq!(command, Some(OsString::from("--rithmic-test")));
 
         let mut empty = Vec::<OsString>::new().into_iter();
         let (mode, command) = split_lifetime_mode(None, &mut empty);
-        assert_eq!(mode, DesktopLifetimeMode::KeepEngineWarm);
-        assert_eq!(mode.engine_resource_mode(), ResourceMode::Warm);
+        assert_eq!(mode, None);
         assert_eq!(command, None);
+    }
+
+    #[test]
+    fn lifecycle_controls_never_enter_markets_live_without_explicit_permission() {
+        assert_eq!(
+            DesktopLifetimeMode::KeepEngineWarm.next(false),
+            DesktopLifetimeMode::ExitWithDesktop
+        );
+        assert_eq!(
+            DesktopLifetimeMode::KeepEngineWarm.next(true),
+            DesktopLifetimeMode::KeepMarketsLive
+        );
+        assert_eq!(
+            DesktopLifetimeMode::KeepMarketsLive.next(true),
+            DesktopLifetimeMode::ExitWithDesktop
+        );
+        assert_eq!(DesktopLifetimeMode::ExitWithDesktop.label(), "Exit fully");
+        assert_eq!(DesktopLifetimeMode::KeepEngineWarm.label(), "Engine warm");
+        assert_eq!(DesktopLifetimeMode::KeepMarketsLive.label(), "Markets live");
+
+        let mut workspace = WorkspaceState {
+            lifetime_mode: EngineLifetimeMode::KeepMarketsLive as i32,
+            markets_live_permitted: false,
+            ..WorkspaceState::default()
+        };
+        assert!(DesktopLifetimeMode::from_workspace(&workspace).is_err());
+        workspace.markets_live_permitted = true;
+        assert_eq!(
+            DesktopLifetimeMode::from_workspace(&workspace),
+            Ok(DesktopLifetimeMode::KeepMarketsLive)
+        );
     }
 
     #[test]

@@ -8,20 +8,20 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
     thread,
     time::{Duration, Instant},
 };
 
 use axiusflow_engine_protocol::{
-    AttachClient, ClientHello, ClientKind, DetachClient, EngineReady, Envelope, EnvelopeDecoder,
-    InstallProviderInstrument, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
+    AttachClient, ClientHello, ClientKind, DetachClient, EngineLifetimeMode, EngineReady,
+    EngineStatus, Envelope, EnvelopeDecoder, GetEngineStatus, InstallProviderInstrument,
+    LIFECYCLE_CONTRACT_REVISION, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
     RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineResourceMode, SetSelection,
-    SetViewport, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, encode_envelope,
-    envelope,
+    SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineLifecycle, SetEngineResourceMode,
+    SetSelection, SetViewport, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState,
+    encode_envelope, envelope,
 };
-use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
+use axiusflow_platform_runtime::{BackgroundService, CredentialVault, NativeCredentialVault};
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
@@ -186,6 +186,41 @@ impl EngineClient {
                 },
             ))?;
         self.receive_workspace()
+    }
+
+    /// Persists revision-fenced engine lifetime, autostart, and markets-live permission settings.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated mutation or native autostart update fails.
+    pub fn set_engine_lifecycle(
+        &mut self,
+        workspace_revision: u64,
+        lifetime_mode: EngineLifetimeMode,
+        autostart_enabled: bool,
+        markets_live_permitted: bool,
+    ) -> Result<WorkspaceState, String> {
+        self.connection
+            .send(envelope::Payload::SetEngineLifecycle(SetEngineLifecycle {
+                workspace_revision,
+                lifetime_mode: lifetime_mode as i32,
+                autostart_enabled,
+                markets_live_permitted,
+            }))?;
+        self.receive_workspace()
+    }
+
+    /// Returns one bounded engine lifecycle and resource status snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated request fails or the reply is invalid.
+    pub fn engine_status(&mut self) -> Result<EngineStatus, String> {
+        self.connection
+            .send(envelope::Payload::GetEngineStatus(GetEngineStatus {}))?;
+        match self.connection.receive()? {
+            envelope::Payload::EngineStatus(status) => Ok(status),
+            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+            _ => Err("engine returned an unexpected status reply".to_string()),
+        }
     }
 
     /// Requests complete resident-engine shutdown and consumes this connection.
@@ -547,9 +582,20 @@ fn connect_or_start_engine_named(
     start_timeout: Duration,
 ) -> Result<EngineClient, String> {
     let mut engine_started = false;
+    let mut replacement_requested = false;
     let mut last_error =
         match EngineClient::connect_with_reachability(socket_name, installation_token) {
-            Ok(client) => return Ok(client),
+            Ok(client) if compatible_lifecycle_contract(&client) => return Ok(client),
+            Ok(client) if client.ready().lifecycle_contract_revision == 0 => {
+                client.shutdown_engine()?;
+                replacement_requested = true;
+                "resident engine is stopping for a compatible replacement".to_string()
+            }
+            Ok(_) => {
+                return Err(
+                    "resident engine lifecycle contract is newer than this desktop".to_string(),
+                );
+            }
             Err(failure) => {
                 if !failure.endpoint_reached {
                     start_engine_process(engine_executable)?;
@@ -561,7 +607,19 @@ fn connect_or_start_engine_named(
     let deadline = Instant::now() + start_timeout;
     while Instant::now() < deadline {
         match EngineClient::connect_with_reachability(socket_name, installation_token) {
-            Ok(client) => return Ok(client),
+            Ok(client) if compatible_lifecycle_contract(&client) => return Ok(client),
+            Ok(client) if client.ready().lifecycle_contract_revision == 0 => {
+                if !replacement_requested {
+                    client.shutdown_engine()?;
+                    replacement_requested = true;
+                }
+                last_error = "resident engine is stopping for a compatible replacement".to_string();
+            }
+            Ok(_) => {
+                return Err(
+                    "resident engine lifecycle contract is newer than this desktop".to_string(),
+                );
+            }
             Err(failure) => {
                 if !failure.endpoint_reached && !engine_started {
                     start_engine_process(engine_executable)?;
@@ -575,25 +633,17 @@ fn connect_or_start_engine_named(
     Err(last_error)
 }
 
+fn compatible_lifecycle_contract(client: &EngineClient) -> bool {
+    client.ready().lifecycle_contract_revision == LIFECYCLE_CONTRACT_REVISION
+}
+
 fn start_engine_process(engine_executable: &Path) -> Result<(), String> {
-    let mut command = Command::new(engine_executable);
-    configure_background_process(&mut command);
-    command.spawn().map_err(|_| {
-        "resident engine could not be started from the installation directory".to_string()
-    })?;
-    Ok(())
+    BackgroundService::new(engine_executable.to_path_buf())
+        .and_then(|service| service.start())
+        .map_err(|_| {
+            "resident engine could not be started from the installation directory".to_string()
+        })
 }
-
-#[cfg(target_os = "windows")]
-fn configure_background_process(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn configure_background_process(_command: &mut Command) {}
 
 struct FramedConnection {
     stream: LocalSocketStream,
@@ -649,6 +699,7 @@ impl FramedConnection {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{Read, Write},
         path::Path,
         sync::{
             Arc,
@@ -662,7 +713,13 @@ mod tests {
         GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*,
     };
 
-    use super::{ENGINE_SOCKET_NAME, connect_or_start_engine_named};
+    use axiusflow_engine_protocol::{
+        EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, encode_envelope, envelope,
+    };
+
+    use super::{
+        ENGINE_SOCKET_NAME, EngineClient, connect_or_start_engine_named, native_installation_token,
+    };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
@@ -718,5 +775,310 @@ mod tests {
             .expect("create socket name");
         drop(LocalSocketStream::connect(name).expect("wake accepting server"));
         server.join().expect("join accepting server");
+    }
+
+    #[test]
+    fn lifecycle_revision_zero_resident_is_shutdown_before_replacement_start() {
+        let socket_name = format!(
+            "axiusflow-engine-client-replacement-test-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        );
+        let name = socket_name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("create listener name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("bind legacy endpoint");
+        let shutdown_received = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown_received);
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().expect("accept replacement probe");
+            let mut decoder = EnvelopeDecoder::try_new().expect("decoder");
+            let mut bytes = [0_u8; 4096];
+            let count = stream.read(&mut bytes).expect("read client hello");
+            let hello = decoder.push(&bytes[..count]).expect("decode hello");
+            assert!(matches!(
+                hello.first().and_then(|message| message.payload.as_ref()),
+                Some(envelope::Payload::ClientHello(_))
+            ));
+            let ready = encode_envelope(&Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                payload: Some(envelope::Payload::EngineReady(EngineReady {
+                    protocol_version: PROTOCOL_VERSION,
+                    engine_epoch: 1,
+                    workspace_revision: 0,
+                    lifecycle_contract_revision: 0,
+                })),
+            })
+            .expect("encode legacy readiness");
+            stream.write_all(&ready).expect("send legacy readiness");
+            let count = stream.read(&mut bytes).expect("read shutdown command");
+            let shutdown = decoder.push(&bytes[..count]).expect("decode shutdown");
+            assert!(matches!(
+                shutdown
+                    .first()
+                    .and_then(|message| message.payload.as_ref()),
+                Some(envelope::Payload::ShutdownEngine(_))
+            ));
+            server_shutdown.store(true, Ordering::Release);
+            let goodbye = encode_envelope(&Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                payload: Some(envelope::Payload::Goodbye(
+                    axiusflow_engine_protocol::Goodbye {
+                        reason: "legacy resident stopping".to_string(),
+                    },
+                )),
+            })
+            .expect("encode shutdown acknowledgement");
+            stream.write_all(&goodbye).expect("acknowledge shutdown");
+        });
+
+        let Err(error) = connect_or_start_engine_named(
+            &socket_name,
+            Path::new("engine-executable-that-does-not-exist"),
+            &[9_u8; 32],
+            Duration::from_millis(250),
+        ) else {
+            panic!("replacement executable is intentionally absent");
+        };
+        server.join().expect("join legacy resident");
+        assert!(shutdown_received.load(Ordering::Acquire));
+        assert_eq!(
+            error,
+            "resident engine could not be started from the installation directory"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine and mutates then restores HKCU autostart"]
+    fn native_release_status_and_autostart_round_trip() {
+        use std::{path::PathBuf, process::Command};
+
+        use axiusflow_engine_protocol::{EngineLifetimeMode, EngineShutdownState, ResourceMode};
+
+        struct LifecycleRestore {
+            lifetime_mode: EngineLifetimeMode,
+            autostart_enabled: bool,
+            markets_live_permitted: bool,
+        }
+
+        impl Drop for LifecycleRestore {
+            fn drop(&mut self) {
+                let Ok(token) = native_installation_token() else {
+                    return;
+                };
+                let Ok(mut client) = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+                else {
+                    return;
+                };
+                let Ok(workspace) = client.restore_workspace() else {
+                    return;
+                };
+                let _ = client.set_engine_lifecycle(
+                    workspace.workspace_revision,
+                    self.lifetime_mode,
+                    self.autostart_enabled,
+                    self.markets_live_permitted,
+                );
+            }
+        }
+
+        let executable = PathBuf::from(
+            std::env::var_os("AXIUSFLOW_NATIVE_ENGINE_EXE")
+                .expect("AXIUSFLOW_NATIVE_ENGINE_EXE is required"),
+        );
+        assert!(executable.is_absolute());
+        assert!(executable.is_file());
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        let original = client.restore_workspace().expect("restore lifecycle state");
+        let original_mode = EngineLifetimeMode::try_from(original.lifetime_mode)
+            .expect("persisted lifetime mode is valid");
+        let _restore = LifecycleRestore {
+            lifetime_mode: original_mode,
+            autostart_enabled: original.autostart_enabled,
+            markets_live_permitted: original.markets_live_permitted,
+        };
+        let enabled = client
+            .set_engine_lifecycle(
+                original.workspace_revision,
+                EngineLifetimeMode::KeepEngineWarm,
+                true,
+                false,
+            )
+            .expect("enable native autostart");
+        let status = client.engine_status().expect("read engine status");
+        assert_ne!(status.process_id, 0);
+        assert_eq!(
+            status.lifetime_mode,
+            EngineLifetimeMode::KeepEngineWarm as i32
+        );
+        assert_eq!(status.resource_mode, ResourceMode::Warm as i32);
+        assert_eq!(status.shutdown_state, EngineShutdownState::Running as i32);
+        assert!(status.autostart_enabled);
+
+        let query = Command::new("reg.exe")
+            .args([
+                "QUERY",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Axiusflow Engine",
+            ])
+            .output()
+            .expect("query Windows autostart value");
+        assert!(query.status.success());
+        let expected = format!("\"{}\"", executable.display());
+        assert!(String::from_utf8_lossy(&query.stdout).contains(&expected));
+
+        let disabled = client
+            .set_engine_lifecycle(
+                enabled.workspace_revision,
+                EngineLifetimeMode::KeepEngineWarm,
+                false,
+                false,
+            )
+            .expect("disable native autostart");
+        assert!(!disabled.autostart_enabled);
+        let query = Command::new("reg.exe")
+            .args([
+                "QUERY",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Axiusflow Engine",
+            ])
+            .output()
+            .expect("query removed Windows autostart value");
+        assert!(!query.status.success());
+        println!(
+            "native_engine_status pid={} clients={} retained_series={} retained_bars={} bytes={}",
+            status.process_id,
+            status.connected_desktop_clients,
+            status.retained_series,
+            status.retained_bars,
+            status.approximate_series_bytes
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine"]
+    fn native_release_status_probe() {
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        let status = client.engine_status().expect("read engine status");
+        assert_ne!(status.process_id, 0);
+        println!(
+            "native_engine_probe pid={} clients={} providers={} retained_series={} retained_bars={} bytes={} shutdown_state={}",
+            status.process_id,
+            status.connected_desktop_clients,
+            status.providers.len(),
+            status.retained_series,
+            status.retained_bars,
+            status.approximate_series_bytes,
+            status.shutdown_state
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine and intentionally changes lifecycle mode"]
+    fn native_release_configure_lifecycle() {
+        use axiusflow_engine_protocol::EngineLifetimeMode;
+
+        let requested = std::env::var("AXIUSFLOW_NATIVE_LIFETIME_MODE")
+            .expect("AXIUSFLOW_NATIVE_LIFETIME_MODE is required");
+        let (mode, markets_live_permitted) = match requested.as_str() {
+            "exit" => (EngineLifetimeMode::ExitCompletely, false),
+            "warm" => (EngineLifetimeMode::KeepEngineWarm, false),
+            "live" => (EngineLifetimeMode::KeepMarketsLive, true),
+            _ => panic!("AXIUSFLOW_NATIVE_LIFETIME_MODE must be exit, warm, or live"),
+        };
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        let workspace = client.restore_workspace().expect("restore lifecycle state");
+        let updated = client
+            .set_engine_lifecycle(
+                workspace.workspace_revision,
+                mode,
+                workspace.autostart_enabled,
+                markets_live_permitted,
+            )
+            .expect("configure native lifecycle mode");
+        assert_eq!(updated.lifetime_mode, mode as i32);
+        println!(
+            "native_lifecycle_mode={} workspace_revision={}",
+            requested, updated.workspace_revision
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine and a live Coinbase connection"]
+    fn native_release_market_snapshot_probe() {
+        use axiusflow_engine_protocol::{SeriesKey, envelope};
+
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        let workspace = client.restore_workspace().expect("restore hot metadata");
+        let hot = workspace
+            .hot_series
+            .iter()
+            .find(|series| series.provider == "coinbase")
+            .expect("Coinbase hot series is available");
+        let client_id = u64::from(std::process::id());
+        let consumer_id = client_id;
+        client
+            .attach_client(client_id)
+            .expect("attach native probe");
+        client
+            .register_consumer(client_id, 1, consumer_id)
+            .expect("register native probe consumer");
+        client
+            .set_series_demand(
+                consumer_id,
+                1,
+                SeriesKey {
+                    provider: hot.provider.clone(),
+                    instrument_id: hot.instrument_id.clone(),
+                    cadence_value: hot.cadence_value,
+                    definition_revision: hot.definition_revision,
+                    entitlement_id: hot.entitlement_id.clone(),
+                    cadence: hot.cadence,
+                },
+            )
+            .expect("demand native hot snapshot");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = client
+                .poll_market_event(consumer_id)
+                .expect("poll native market snapshot")
+            {
+                let last = snapshot.bars.last().expect("snapshot contains bars");
+                println!(
+                    "native_market_snapshot instrument={} bars={} sequence={} timestamp={} close={} volume={} publication={}",
+                    hot.instrument_id,
+                    snapshot.bars.len(),
+                    last.source_sequence,
+                    last.exchange_timestamp_unix_nanos,
+                    last.close,
+                    last.volume,
+                    snapshot.publication_generation
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "native snapshot timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        client
+            .remove_market_consumer(consumer_id)
+            .expect("remove native probe consumer");
     }
 }

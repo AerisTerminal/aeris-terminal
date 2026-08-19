@@ -12,16 +12,21 @@ pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
 pub use messages::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
-    EngineFaultCode, EngineReady, Envelope, Fault, Goodbye, HotSeries, InstallProviderInstrument,
-    MarketBar, MarketEventIdle, OrderBookLevel, OrderBookSnapshot, OrderBookState,
-    PersistenceState, PollMarketEvent, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope,
+    Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument, MarketBar,
+    MarketEventIdle, OrderBookLevel, OrderBookSnapshot, OrderBookState, PersistenceState,
+    PollMarketEvent, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderConnectionState, ProviderInstrumentInstalled, ProviderInstrumentSearchResult,
     ProviderInstrumentSelection, ProviderInstrumentSummary, ProviderState, RegisterConsumer,
     RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
-    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineResourceMode, SetSelection, SetViewport,
-    SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, envelope,
+    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineLifecycle, SetEngineResourceMode,
+    SetSelection, SetViewport, SetWatchlist, ShutdownEngine, ViewportDemand, VisibilityDemand,
+    WorkspaceState, envelope,
 };
+
+/// Current compatible lifecycle contract revision advertised during readiness.
+pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
 pub const PROTOCOL_VERSION: u32 = 10;

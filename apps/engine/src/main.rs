@@ -18,8 +18,13 @@ use axiusflow_engine::{
     EngineShutdown, EngineState, MarketService, bind_listener, default_engine_state_root,
     serve_client_with_market_and_shutdown,
 };
+use axiusflow_engine_protocol::{EngineLifetimeMode, ResourceMode};
 use axiusflow_local_engine_client::{
     ENGINE_SOCKET_NAME, native_installation_token, shutdown_running_engine,
+};
+use axiusflow_platform_runtime::{
+    BackgroundService, NativeSessionShutdownCancellation, NativeSessionShutdownMonitor,
+    SessionShutdownError,
 };
 use interprocess::local_socket::{ListenerNonblockingMode, traits::Listener as _};
 
@@ -47,6 +52,11 @@ enum EngineCommand {
     Shutdown,
 }
 
+struct SessionShutdownRuntime {
+    cancellation: NativeSessionShutdownCancellation,
+    worker: thread::JoinHandle<()>,
+}
+
 fn parse_command(mut arguments: impl Iterator<Item = OsString>) -> Result<EngineCommand, String> {
     match (arguments.next(), arguments.next()) {
         (None, None) => Ok(EngineCommand::Run),
@@ -71,9 +81,19 @@ fn run() -> Result<(), String> {
     getrandom::fill(&mut epoch_bytes).map_err(|error| error.to_string())?;
     let engine_epoch = u64::from_le_bytes(epoch_bytes).max(1);
     let state = EngineState::open(default_engine_state_root()?)?;
-    let market = MarketService::start()?;
+    let workspace = state.workspace();
+    install_background_service(&state, workspace.autostart_enabled)?;
+    let market = MarketService::start(&workspace.hot_series)?;
+    market.set_resource_mode(lifetime_resource_mode(&workspace)?)?;
     let active_clients = Arc::new(AtomicUsize::new(0));
     let shutdown = EngineShutdown::default();
+    let session_shutdown = match start_session_shutdown_monitor(shutdown.clone()) {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            eprintln!("Axiusflow engine session-shutdown integration degraded: {error}");
+            None
+        }
+    };
 
     while !shutdown.is_requested() {
         let stream = match listener.accept() {
@@ -116,7 +136,27 @@ fn run() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     drop(listener);
-    let deadline = Instant::now() + ENGINE_SHUTDOWN_DEADLINE;
+    finish_shutdown(
+        &state,
+        &market,
+        active_clients.as_ref(),
+        session_shutdown,
+        ACCEPT_POLL_INTERVAL,
+        Instant::now() + ENGINE_SHUTDOWN_DEADLINE,
+    )
+}
+
+fn finish_shutdown(
+    state: &EngineState,
+    market: &MarketService,
+    active_clients: &AtomicUsize,
+    session_shutdown: Option<SessionShutdownRuntime>,
+    poll_interval: Duration,
+    deadline: Instant,
+) -> Result<(), String> {
+    state.begin_shutdown();
+    state.set_resource_mode(ResourceMode::OfflineSuspended);
+    let session_shutdown = stop_session_shutdown_monitor(session_shutdown, deadline);
     let hot_set_state = state.clone();
     let hot_set_flush = thread::Builder::new()
         .name("axiusflow-engine-hot-set-flush".to_string())
@@ -128,7 +168,7 @@ fn run() -> Result<(), String> {
         Err(error) => Err(format!("hot-set flush worker could not start: {error}")),
     };
     while active_clients.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
-        thread::sleep(ACCEPT_POLL_INTERVAL);
+        thread::sleep(poll_interval);
     }
     let client_shutdown = match active_clients.load(Ordering::Acquire) {
         0 => Ok(()),
@@ -136,14 +176,85 @@ fn run() -> Result<(), String> {
             "engine shutdown deadline expired with {active} active client sessions"
         )),
     };
-    let errors = [market_shutdown, hot_set_shutdown, client_shutdown]
-        .into_iter()
-        .filter_map(Result::err)
-        .collect::<Vec<_>>();
+    let errors = [
+        session_shutdown,
+        market_shutdown,
+        hot_set_shutdown,
+        client_shutdown,
+    ]
+    .into_iter()
+    .filter_map(Result::err)
+    .collect::<Vec<_>>();
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors.join("; "))
+    }
+}
+
+fn start_session_shutdown_monitor(
+    shutdown: EngineShutdown,
+) -> Result<SessionShutdownRuntime, String> {
+    let monitor = NativeSessionShutdownMonitor::connect().map_err(|error| error.to_string())?;
+    let cancellation = monitor.cancellation();
+    let worker = thread::Builder::new()
+        .name("axiusflow-engine-session-shutdown".to_string())
+        .spawn(move || match monitor.wait_for_shutdown() {
+            Ok(()) => shutdown.request(),
+            Err(SessionShutdownError::Cancelled) => {}
+            Err(error) => eprintln!("Axiusflow engine session-shutdown monitor failed: {error}"),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(SessionShutdownRuntime {
+        cancellation,
+        worker,
+    })
+}
+
+fn stop_session_shutdown_monitor(
+    runtime: Option<SessionShutdownRuntime>,
+    deadline: Instant,
+) -> Result<(), String> {
+    let Some(runtime) = runtime else {
+        return Ok(());
+    };
+    runtime.cancellation.cancel();
+    finish_named_worker(runtime.worker, deadline, "engine session-shutdown monitor")
+}
+
+fn install_background_service(state: &EngineState, autostart_enabled: bool) -> Result<(), String> {
+    let service = BackgroundService::new(
+        std::env::current_exe().map_err(|_| "engine executable path is unavailable".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if service
+        .autostart_enabled()
+        .map_err(|error| error.to_string())?
+        != autostart_enabled
+    {
+        service
+            .set_autostart(autostart_enabled)
+            .map_err(|error| error.to_string())?;
+    }
+    state.install_background_service(service);
+    Ok(())
+}
+
+fn lifetime_resource_mode(
+    workspace: &axiusflow_engine_protocol::WorkspaceState,
+) -> Result<ResourceMode, String> {
+    match EngineLifetimeMode::try_from(workspace.lifetime_mode)
+        .map_err(|_| "persisted engine lifetime mode is invalid".to_string())?
+    {
+        EngineLifetimeMode::KeepMarketsLive if workspace.markets_live_permitted => {
+            Ok(ResourceMode::MarketsLive)
+        }
+        EngineLifetimeMode::ExitCompletely | EngineLifetimeMode::KeepEngineWarm => {
+            Ok(ResourceMode::Warm)
+        }
+        EngineLifetimeMode::KeepMarketsLive => {
+            Err("persisted markets-live mode lacks explicit permission".to_string())
+        }
     }
 }
 
@@ -161,6 +272,21 @@ fn finish_hot_set_flush(
     worker
         .join()
         .map_err(|_| "engine hot-set flush worker panicked".to_string())?
+}
+
+fn finish_named_worker(
+    worker: thread::JoinHandle<()>,
+    deadline: Instant,
+    name: &str,
+) -> Result<(), String> {
+    while !worker.is_finished() {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!("{name} exceeded the shutdown deadline"));
+        }
+        thread::sleep(Duration::from_millis(5).min(deadline.duration_since(now)));
+    }
+    worker.join().map_err(|_| format!("{name} panicked"))
 }
 
 #[cfg(test)]

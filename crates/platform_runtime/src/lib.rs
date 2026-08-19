@@ -2,13 +2,16 @@
 //!
 //! Consumers depend on capabilities rather than branching on operating-system names.
 
+mod background_service;
 mod capability;
 mod credential_vault;
 mod display_timing;
 mod io_cancellation;
 mod network_notifications;
 mod power_notifications;
+mod session_shutdown;
 
+pub use background_service::{BackgroundService, BackgroundServiceError};
 pub use capability::CapabilityAvailability;
 pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};
 pub use display_timing::{
@@ -22,4 +25,7 @@ pub use network_notifications::{
 };
 pub use power_notifications::{
     NativePowerMonitor, NativePowerMonitorCancellation, PowerEvent, PowerNotificationError,
+};
+pub use session_shutdown::{
+    NativeSessionShutdownCancellation, NativeSessionShutdownMonitor, SessionShutdownError,
 };

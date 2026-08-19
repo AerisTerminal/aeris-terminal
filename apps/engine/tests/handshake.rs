@@ -9,8 +9,8 @@ use std::{
 
 use axiusflow_engine::{EngineState, bind_listener, serve_client, serve_client_with_state};
 use axiusflow_engine_protocol::{
-    ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
-    ResourceMode, WorkspaceState, encode_envelope, envelope,
+    ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, HotSeries,
+    PROTOCOL_VERSION, ResourceMode, WorkspaceState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
 use axiusflow_platform_runtime::CredentialVault;
@@ -212,11 +212,9 @@ fn workspace_selection_is_durable_across_engine_restart() {
     assert_eq!(reopened.workspace().market, "MNQU6");
     assert_eq!(reopened.workspace().interval_seconds, 300);
     assert_eq!(reopened.workspace().workspace_revision, 1);
-    assert_eq!(reopened.workspace().schema_revision, 1);
+    assert_eq!(reopened.workspace().schema_revision, 3);
     assert_eq!(reopened.workspace().cache_manifest_revision, 1);
-    assert_eq!(reopened.workspace().hot_series[0].provider, "rithmic");
-    assert_eq!(reopened.workspace().hot_series[0].market, "MNQU6");
-    assert_eq!(reopened.workspace().hot_series[0].interval_seconds, 300);
+    assert_eq!(reopened.workspace().hot_series[0].provider, "coinbase");
 }
 
 #[test]
@@ -364,9 +362,15 @@ fn shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation() {
         workspace.cache_manifest_revision,
         flushed.cache_manifest_revision
     );
-    assert_eq!(workspace.hot_series[0].provider, "rithmic");
-    assert_eq!(workspace.hot_series[0].market, "MNQU6");
-    assert_eq!(workspace.hot_series[0].interval_seconds, 300);
+    assert_eq!(workspace.provider, "rithmic");
+    assert_eq!(workspace.market, "MNQU6");
+    assert!(
+        workspace
+            .hot_series
+            .iter()
+            .all(|series| series.provider == "coinbase"),
+        "legacy selection without exact Rithmic metadata is not fabricated into the hot set"
+    );
     let manifests = fs::read_dir(&directory.0)
         .expect("read workspace directory")
         .filter_map(Result::ok)
@@ -407,6 +411,9 @@ fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
         schema_revision: 0,
         cache_manifest_revision: 0,
         hot_series: Vec::new(),
+        lifetime_mode: 0,
+        autostart_enabled: false,
+        markets_live_permitted: false,
     };
     let bytes = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
@@ -421,14 +428,98 @@ fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
     let migrated = EngineState::open(&directory.0).expect("migrate workspace");
     let workspace = migrated.workspace();
     assert_eq!(workspace.workspace_revision, 8);
-    assert_eq!(workspace.schema_revision, 1);
+    assert_eq!(workspace.schema_revision, 3);
     assert_eq!(workspace.cache_manifest_revision, 1);
     assert_eq!(workspace.hot_series.len(), 1);
     assert_eq!(workspace.hot_series[0].market, "ETH-USD");
+    assert_eq!(
+        workspace.hot_series[0].instrument_id,
+        "instrument:coinbase:eth:usd"
+    );
+    assert_eq!(
+        workspace.hot_series[0].entitlement_id,
+        "crypto_public_realtime"
+    );
     assert!(
         directory
             .0
             .join("workspace-00000000000000000008.frame")
             .exists()
     );
+}
+
+#[test]
+fn schema_two_migration_keeps_supported_coinbase_and_discards_incomplete_rithmic() {
+    let directory = TestDirectory::new();
+    let legacy_series =
+        |provider: &str, market: &str, interval_seconds: u32, score: u32| HotSeries {
+            provider: provider.to_string(),
+            market: market.to_string(),
+            interval_seconds,
+            score,
+            last_used_unix_seconds: u64::from(score),
+            provider_watermark: 9,
+            series_watermark: 11,
+            viewport_start_unix_nanos: Some(1_000),
+            viewport_end_unix_nanos: Some(2_000),
+            account_id: String::new(),
+            instrument_id: String::new(),
+            entitlement_id: String::new(),
+            cadence: 0,
+            cadence_value: 0,
+            definition_revision: 0,
+            pinned: false,
+            workspace_ids: Vec::new(),
+            coverage_start_unix_nanos: None,
+            coverage_end_unix_nanos: None,
+            provider_symbol: String::new(),
+            venue_id: String::new(),
+            display_symbol: String::new(),
+            price_scale: 0,
+            quantity_scale: 0,
+        };
+    let legacy = WorkspaceState {
+        provider: "rithmic".to_string(),
+        market: "MNQU6".to_string(),
+        interval_seconds: 300,
+        watchlist: vec!["BTC-USD".to_string(), "MNQU6".to_string()],
+        workspace_revision: 12,
+        warm_mode_enabled: true,
+        resource_mode: ResourceMode::Warm as i32,
+        schema_revision: 2,
+        cache_manifest_revision: 3,
+        hot_series: vec![
+            legacy_series("coinbase", "BTC-USD", 300, 1),
+            legacy_series("rithmic", "MNQU6", 300, 2),
+        ],
+        lifetime_mode: axiusflow_engine_protocol::EngineLifetimeMode::KeepEngineWarm as i32,
+        autostart_enabled: false,
+        markets_live_permitted: false,
+    };
+    let bytes = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        payload: Some(envelope::Payload::WorkspaceState(legacy)),
+    })
+    .expect("encode schema-two workspace");
+    fs::write(
+        directory.0.join("workspace-00000000000000000012.frame"),
+        bytes,
+    )
+    .expect("write schema-two workspace");
+
+    let migrated = EngineState::open(&directory.0).expect("migrate schema-two workspace");
+    let workspace = migrated.workspace();
+
+    assert_eq!(workspace.schema_revision, 3);
+    assert_eq!(workspace.workspace_revision, 13);
+    assert_eq!(workspace.hot_series.len(), 1);
+    let series = &workspace.hot_series[0];
+    assert_eq!(series.provider, "coinbase");
+    assert_eq!(series.instrument_id, "instrument:coinbase:btc:usd");
+    assert_eq!(series.account_id, "coinbase_public_market_data");
+    assert_eq!(series.entitlement_id, "crypto_public_realtime");
+    assert_eq!(series.provider_watermark, 9);
+    assert_eq!(series.series_watermark, 11);
+    assert_eq!(series.viewport_start_unix_nanos, Some(1_000));
+    assert_eq!(series.viewport_end_unix_nanos, Some(2_000));
 }

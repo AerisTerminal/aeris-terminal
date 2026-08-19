@@ -12,9 +12,6 @@ use axiusflow_engine_protocol::{
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use axiusflow_local_engine_client::{
-    EngineClient, connect_or_start_engine, sibling_engine_executable,
-};
 use axiusflow_market_data::{
     BarDefinition, ChartAggregation, ChartInterval, DepthLevel, MarketBar, OrderBookPublication,
     OrderBookRecoveryReason, OrderBookState,
@@ -31,7 +28,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::resident_market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
+use crate::{
+    engine_supervisor::EngineSupervisor,
+    resident_market_worker::{MarketWorkerBootstrap, MarketWorkerMessage},
+};
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_DOM_LEVELS: usize = 20;
@@ -240,8 +240,7 @@ impl Drop for RithmicHistoryTask {
 }
 
 struct EngineHistorySession {
-    client: EngineClient,
-    client_id: u64,
+    client: EngineSupervisor,
     consumer_id: u64,
 }
 
@@ -253,18 +252,15 @@ enum EngineUpdate {
 
 impl EngineHistorySession {
     fn connect() -> Result<Self, String> {
-        let executable = sibling_engine_executable()?;
-        let mut client = connect_or_start_engine(&executable)?;
         let client_id = random_identity()?;
         let consumer_id = random_identity()?;
-        client.attach_client(client_id)?;
-        if let Err(error) = client.register_consumer(client_id, ENGINE_WORKSPACE_ID, consumer_id) {
-            let _ = client.detach_client(client_id);
+        let mut client = EngineSupervisor::connect(client_id)?;
+        if let Err(error) = client.register_consumer(ENGINE_WORKSPACE_ID, consumer_id) {
+            let _ = client.detach_client();
             return Err(error);
         }
         Ok(Self {
             client,
-            client_id,
             consumer_id,
         })
     }
@@ -309,7 +305,8 @@ impl EngineHistorySession {
         request: &HistoryFetchRequest,
     ) -> Result<Option<EngineUpdate>, String> {
         let series = engine_series_key(request)?;
-        let Some(event) = self.client.poll_market_event(self.consumer_id)? else {
+        let poll = self.client.poll_market_event(self.consumer_id)?;
+        let Some(event) = poll.event else {
             return Ok(None);
         };
         match event {
@@ -387,7 +384,7 @@ impl EngineHistorySession {
             .remove_market_consumer(self.consumer_id)
             .and_then(|()| {
                 self.client
-                    .register_consumer(self.client_id, ENGINE_WORKSPACE_ID, self.consumer_id)
+                    .register_consumer(ENGINE_WORKSPACE_ID, self.consumer_id)
             })
     }
 }
@@ -395,7 +392,7 @@ impl EngineHistorySession {
 impl Drop for EngineHistorySession {
     fn drop(&mut self) {
         let _ = self.client.remove_market_consumer(self.consumer_id);
-        let _ = self.client.detach_client(self.client_id);
+        let _ = self.client.detach_client();
     }
 }
 

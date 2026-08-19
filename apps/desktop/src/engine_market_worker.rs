@@ -23,12 +23,10 @@ use axiusflow_engine_protocol::{
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use axiusflow_local_engine_client::{
-    EngineClient, connect_or_start_engine, sibling_engine_executable,
-};
 use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 
+use crate::engine_supervisor::EngineSupervisor;
 use crate::resident_market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
     MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
@@ -251,30 +249,27 @@ fn run_workers(
             message: "Connecting to the resident market engine".to_string(),
         });
     }
-    let executable = sibling_engine_executable()?;
-    let mut client = connect_or_start_engine(&executable)?;
-    client.attach_client(client_id)?;
-    let result = run_attached_workers(&mut client, client_id, endpoints, additions);
+    let mut supervisor = EngineSupervisor::connect(client_id)?;
+    let result = run_attached_workers(&mut supervisor, endpoints, additions);
     for (_, _, endpoint) in endpoints
         .iter_mut()
         .filter(|(_, _, endpoint)| endpoint.active)
     {
-        let _ = client.remove_market_consumer(endpoint.consumer_id);
+        let _ = supervisor.remove_market_consumer(endpoint.consumer_id);
         endpoint.active = false;
         let _ = endpoint.shutdown.try_send(());
     }
-    let detach_result = client.detach_client(client_id);
+    let detach_result = supervisor.detach();
     result.and(detach_result)
 }
 
 fn run_attached_workers(
-    client: &mut EngineClient,
-    client_id: u64,
+    client: &mut EngineSupervisor,
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
     for (workspace_id, product, endpoint) in endpoints.iter_mut() {
-        initialize_endpoint(client, client_id, *workspace_id, product, endpoint)?;
+        initialize_endpoint(client, *workspace_id, product, endpoint)?;
     }
 
     let mut additions = additions;
@@ -283,13 +278,7 @@ fn run_attached_workers(
             loop {
                 match receiver.try_recv() {
                     Ok(mut record) => {
-                        match initialize_endpoint(
-                            client,
-                            client_id,
-                            record.0,
-                            &record.1,
-                            &mut record.2,
-                        ) {
+                        match initialize_endpoint(client, record.0, &record.1, &mut record.2) {
                             Ok(()) => endpoints.push(record),
                             Err(error) => {
                                 let _ = record.2.messages.send(MarketWorkerMessage::State {
@@ -327,21 +316,29 @@ fn run_attached_workers(
                     continue;
                 }
             }
-            if endpoint.active
-                && let Some(event) = client.poll_market_event(endpoint.consumer_id)?
-                && let Err(error) = apply_polled_event(
-                    event,
-                    endpoint.consumer_id,
-                    endpoint.active_generation,
-                    &mut endpoint.model,
-                    &mut endpoint.publication,
-                    &endpoint.messages,
-                )
-            {
-                let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                    state: ChartState::Error,
-                    message: error,
-                });
+            if endpoint.active {
+                let poll = client.poll_market_event(endpoint.consumer_id)?;
+                if poll.reconnected {
+                    let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+                        state: FeedConnectionState::Recovering,
+                        message: "Resident engine restarted; restoring chart demand".to_string(),
+                    });
+                }
+                if let Some(event) = poll.event
+                    && let Err(error) = apply_polled_event(
+                        event,
+                        endpoint.consumer_id,
+                        endpoint.active_generation,
+                        &mut endpoint.model,
+                        &mut endpoint.publication,
+                        &endpoint.messages,
+                    )
+                {
+                    let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                        state: ChartState::Error,
+                        message: error,
+                    });
+                }
             }
         }
         endpoints.retain(|(_, _, endpoint)| endpoint.active);
@@ -351,8 +348,7 @@ fn run_attached_workers(
 }
 
 fn initialize_endpoint(
-    client: &mut EngineClient,
-    client_id: u64,
+    client: &mut EngineSupervisor,
     workspace_id: u64,
     product: &InstallProviderInstrument,
     endpoint: &mut WorkerEndpoint,
@@ -361,7 +357,7 @@ fn initialize_endpoint(
         state: FeedConnectionState::Discovering,
         message: "Connecting to the resident market engine".to_string(),
     });
-    client.register_consumer(client_id, workspace_id, endpoint.consumer_id)?;
+    client.register_consumer(workspace_id, endpoint.consumer_id)?;
     let _ = endpoint.messages.send(MarketWorkerMessage::CoinbaseCatalog(
         Ok(coinbase_products()),
     ));
@@ -397,7 +393,7 @@ fn initialize_endpoint(
 }
 
 fn process_command(
-    client: &mut EngineClient,
+    client: &mut EngineSupervisor,
     endpoint: &mut WorkerEndpoint,
     command: MarketWorkerCommand,
 ) -> Result<(), String> {
@@ -462,7 +458,7 @@ fn process_command(
     }
 }
 
-fn retire_endpoint(client: &mut EngineClient, endpoint: &mut WorkerEndpoint) {
+fn retire_endpoint(client: &mut EngineSupervisor, endpoint: &mut WorkerEndpoint) {
     let _ = client.remove_market_consumer(endpoint.consumer_id);
     endpoint.active = false;
     let _ = endpoint.shutdown.try_send(());
@@ -503,7 +499,10 @@ fn apply_polled_event(
             let (first_sequence, last_sequence) = current.sequence_range();
             let sequence = tail.item().value().source_sequence;
             if sequence < last_sequence || sequence > last_sequence.saturating_add(1) {
-                return Err("engine realtime update sequence was not contiguous".to_string());
+                return Err(format!(
+                    "engine realtime update sequence was not contiguous: retained {first_sequence}-{last_sequence}, received {sequence}, publication {}",
+                    update.publication_generation
+                ));
             }
             let appended = usize::from(sequence > last_sequence);
             let retained_items = current
@@ -593,7 +592,7 @@ fn apply_provider_state(
 }
 
 fn request_snapshot(
-    client: &mut EngineClient,
+    client: &mut EngineSupervisor,
     consumer_id: u64,
     generation: u64,
     series: SeriesKey,
@@ -602,7 +601,14 @@ fn request_snapshot(
 ) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
     client.set_series_demand(consumer_id, generation, series)?;
     loop {
-        let Some(event) = client.poll_market_event(consumer_id)? else {
+        let poll = client.poll_market_event(consumer_id)?;
+        if poll.reconnected {
+            let _ = messages.send(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Recovering,
+                message: "Resident engine restarted; restoring chart demand".to_string(),
+            });
+        }
+        let Some(event) = poll.event else {
             thread::sleep(POLL_INTERVAL);
             continue;
         };
@@ -654,7 +660,7 @@ fn request_snapshot(
 }
 
 fn send_recovery(
-    client: &mut EngineClient,
+    client: &mut EngineSupervisor,
     consumer_id: u64,
     active_generation: u64,
     command: ReplayRecoveryCommand,

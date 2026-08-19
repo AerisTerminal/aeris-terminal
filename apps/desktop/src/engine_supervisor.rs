@@ -1,0 +1,598 @@
+//! Desktop-owned recovery for authenticated resident-engine IPC sessions.
+
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
+
+use axiusflow_engine_protocol::{
+    InstallProviderInstrument, SearchProviderInstruments, SelectProviderInstrument, SeriesKey,
+    envelope,
+};
+use axiusflow_local_engine_client::{
+    EngineClient, connect_or_start_engine, sibling_engine_executable,
+};
+
+const RESTORE_DEADLINE: Duration = Duration::from_secs(4);
+const RESTORE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Clone)]
+struct ConsumerRestore {
+    workspace_id: u64,
+    demand: Option<(u64, SeriesKey)>,
+    viewport: Option<(u64, i64, i64)>,
+    visible: bool,
+    pending_search: Option<SearchProviderInstruments>,
+    pending_selection: Option<SelectProviderInstrument>,
+}
+
+/// Result of one supervised market-event poll.
+pub(super) struct SupervisedPoll {
+    pub event: Option<envelope::Payload>,
+    pub reconnected: bool,
+}
+
+/// One bounded desktop IPC owner that reconstructs its consumers after engine restart.
+pub(super) struct EngineSupervisor {
+    executable: PathBuf,
+    client_id: u64,
+    client: EngineClient,
+    consumers: BTreeMap<u64, ConsumerRestore>,
+    instruments: BTreeMap<(String, String), InstallProviderInstrument>,
+    #[cfg(test)]
+    reconnect_fixture: Option<Box<dyn FnMut() -> Result<EngineClient, String>>>,
+}
+
+impl EngineSupervisor {
+    pub fn connect(client_id: u64) -> Result<Self, String> {
+        let executable = sibling_engine_executable()?;
+        let mut client = connect_or_start_engine(&executable)?;
+        client.attach_client(client_id)?;
+        Ok(Self {
+            executable,
+            client_id,
+            client,
+            consumers: BTreeMap::new(),
+            instruments: BTreeMap::new(),
+            #[cfg(test)]
+            reconnect_fixture: None,
+        })
+    }
+
+    pub fn register_consumer(&mut self, workspace_id: u64, consumer_id: u64) -> Result<(), String> {
+        self.client
+            .register_consumer(self.client_id, workspace_id, consumer_id)?;
+        self.consumers.insert(
+            consumer_id,
+            ConsumerRestore {
+                workspace_id,
+                demand: None,
+                viewport: None,
+                visible: true,
+                pending_search: None,
+                pending_selection: None,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn install_provider_instrument(
+        &mut self,
+        instrument: InstallProviderInstrument,
+    ) -> Result<(), String> {
+        self.client
+            .install_provider_instrument(instrument.clone())?;
+        self.instruments.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument,
+        );
+        Ok(())
+    }
+
+    pub fn set_series_demand(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        series: SeriesKey,
+    ) -> Result<(), String> {
+        self.client
+            .set_series_demand(consumer_id, generation, series.clone())?;
+        self.consumer_mut(consumer_id)?.demand = Some((generation, series));
+        Ok(())
+    }
+
+    pub fn set_market_viewport(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+    ) -> Result<(), String> {
+        self.client.set_market_viewport(
+            consumer_id,
+            generation,
+            start_unix_nanos,
+            end_unix_nanos,
+        )?;
+        self.consumer_mut(consumer_id)?.viewport =
+            Some((generation, start_unix_nanos, end_unix_nanos));
+        Ok(())
+    }
+
+    pub fn set_market_visibility(&mut self, consumer_id: u64, visible: bool) -> Result<(), String> {
+        self.client.set_market_visibility(consumer_id, visible)?;
+        self.consumer_mut(consumer_id)?.visible = visible;
+        Ok(())
+    }
+
+    pub fn search_provider_instruments(
+        &mut self,
+        request: SearchProviderInstruments,
+    ) -> Result<(), String> {
+        let consumer_id = request.consumer_id;
+        self.client.search_provider_instruments(request.clone())?;
+        self.consumer_mut(consumer_id)?.pending_search = Some(request);
+        Ok(())
+    }
+
+    pub fn select_provider_instrument(
+        &mut self,
+        request: SelectProviderInstrument,
+    ) -> Result<(), String> {
+        let consumer_id = request.consumer_id;
+        self.client.select_provider_instrument(request.clone())?;
+        self.consumer_mut(consumer_id)?.pending_selection = Some(request);
+        Ok(())
+    }
+
+    pub fn poll_market_event(&mut self, consumer_id: u64) -> Result<SupervisedPoll, String> {
+        match self.client.poll_market_event(consumer_id) {
+            Ok(event) => {
+                if let Some(event) = &event {
+                    self.complete_catalog_command(consumer_id, event);
+                }
+                Ok(SupervisedPoll {
+                    event,
+                    reconnected: false,
+                })
+            }
+            Err(disconnected) => {
+                self.reconnect_and_restore().map_err(|restore| {
+                    format!("resident engine connection failed: {disconnected}; recovery failed: {restore}")
+                })?;
+                Ok(SupervisedPoll {
+                    event: None,
+                    reconnected: true,
+                })
+            }
+        }
+    }
+
+    pub fn remove_market_consumer(&mut self, consumer_id: u64) -> Result<(), String> {
+        self.consumers.remove(&consumer_id);
+        self.client.remove_market_consumer(consumer_id)
+    }
+
+    pub fn detach(mut self) -> Result<(), String> {
+        self.detach_client()
+    }
+
+    pub fn detach_client(&mut self) -> Result<(), String> {
+        self.consumers.clear();
+        self.client.detach_client(self.client_id)
+    }
+
+    fn consumer_mut(&mut self, consumer_id: u64) -> Result<&mut ConsumerRestore, String> {
+        self.consumers
+            .get_mut(&consumer_id)
+            .ok_or_else(|| "desktop engine consumer is not registered".to_string())
+    }
+
+    fn complete_catalog_command(&mut self, consumer_id: u64, event: &envelope::Payload) {
+        let Some(consumer) = self.consumers.get_mut(&consumer_id) else {
+            return;
+        };
+        match event {
+            envelope::Payload::ProviderInstrumentSearchResult(result) => {
+                if consumer
+                    .pending_search
+                    .as_ref()
+                    .is_some_and(|request| request.search_generation == result.search_generation)
+                {
+                    consumer.pending_search = None;
+                }
+            }
+            envelope::Payload::ProviderInstrumentSelection(selection) => {
+                if consumer.pending_selection.as_ref().is_some_and(|request| {
+                    selection.instrument.as_ref().is_some_and(|instrument| {
+                        request.selection_generation == instrument.selection_generation
+                    })
+                }) {
+                    consumer.pending_selection = None;
+                }
+            }
+            envelope::Payload::ProviderCatalogRejected(rejection) => {
+                if consumer.pending_search.as_ref().is_some_and(|request| {
+                    request.search_generation == rejection.command_generation
+                }) {
+                    consumer.pending_search = None;
+                }
+                if consumer.pending_selection.as_ref().is_some_and(|request| {
+                    request.selection_generation == rejection.command_generation
+                }) {
+                    consumer.pending_selection = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reconnect_and_restore(&mut self) -> Result<(), String> {
+        let deadline = Instant::now()
+            .checked_add(RESTORE_DEADLINE)
+            .ok_or_else(|| "engine recovery deadline overflowed".to_string())?;
+        let mut last_error = "resident engine recovery did not start".to_string();
+        while Instant::now() < deadline {
+            match self
+                .connect_replacement()
+                .and_then(|mut client| self.restore_into(&mut client).map(|()| client))
+            {
+                Ok(client) => {
+                    self.client = client;
+                    return Ok(());
+                }
+                Err(error) => last_error = error,
+            }
+            thread::sleep(RESTORE_RETRY_INTERVAL);
+        }
+        Err(last_error)
+    }
+
+    fn connect_replacement(&mut self) -> Result<EngineClient, String> {
+        #[cfg(test)]
+        if let Some(connect) = self.reconnect_fixture.as_mut() {
+            return connect();
+        }
+        connect_or_start_engine(&self.executable)
+    }
+
+    fn restore_into(&self, client: &mut EngineClient) -> Result<(), String> {
+        client.attach_client(self.client_id)?;
+        for (consumer_id, consumer) in &self.consumers {
+            client.register_consumer(self.client_id, consumer.workspace_id, *consumer_id)?;
+        }
+        for instrument in self.instruments.values() {
+            client.install_provider_instrument(instrument.clone())?;
+        }
+        for (consumer_id, consumer) in &self.consumers {
+            if let Some(search) = &consumer.pending_search {
+                client.search_provider_instruments(search.clone())?;
+            }
+            if let Some(selection) = &consumer.pending_selection {
+                client.select_provider_instrument(selection.clone())?;
+            }
+            if let Some((generation, series)) = &consumer.demand {
+                client.set_series_demand(*consumer_id, *generation, series.clone())?;
+            }
+            if let Some((generation, start, end)) = consumer.viewport {
+                client.set_market_viewport(*consumer_id, generation, start, end)?;
+            }
+            client.set_market_visibility(*consumer_id, consumer.visible)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        io::{Read, Write},
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
+        thread,
+    };
+
+    use axiusflow_engine_protocol::{
+        EngineReady, Envelope, EnvelopeDecoder, InstallProviderInstrument, MarketBar,
+        PROTOCOL_VERSION, ProviderInstrumentInstalled, SearchProviderInstruments,
+        SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesSnapshot, encode_envelope,
+        envelope,
+    };
+    use axiusflow_local_engine_client::EngineClient;
+    use interprocess::local_socket::{
+        GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*,
+    };
+
+    use super::EngineSupervisor;
+
+    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+    struct FixtureServer {
+        stream: LocalSocketStream,
+        decoder: EnvelopeDecoder,
+        pending: VecDeque<Envelope>,
+    }
+
+    impl FixtureServer {
+        fn receive(&mut self) -> envelope::Payload {
+            loop {
+                if let Some(envelope) = self.pending.pop_front() {
+                    return envelope.payload.expect("fixture payload");
+                }
+                let mut bytes = [0_u8; 16 * 1024];
+                let count = self.stream.read(&mut bytes).expect("fixture read");
+                assert!(count > 0, "fixture client remains connected");
+                self.pending.extend(
+                    self.decoder
+                        .push(&bytes[..count])
+                        .expect("decode fixture frame"),
+                );
+            }
+        }
+
+        fn send(&mut self, payload: envelope::Payload) {
+            let frame = encode_envelope(&Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                payload: Some(payload),
+            })
+            .expect("encode fixture frame");
+            self.stream.write_all(&frame).expect("fixture write");
+        }
+    }
+
+    fn start_fixture(
+        epoch: u64,
+        disconnect_on_poll: bool,
+        snapshot_series: SeriesKey,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<envelope::Payload>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let name = format!(
+            "axiusflow-supervisor-test-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        );
+        let socket = name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("fixture socket name");
+        let listener = ListenerOptions::new()
+            .name(socket)
+            .create_sync()
+            .expect("bind fixture server");
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&commands);
+        let worker = thread::spawn(move || {
+            let stream = listener.accept().expect("accept fixture client");
+            let mut server = FixtureServer {
+                stream,
+                decoder: EnvelopeDecoder::try_new().expect("fixture decoder"),
+                pending: VecDeque::new(),
+            };
+            assert!(matches!(
+                server.receive(),
+                envelope::Payload::ClientHello(_)
+            ));
+            server.send(envelope::Payload::EngineReady(EngineReady {
+                protocol_version: PROTOCOL_VERSION,
+                engine_epoch: epoch,
+                workspace_revision: 0,
+                lifecycle_contract_revision: axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
+            }));
+            loop {
+                let payload = server.receive();
+                if matches!(payload, envelope::Payload::PollMarketEvent(_)) {
+                    if disconnect_on_poll {
+                        return;
+                    }
+                    recorded
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(payload);
+                    server.send(envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+                        consumer_id: 11,
+                        generation: 7,
+                        series: Some(snapshot_series),
+                        provider_generation: 2,
+                        price_scale: 2,
+                        quantity_scale: 8,
+                        bars: vec![MarketBar {
+                            source_sequence: 1,
+                            exchange_timestamp_seconds: 60,
+                            open: 100,
+                            high: 110,
+                            low: 90,
+                            close: 105,
+                            volume: 7,
+                            exchange_timestamp_unix_nanos: 60_000_000_000,
+                        }],
+                        publication_generation: 1,
+                        forming: false,
+                    }));
+                    return;
+                }
+                if let envelope::Payload::InstallProviderInstrument(instrument) = &payload {
+                    server.send(envelope::Payload::ProviderInstrumentInstalled(
+                        ProviderInstrumentInstalled {
+                            provider: instrument.provider.clone(),
+                            session_generation: instrument.session_generation,
+                            selection_generation: instrument.selection_generation,
+                            instrument_id: instrument.instrument_id.clone(),
+                        },
+                    ));
+                }
+                recorded
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(payload);
+            }
+        });
+        (name, commands, worker)
+    }
+
+    fn series() -> SeriesKey {
+        SeriesKey {
+            provider: "coinbase".to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            cadence_value: 60,
+            definition_revision: 1,
+            entitlement_id: "crypto_public_realtime".to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
+        }
+    }
+
+    fn instrument() -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: "coinbase".to_string(),
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            provider_symbol: "BTC-USD".to_string(),
+            display_symbol: "BTC/USD".to_string(),
+            venue_id: "coinbase".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+            entitlement_id: "crypto_public_realtime".to_string(),
+        }
+    }
+
+    fn configure_restore_state(supervisor: &mut EngineSupervisor, requested: &SeriesKey) {
+        supervisor
+            .register_consumer(101, 11)
+            .expect("register visible consumer");
+        supervisor
+            .register_consumer(202, 12)
+            .expect("register hidden consumer");
+        supervisor
+            .install_provider_instrument(instrument())
+            .expect("install instrument");
+        supervisor
+            .search_provider_instruments(SearchProviderInstruments {
+                consumer_id: 11,
+                search_generation: 3,
+                provider: "rithmic".to_string(),
+                query: "MNQ".to_string(),
+                maximum_results: 8,
+            })
+            .expect("queue catalog search");
+        supervisor
+            .select_provider_instrument(SelectProviderInstrument {
+                consumer_id: 12,
+                selection_generation: 4,
+                search_generation: 3,
+                provider: "rithmic".to_string(),
+                symbol: "MNQU6".to_string(),
+                exchange: "CME".to_string(),
+                entitlement_id: "rithmic-test".to_string(),
+            })
+            .expect("queue catalog selection");
+        for consumer_id in [11, 12] {
+            supervisor
+                .set_series_demand(consumer_id, 7, requested.clone())
+                .expect("set demand");
+            supervisor
+                .set_market_viewport(consumer_id, 7, 1_000, 2_000)
+                .expect("set viewport");
+        }
+        supervisor
+            .set_market_visibility(12, false)
+            .expect("hide second consumer");
+    }
+
+    #[test]
+    fn restart_restores_every_consumer_and_resumes_a_covering_snapshot() {
+        let token = [23_u8; 32];
+        let requested = series();
+        let (first_name, _, first_server) = start_fixture(1, true, requested.clone());
+        let (second_name, restored, second_server) = start_fixture(2, false, requested.clone());
+        let first = EngineClient::connect(&first_name, &token).expect("connect first engine");
+        let replacement_name = second_name.clone();
+        let mut supervisor = EngineSupervisor {
+            executable: PathBuf::from("unused-test-engine"),
+            client_id: 9,
+            client: first,
+            consumers: BTreeMap::default(),
+            instruments: BTreeMap::default(),
+            reconnect_fixture: Some(Box::new(move || {
+                EngineClient::connect(&replacement_name, &token)
+            })),
+        };
+        supervisor
+            .client
+            .attach_client(9)
+            .expect("attach first client");
+        configure_restore_state(&mut supervisor, &requested);
+
+        let recovered = supervisor.poll_market_event(11).expect("recover engine");
+        assert!(recovered.reconnected);
+        assert_eq!(supervisor.client.ready().engine_epoch, 2);
+        let resumed = supervisor
+            .poll_market_event(11)
+            .expect("poll restored engine");
+        assert!(matches!(
+            resumed.event,
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
+                if snapshot.consumer_id == 11 && snapshot.generation == 7
+        ));
+        first_server.join().expect("join first fixture");
+        second_server.join().expect("join second fixture");
+
+        let commands = restored
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|payload| matches!(payload, envelope::Payload::RegisterConsumer(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|payload| matches!(payload, envelope::Payload::SeriesDemand(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|payload| matches!(payload, envelope::Payload::ViewportDemand(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|payload| matches!(payload, envelope::Payload::VisibilityDemand(_)))
+                .count(),
+            2
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|payload| matches!(payload, envelope::Payload::SearchProviderInstruments(_)))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|payload| matches!(payload, envelope::Payload::SelectProviderInstrument(_)))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|payload| matches!(payload, envelope::Payload::InstallProviderInstrument(_)))
+        );
+    }
+}

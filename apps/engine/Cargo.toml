@@ -18,10 +18,8 @@ axiusflow_provider_history = { path = "../../crates/provider_history" }
 axiusflow_rithmic_protocol_adapter = { path = "../../crates/adapters/rithmic_protocol" }
 getrandom.workspace = true
 interprocess.workspace = true
-zeroize.workspace = true
-
-[dev-dependencies]
 sysinfo.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

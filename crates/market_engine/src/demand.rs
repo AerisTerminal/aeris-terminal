@@ -221,4 +221,11 @@ impl DemandRegistry {
     pub(crate) fn len(&self) -> usize {
         self.consumers.len()
     }
+
+    pub(crate) fn visible_len(&self) -> usize {
+        self.consumers
+            .values()
+            .filter(|demand| demand.visible)
+            .count()
+    }
 }

@@ -42,6 +42,7 @@ pub(super) fn fetch(
     series: &BarSeriesKey,
     provider_generation: u64,
     installed: &InstallProviderInstrument,
+    maximum_visible_bars: usize,
     stop: &Arc<AtomicBool>,
 ) -> Result<Snapshot, String> {
     if stop.load(Ordering::Acquire) {
@@ -56,7 +57,8 @@ pub(super) fn fetch(
         return Err("Rithmic history identity is inconsistent".to_string());
     }
     let interval = chart_interval(series.period)?;
-    let replay = replay_envelope(interval, SystemTime::now())?;
+    let maximum_visible_bars = maximum_visible_bars.clamp(1, MAXIMUM_VISIBLE_BARS);
+    let replay = replay_envelope(interval, maximum_visible_bars, SystemTime::now())?;
     let connection = connect(Arc::clone(stop))?;
     let mut transport = RithmicHistorySessionTransport::try_new(
         connection,
@@ -74,8 +76,8 @@ pub(super) fn fetch(
     )
     .map_err(|error| error.to_string())?;
     bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-    if bars.len() > MAXIMUM_VISIBLE_BARS {
-        bars.drain(..bars.len() - MAXIMUM_VISIBLE_BARS);
+    if bars.len() > maximum_visible_bars {
+        bars.drain(..bars.len() - maximum_visible_bars);
     }
     if bars.is_empty() {
         return Err("Rithmic returned no completed historical bars".to_string());
@@ -149,14 +151,18 @@ struct ReplayEnvelope {
     maximum_bars: NonZeroUsize,
 }
 
-fn replay_envelope(interval: ChartInterval, now: SystemTime) -> Result<ReplayEnvelope, String> {
+fn replay_envelope(
+    interval: ChartInterval,
+    maximum_visible_bars: usize,
+    now: SystemTime,
+) -> Result<ReplayEnvelope, String> {
     let now_seconds = now
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is invalid".to_string())?
         .as_secs();
     if let Some(RithmicChartAggregation::DailySessions { period }) = interval.rithmic_aggregation()
     {
-        return aggregate_replay_envelope(now_seconds, period);
+        return aggregate_replay_envelope(now_seconds, period, maximum_visible_bars);
     }
     let interval_seconds = match interval.aggregation() {
         ChartAggregation::FixedSeconds(seconds) => u64::from(seconds.get()),
@@ -168,9 +174,9 @@ fn replay_envelope(interval: ChartInterval, now: SystemTime) -> Result<ReplayEnv
         now_seconds - now_seconds % interval_seconds
     };
     let requested_bars = if interval == ChartInterval::Day1 {
-        MAXIMUM_VISIBLE_BARS.saturating_add(DAILY_SESSION_PADDING_BARS)
+        maximum_visible_bars.saturating_add(DAILY_SESSION_PADDING_BARS)
     } else {
-        MAXIMUM_VISIBLE_BARS
+        maximum_visible_bars
     };
     let span_seconds = interval_seconds
         .checked_mul(requested_bars as u64)
@@ -199,13 +205,14 @@ fn replay_envelope(interval: ChartInterval, now: SystemTime) -> Result<ReplayEnv
 fn aggregate_replay_envelope(
     now_seconds: u64,
     period: RithmicDailyAggregation,
+    maximum_visible_bars: usize,
 ) -> Result<ReplayEnvelope, String> {
     const DAY_SECONDS: u64 = 24 * 60 * 60;
     let maximum_days_per_bar = match period {
         RithmicDailyAggregation::Week => 7,
         RithmicDailyAggregation::Month => 31,
     };
-    let source_days = MAXIMUM_VISIBLE_BARS
+    let source_days = maximum_visible_bars
         .saturating_mul(maximum_days_per_bar)
         .saturating_add(maximum_days_per_bar)
         .saturating_add(

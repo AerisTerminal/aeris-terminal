@@ -346,6 +346,13 @@ impl SeriesStore {
         true
     }
 
+    pub(crate) fn retained(&self) -> Vec<(BarSeriesKey, usize)> {
+        self.series
+            .iter()
+            .map(|(series, stored)| (series.clone(), stored.bar_count()))
+            .collect()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.series.len()
     }

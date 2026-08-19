@@ -22,7 +22,7 @@ use axiusflow_coinbase_market_adapter::{
     ENTITLEMENT_CLASS, aggregate_coinbase_bars, decode_history_bar,
 };
 use axiusflow_engine_protocol::{
-    DemandError, EngineFaultCode, InstallProviderInstrument, MarketBar as IpcMarketBar,
+    DemandError, EngineFaultCode, HotSeries, InstallProviderInstrument, MarketBar as IpcMarketBar,
     OrderBookLevel as IpcOrderBookLevel, OrderBookSnapshot as IpcOrderBookSnapshot,
     OrderBookState as IpcOrderBookState, PersistenceState, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSelection,
@@ -36,14 +36,17 @@ use axiusflow_market_data::{
     OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState as CanonicalOrderBookState,
 };
 use axiusflow_market_engine::{
-    ClientId, ConsumerId, ConsumerIdentity, EngineError, GenerationId, MarketEngine,
-    MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
-    ProviderHealth, ProviderRequest, StreamRequirements, Viewport, WorkspaceId,
+    ClientId, ConsumerId, ConsumerIdentity, EngineError, EngineResourceMode, GenerationId,
+    MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig,
+    ProviderGeneration, ProviderHealth, ProviderRequest, ResourcePolicyDecision,
+    ResourcePolicyInput, SeriesSnapshot, StreamRequirements, Viewport, WorkspaceId,
+    decide_resource_policy,
 };
 use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
 use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
+use sysinfo::System;
 
 use crate::rithmic_realtime::{
     RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, RithmicRealtimeEvent,
@@ -77,6 +80,17 @@ pub struct MarketService {
     runtime: Arc<MarketRuntime>,
 }
 
+/// Bounded coordinator-owned lifecycle and memory snapshot for authenticated diagnostics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketServiceStatus {
+    pub resource_mode: ResourceMode,
+    pub connected_desktop_clients: usize,
+    pub providers: Vec<ProviderState>,
+    pub retained_series: usize,
+    pub retained_bars: usize,
+    pub approximate_series_bytes: usize,
+}
+
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
     realtime_stop: Arc<AtomicBool>,
@@ -91,7 +105,9 @@ impl Drop for MarketRuntime {
 }
 
 enum Command {
+    RestoreHotSet(Vec<WarmSeries>, Reply<()>),
     SetResourceMode(ResourceMode, Reply<()>),
+    Status(Reply<MarketServiceStatus>),
     Attach(ClientId, Reply<()>),
     Detach(ClientId, Reply<()>),
     Register(ConsumerIdentity, Reply<()>),
@@ -120,7 +136,15 @@ struct HistoryRequest {
     series: BarSeriesKey,
     provider_generation: ProviderGeneration,
     instrument: Option<InstallProviderInstrument>,
+    maximum_bars: usize,
     stop: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct WarmSeries {
+    series: BarSeriesKey,
+    instrument: InstallProviderInstrument,
+    provider_watermark: u64,
 }
 
 enum StorageRequest {
@@ -753,7 +777,7 @@ impl HistorySource for LiveCoinbaseHistory {
             .ok()
             .and_then(|seconds| seconds.checked_mul(1_000_000_000))
             .ok_or_else(|| "Coinbase history end time overflowed".to_string())?;
-        let span_nanos = i64::try_from(HISTORY_BARS_PER_SERIES)
+        let span_nanos = i64::try_from(request.maximum_bars)
             .ok()
             .and_then(|count| count.checked_mul(i64::from(profile.interval_seconds)))
             .and_then(|seconds| seconds.checked_mul(1_000_000_000))
@@ -769,7 +793,7 @@ impl HistorySource for LiveCoinbaseHistory {
                 start_unix_nanos: end_unix_nanos.saturating_sub(span_nanos),
                 end_unix_nanos,
             },
-            maximum_items: NonZeroUsize::new(HISTORY_BARS_PER_SERIES).unwrap_or(NonZeroUsize::MIN),
+            maximum_items: NonZeroUsize::new(request.maximum_bars).unwrap_or(NonZeroUsize::MIN),
             continuation: None,
         };
         let batch = self.adapter.fetch_paginated(&request)?;
@@ -814,6 +838,7 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
         &request.series,
         request.provider_generation.0.get(),
         installed,
+        request.maximum_bars,
         &request.stop,
     )?;
     Ok(HistorySnapshot {
@@ -877,14 +902,14 @@ impl MarketService {
     ///
     /// # Errors
     /// Returns an error when provider configuration or either bounded worker cannot start.
-    pub fn start() -> Result<Self, String> {
+    pub fn start(hot_series: &[HotSeries]) -> Result<Self, String> {
         let storage = LocalHistoryStore::open(
             &crate::default_engine_state_root()?
                 .join("market-history")
                 .join("coinbase"),
         )
         .map_err(|error| error.to_string());
-        Self::start_composed(
+        let service = Self::start_composed(
             HistorySources::Split {
                 coinbase: Box::new(LiveCoinbaseHistory::try_new()?),
                 rithmic: Box::new(LiveRithmicHistory),
@@ -892,7 +917,10 @@ impl MarketService {
             Some(Box::new(LiveCoinbaseRealtime::try_new()?)),
             Some(storage),
             true,
-        )
+            hot_series.len(),
+        )?;
+        service.restore_hot_set(hot_series)?;
+        Ok(service)
     }
 
     #[cfg(test)]
@@ -962,6 +990,7 @@ impl MarketService {
             realtime,
             storage,
             false,
+            0,
         )
     }
 
@@ -970,6 +999,7 @@ impl MarketService {
         realtime: Option<Box<dyn RealtimeSource>>,
         storage: Option<Result<LocalHistoryStore, String>>,
         rithmic_realtime: bool,
+        hot_set_priority_count: usize,
     ) -> Result<Self, String> {
         let engine = configured_engine()?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
@@ -995,6 +1025,7 @@ impl MarketService {
         let realtime_overflow = Arc::new(AtomicBool::new(false));
         let realtime_stop = Arc::new(AtomicBool::new(true));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let available_memory_bytes = available_memory_bytes();
         let mut workers = Vec::with_capacity(7);
         workers.push(spawn_history_worker(
             "axiusflow-coinbase-history",
@@ -1034,35 +1065,27 @@ impl MarketService {
             rithmic_realtime_tx,
             configured_reconnect_delay(&engine, "rithmic")?,
         )?);
-        let coordinator_shutdown = Arc::clone(&shutdown);
-        let coordinator_realtime_stop = Arc::clone(&realtime_stop);
-        workers.push(
-            thread::Builder::new()
-                .name("axiusflow-market-engine".to_string())
-                .spawn(move || {
-                    run_coordinator(
-                        engine,
-                        CoordinatorChannels {
-                            commands: &command_rx,
-                            coinbase_history: &coinbase_history_tx,
-                            rithmic_history: &rithmic_history_tx,
-                            storage: &storage_tx,
-                            realtime_control: &realtime_control_tx,
-                            realtime: &realtime_rx,
-                            rithmic_realtime_control: rithmic_realtime
-                                .then_some(&rithmic_realtime_control_tx),
-                            rithmic_realtime: &rithmic_realtime_rx,
-                            rithmic_catalog_control: rithmic_realtime
-                                .then_some(&rithmic_catalog_control_tx),
-                            rithmic_catalog: &rithmic_catalog_rx,
-                        },
-                        &realtime_overflow,
-                        &coordinator_realtime_stop,
-                        &coordinator_shutdown,
-                    );
-                })
-                .map_err(|error| error.to_string())?,
-        );
+        workers.push(spawn_coordinator(
+            engine,
+            OwnedCoordinatorChannels {
+                commands: command_rx,
+                coinbase_history: coinbase_history_tx,
+                rithmic_history: rithmic_history_tx,
+                storage: storage_tx,
+                realtime_control: realtime_control_tx,
+                realtime: realtime_rx,
+                rithmic_realtime_control: rithmic_realtime_control_tx,
+                rithmic_realtime: rithmic_realtime_rx,
+                rithmic_catalog_control: rithmic_catalog_control_tx,
+                rithmic_catalog: rithmic_catalog_rx,
+                rithmic_enabled: rithmic_realtime,
+            },
+            Arc::clone(&realtime_overflow),
+            Arc::clone(&realtime_stop),
+            Arc::clone(&shutdown),
+            available_memory_bytes,
+            hot_set_priority_count,
+        )?);
         Ok(Self {
             commands: command_tx,
             runtime: Arc::new(MarketRuntime {
@@ -1151,6 +1174,29 @@ impl MarketService {
     /// Returns an error when the coordinator is unavailable.
     pub fn set_resource_mode(&self, mode: ResourceMode) -> Result<(), String> {
         self.request(|reply| Ok(Command::SetResourceMode(mode, reply)))
+    }
+
+    fn restore_hot_set(&self, hot_series: &[HotSeries]) -> Result<(), String> {
+        let restored = hot_series
+            .iter()
+            .filter_map(|series| {
+                if let Ok(series) = warm_series(series) {
+                    Some(series)
+                } else {
+                    eprintln!("Axiusflow engine skipped unsupported hot-set metadata");
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        self.request(|reply| Ok(Command::RestoreHotSet(restored, reply)))
+    }
+
+    /// Returns one bounded coordinator-owned lifecycle and memory snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when the coordinator is unavailable.
+    pub fn status(&self) -> Result<MarketServiceStatus, String> {
+        self.request(|reply| Ok(Command::Status(reply)))
     }
 
     /// Registers one market consumer owned by an attached client.
@@ -1641,13 +1687,77 @@ struct CoordinatorChannels<'a> {
     rithmic_catalog: &'a Receiver<RithmicCatalogEvent>,
 }
 
+struct OwnedCoordinatorChannels {
+    commands: Receiver<Command>,
+    coinbase_history: SyncSender<HistoryRequest>,
+    rithmic_history: SyncSender<HistoryRequest>,
+    storage: SyncSender<StorageRequest>,
+    realtime_control: SyncSender<RealtimeControl>,
+    realtime: Receiver<RealtimeEvent>,
+    rithmic_realtime_control: SyncSender<RithmicRealtimeControl>,
+    rithmic_realtime: Receiver<RithmicRealtimeEvent>,
+    rithmic_catalog_control: SyncSender<RithmicCatalogControl>,
+    rithmic_catalog: Receiver<RithmicCatalogEvent>,
+    rithmic_enabled: bool,
+}
+
+fn spawn_coordinator(
+    engine: MarketEngine,
+    channels: OwnedCoordinatorChannels,
+    realtime_overflow: Arc<AtomicBool>,
+    realtime_stop: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    available_memory_bytes: u64,
+    hot_set_priority_count: usize,
+) -> Result<thread::JoinHandle<()>, String> {
+    thread::Builder::new()
+        .name("axiusflow-market-engine".to_string())
+        .spawn(move || {
+            run_coordinator(
+                engine,
+                CoordinatorChannels {
+                    commands: &channels.commands,
+                    coinbase_history: &channels.coinbase_history,
+                    rithmic_history: &channels.rithmic_history,
+                    storage: &channels.storage,
+                    realtime_control: &channels.realtime_control,
+                    realtime: &channels.realtime,
+                    rithmic_realtime_control: channels
+                        .rithmic_enabled
+                        .then_some(&channels.rithmic_realtime_control),
+                    rithmic_realtime: &channels.rithmic_realtime,
+                    rithmic_catalog_control: channels
+                        .rithmic_enabled
+                        .then_some(&channels.rithmic_catalog_control),
+                    rithmic_catalog: &channels.rithmic_catalog,
+                },
+                &realtime_overflow,
+                &realtime_stop,
+                &shutdown,
+                available_memory_bytes,
+                hot_set_priority_count,
+            );
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn run_coordinator(
     engine: MarketEngine,
     channels: CoordinatorChannels<'_>,
     realtime_overflow: &AtomicBool,
     realtime_stop: &Arc<AtomicBool>,
     shutdown: &AtomicBool,
+    available_memory_bytes: u64,
+    hot_set_priority_count: usize,
 ) {
+    let resource_policy = decide_resource_policy(ResourcePolicyInput {
+        mode: EngineResourceMode::Warm,
+        available_memory_bytes,
+        consumer_count: 0,
+        visible_consumer_count: 0,
+        provider_series_limit: MAXIMUM_SERIES,
+        hot_set_priority_count,
+    });
     let mut coordinator = Coordinator {
         engine,
         coinbase_history: channels.coinbase_history,
@@ -1658,12 +1768,23 @@ fn run_coordinator(
         rithmic_catalog_control: channels.rithmic_catalog_control,
         realtime_stop,
         resource_mode: ResourceMode::Warm,
+        resource_policy,
+        available_memory_bytes,
+        hot_set_priority_count,
+        last_consumer_activity: Instant::now(),
         attached: BTreeSet::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeSet::new(),
         history_cancellations: BTreeMap::new(),
         local_history_deadlines: BTreeMap::new(),
         local_loaded: BTreeSet::new(),
+        warming: BTreeSet::new(),
+        warm_series: BTreeMap::new(),
+        warm_priority: Vec::new(),
+        retained_history: BTreeMap::new(),
+        prewarmed: BTreeSet::new(),
+        retained_live: BTreeSet::new(),
+        warm_rithmic_search_generation: 0,
         events: BTreeMap::new(),
         live: BTreeMap::new(),
         rithmic_live: BTreeMap::new(),
@@ -1704,6 +1825,7 @@ fn run_coordinator(
         coordinator.publish_live();
         coordinator.publish_rithmic_live();
         coordinator.expire_local_history_reads();
+        coordinator.enforce_resource_policy();
         match channels.commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
                 coordinator.handle_command(command);
@@ -1728,12 +1850,23 @@ struct Coordinator<'a> {
     rithmic_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
     realtime_stop: &'a Arc<AtomicBool>,
     resource_mode: ResourceMode,
+    resource_policy: ResourcePolicyDecision,
+    available_memory_bytes: u64,
+    hot_set_priority_count: usize,
+    last_consumer_activity: Instant,
     attached: BTreeSet<ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
     local_history_deadlines: BTreeMap<(BarSeriesKey, ProviderGeneration), Instant>,
     local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
+    warming: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
+    warm_series: BTreeMap<BarSeriesKey, WarmSeries>,
+    warm_priority: Vec<BarSeriesKey>,
+    retained_history: BTreeMap<BarSeriesKey, StoredHistory>,
+    prewarmed: BTreeSet<BarSeriesKey>,
+    retained_live: BTreeSet<BarSeriesKey>,
+    warm_rithmic_search_generation: u64,
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
     rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
@@ -1763,9 +1896,37 @@ impl Coordinator<'_> {
 
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::HistoryCompleted(series, generation, result) => {
+                self.history_completed(&series, generation, result);
+            }
+            Command::LocalHistoryCompleted(series, generation, result) => {
+                self.local_history_completed(&series, generation, result);
+            }
+            Command::PersistenceCompleted(series, generation, result) => {
+                self.persistence_completed(&series, generation, &result);
+            }
+            command @ (Command::RestoreHotSet(..)
+            | Command::SetResourceMode(..)
+            | Command::Status(..)
+            | Command::Attach(..)
+            | Command::Detach(..)) => self.handle_service_command(command),
+            command => self.handle_consumer_command(command),
+        }
+        self.refresh_resource_policy();
+    }
+
+    fn handle_service_command(&mut self, command: Command) {
+        match command {
+            Command::RestoreHotSet(series, reply) => {
+                self.restore_hot_series(series);
+                let _ = reply.send(Ok(()));
+            }
             Command::SetResourceMode(mode, reply) => {
                 self.apply_resource_mode(mode);
                 let _ = reply.send(Ok(()));
+            }
+            Command::Status(reply) => {
+                let _ = reply.send(Ok(self.status()));
             }
             Command::Attach(client_id, reply) => {
                 self.handle_attach(client_id, &reply);
@@ -1776,6 +1937,12 @@ impl Coordinator<'_> {
                 self.release_unused_live_market_data();
                 let _ = reply.send(Ok(()));
             }
+            _ => unreachable!("only service commands reach service dispatch"),
+        }
+    }
+
+    fn handle_consumer_command(&mut self, command: Command) {
+        match command {
             Command::Register(identity, reply) => {
                 let result = if self.attached.contains(&identity.client_id) {
                     self.engine
@@ -1846,20 +2013,19 @@ impl Coordinator<'_> {
                 );
             }
             Command::InstallProviderInstrument(instrument, reply) => {
-                let _ = reply.send(self.install_provider_instrument(instrument));
+                let _ = reply.send(self.install_provider_instrument(&instrument));
             }
             Command::Poll(client_id, consumer_id, reply) => {
                 self.handle_poll(client_id, consumer_id, &reply);
             }
-            Command::HistoryCompleted(series, generation, result) => {
-                self.history_completed(&series, generation, result);
-            }
-            Command::LocalHistoryCompleted(series, generation, result) => {
-                self.local_history_completed(&series, generation, result);
-            }
-            Command::PersistenceCompleted(series, generation, result) => {
-                self.persistence_completed(&series, generation, &result);
-            }
+            Command::HistoryCompleted(..)
+            | Command::LocalHistoryCompleted(..)
+            | Command::PersistenceCompleted(..)
+            | Command::RestoreHotSet(..)
+            | Command::SetResourceMode(..)
+            | Command::Status(..)
+            | Command::Attach(..)
+            | Command::Detach(..) => unreachable!("command was routed to the wrong dispatcher"),
         }
     }
 
@@ -1874,7 +2040,185 @@ impl Coordinator<'_> {
 
     fn apply_resource_mode(&mut self, mode: ResourceMode) {
         self.resource_mode = mode;
+        self.refresh_resource_policy();
+        if mode == ResourceMode::OfflineSuspended {
+            self.suspend_provider_work();
+        } else if mode == ResourceMode::MarketsLive {
+            self.activate_markets_live_hot_set();
+        }
         self.release_unused_live_market_data();
+    }
+
+    fn restore_hot_series(&mut self, series: Vec<WarmSeries>) {
+        for warm in series
+            .into_iter()
+            .take(self.resource_policy.maximum_derived_series.max(1))
+        {
+            let generation = ProviderGeneration(
+                NonZeroU64::new(warm.provider_watermark.max(1)).unwrap_or(NonZeroU64::MIN),
+            );
+            if warm.series.provider_id == "coinbase" {
+                self.catalog.insert(
+                    (
+                        warm.instrument.provider.clone(),
+                        warm.instrument.instrument_id.clone(),
+                    ),
+                    warm.instrument.clone(),
+                );
+                self.catalog_sessions
+                    .insert("coinbase".to_string(), COINBASE_PROVIDER_GENERATION);
+            }
+            self.warm_priority.push(warm.series.clone());
+            self.warm_series.insert(warm.series.clone(), warm.clone());
+            if self
+                .storage
+                .try_send(StorageRequest::Read(warm.series.clone(), generation))
+                .is_ok()
+            {
+                self.warming.insert((warm.series, generation));
+            }
+        }
+    }
+
+    fn activate_markets_live_hot_set(&mut self) {
+        let priority = self.warm_priority.clone();
+        for series in priority
+            .iter()
+            .filter(|series| series.provider_id == "coinbase")
+        {
+            self.retained_live.insert(series.clone());
+            if let Ok(generation) = self.provider_generation_for_series(series) {
+                let _ = self.ensure_realtime(series);
+                let _ = self.enqueue_history(series, generation);
+            }
+        }
+        let Some(series) = priority
+            .into_iter()
+            .find(|series| series.provider_id == "rithmic")
+        else {
+            return;
+        };
+        let Some(warm) = self.warm_series.get(&series) else {
+            return;
+        };
+        let Some(control) = self.rithmic_catalog_control else {
+            return;
+        };
+        self.warm_rithmic_search_generation = self
+            .warm_rithmic_search_generation
+            .checked_add(1)
+            .unwrap_or(1);
+        let _ = control.try_send(RithmicCatalogControl::Search(SearchProviderInstruments {
+            consumer_id: 0,
+            search_generation: self.warm_rithmic_search_generation,
+            provider: "rithmic".to_string(),
+            query: warm.instrument.provider_symbol.clone(),
+            maximum_results: 16,
+        }));
+    }
+
+    fn refresh_resource_policy(&mut self) {
+        let metrics = self.engine.metrics();
+        if metrics.active_consumers > 0 {
+            self.last_consumer_activity = Instant::now();
+        }
+        self.resource_policy = decide_resource_policy(ResourcePolicyInput {
+            mode: resource_policy_mode(self.resource_mode),
+            available_memory_bytes: self.available_memory_bytes,
+            consumer_count: metrics.active_consumers,
+            visible_consumer_count: self.engine.visible_consumer_count(),
+            provider_series_limit: MAXIMUM_SERIES,
+            hot_set_priority_count: self.hot_set_priority_count,
+        });
+        self.enforce_resource_policy();
+    }
+
+    fn enforce_resource_policy(&mut self) {
+        let metrics = self.engine.metrics();
+        let retention_expired = metrics.active_consumers == 0
+            && self.last_consumer_activity.elapsed()
+                >= Duration::from_secs(self.resource_policy.warm_retention_seconds);
+        let retained_market_series = if self.resource_mode == ResourceMode::MarketsLive {
+            self.live.len().saturating_add(self.rithmic_live.len())
+        } else {
+            0
+        };
+        let maximum_cached_series = if retention_expired {
+            0
+        } else {
+            self.resource_policy
+                .maximum_derived_series
+                .max(retained_market_series)
+        };
+        let maximum_decoded_bars = if retention_expired {
+            0
+        } else {
+            self.resource_policy.maximum_decoded_bars
+        };
+        let protected = self
+            .live
+            .keys()
+            .chain(self.rithmic_live.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        self.engine.evict_unsubscribed_series(
+            maximum_cached_series,
+            maximum_decoded_bars,
+            &protected,
+        );
+        if !self.resource_policy.retain_hidden_depth
+            && self.engine.visible_consumer_count() < metrics.active_consumers
+        {
+            self.rithmic_order_books.clear();
+        }
+    }
+
+    fn suspend_provider_work(&mut self) {
+        for stop in self.history_cancellations.values() {
+            stop.store(true, Ordering::Release);
+        }
+        self.realtime_stop.store(true, Ordering::Release);
+        if let Some(control) = self.rithmic_realtime_control {
+            let _ = control.try_send(RithmicRealtimeControl::Stop);
+        }
+        self.realtime_started = false;
+        self.realtime_connected = false;
+        self.rithmic_realtime_started = false;
+        self.live.clear();
+        self.rithmic_live.clear();
+        self.rithmic_order_books.clear();
+    }
+
+    fn status(&self) -> MarketServiceStatus {
+        let metrics = self.engine.metrics();
+        MarketServiceStatus {
+            resource_mode: self.resource_mode,
+            connected_desktop_clients: self.attached.len(),
+            providers: ["coinbase", "rithmic"]
+                .into_iter()
+                .filter_map(|provider| self.provider_state(provider))
+                .collect(),
+            retained_series: metrics.stored_series,
+            retained_bars: metrics.stored_bars,
+            approximate_series_bytes: metrics.approximate_series_bytes,
+        }
+    }
+
+    fn provider_state(&self, provider: &str) -> Option<ProviderState> {
+        let status = self.engine.provider_status(provider)?;
+        let state = match status.health {
+            ProviderHealth::Disconnected => ProviderConnectionState::Disconnected,
+            ProviderHealth::Connecting => ProviderConnectionState::Connecting,
+            ProviderHealth::Online => ProviderConnectionState::Online,
+            ProviderHealth::Recovering => ProviderConnectionState::Recovering,
+            ProviderHealth::Failed => ProviderConnectionState::Failed,
+        };
+        Some(ProviderState {
+            provider: provider.to_string(),
+            state: state as i32,
+            generation: status.generation.map_or(0, |generation| generation.0.get()),
+            detail: None,
+        })
     }
 
     fn handle_catalog_command(
@@ -1920,9 +2264,9 @@ impl Coordinator<'_> {
 
     fn install_provider_instrument(
         &mut self,
-        instrument: InstallProviderInstrument,
+        instrument: &InstallProviderInstrument,
     ) -> Result<(), String> {
-        validate_provider_instrument(&instrument)?;
+        validate_provider_instrument(instrument)?;
         let provider = instrument.provider.clone();
         let provider_generation = ProviderGeneration(
             NonZeroU64::new(instrument.session_generation)
@@ -1948,7 +2292,7 @@ impl Coordinator<'_> {
             return self
                 .catalog
                 .get(&key)
-                .filter(|installed| *installed == &instrument)
+                .filter(|installed| *installed == instrument)
                 .map(|_| ())
                 .ok_or_else(|| "provider instrument selection conflicts".to_string());
         }
@@ -1993,8 +2337,65 @@ impl Coordinator<'_> {
                 RithmicOrderBook::new(instrument.clone()),
             );
         }
-        self.catalog.insert(key, instrument);
+        let instrument_id = instrument.instrument_id.clone();
+        self.catalog.insert(key, instrument.clone());
+        self.activate_retained_instrument(instrument, provider_generation);
+        if self.resource_mode == ResourceMode::MarketsLive
+            && let Some(series) = self
+                .warm_priority
+                .iter()
+                .find(|series| {
+                    series.provider_id == provider && series.instrument_id == instrument_id
+                })
+                .cloned()
+        {
+            self.retained_live.insert(series.clone());
+            let _ = self.ensure_realtime(&series);
+            let _ = self.enqueue_history(&series, provider_generation);
+        }
         Ok(())
+    }
+
+    fn activate_retained_instrument(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        generation: ProviderGeneration,
+    ) {
+        let series = self
+            .retained_history
+            .keys()
+            .filter(|series| {
+                series.provider_id == instrument.provider
+                    && series.instrument_id == instrument.instrument_id
+                    && series.entitlement_id == instrument.entitlement_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let (Ok(price_scale), Ok(quantity_scale)) = (
+            u8::try_from(instrument.price_scale),
+            u8::try_from(instrument.quantity_scale),
+        ) else {
+            return;
+        };
+        for series in series {
+            let Some(stored) = self.retained_history.remove(&series) else {
+                continue;
+            };
+            if self
+                .engine
+                .install_retained_history(
+                    generation,
+                    &series,
+                    price_scale,
+                    quantity_scale,
+                    stored.bars,
+                )
+                .is_ok()
+            {
+                self.prewarmed.insert(series.clone());
+                self.local_loaded.insert((series, generation));
+            }
+        }
     }
 
     fn accept_series_demand(
@@ -2012,7 +2413,7 @@ impl Coordinator<'_> {
         authorize_consumer(&self.engine, client_id, waiter.consumer_id)?;
         let provider_generation = self.provider_generation_for_series(series)?;
         let streams = chart_stream_requirements(series);
-        let mut publication = self
+        let publication = self
             .engine
             .set_series_demand_with_streams(waiter.consumer_id, waiter.generation, series, streams)
             .map_err(|error| error.to_string())?;
@@ -2021,12 +2422,6 @@ impl Coordinator<'_> {
             events.snapshot = None;
             events.series_state = None;
             events.demand_error = None;
-        }
-        if publication.as_ref().is_some_and(|publication| {
-            publication.snapshot.provider_generation != provider_generation
-        }) {
-            self.engine.invalidate_series(series);
-            publication = None;
         }
         Ok((provider_generation, publication))
     }
@@ -2038,6 +2433,12 @@ impl Coordinator<'_> {
         waiter: DemandWaiter,
         reply: &Reply<()>,
     ) {
+        if self.resource_mode == ResourceMode::OfflineSuspended {
+            let _ = reply.send(Err(
+                "engine market work is offline and suspended".to_string()
+            ));
+            return;
+        }
         let (provider_generation, publication) =
             match self.accept_series_demand(client_id, series, &waiter) {
                 Ok(accepted) => accepted,
@@ -2054,75 +2455,114 @@ impl Coordinator<'_> {
             return;
         }
         self.publish_order_book_to_consumer(waiter.consumer_id);
-        if let Some(publication) = publication {
-            let seeded = series.provider_id != "coinbase"
-                || self.live.get_mut(series).is_none_or(|live| {
-                    if live.history_ready {
-                        return true;
-                    }
-                    live.aggregator.reset();
-                    let result = if publication.snapshot.forming {
-                        live.aggregator
-                            .seed_canonical_backfill(&publication.snapshot.bars)
-                    } else {
-                        live.aggregator
-                            .seed_canonical_history(&publication.snapshot.bars)
-                    };
-                    if result.is_ok() {
-                        live.history_ready = true;
-                    }
-                    result.is_ok()
-                });
-            if !seeded {
-                let _ = reply.send(Err(
-                    "Coinbase cached history/live handoff failed".to_string()
-                ));
-                return;
+        let result = match publication {
+            None => {
+                self.start_uncached_demand(series, provider_generation, waiter);
+                Ok(())
             }
-            if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
-                publish_ready(events, &publication);
+            Some(publication) => {
+                self.publish_cached_demand(series, provider_generation, &waiter, &publication)
             }
-            self.series_live_if_ready(series);
-        } else {
-            let first = !self.pending.contains_key(series);
-            if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
-                events.series_state = Some(series_state(
-                    waiter.consumer_id,
-                    waiter.generation,
-                    ipc_series(series),
-                    SeriesLoadState::Resolving,
-                    None,
-                ));
-            }
-            self.pending.entry(series.clone()).or_default().push(waiter);
-            if first {
-                if series.provider_id == "coinbase" {
-                    let derived = self.derive_compatible_history(series, provider_generation);
-                    if matches!(derived, Ok(true)) {
-                        if let Err(detail) = self.enqueue_history(series, provider_generation)
-                            && let Some(waiters) = self.pending.remove(series)
-                        {
-                            fail_waiters(&mut self.events, waiters, detail);
-                        }
-                    } else if self
-                        .enqueue_local_history(series, provider_generation)
-                        .is_err()
-                        && let Err(detail) = self.enqueue_history(series, provider_generation)
-                        && let Some(waiters) = self.pending.remove(series)
-                    {
-                        fail_waiters(&mut self.events, waiters, detail);
-                    }
-                } else if self
-                    .enqueue_local_history(series, provider_generation)
-                    .is_err()
-                    && let Err(detail) = self.enqueue_history(series, provider_generation)
-                    && let Some(waiters) = self.pending.remove(series)
-                {
-                    fail_waiters(&mut self.events, waiters, detail);
+        };
+        let _ = reply.send(result);
+    }
+
+    fn publish_cached_demand(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        waiter: &DemandWaiter,
+        publication: &axiusflow_market_engine::ConsumerPublication,
+    ) -> Result<(), String> {
+        let needs_covering_repair = publication.snapshot.provider_generation != provider_generation
+            || self.prewarmed.remove(series);
+        if series.provider_id == "coinbase"
+            && !self.live.get_mut(series).is_none_or(|live| {
+                if live.history_ready {
+                    return true;
                 }
+                live.aggregator.reset();
+                let seeded = if publication.snapshot.forming {
+                    live.aggregator
+                        .seed_canonical_backfill(&publication.snapshot.bars)
+                } else {
+                    live.aggregator
+                        .seed_canonical_history(&publication.snapshot.bars)
+                };
+                if seeded.is_ok() {
+                    live.history_ready = true;
+                }
+                seeded.is_ok()
+            })
+        {
+            return Err("Coinbase cached history/live handoff failed".to_string());
+        }
+        if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
+            if needs_covering_repair {
+                publish_state(
+                    events,
+                    publication,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Durable,
+                    Some("Showing retained local history while provider coverage repairs"),
+                );
+            } else {
+                publish_ready(events, publication);
             }
         }
-        let _ = reply.send(Ok(()));
+        if needs_covering_repair {
+            self.engine.invalidate_series(series);
+            self.local_loaded
+                .insert((series.clone(), provider_generation));
+            if let Err(detail) = self.enqueue_history(series, provider_generation) {
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Durable,
+                    Some(detail),
+                );
+            }
+        } else {
+            self.series_live_if_ready(series);
+        }
+        Ok(())
+    }
+
+    fn start_uncached_demand(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        waiter: DemandWaiter,
+    ) {
+        let first = !self.pending.contains_key(series);
+        if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
+            events.series_state = Some(series_state(
+                waiter.consumer_id,
+                waiter.generation,
+                ipc_series(series),
+                SeriesLoadState::Resolving,
+                None,
+            ));
+        }
+        self.pending.entry(series.clone()).or_default().push(waiter);
+        if !first {
+            return;
+        }
+        let derived = series.provider_id == "coinbase"
+            && matches!(
+                self.derive_compatible_history(series, provider_generation),
+                Ok(true)
+            );
+        let local_unavailable = !derived
+            && self
+                .enqueue_local_history(series, provider_generation)
+                .is_err();
+        if (derived || local_unavailable)
+            && let Err(detail) = self.enqueue_history(series, provider_generation)
+            && let Some(waiters) = self.pending.remove(series)
+        {
+            fail_waiters(&mut self.events, waiters, detail);
+        }
     }
 
     fn derive_compatible_history(
@@ -2233,6 +2673,34 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         result: Result<Option<StoredHistory>, String>,
     ) {
+        if self.warming.remove(&(series.clone(), generation)) {
+            if let Ok(Some(stored)) = result
+                && !stored.bars.is_empty()
+            {
+                if series.provider_id == "rithmic" {
+                    self.retained_history.insert(series.clone(), stored);
+                } else if let Some(warm) = self.warm_series.get(series)
+                    && let (Ok(price_scale), Ok(quantity_scale)) = (
+                        u8::try_from(warm.instrument.price_scale),
+                        u8::try_from(warm.instrument.quantity_scale),
+                    )
+                    && self
+                        .engine
+                        .install_retained_history(
+                            generation,
+                            series,
+                            price_scale,
+                            quantity_scale,
+                            stored.bars,
+                        )
+                        .is_ok()
+                {
+                    self.prewarmed.insert(series.clone());
+                    self.local_loaded.insert((series.clone(), generation));
+                }
+            }
+            return;
+        }
         let expected = self
             .local_history_deadlines
             .remove(&(series.clone(), generation))
@@ -2387,6 +2855,11 @@ impl Coordinator<'_> {
             .engine
             .subscription_status(series)
             .map(|status| status.streams)
+            .or_else(|| {
+                (self.resource_mode == ResourceMode::MarketsLive
+                    && self.retained_live.contains(series))
+                .then(|| chart_stream_requirements(series))
+            })
             .ok_or_else(|| "series has no accepted upstream subscription".to_string())?;
         if streams.contains(MarketStream::Trades) {
             self.engine
@@ -2498,6 +2971,7 @@ impl Coordinator<'_> {
             series: series.clone(),
             provider_generation: generation,
             instrument,
+            maximum_bars: self.resource_policy.history_prefetch_bars.max(1),
             stop: Arc::clone(&stop),
         };
         let history = if series.provider_id == "rithmic" {
@@ -2573,13 +3047,13 @@ impl Coordinator<'_> {
             }
             return;
         };
+        let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot) else {
+            return;
+        };
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
         let bars = snapshot.bars;
-        if self.local_loaded.remove(&(series.clone(), generation)) {
-            self.engine.invalidate_series(series);
-        }
         let installed = self.engine.install_history(
             generation,
             series,
@@ -2645,6 +3119,30 @@ impl Coordinator<'_> {
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
+    }
+
+    fn prepare_history_repair(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        mut snapshot: HistorySnapshot,
+    ) -> Option<HistorySnapshot> {
+        if !self.local_loaded.contains(&(series.clone(), generation)) {
+            return Some(snapshot);
+        }
+        let Some(current) = self.engine.series_snapshot(series) else {
+            self.history_failed(series, generation);
+            return None;
+        };
+        let Ok(bars) = reconcile_history_repair(&current, snapshot.bars, HISTORY_BARS_PER_SERIES)
+        else {
+            self.history_failed(series, generation);
+            return None;
+        };
+        snapshot.bars = bars;
+        self.local_loaded.remove(&(series.clone(), generation));
+        self.engine.invalidate_series(series);
+        Some(snapshot)
     }
 
     fn seed_rithmic_history(
@@ -2818,58 +3316,131 @@ impl Coordinator<'_> {
 
     fn handle_rithmic_catalog(&mut self, event: RithmicCatalogEvent) {
         match event {
-            RithmicCatalogEvent::SearchCompleted(result) => {
-                let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
-                    return;
-                };
-                if let Some(events) = self.events.get_mut(&consumer_id) {
-                    events.catalog_search =
-                        Some(envelope::Payload::ProviderInstrumentSearchResult(result));
-                }
-            }
+            RithmicCatalogEvent::SearchCompleted(result) => self.handle_catalog_search(result),
             RithmicCatalogEvent::SelectionResolved {
                 consumer_id,
                 instrument,
-            } => {
-                let Ok(id) = id(consumer_id).map(ConsumerId) else {
-                    return;
-                };
-                let command_generation = instrument.selection_generation;
-                let publication = match self.install_provider_instrument(instrument.clone()) {
-                    Ok(()) => envelope::Payload::ProviderInstrumentSelection(
-                        ProviderInstrumentSelection {
-                            consumer_id,
-                            instrument: Some(instrument),
-                        },
-                    ),
-                    Err(_) => envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
-                        consumer_id,
-                        provider: "rithmic".to_string(),
-                        provider_generation: Some(instrument.session_generation),
-                        command_generation,
-                        reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
-                    }),
-                };
-                if let Some(events) = self.events.get_mut(&id) {
-                    events.catalog_selection = Some(publication);
-                }
-            }
+            } => self.handle_catalog_selection(consumer_id, instrument),
             RithmicCatalogEvent::Rejected {
                 rejection,
                 selection,
-            } => {
-                let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
-                    return;
-                };
-                if let Some(events) = self.events.get_mut(&consumer_id) {
-                    let slot = if selection {
-                        &mut events.catalog_selection
-                    } else {
-                        &mut events.catalog_search
-                    };
-                    *slot = Some(envelope::Payload::ProviderCatalogRejected(rejection));
-                }
+            } => self.handle_catalog_rejection(rejection, selection),
+        }
+    }
+
+    fn handle_catalog_search(
+        &mut self,
+        result: axiusflow_engine_protocol::ProviderInstrumentSearchResult,
+    ) {
+        if result.consumer_id == 0 {
+            self.select_warm_rithmic_instrument(&result);
+            return;
+        }
+        let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
+            return;
+        };
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.catalog_search = Some(envelope::Payload::ProviderInstrumentSearchResult(result));
+        }
+    }
+
+    fn select_warm_rithmic_instrument(
+        &self,
+        result: &axiusflow_engine_protocol::ProviderInstrumentSearchResult,
+    ) {
+        if result.search_generation != self.warm_rithmic_search_generation {
+            return;
+        }
+        let Some(warm) = self
+            .warm_priority
+            .iter()
+            .find(|series| series.provider_id == "rithmic")
+            .and_then(|series| self.warm_series.get(series))
+        else {
+            return;
+        };
+        if !result.instruments.iter().any(|candidate| {
+            candidate.symbol == warm.instrument.provider_symbol
+                && candidate.exchange == warm.instrument.venue_id
+        }) {
+            return;
+        }
+        if let Some(control) = self.rithmic_catalog_control {
+            let _ = control.try_send(RithmicCatalogControl::Select(SelectProviderInstrument {
+                consumer_id: 0,
+                selection_generation: result.search_generation,
+                search_generation: result.search_generation,
+                provider: "rithmic".to_string(),
+                symbol: warm.instrument.provider_symbol.clone(),
+                exchange: warm.instrument.venue_id.clone(),
+                entitlement_id: warm.instrument.entitlement_id.clone(),
+            }));
+        }
+    }
+
+    fn handle_catalog_selection(
+        &mut self,
+        consumer_id: u64,
+        instrument: InstallProviderInstrument,
+    ) {
+        if consumer_id == 0 {
+            let exact = self
+                .warm_priority
+                .iter()
+                .find(|series| series.provider_id == "rithmic")
+                .and_then(|series| self.warm_series.get(series))
+                .is_some_and(|warm| {
+                    instrument.instrument_id == warm.instrument.instrument_id
+                        && instrument.provider_symbol == warm.instrument.provider_symbol
+                        && instrument.venue_id == warm.instrument.venue_id
+                        && instrument.entitlement_id == warm.instrument.entitlement_id
+                });
+            if exact {
+                let _ = self.install_provider_instrument(&instrument);
             }
+            return;
+        }
+        let Ok(id) = id(consumer_id).map(ConsumerId) else {
+            return;
+        };
+        let command_generation = instrument.selection_generation;
+        let publication = match self.install_provider_instrument(&instrument) {
+            Ok(()) => envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
+                consumer_id,
+                instrument: Some(instrument),
+            }),
+            Err(_) => envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
+                consumer_id,
+                provider: "rithmic".to_string(),
+                provider_generation: Some(instrument.session_generation),
+                command_generation,
+                reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
+            }),
+        };
+        if let Some(events) = self.events.get_mut(&id) {
+            events.catalog_selection = Some(publication);
+        }
+    }
+
+    fn handle_catalog_rejection(&mut self, rejection: ProviderCatalogRejected, selection: bool) {
+        if rejection.consumer_id == 0 {
+            if self.resource_mode == ResourceMode::MarketsLive
+                && self.warm_rithmic_search_generation < 3
+            {
+                self.activate_markets_live_hot_set();
+            }
+            return;
+        }
+        let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
+            return;
+        };
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            let slot = if selection {
+                &mut events.catalog_selection
+            } else {
+                &mut events.catalog_search
+            };
+            *slot = Some(envelope::Payload::ProviderCatalogRejected(rejection));
         }
     }
 
@@ -3561,21 +4132,27 @@ impl Coordinator<'_> {
     }
 
     fn prune_unused_live_series(&mut self) {
-        for series in self
-            .rithmic_live
-            .keys()
-            .filter(|series| !self.engine.has_subscription(series))
-        {
+        for series in self.rithmic_live.keys().filter(|series| {
+            !(self.engine.has_subscription(series)
+                || self.resource_mode == ResourceMode::MarketsLive
+                    && self.retained_live.contains(series))
+        }) {
             for ((active, _), stop) in &self.history_cancellations {
                 if active == series {
                     stop.store(true, Ordering::Release);
                 }
             }
         }
-        self.live
-            .retain(|series, _| self.engine.has_subscription(series));
-        self.rithmic_live
-            .retain(|series, _| self.engine.has_subscription(series));
+        self.live.retain(|series, _| {
+            self.engine.has_subscription(series)
+                || self.resource_mode == ResourceMode::MarketsLive
+                    && self.retained_live.contains(series)
+        });
+        self.rithmic_live.retain(|series, _| {
+            self.engine.has_subscription(series)
+                || self.resource_mode == ResourceMode::MarketsLive
+                    && self.retained_live.contains(series)
+        });
     }
 
     fn release_unused_live_market_data(&mut self) {
@@ -3640,6 +4217,22 @@ fn configured_reconnect_delay(engine: &MarketEngine, provider: &str) -> Result<D
         .ok_or_else(|| format!("{provider} reconnect policy is unavailable"))
 }
 
+fn available_memory_bytes() -> u64 {
+    let mut system = System::new();
+    system.refresh_memory();
+    system.available_memory()
+}
+
+const fn resource_policy_mode(mode: ResourceMode) -> EngineResourceMode {
+    match mode {
+        ResourceMode::Interactive => EngineResourceMode::Interactive,
+        ResourceMode::Warm => EngineResourceMode::Warm,
+        ResourceMode::Constrained => EngineResourceMode::Constrained,
+        ResourceMode::OfflineSuspended => EngineResourceMode::OfflineSuspended,
+        ResourceMode::MarketsLive => EngineResourceMode::MarketsLive,
+    }
+}
+
 fn configured_engine() -> Result<MarketEngine, String> {
     let mut engine = MarketEngine::new(MarketEngineConfig {
         maximum_consumers: NonZeroUsize::new(MAXIMUM_CONSUMERS).unwrap_or(NonZeroUsize::MIN),
@@ -3672,7 +4265,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
         .register_provider(
             "rithmic".to_string(),
             ProviderConfig {
-                account_id: "rithmic:test".to_string(),
+                account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
                 capabilities: ProviderCapabilities {
                     historical_bars: true,
                     realtime_bars: true,
@@ -3952,6 +4545,54 @@ fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Resul
     Ok(())
 }
 
+fn reconcile_history_repair(
+    current: &SeriesSnapshot,
+    repair: Vec<MarketBar>,
+    maximum_bars: usize,
+) -> Result<Vec<MarketBar>, String> {
+    if maximum_bars == 0 || current.bars.is_empty() || repair.is_empty() {
+        return Err("covering history repair is empty".to_string());
+    }
+    let mut merged = current.bars.to_vec();
+    for mut repaired in repair {
+        match merged.binary_search_by_key(&repaired.exchange_timestamp_unix_nanos, |bar| {
+            bar.exchange_timestamp_unix_nanos
+        }) {
+            Ok(index) => {
+                repaired.source_sequence = merged[index].source_sequence;
+                merged[index] = repaired;
+            }
+            Err(0)
+                if repaired.exchange_timestamp_unix_nanos
+                    < merged[0].exchange_timestamp_unix_nanos => {}
+            Err(index) if index == merged.len() => {
+                repaired.source_sequence = merged
+                    .last()
+                    .and_then(|bar| bar.source_sequence.checked_add(1))
+                    .ok_or_else(|| "covering history repair sequence overflowed".to_string())?;
+                merged.push(repaired);
+            }
+            Err(_) => {
+                return Err(
+                    "covering history repair introduced interior sequence drift".to_string()
+                );
+            }
+        }
+    }
+    let retained_start = merged.len().saturating_sub(maximum_bars);
+    let retained = merged.split_off(retained_start);
+    for bar in &retained {
+        bar.validate().map_err(|error| error.to_string())?;
+    }
+    if retained.windows(2).any(|pair| {
+        pair[0].source_sequence.checked_add(1) != Some(pair[1].source_sequence)
+            || pair[0].exchange_timestamp_unix_nanos >= pair[1].exchange_timestamp_unix_nanos
+    }) {
+        return Err("covering history repair is not canonical".to_string());
+    }
+    Ok(retained)
+}
+
 fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggregator, String> {
     CoinbaseBarAggregatorConfig::try_new_interval(
         profile.product_id,
@@ -4044,6 +4685,47 @@ fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
         entitlement_id: series.entitlement_id.clone(),
         period,
         definition_version: series.definition_revision,
+    })
+}
+
+fn warm_series(series: &HotSeries) -> Result<WarmSeries, String> {
+    let expected_account = match series.provider.as_str() {
+        "coinbase" => COINBASE_PUBLIC_ACCOUNT_ID,
+        "rithmic" => RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
+        _ => return Err("hot-set provider is unsupported".to_string()),
+    };
+    if series.account_id != expected_account
+        || series.provider_symbol.trim().is_empty()
+        || series.venue_id.trim().is_empty()
+        || series.display_symbol.trim().is_empty()
+        || series.price_scale > 18
+        || series.quantity_scale > 18
+    {
+        return Err("hot-set instrument metadata is invalid".to_string());
+    }
+    let canonical = internal_series(&SeriesKey {
+        provider: series.provider.clone(),
+        instrument_id: series.instrument_id.clone(),
+        cadence_value: series.cadence_value,
+        definition_revision: series.definition_revision,
+        entitlement_id: series.entitlement_id.clone(),
+        cadence: series.cadence,
+    })?;
+    Ok(WarmSeries {
+        series: canonical,
+        instrument: InstallProviderInstrument {
+            provider: series.provider.clone(),
+            session_generation: series.provider_watermark.max(1),
+            selection_generation: 1,
+            instrument_id: series.instrument_id.clone(),
+            provider_symbol: series.provider_symbol.clone(),
+            display_symbol: series.display_symbol.clone(),
+            venue_id: series.venue_id.clone(),
+            price_scale: series.price_scale,
+            quantity_scale: series.quantity_scale,
+            entitlement_id: series.entitlement_id.clone(),
+        },
+        provider_watermark: series.provider_watermark,
     })
 }
 
@@ -4147,6 +4829,17 @@ mod tests {
             rithmic_catalog_control: None,
             realtime_stop,
             resource_mode: ResourceMode::Warm,
+            resource_policy: decide_resource_policy(ResourcePolicyInput {
+                mode: EngineResourceMode::Warm,
+                available_memory_bytes: u64::MAX,
+                consumer_count: 1,
+                visible_consumer_count: 1,
+                provider_series_limit: MAXIMUM_SERIES,
+                hot_set_priority_count: 1,
+            }),
+            available_memory_bytes: u64::MAX,
+            hot_set_priority_count: 1,
+            last_consumer_activity: Instant::now(),
             attached: BTreeSet::new(),
             pending: BTreeMap::from([(
                 series.clone(),
@@ -4159,6 +4852,13 @@ mod tests {
             history_cancellations: BTreeMap::new(),
             local_history_deadlines: BTreeMap::new(),
             local_loaded: BTreeSet::new(),
+            warming: BTreeSet::new(),
+            warm_series: BTreeMap::new(),
+            warm_priority: Vec::new(),
+            retained_history: BTreeMap::new(),
+            prewarmed: BTreeSet::new(),
+            retained_live: BTreeSet::new(),
+            warm_rithmic_search_generation: 0,
             events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
             live: BTreeMap::new(),
             rithmic_live: BTreeMap::new(),
@@ -4170,6 +4870,136 @@ mod tests {
             realtime_connected: false,
             rithmic_realtime_started: false,
         }
+    }
+
+    fn hot_coinbase() -> HotSeries {
+        HotSeries {
+            provider: "coinbase".to_string(),
+            market: "BTC-USD".to_string(),
+            interval_seconds: 60,
+            score: 1,
+            last_used_unix_seconds: 1,
+            provider_watermark: 1,
+            series_watermark: 1,
+            viewport_start_unix_nanos: Some(1),
+            viewport_end_unix_nanos: Some(2),
+            account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
+            cadence_value: 60,
+            definition_revision: 1,
+            pinned: false,
+            workspace_ids: vec![1],
+            coverage_start_unix_nanos: Some(60_000_000_000),
+            coverage_end_unix_nanos: Some(60_000_000_001),
+            provider_symbol: "BTC-USD".to_string(),
+            venue_id: "coinbase".to_string(),
+            display_symbol: "BTC/USD".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+        }
+    }
+
+    #[test]
+    fn warm_restore_prefetches_local_history_and_installs_it_before_reattach() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let series = internal_series(&btc()).expect("series");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let mut engine = configured_engine().expect("engine configures");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        coordinator.restore_hot_series(vec![warm_series(&hot_coinbase()).expect("hot series")]);
+        let (requested, generation) = match storage_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("local warm read is requested")
+        {
+            StorageRequest::Read(series, generation) => (series, generation),
+            StorageRequest::Persist(..) => panic!("warm restore reads before persisting"),
+        };
+        assert_eq!(requested, series);
+        coordinator.local_history_completed(
+            &requested,
+            generation,
+            Ok(Some(StoredHistory {
+                bars: vec![history_bar()],
+                derived: false,
+                durable: true,
+            })),
+        );
+        assert!(coordinator.engine.series_snapshot(&series).is_some());
+        assert!(coordinator.prewarmed.contains(&series));
+    }
+
+    #[test]
+    fn constrained_policy_sets_the_real_provider_history_bound() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let series = internal_series(&btc()).expect("series");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let mut engine = configured_engine().expect("engine configures");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        coordinator.apply_resource_mode(ResourceMode::Constrained);
+        coordinator
+            .enqueue_history(
+                &series,
+                ProviderGeneration(id(1).expect("provider generation")),
+            )
+            .expect("bounded history enqueues");
+        assert!(matches!(
+            history_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(HistoryRequest {
+                maximum_bars: 160,
+                ..
+            })
+        ));
     }
 
     fn provider_instrument(
@@ -4520,7 +5350,7 @@ mod tests {
             &series,
         );
         coordinator
-            .install_provider_instrument(provider_instrument(7, 2))
+            .install_provider_instrument(&provider_instrument(7, 2))
             .expect("instrument installs");
         coordinator.rithmic_depth(
             7,
@@ -4752,6 +5582,7 @@ mod tests {
             None,
             None,
             false,
+            0,
         )
         .expect("split provider history starts");
         service.attach(1).expect("client attaches");
@@ -5032,6 +5863,25 @@ mod tests {
         }
     }
 
+    fn sequential_history(first_sequence: u64, count: usize, first_minute: i64) -> Vec<MarketBar> {
+        (0..count)
+            .map(|index| {
+                let offset = u64::try_from(index).expect("history index fits");
+                let minute = first_minute + i64::try_from(index).expect("history minute fits");
+                MarketBar {
+                    source_sequence: first_sequence + offset,
+                    exchange_timestamp_seconds: minute * 60,
+                    exchange_timestamp_unix_nanos: minute * 60_000_000_000,
+                    open: 100,
+                    high: 110,
+                    low: 90,
+                    close: 105,
+                    volume: 7,
+                }
+            })
+            .collect()
+    }
+
     fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {
         trade_for("BTC-USD", minute, price, provider_sequence)
     }
@@ -5073,6 +5923,24 @@ mod tests {
             assert!(Instant::now() < deadline, "market event timed out");
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    fn assert_persisted_bars(
+        request: Result<StorageRequest, mpsc::TryRecvError>,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        local: MarketBar,
+        repaired: MarketBar,
+    ) {
+        let reconciled = MarketBar {
+            source_sequence: local.source_sequence + 1,
+            ..repaired
+        };
+        assert!(matches!(
+            request,
+            Ok(StorageRequest::Persist(persisted, current, bars, false))
+                if persisted == *series && current == generation && bars == [local, reconciled]
+        ));
     }
 
     fn is_live_update(
@@ -5835,6 +6703,82 @@ mod tests {
     }
 
     #[test]
+    fn shorter_provider_repair_preserves_the_published_canonical_sequence() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let series = internal_series(&btc()).expect("series");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        coordinator.local_history_completed(
+            &series,
+            generation,
+            Ok(Some(StoredHistory {
+                bars: sequential_history(1, 350, 1),
+                derived: false,
+                durable: true,
+            })),
+        );
+        history_rx.recv().expect("provider repair is queued");
+
+        coordinator.history_completed(
+            &series,
+            generation,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: sequential_history(1, 250, 102),
+                handoff_boundary_unix_nanos: None,
+            }),
+        );
+
+        let Some(envelope::Payload::SeriesSnapshot(snapshot)) =
+            coordinator.events[&consumer_id].snapshot.as_ref()
+        else {
+            panic!("covering repair publishes a snapshot");
+        };
+        assert_eq!(snapshot.bars.len(), 350);
+        assert_eq!(snapshot.bars[0].source_sequence, 2);
+        assert_eq!(snapshot.bars[0].exchange_timestamp_seconds, 120);
+        assert_eq!(snapshot.bars[349].source_sequence, 351);
+        assert_eq!(snapshot.bars[349].exchange_timestamp_seconds, 21_060);
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Persist(_, _, ref bars, false))
+                if bars.first().is_some_and(|bar| bar.source_sequence == 2)
+                    && bars.last().is_some_and(|bar| bar.source_sequence == 351)
+        ));
+    }
+
+    #[test]
     fn retained_rithmic_history_uses_installed_precision_and_is_persisted_after_repair() {
         let (history_tx, history_rx) = mpsc::sync_channel(1);
         let (storage_tx, storage_rx) = mpsc::sync_channel(1);
@@ -5923,11 +6867,7 @@ mod tests {
                 handoff_boundary_unix_nanos: None,
             }),
         );
-        assert!(matches!(
-            storage_rx.try_recv(),
-            Ok(StorageRequest::Persist(ref persisted, current, ref bars, false))
-                if persisted == &series && current == generation && bars == &[repaired]
-        ));
+        assert_persisted_bars(storage_rx.try_recv(), &series, generation, local, repaired);
         assert!(matches!(
             coordinator.events[&consumer_id].series_state,
             Some(envelope::Payload::SeriesState(ref state))
@@ -6317,7 +7257,10 @@ mod tests {
         poll_until(&service, 1, 1, |event| {
             matches!(event, envelope::Payload::SeriesSnapshot(snapshot)
                 if snapshot.generation == 2
-                    && snapshot.bars[0].exchange_timestamp_seconds == 300)
+                    && snapshot.bars.len() == 2
+                    && snapshot.bars[0].exchange_timestamp_seconds == 0
+                    && snapshot.bars[1].exchange_timestamp_seconds == 300
+                    && snapshot.bars[1].source_sequence == 2)
         });
 
         service
@@ -6451,6 +7394,7 @@ mod tests {
                 series: internal_series(&btc()).expect("first series"),
                 provider_generation: ProviderGeneration(id(1).expect("provider generation")),
                 instrument: None,
+                maximum_bars: HISTORY_BARS_PER_SERIES,
                 stop: Arc::new(AtomicBool::new(false)),
             })
             .expect("fill history queue");
@@ -6463,6 +7407,7 @@ mod tests {
                     series: second,
                     provider_generation: ProviderGeneration(id(1).expect("provider generation")),
                     instrument: None,
+                    maximum_bars: HISTORY_BARS_PER_SERIES,
                     stop: Arc::new(AtomicBool::new(false)),
                 },
             ),

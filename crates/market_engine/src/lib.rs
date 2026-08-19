@@ -5,16 +5,23 @@
 //! and passes ordinary typed commands and canonical provider results into it.
 
 mod demand;
+mod hot_set;
 mod provider_manager;
 mod publication;
+mod resource_policy;
 mod series_store;
 mod subscription_registry;
 
 pub use demand::{ConsumerDemand, ConsumerIdentity, MarketStream, StreamRequirements};
+pub use hot_set::{HotSetDescriptor, HotSetEntry, HotSetManager};
 pub use provider_manager::{
     ProviderCapabilities, ProviderConfig, ProviderHealth, ProviderRequest, ProviderStatus,
 };
 pub use publication::{ConsumerPublication, ConsumerSeriesUpdate};
+pub use resource_policy::{
+    EngineResourceMode, ResourcePolicyDecision, ResourcePolicyInput,
+    decide as decide_resource_policy,
+};
 pub use series_store::SeriesSnapshot;
 pub use subscription_registry::SubscriptionStatus;
 
@@ -112,6 +119,12 @@ pub enum EngineError {
         received: GenerationId,
     },
     InvalidViewport,
+    InvalidHotSeries,
+    DuplicateHotSeries,
+    UnknownHotSeries,
+    HotSetPinnedLimitExceeded {
+        maximum: NonZeroUsize,
+    },
     InvalidSeriesPrecision,
     EmptySeries,
     DiscontinuousSeries {
@@ -185,6 +198,14 @@ impl fmt::Display for EngineError {
                 formatter.write_str("consumer generation is stale")
             }
             Self::InvalidViewport => formatter.write_str("viewport start must precede end"),
+            Self::InvalidHotSeries => formatter.write_str("hot-set series metadata is invalid"),
+            Self::DuplicateHotSeries => {
+                formatter.write_str("hot-set series identity is duplicated")
+            }
+            Self::UnknownHotSeries => formatter.write_str("hot-set series identity is unknown"),
+            Self::HotSetPinnedLimitExceeded { maximum } => {
+                write!(formatter, "pinned hot-set entries exceed bound {maximum}")
+            }
             Self::InvalidSeriesPrecision => {
                 formatter.write_str("series decimal precision exceeds 18 places")
             }
@@ -455,6 +476,41 @@ impl MarketEngine {
             .collect()
     }
 
+    /// Installs validated local history before a provider session is available.
+    ///
+    /// Retained data keeps its historical provenance generation and remains usable
+    /// while a fresh provider session is established and covering repair runs.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown provider, invalid data, or configured capacity exhaustion.
+    pub fn install_retained_history(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: Vec<MarketBar>,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        if self.providers.status(&series.provider_id).is_none() {
+            return Err(EngineError::UnknownProvider(series.provider_id.clone()));
+        }
+        let snapshot = self.series.install(
+            series.clone(),
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+        )?;
+        self.demands
+            .matching(series)
+            .into_iter()
+            .map(|(consumer_id, generation)| {
+                self.publications
+                    .publish(consumer_id, generation, Arc::clone(&snapshot))
+            })
+            .collect()
+    }
+
     /// Installs one bounded live covering image and publishes it to matching demand.
     ///
     /// The newest forming bar may be revised within the same provider generation;
@@ -613,6 +669,39 @@ impl MarketEngine {
         self.series.invalidate(series)
     }
 
+    /// Evicts only unsubscribed cached series until both policy bounds are met.
+    ///
+    /// Active subscriptions are never removed to satisfy a resource preference.
+    pub fn evict_unsubscribed_series(
+        &mut self,
+        maximum_cached_series: usize,
+        maximum_decoded_bars: usize,
+        protected: &[BarSeriesKey],
+    ) -> Vec<BarSeriesKey> {
+        let mut cached = self
+            .series
+            .retained()
+            .into_iter()
+            .filter(|(series, _)| {
+                !self.subscriptions.contains(series) && !protected.contains(series)
+            })
+            .collect::<Vec<_>>();
+        let mut removed = Vec::new();
+        while cached.len() > maximum_cached_series
+            || self.series.total_bars() > maximum_decoded_bars
+        {
+            let Some((series, _)) = cached.first().cloned() else {
+                break;
+            };
+            cached.remove(0);
+            if self.series.invalidate(&series) {
+                self.publications.invalidate_series(&series);
+                removed.push(series);
+            }
+        }
+        removed
+    }
+
     #[must_use]
     pub fn metrics(&self) -> MarketEngineMetrics {
         MarketEngineMetrics {
@@ -623,6 +712,11 @@ impl MarketEngine {
             stored_bars: self.series.total_bars(),
             approximate_series_bytes: self.series.approximate_bytes(),
         }
+    }
+
+    #[must_use]
+    pub fn visible_consumer_count(&self) -> usize {
+        self.demands.visible_len()
     }
 }
 
@@ -830,6 +924,34 @@ mod tests {
         assert_eq!(engine.metrics().stored_bars, 2);
         assert!(engine.invalidate_series(&btc));
         assert_eq!(engine.metrics().stored_bars, 0);
+    }
+
+    #[test]
+    fn resource_eviction_preserves_active_and_explicitly_retained_series() {
+        let mut engine = engine(1, 3, 6);
+        let active = series("coinbase:spot:BTC-USD");
+        let retained = series("coinbase:spot:ETH-USD");
+        let cold = series("coinbase:spot:SOL-USD");
+        for current in [&active, &retained, &cold] {
+            engine
+                .install_history(provider_generation(1), current, 2, 8, bars(2))
+                .expect("series history installs");
+        }
+        register(&mut engine, 1, 1);
+        assert!(
+            engine
+                .set_series_demand(id(1), generation(1), &active)
+                .expect("active demand resolves")
+                .is_some()
+        );
+
+        let removed = engine.evict_unsubscribed_series(0, 0, std::slice::from_ref(&retained));
+
+        assert_eq!(removed, vec![cold.clone()]);
+        assert_eq!(engine.metrics().stored_series, 2);
+        assert_eq!(engine.metrics().stored_bars, 4);
+        assert!(engine.invalidate_series(&retained));
+        assert!(engine.invalidate_series(&active));
     }
 
     #[test]

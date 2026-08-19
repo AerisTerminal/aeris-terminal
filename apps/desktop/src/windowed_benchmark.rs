@@ -945,7 +945,8 @@ fn benchmark_root(
             cx,
             interaction_startup,
             interaction_worker,
-            DesktopLifecycle::new(DesktopLifetimeMode::KeepEngineWarm),
+            DesktopLifecycle::new(DesktopLifetimeMode::KeepEngineWarm, false, false)
+                .expect("benchmark lifecycle client starts"),
             Some(terminal_symbol_input),
             indicator_input,
         )

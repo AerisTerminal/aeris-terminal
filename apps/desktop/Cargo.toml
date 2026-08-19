@@ -29,5 +29,8 @@ gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 
+[dev-dependencies]
+interprocess.workspace = true
+
 [lints]
 workspace = true

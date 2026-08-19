@@ -12,9 +12,6 @@ use axiusflow_engine_protocol::{
     ProviderInstrumentSearchResult, ProviderInstrumentSelection, SearchProviderInstruments,
     SelectProviderInstrument, envelope,
 };
-use axiusflow_local_engine_client::{
-    EngineClient, connect_or_start_engine, sibling_engine_executable,
-};
 use axiusflow_observability::FeedConnectionState;
 use std::{
     collections::BTreeSet,
@@ -23,6 +20,8 @@ use std::{
     thread,
     time::Duration,
 };
+
+use crate::engine_supervisor::EngineSupervisor;
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
@@ -104,8 +103,18 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
             Err(RecvTimeoutError::Timeout) => {}
         }
         match state.catalog.poll() {
-            Ok(Some(event)) => handle_catalog_event(messages, &mut state, event),
-            Ok(None) => {}
+            Ok(poll) if poll.reconnected => {
+                send_connection(
+                    messages,
+                    FeedConnectionState::Recovering,
+                    "resident Rithmic engine restarted; restoring catalog demand",
+                );
+            }
+            Ok(poll) => {
+                if let Some(event) = poll.event {
+                    handle_catalog_event(messages, &mut state, event);
+                }
+            }
             Err(_) => {
                 send_connection(
                     messages,
@@ -327,25 +336,21 @@ fn publish_dispatch_rejection(
 }
 
 struct EngineCatalogSession {
-    client: EngineClient,
-    client_id: u64,
+    client: EngineSupervisor,
     consumer_id: u64,
 }
 
 impl EngineCatalogSession {
     fn connect() -> Result<Self, String> {
-        let executable = sibling_engine_executable()?;
-        let mut client = connect_or_start_engine(&executable)?;
         let client_id = random_identity()?;
         let consumer_id = random_identity()?;
-        client.attach_client(client_id)?;
-        if let Err(error) = client.register_consumer(client_id, ENGINE_WORKSPACE_ID, consumer_id) {
-            let _ = client.detach_client(client_id);
+        let mut client = EngineSupervisor::connect(client_id)?;
+        if let Err(error) = client.register_consumer(ENGINE_WORKSPACE_ID, consumer_id) {
+            let _ = client.detach_client();
             return Err(error);
         }
         Ok(Self {
             client,
-            client_id,
             consumer_id,
         })
     }
@@ -378,7 +383,7 @@ impl EngineCatalogSession {
         self.client.select_provider_instrument(selection)
     }
 
-    fn poll(&mut self) -> Result<Option<envelope::Payload>, String> {
+    fn poll(&mut self) -> Result<crate::engine_supervisor::SupervisedPoll, String> {
         self.client.poll_market_event(self.consumer_id)
     }
 }
@@ -386,7 +391,7 @@ impl EngineCatalogSession {
 impl Drop for EngineCatalogSession {
     fn drop(&mut self) {
         let _ = self.client.remove_market_consumer(self.consumer_id);
-        let _ = self.client.detach_client(self.client_id);
+        let _ = self.client.detach_client();
     }
 }
 

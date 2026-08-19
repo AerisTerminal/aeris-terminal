@@ -9,9 +9,9 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 149 of 180 tasks complete.**
+**Verified progress: 153 of 180 tasks complete.**
 
-The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, durable lifetime/autostart integration, desktop recovery after an engine-process restart, deeper hot-set/resource policy, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
+The unchecked sections are the authoritative remaining-work ledger. They primarily cover persisted multi-pane workspace composition and restore priority, reboot and unsupported-platform lifecycle proof, credentialed Rithmic markets-live proof, real updater/uninstaller integration, long-running memory evidence, and the remaining multi-tab/provider performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -2027,7 +2027,7 @@ Do not warm the entire exchange catalog.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-12): protocol v10 lifecycle commands cross the authenticated local boundary. `SetEngineResourceMode` now applies one coordinator-owned policy as well as acknowledging engine workspace state. The explicit per-launch `--keep-markets-live` mode is installed before desktop market workers start; after the last UI client detaches, it retains the bounded selected Coinbase/Rithmic handoffs, keeps provider sessions available, lets live bars/books advance in canonical engine state, and preserves in-flight Rithmic repair. A deterministic no-UI regression observes no Coinbase stop, advances the forming bar, reattaches from that advanced snapshot without another history fetch, then switches to ordinary warm mode and observes realtime release. An optimized Windows native run closed two successive markets-live desktops through `WM_CLOSE`; both left the engine alive, the second reused the first engine PID, and authenticated cleanup exited zero. `ShutdownEngine` marks the engine offline/suspended, freezes later persistent workspace mutation, rejects subsequent demand, closes the listener, writes a final revisioned hot-set manifest, cancels in-flight history and Coinbase realtime work, disconnects active Rithmic worker controls, drains accepted local-history requests, cancels and joins each Rithmic worker's native network/power helpers, joins the top-level market workers, and exits within one shared two-second process deadline. Default native desktop close preserves the warm engine, while per-launch `--exit-with-desktop` awaits detach before complete shutdown. Durable in-product lifetime-mode selection, optional autostart, provider-permission configuration, credentialed markets-live evidence, and end-to-end GPUI warm snapshot-to-render proof remain incomplete, so this section stays unchecked.
+Progress evidence (2026-08-19): the engine persists revision-fenced Exit Completely, Keep Engine Warm, Keep Markets Live, autostart, and explicit markets-live permission. The desktop title bar edits those preferences through a bounded background lifecycle client and restores them before market workers start. Deterministic no-UI coverage proves selected Coinbase state advances and reattaches without another history fetch; a release Windows run kept engine PID 4440 alive, advanced sequence 250 to 253 in 2.020 seconds without a UI, reopened in 555.455 ms, and rendered the `Markets live` state. Ordinary warm close completed in 47.996 ms and reopened in 615.858 ms with retained history visible before provider readiness. Persisted Exit Completely now keeps the GPUI event loop alive until bounded detach and authenticated shutdown finish; the native close left neither process in 2,048.094 ms. Credentialed Rithmic markets-live continuation and Linux/macOS native lifecycle proof remain unverified, so this section stays unchecked.
 
 Support at least these product modes conceptually.
 
@@ -2103,7 +2103,7 @@ Reopening the UI should effectively attach to an already-running trading termina
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-11): engine startup no longer writes an unconditional Windows `HKCU` login-start entry. The obsolete development-machine entry created by the previous behavior was removed during verification. Optional user-controlled enable/disable policy, equivalent native behavior on every supported platform, persisted preference ownership, and reboot-to-warm validation are not implemented, so this section stays unchecked.
+Progress evidence (2026-08-19): optional autostart is a persisted user-controlled engine preference. The narrow platform boundary writes/removes an exact quoted Windows HKCU Run value, an XDG autostart entry on Linux, or a per-user macOS LaunchAgent; engine startup reconciles native configuration with the persisted preference. A native Windows round trip enabled, inspected, and removed the exact release-engine registration while restoring the prior lifecycle state. Hot-set startup reconstructs ranked identities, preloads retained local history, and queues provider repair. No machine reboot/login cycle or Linux/macOS native run was performed, so this section stays unchecked.
 
 Do not claim state remains in RAM after machine power-off.
 
@@ -2135,6 +2135,8 @@ When the user later launches the desktop, the engine may already be ready.
 
 - [ ] **Status: Not verified complete**
 
+Progress evidence (2026-08-19): `platform_runtime::BackgroundService` is the single exact-executable boundary for running-state inspection, detached start, authenticated non-starting shutdown with a caller deadline, and per-user autostart enable/disable/inspection. `NativeSessionShutdownMonitor` owns platform lifecycle notification: an invisible Windows top-level window receives session-end messages, Linux combines logind `PrepareForShutdown` with termination signals, and macOS uses launch/session termination signals. Payload/capability tests and native Windows autostart/cancellation evidence pass. Linux/macOS native execution remains unverified on this Windows host, so this section stays unchecked.
+
 Add a narrow platform boundary.
 
 Conceptually:
@@ -2158,7 +2160,9 @@ Do not spread Windows/macOS/Linux service APIs through the product.
 
 # 49. ENGINE SUPERVISOR
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): `apps/desktop/src/engine_supervisor.rs` owns authenticated connection/start/recovery without owning market state. On transport loss it reconnects through the real `local_engine_client`, waits only for engine readiness, reattaches the desktop client, restores every consumer, installed provider instrument, pending catalog search/selection, generation-fenced series demand, viewport, and visibility, then resumes polling. A two-engine socket fixture forces failure of the first session and proves the replacement receives the complete restore set and publishes a covering snapshot for the existing consumer.
 
 Desktop uses:
 
@@ -2180,9 +2184,9 @@ It does NOT own engine market state.
 
 # 50. DESKTOP IPC CLIENT
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-11): the blocking authenticated client, local framing, native installation-token access, sibling-engine discovery/start, typed workspace/market commands, resource-mode control, and complete shutdown now live in `crates/local_engine_client`. Desktop background workers depend on that narrow client support instead of linking `apps/engine` as a backend library, while the engine application retains server and market ownership. Both production Coinbase and Rithmic presentation bridges use it off GPUI; the latter installs its canonical instrument, submits series demand, polls covering series and order-book snapshots, and removes cancelled consumers without opening provider history or depth sockets. The engine application itself uses the same authenticated client for `--shutdown`. Focused tests prove protocol-v10 socket fencing, occupied-endpoint retry without spawning a competing engine, authenticated client/server exchanges, acknowledged resource-mode updates, and shutdown signaling. Reconnect with active-consumer restoration remains incomplete, so this section stays unchecked.
+Evidence (2026-08-19): the blocking authenticated client, local framing, native installation-token access, sibling-engine discovery/start, typed workspace/market/lifecycle/status commands, consumer-aware response realignment, and complete shutdown live in `crates/local_engine_client`. Desktop workers and the reconnecting `EngineSupervisor` use it off GPUI; no client code performs provider work. Tests cover protocol/socket fencing, occupied-endpoint handling, incompatible resident replacement, authentication, typed round trips, response alignment, lifecycle/status/shutdown, and full active-consumer restoration after reconnect.
 
 Use:
 
@@ -2854,9 +2858,9 @@ It does not own provider sockets.
 
 # 76. HOT SET
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
 
-Progress evidence (2026-08-11): the engine persists a bounded list of recently selected provider/market/interval identities, recency scores, last-used times, provider/series watermarks, and stable viewport bounds rather than serializing decoded market structures. Immutable manifest revisions survive restart, retain only the latest two, quarantine corrupt candidates, migrate legacy workspace state, and now receive a final shutdown snapshot that wins over any equal-revision stale manifest. Multiple active workspaces, pins, account-scoped identity, and coverage-driven warm reconstruction remain incomplete, so this section stays unchecked.
+Evidence (2026-08-19): `market_engine::HotSetManager` is the bounded provider-neutral owner for exact provider/account/instrument/entitlement/cadence identity, precision, workspace membership, optional pins, recency score/time, viewport, retained coverage, and provider/series watermarks. Engine workspace schema v3 persists those descriptors in revisioned manifests, retains the latest two, quarantines corruption, migrates complete schema-v2 Coinbase identity, and discards incomplete Rithmic identity rather than fabricating it. Startup ranks entries, preloads available retained history before desktop attachment, and queues bounded provider repair. Tests cover pin-preserving eviction, duplicate/invalid restore rejection, mixed-provider migration, exact authenticated Rithmic metadata, final-shutdown truth, and warm reconstruction.
 
 `market_engine/src/hot_set.rs`
 
@@ -2876,7 +2880,9 @@ Persist enough identity/coverage information to rebuild efficiently.
 
 # 77. RESOURCE POLICY
 
-- [ ] **Status: Not verified complete**
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-19): `market_engine::resource_policy::decide` computes one deterministic bounded decision from lifecycle mode, available memory, total/visible consumers, provider series limits, and hot-set priority. The coordinator applies its decoded-bar, derived-series, hidden-depth, history-prefetch, and warm-retention outputs to real provider requests and eviction. Offline mode admits no retained work; constrained mode reduces prefetch/derived retention without dropping the active-history minimum; markets-live remains bounded. Tests prove provider history receives the policy bound and eviction preserves active subscriptions plus explicitly retained series.
 
 `market_engine/src/resource_policy.rs`
 
@@ -3043,7 +3049,7 @@ Cold startup should:
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): native close, custom caption close, keyboard close, and direct application quit begin each desktop market client's bounded retirement without waiting on GPUI. App quit awaits those background detach acknowledgements, closing the final window exits the GPUI process, and the engine removes presentation pressure while retaining state according to its installed resource mode. A release Windows native-close run exited the desktop in `225.858 ms`, preserved the engine, and a later desktop attached to the same engine PID. Durable in-product lifetime selection remains open under sections 46 and 116 rather than this close-path contract.
+Evidence (2026-08-19): native close, custom caption close, keyboard close, and direct application quit begin bounded market-client retirement without blocking GPUI. The application uses explicit quit ownership so destroying the final window cannot end the process before the background lifecycle result is known. Ordinary warm native close completed in `47.996 ms`, preserved engine PID 4440, and a later desktop attached to the same PID with retained history visible before provider readiness. Persisted Exit Completely waits for bounded retirement and authenticated engine shutdown before quitting.
 
 Desktop sends `DetachClient`.
 
@@ -3960,7 +3966,7 @@ Verify:
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-12): the authenticated resource-mode boundary now governs coordinator retention, the complete-exit command is implemented, unconditional Windows login registration is removed, and the optimized production engine was observed writing its final bounded hot-set manifest, cancelling and joining its native environment helpers and top-level market workers, and exiting cleanly. Default native desktop close detaches bounded market clients off GPUI and preserves the resident engine; per-launch `--keep-markets-live` preserves bounded selected handoffs/provider work across final detach, and per-launch `--exit-with-desktop` requests complete exit. Deterministic no-UI reattachment proves a retained forming bar advances without another history fetch. Release Windows native-close samples left the expected topology for ordinary warm and complete-exit modes; an additional markets-live run closed two successive desktops, reused the same surviving engine PID, and ended with code-zero authenticated cleanup. Durable in-product lifetime preferences, optional cross-platform login startup, provider-permission configuration, credentialed markets-live evidence, and GPUI snapshot-to-render verification remain incomplete, so Phase 8 stays unchecked.
+Progress evidence (2026-08-19): all four Phase 8 product controls are implemented: persisted Keep Engine Warm, permission-gated Keep Markets Live, Exit Completely, and optional per-user autostart. Warm startup reconstructs the bounded hot set, publishes retained history before provider readiness, and repairs coverage; the title-bar controls mutate lifecycle/autostart/permission through background authenticated IPC. Native Windows evidence covers autostart round trip, ordinary warm retain/reopen/render, Coinbase markets-live advancement without a UI and same-PID reopen, and persisted Exit Completely leaving neither process within the bounded shutdown path. Actual reboot/login restore, Linux/macOS native execution, and credentialed Rithmic markets-live proof remain unverified, so Phase 8 stays unchecked.
 
 Only after cold behavior works correctly:
 
@@ -4989,7 +4995,7 @@ Exclude:
 ### Known remaining limitations
 
 - Persisted user-authored workspace-tab layouts and deterministic restore ordering are not yet implemented; `--workspace-tabs` is the transient native migration-proof surface with one active chart, while section 174 remains the later persistence/restore feature.
-- Lifetime mode is selected per launch; durable in-product policy selection and optional user-controlled OS autostart remain unfinished.
+- Durable lifetime mode, markets-live permission, and optional user-controlled OS autostart are implemented. Actual reboot/login restore, Linux/macOS native execution, credentialed Rithmic markets-live continuation, and real updater/uninstaller integration remain unverified.
 - The credentialed Rithmic run targets Rithmic Test with the available account/entitlements. Production account rollout and future order execution require their own safety and conformance gates.
 - The GPUI benchmark uses deterministic disconnected market input and compositor timing; it does not measure physical panel scanout, tab-switch latency inside that benchmark, macOS/Linux native behavior, or exchange-to-screen latency.
 - These limitations do not retain a legacy market owner or weaken the final dependency, ownership, bounded-work, generation, persistence, or lifecycle contracts.
@@ -5530,7 +5536,7 @@ Do NOT accidentally support multiple desktop processes through undefined behavio
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-12): `axiusflow_engine --shutdown` is a concrete authenticated process-termination command suitable for explicit user, update, uninstall, and incompatible-engine-replacement callers. It does not start an absent engine and returns failure when no engine is reachable. The server stops accepting connections, owns bounded top-level market-worker teardown, reports named stuck workers, and the verified production process exits without a remnant. The desktop's per-launch `--exit-with-desktop` policy now calls the same non-starting helper after its clients detach; a release native-close run left no desktop or engine process. Engine PID/client/provider/resource diagnostics, durable in-product lifetime control, and actual update/uninstall/system-session callers remain incomplete, so this section stays unchecked.
+Progress evidence (2026-08-19): authenticated status now exposes engine PID, durable lifetime/resource mode, active clients, provider counts/states, retained series/bars/bytes, autostart, and shutdown state. Exit Completely, explicit `--shutdown`, incompatible resident replacement, and native system/user-session notification all reach the same bounded shutdown owner; the Windows native persisted-exit run left neither process in 2,048.094 ms. `BackgroundService::request_shutdown` provides an exact-executable, deadline-bounded entry point suitable for updater/uninstaller callers, but no real updater or uninstaller integration was executed and actual logout/reboot was not triggered, so this section stays unchecked.
 
 Warm background mode is a user-controlled product feature.
 
@@ -5566,7 +5572,7 @@ Do not leave Axiusflow engine processes orphaned after uninstall/update.
 
 - [ ] **Status: Not verified complete**
 
-Progress evidence (2026-08-12): authenticated shutdown marks lifecycle state offline/suspended, freezes persistent workspace mutation, stops the accept loop and publication, rejects subsequent demand, and closes the IPC listener. One shared two-second process deadline covers a named final hot-set flush, cancellation of coordinator-owned history, Coinbase realtime, Rithmic control channels and their four native environment helpers, draining already-accepted local-history work, joining every top-level market worker, and the remaining client-session wait. A panic or expired flush/worker/client stage returns process failure before termination. Deterministic tests prove both native waiters unblock on cancellation, final-manifest restart truth, successful worker cancellation/join, and the uncancellable-worker deadline path; the optimized production process exited `8.671 ms` after acknowledgement with code zero and no remnant after helper ownership was added. Desktop `ExitWithDesktop` integration now begins client retirement without waiting on GPUI, awaits the bounded detach tasks in the app-quit future, and only then requests engine shutdown. The release native-close path left neither process. Durable user selection and system-session shutdown integration remain incomplete, so this section stays unchecked.
+Progress evidence (2026-08-19): authenticated shutdown marks lifecycle state offline/suspended, freezes workspace mutation, stops acceptance/publication, and applies one shared two-second deadline to final hot-set flush, coordinator/provider/history/storage cancellation, Rithmic native-helper joins, and remaining client sessions. Named panic/deadline failures remain nonzero. Native session-shutdown monitoring now requests the same owner and cancellation joins its helper within the deadline. GPUI uses explicit quit mode so final-window destruction cannot terminate the desktop before worker retirement and authenticated shutdown finish; a persisted Exit Completely native run left neither process in 2,048.094 ms. Deterministic tests cover successful cancellation/join, an uncancellable worker deadline, final-manifest truth, and native session-monitor cancellation. Actual Windows logout/reboot and Linux/macOS native session termination remain unverified, so this section stays unchecked.
 
 Graceful shutdown is bounded.
 

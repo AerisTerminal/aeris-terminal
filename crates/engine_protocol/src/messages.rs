@@ -26,6 +26,28 @@ pub enum ResourceMode {
     MarketsLive = 4,
 }
 
+/// Durable user-selected resident-engine lifetime policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum EngineLifetimeMode {
+    /// Closing the final desktop requests complete engine termination.
+    ExitCompletely = 0,
+    /// Closing the desktop retains bounded in-memory and local-cache state.
+    KeepEngineWarm = 1,
+    /// Closing the desktop also retains explicitly permitted hot provider sessions.
+    KeepMarketsLive = 2,
+}
+
+/// Observable process shutdown state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum EngineShutdownState {
+    /// The engine accepts authenticated work.
+    Running = 0,
+    /// Complete shutdown was accepted and bounded teardown is underway.
+    ShuttingDown = 1,
+}
+
 /// Machine-readable local engine fault classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
@@ -146,6 +168,9 @@ pub struct EngineReady {
     /// Current workspace revision.
     #[prost(uint64, tag = "3")]
     pub workspace_revision: u64,
+    /// Compatible lifecycle contract revision supported by this engine binary.
+    #[prost(uint32, tag = "4")]
+    pub lifecycle_contract_revision: u32,
 }
 
 /// Requests persisted workspace restoration.
@@ -182,6 +207,51 @@ pub struct HotSeries {
     /// Visible range end.
     #[prost(sint64, optional, tag = "9")]
     pub viewport_end_unix_nanos: Option<i64>,
+    /// Provider account identity needed for safe restore.
+    #[prost(string, tag = "10")]
+    pub account_id: String,
+    /// Canonical provider-neutral instrument identity.
+    #[prost(string, tag = "11")]
+    pub instrument_id: String,
+    /// Entitlement identity that fences provider/account reuse.
+    #[prost(string, tag = "12")]
+    pub entitlement_id: String,
+    /// Exact canonical cadence kind.
+    #[prost(enumeration = "SeriesCadence", tag = "13")]
+    pub cadence: i32,
+    /// Exact cadence value.
+    #[prost(uint32, tag = "14")]
+    pub cadence_value: u32,
+    /// Bar-definition revision.
+    #[prost(uint32, tag = "15")]
+    pub definition_revision: u32,
+    /// Explicit user pin retained ahead of recency-only entries.
+    #[prost(bool, tag = "16")]
+    pub pinned: bool,
+    /// Bounded workspace identities that recently used this series.
+    #[prost(uint64, repeated, tag = "17")]
+    pub workspace_ids: Vec<u64>,
+    /// Durable local coverage start.
+    #[prost(sint64, optional, tag = "18")]
+    pub coverage_start_unix_nanos: Option<i64>,
+    /// Durable local coverage end.
+    #[prost(sint64, optional, tag = "19")]
+    pub coverage_end_unix_nanos: Option<i64>,
+    /// Provider-native symbol required for warm provider selection.
+    #[prost(string, tag = "20")]
+    pub provider_symbol: String,
+    /// Provider venue/exchange identity.
+    #[prost(string, tag = "21")]
+    pub venue_id: String,
+    /// Stable presentation label.
+    #[prost(string, tag = "22")]
+    pub display_symbol: String,
+    /// Fixed-point price scale.
+    #[prost(uint32, tag = "23")]
+    pub price_scale: u32,
+    /// Fixed-point quantity scale.
+    #[prost(uint32, tag = "24")]
+    pub quantity_scale: u32,
 }
 
 /// Persisted workspace state.
@@ -217,6 +287,15 @@ pub struct WorkspaceState {
     /// Bounded recent-series set.
     #[prost(message, repeated, tag = "10")]
     pub hot_series: Vec<HotSeries>,
+    /// Durable final-desktop lifetime behavior.
+    #[prost(enumeration = "EngineLifetimeMode", tag = "11")]
+    pub lifetime_mode: i32,
+    /// Whether the engine should start with the user's OS session.
+    #[prost(bool, tag = "12")]
+    pub autostart_enabled: bool,
+    /// Explicit user permission to retain provider sessions without a desktop.
+    #[prost(bool, tag = "13")]
+    pub markets_live_permitted: bool,
 }
 
 /// Revision-fenced selection persistence request.
@@ -549,6 +628,65 @@ pub struct ProviderInstrumentSelection {
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct ShutdownEngine {}
 
+/// Revision-fenced durable engine-lifecycle preference mutation.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct SetEngineLifecycle {
+    /// Expected workspace revision.
+    #[prost(uint64, tag = "1")]
+    pub workspace_revision: u64,
+    /// Durable lifetime mode.
+    #[prost(enumeration = "EngineLifetimeMode", tag = "2")]
+    pub lifetime_mode: i32,
+    /// Whether per-user OS-session autostart is enabled.
+    #[prost(bool, tag = "3")]
+    pub autostart_enabled: bool,
+    /// Explicit permission for background provider sessions.
+    #[prost(bool, tag = "4")]
+    pub markets_live_permitted: bool,
+}
+
+/// Requests one bounded engine lifecycle/resource status snapshot.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct GetEngineStatus {}
+
+/// Bounded resident-engine process and resource diagnostics.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct EngineStatus {
+    /// Operating-system process identifier.
+    #[prost(uint32, tag = "1")]
+    pub process_id: u32,
+    /// Durable user-selected lifetime policy.
+    #[prost(enumeration = "EngineLifetimeMode", tag = "2")]
+    pub lifetime_mode: i32,
+    /// Current operational resource mode.
+    #[prost(enumeration = "ResourceMode", tag = "3")]
+    pub resource_mode: i32,
+    /// Number of attached desktop client identities.
+    #[prost(uint32, tag = "4")]
+    pub connected_desktop_clients: u32,
+    /// Current provider states, bounded by registered providers.
+    #[prost(message, repeated, tag = "5")]
+    pub providers: Vec<ProviderState>,
+    /// Number of canonical series retained in memory.
+    #[prost(uint32, tag = "6")]
+    pub retained_series: u32,
+    /// Number of canonical bars retained in memory.
+    #[prost(uint64, tag = "7")]
+    pub retained_bars: u64,
+    /// Approximate canonical-series heap bytes.
+    #[prost(uint64, tag = "8")]
+    pub approximate_series_bytes: u64,
+    /// Current process shutdown state.
+    #[prost(enumeration = "EngineShutdownState", tag = "9")]
+    pub shutdown_state: i32,
+    /// Whether per-user OS-session autostart is enabled.
+    #[prost(bool, tag = "10")]
+    pub autostart_enabled: bool,
+    /// Whether unattended provider retention is explicitly permitted.
+    #[prost(bool, tag = "11")]
+    pub markets_live_permitted: bool,
+}
+
 /// Authoritative state of one consumer generation.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct SeriesState {
@@ -781,7 +919,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -893,5 +1031,14 @@ pub mod envelope {
         /// Completed provider-instrument selection. Tag 48.
         #[prost(message, tag = "48")]
         ProviderInstrumentSelection(super::ProviderInstrumentSelection),
+        /// Durable lifecycle preference mutation. Tag 49.
+        #[prost(message, tag = "49")]
+        SetEngineLifecycle(super::SetEngineLifecycle),
+        /// Engine status request. Tag 50.
+        #[prost(message, tag = "50")]
+        GetEngineStatus(super::GetEngineStatus),
+        /// Engine status snapshot. Tag 51.
+        #[prost(message, tag = "51")]
+        EngineStatus(super::EngineStatus),
     }
 }
