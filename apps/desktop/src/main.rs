@@ -29,11 +29,11 @@ use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Hsla, KeyBinding,
-    KeyDownEvent, MouseButton, Render, Task, WeakEntity, Window, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, rgb, size,
+    KeyDownEvent, MouseButton, Orientation, Render, Role, Stateful, Task, WeakEntity, Window,
+    WindowBounds, WindowControlArea, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, StyledExt, TitleBar,
+    ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
     button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
@@ -129,6 +129,9 @@ const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
+const WORKSPACE_TAB_WIDTH: f32 = 132.0;
+const WORKSPACE_TAB_GAP: f32 = 2.0;
+const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
 
@@ -225,7 +228,17 @@ impl DesktopLifecycle {
 
 actions!(
     axiusflow,
-    [MinimizeWindow, ZoomWindow, ToggleFullscreen, CloseWindow]
+    [
+        MinimizeWindow,
+        ZoomWindow,
+        ToggleFullscreen,
+        CloseWindow,
+        SelectNextWorkspace,
+        SelectPreviousWorkspace,
+        MoveWorkspaceLeft,
+        MoveWorkspaceRight,
+        CloseWorkspace,
+    ]
 );
 
 static COINBASE_INTERVALS: &[ChartInterval] = &[
@@ -2903,22 +2916,52 @@ fn terminal_header(
         .child(controls)
 }
 
-fn workspace_title_bar(
-    terminal: &Entity<TerminalApp>,
-    workspaces: &[WorkspaceTab],
+#[derive(Clone, Copy)]
+struct WorkspaceTabBarState<'a> {
+    workspaces: &'a [WorkspaceTab],
     active: usize,
     enabled: bool,
-    error: Option<&str>,
-    theme: &AxiusflowTheme,
+    error: Option<&'a str>,
+    workspace_drag: Option<WorkspaceDragState>,
+    theme: AxiusflowTheme,
+}
+
+fn workspace_title_bar(
+    terminal: &Entity<TerminalApp>,
+    state: &WorkspaceTabBarState<'_>,
+    window: &Window,
 ) -> impl IntoElement + use<> {
-    let tabs = workspace_tab_strip(terminal, workspaces, active, enabled, error, theme);
-    TitleBar::new()
+    let tabs = workspace_tab_strip(terminal, state);
+    let theme = state.theme;
+    let drag_region = || {
+        div()
+            .id("workspace_window_drag_region")
+            .h_full()
+            .min_w(px(12.0))
+            .flex_1()
+            .window_control_area(WindowControlArea::Drag)
+            .when(!cfg!(target_os = "windows"), |region| {
+                region
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_move();
+                    })
+                    .on_click(|event, window, _| {
+                        if event.click_count() > 1 {
+                            window.zoom_window();
+                        }
+                    })
+            })
+    };
+    div()
         .w_full()
         .h(px(WORKSPACE_TITLE_BAR_HEIGHT))
-        .pl_0()
+        .flex_none()
+        .flex()
+        .items_center()
         .border_b_1()
         .border_color(gpui_color(theme.colors.muted_border))
-        .bg(gpui_color(theme.colors.muted))
+        .bg(gpui_color(theme.colors.background))
+        .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
         .child(
             div()
                 .h_full()
@@ -2927,10 +2970,117 @@ fn workspace_title_bar(
                 .flex()
                 .items_center()
                 .overflow_x_hidden()
-                .child(div().flex_none().pl_4().pr_2().text_sm().child("Axiusflow"))
+                .child(
+                    div()
+                        .h_full()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .pl_4()
+                        .pr_2()
+                        .text_sm()
+                        .window_control_area(WindowControlArea::Drag)
+                        .child("Axiusflow"),
+                )
                 .child(tabs)
-                .child(div().h_full().min_w(px(12.0)).flex_1()),
+                .child(drag_region()),
         )
+        .child(workspace_window_controls(terminal, window, &theme))
+}
+
+fn workspace_caption_control(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    area: WindowControlArea,
+    close: bool,
+    theme: &AxiusflowTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .w(px(46.0))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(gpui_color(colors.foreground))
+        .window_control_area(area)
+        .role(Role::Button)
+        .aria_label(label)
+        .tab_index(isize::MAX)
+        .hover(move |control| {
+            if close {
+                control
+                    .bg(gpui_color(colors.destructive))
+                    .text_color(gpui_color(colors.primary_foreground))
+            } else {
+                control.bg(gpui_color(colors.accent))
+            }
+        })
+        .focus_visible(move |control| control.border_2().border_color(gpui_color(colors.primary)))
+        .child(Icon::new(icon).small())
+}
+
+fn workspace_window_controls(
+    terminal: &Entity<TerminalApp>,
+    window: &Window,
+    theme: &AxiusflowTheme,
+) -> Div {
+    if cfg!(target_os = "macos") {
+        return div().h_full();
+    }
+    let supported = window.window_controls();
+    let minimize = workspace_caption_control(
+        "workspace_window_minimize",
+        IconName::WindowMinimize,
+        "Minimize window",
+        WindowControlArea::Min,
+        false,
+        theme,
+    )
+    .on_click(|_, window, _| window.minimize_window());
+    let maximize = workspace_caption_control(
+        "workspace_window_maximize",
+        if window.is_maximized() {
+            IconName::WindowRestore
+        } else {
+            IconName::WindowMaximize
+        },
+        if window.is_maximized() {
+            "Restore window"
+        } else {
+            "Maximize window"
+        },
+        WindowControlArea::Max,
+        false,
+        theme,
+    )
+    .on_click(|_, window, _| window.zoom_window());
+    let close_terminal = terminal.clone();
+    let close = workspace_caption_control(
+        "workspace_window_close",
+        IconName::WindowClose,
+        "Close window",
+        WindowControlArea::Close,
+        true,
+        theme,
+    )
+    .on_click(move |_, window, cx| {
+        close_terminal.update(cx, |terminal, cx| {
+            terminal.retire_workspaces(cx);
+            window.remove_window();
+        });
+    });
+    div()
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .children(supported.minimize.then_some(minimize))
+        .children(supported.maximize.then_some(maximize))
+        .child(close)
 }
 
 fn header_controls(
@@ -3936,6 +4086,15 @@ struct WorkspaceTab {
     id: u64,
     label: String,
     surface: Entity<WorkspaceSurface>,
+    focus: FocusHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WorkspaceDragState {
+    tab_id: u64,
+    cursor_offset_x: f32,
+    pointer_x: Option<f32>,
+    strip_left: f32,
 }
 
 struct TerminalApp {
@@ -3950,33 +4109,82 @@ struct TerminalApp {
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     workspace_error: Option<String>,
     next_workspace_id: u64,
+    workspace_drag: Option<WorkspaceDragState>,
 }
 
 fn workspace_switch(active: usize, next: usize, workspace_count: usize) -> Option<(usize, usize)> {
     (next != active && next < workspace_count).then_some((active, next))
 }
 
+fn wrapped_workspace_index(
+    current: usize,
+    workspace_count: usize,
+    direction: isize,
+) -> Option<usize> {
+    if workspace_count == 0 || current >= workspace_count {
+        return None;
+    }
+    match direction.cmp(&0) {
+        std::cmp::Ordering::Less => Some(if current == 0 {
+            workspace_count - 1
+        } else {
+            current - 1
+        }),
+        std::cmp::Ordering::Equal => Some(current),
+        std::cmp::Ordering::Greater => Some((current + 1) % workspace_count),
+    }
+}
+
 fn workspace_label(index: usize) -> String {
     format!("Workspace {}", index + 1)
 }
 
-fn reorder_workspace_ids(ids: &mut Vec<u64>, dragged_id: u64, target_id: u64) -> bool {
+fn reorder_workspace_ids(ids: &mut Vec<u64>, dragged_id: u64, destination_index: usize) -> bool {
     let Some(from) = ids.iter().position(|id| *id == dragged_id) else {
         return false;
     };
-    let Some(target) = ids.iter().position(|id| *id == target_id) else {
-        return false;
-    };
-    if from == target {
+    if from == destination_index {
         return false;
     }
-    let moving_right = from < target;
     let dragged = ids.remove(from);
-    let Some(target) = ids.iter().position(|id| *id == target_id) else {
-        return false;
-    };
-    ids.insert(if moving_right { target + 1 } else { target }, dragged);
-    true
+    let insertion_index = destination_index.min(ids.len());
+    ids.insert(insertion_index, dragged);
+    insertion_index != from
+}
+
+fn workspace_drag_destination(
+    pointer_x: f32,
+    strip_left: f32,
+    cursor_offset_x: f32,
+    workspace_count: usize,
+) -> Option<usize> {
+    let last = workspace_count.checked_sub(1)?;
+    let stride = WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+    let dragged_left = pointer_x - cursor_offset_x - strip_left - WORKSPACE_TAB_STRIP_PADDING_LEFT;
+    if !dragged_left.is_finite() {
+        return None;
+    }
+    let mut destination = 0;
+    let mut boundary = stride / 2.0;
+    while destination < last && dragged_left >= boundary {
+        destination += 1;
+        boundary += stride;
+    }
+    Some(destination)
+}
+
+fn workspace_drag_translation(
+    drag: Option<WorkspaceDragState>,
+    tab_id: u64,
+    index: usize,
+) -> Option<f32> {
+    let drag = drag.filter(|drag| drag.tab_id == tab_id)?;
+    let pointer_x = drag.pointer_x?;
+    let index_offset = (0..index).fold(0.0, |offset, _| {
+        offset + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP
+    });
+    let slot_left = drag.strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + index_offset;
+    Some(pointer_x - drag.cursor_offset_x - slot_left)
 }
 
 fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) -> Option<u64> {
@@ -3994,11 +4202,18 @@ fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) ->
 
 impl TerminalApp {
     fn new(
-        workspaces: Vec<WorkspaceTab>,
+        mut workspaces: Vec<WorkspaceTab>,
         lifecycle: DesktopLifecycle,
         workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
         cx: &mut Context<Self>,
     ) -> Self {
+        for (index, workspace) in workspaces.iter_mut().enumerate() {
+            workspace.focus = workspace
+                .focus
+                .clone()
+                .tab_index(isize::try_from(index.saturating_mul(2)).unwrap_or(isize::MAX))
+                .tab_stop(true);
+        }
         for workspace in &workspaces {
             cx.observe(&workspace.surface, |_, _, cx| cx.notify())
                 .detach();
@@ -4017,11 +4232,22 @@ impl TerminalApp {
             lifecycle,
             workspace_factory,
             workspace_error: None,
+            workspace_drag: None,
         }
     }
 
     fn active_surface(&self) -> Entity<WorkspaceSurface> {
         self.workspaces[self.active].surface.clone()
+    }
+
+    fn refresh_workspace_focus_order(&mut self) {
+        for (index, workspace) in self.workspaces.iter_mut().enumerate() {
+            workspace.focus = workspace
+                .focus
+                .clone()
+                .tab_index(isize::try_from(index.saturating_mul(2)).unwrap_or(isize::MAX))
+                .tab_stop(true);
+        }
     }
 
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
@@ -4040,15 +4266,119 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn reorder_workspace(&mut self, dragged_id: u64, target_id: u64, cx: &mut Context<Self>) {
+    fn select_workspace_id(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == tab_id)
+        {
+            self.select_workspace(index, cx);
+        }
+    }
+
+    fn select_and_focus_workspace(
+        &mut self,
+        next: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if next >= self.workspaces.len() {
+            return;
+        }
+        self.select_workspace(next, cx);
+        self.workspaces[next].focus.focus(window, cx);
+    }
+
+    fn select_relative_workspace(
+        &mut self,
+        current: usize,
+        direction: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(next) = wrapped_workspace_index(current, self.workspaces.len(), direction) {
+            self.select_and_focus_workspace(next, window, cx);
+        }
+    }
+
+    fn select_next_workspace(
+        &mut self,
+        _: &SelectNextWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_relative_workspace(self.active, 1, window, cx);
+    }
+
+    fn select_previous_workspace(
+        &mut self,
+        _: &SelectPreviousWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_relative_workspace(self.active, -1, window, cx);
+    }
+
+    fn move_active_workspace(
+        &mut self,
+        direction: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(destination) = self.active.checked_add_signed(direction) else {
+            return;
+        };
+        if destination >= self.workspaces.len() {
+            return;
+        }
+        let active_id = self.workspaces[self.active].id;
+        if self.reorder_workspace(active_id, destination, cx) {
+            self.workspaces[self.active].focus.focus(window, cx);
+        }
+    }
+
+    fn move_workspace_left(
+        &mut self,
+        _: &MoveWorkspaceLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_workspace(-1, window, cx);
+    }
+
+    fn move_workspace_right(
+        &mut self,
+        _: &MoveWorkspaceRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_workspace(1, window, cx);
+    }
+
+    fn close_active_workspace(
+        &mut self,
+        _: &CloseWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = self.workspaces[self.active].id;
+        self.close_workspace(tab_id, window, cx);
+    }
+
+    fn reorder_workspace(
+        &mut self,
+        dragged_id: u64,
+        destination_index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let active_id = self.workspaces[self.active].id;
         let mut ids = self
             .workspaces
             .iter()
             .map(|workspace| workspace.id)
             .collect::<Vec<_>>();
-        if !reorder_workspace_ids(&mut ids, dragged_id, target_id) {
-            return;
+        if !reorder_workspace_ids(&mut ids, dragged_id, destination_index) {
+            return false;
         }
         self.workspaces.sort_by_key(|workspace| {
             ids.iter()
@@ -4060,7 +4390,65 @@ impl TerminalApp {
             .iter()
             .position(|workspace| workspace.id == active_id)
             .unwrap_or(0);
+        self.refresh_workspace_focus_order();
         cx.notify();
+        true
+    }
+
+    fn begin_workspace_drag(&mut self, tab_id: u64, cursor_offset_x: f32, cx: &mut Context<Self>) {
+        if self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == tab_id)
+        {
+            self.workspace_drag = Some(WorkspaceDragState {
+                tab_id,
+                cursor_offset_x: if cursor_offset_x.is_finite() {
+                    cursor_offset_x.clamp(0.0, WORKSPACE_TAB_WIDTH)
+                } else {
+                    WORKSPACE_TAB_WIDTH / 2.0
+                },
+                pointer_x: None,
+                strip_left: 0.0,
+            });
+            cx.notify();
+        }
+    }
+
+    fn move_workspace_drag(
+        &mut self,
+        tab_id: u64,
+        pointer_x: f32,
+        strip_left: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self
+            .workspace_drag
+            .as_mut()
+            .filter(|drag| drag.tab_id == tab_id)
+        else {
+            return;
+        };
+        let cursor_offset_x = drag.cursor_offset_x;
+        drag.pointer_x = Some(pointer_x);
+        drag.strip_left = strip_left;
+        let Some(destination_index) = workspace_drag_destination(
+            pointer_x,
+            strip_left,
+            cursor_offset_x,
+            self.workspaces.len(),
+        ) else {
+            return;
+        };
+        if !self.reorder_workspace(tab_id, destination_index, cx) {
+            cx.notify();
+        }
+    }
+
+    fn end_workspace_drag(&mut self, cx: &mut Context<Self>) {
+        if self.workspace_drag.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn close_workspace(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -4086,6 +4474,14 @@ impl TerminalApp {
             return;
         };
         let removed = self.workspaces.remove(index);
+        let focus_next_tab = active_id == tab_id || removed.focus.is_focused(window);
+        if self
+            .workspace_drag
+            .is_some_and(|drag| drag.tab_id == tab_id)
+        {
+            self.workspace_drag = None;
+            cx.stop_active_drag(window);
+        }
         removed.surface.update(cx, |workspace, workspace_cx| {
             workspace.set_market_visibility(false);
             workspace.retire_market_worker(workspace_cx);
@@ -4095,9 +4491,13 @@ impl TerminalApp {
             .iter()
             .position(|workspace| workspace.id == next_active_id)
             .unwrap_or(0);
+        self.refresh_workspace_focus_order();
         self.workspaces[self.active]
             .surface
             .update(cx, |workspace, _| workspace.set_market_visibility(true));
+        if focus_next_tab {
+            self.workspaces[self.active].focus.focus(window, cx);
+        }
         self.workspace_error = None;
         cx.notify();
     }
@@ -4147,7 +4547,9 @@ impl TerminalApp {
             id: self.next_workspace_id,
             label: format!("Workspace {}", self.next_workspace_id),
             surface,
+            focus: cx.focus_handle(),
         });
+        self.refresh_workspace_focus_order();
         self.next_workspace_id = self.next_workspace_id.saturating_add(1);
         self.active = self.workspaces.len() - 1;
         self.workspace_error = None;
@@ -4184,6 +4586,12 @@ impl TerminalApp {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_drag.is_some() && event.keystroke.key.as_str() == "escape" {
+            cx.stop_active_drag(window);
+            self.end_workspace_drag(cx);
+            cx.stop_propagation();
+            return;
+        }
         self.active_surface().update(cx, |workspace, workspace_cx| {
             workspace.on_terminal_key_down(event, window, workspace_cx);
         });
@@ -4193,6 +4601,10 @@ impl TerminalApp {
         let window_active = window.is_window_active();
         let became_active = window_active && !self.window_active;
         self.window_active = window_active;
+        if !window_active && self.workspace_drag.is_some() {
+            cx.stop_active_drag(window);
+            self.end_workspace_drag(cx);
+        }
         if became_active {
             self.schedule_market_frame(window, cx);
         }
@@ -4293,6 +4705,9 @@ fn active_header_state(
 
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.workspace_drag.is_some() && !cx.has_active_drag() {
+            self.workspace_drag = None;
+        }
         self.track_window_activation(window, cx);
         self.schedule_market_frame(window, cx);
         let terminal = cx.entity();
@@ -4322,11 +4737,15 @@ impl Render for TerminalApp {
         let title_bar = workspace_title_bar_visible(fullscreen).then(|| {
             workspace_title_bar(
                 &terminal,
-                &self.workspaces,
-                self.active,
-                self.workspace_factory.is_some(),
-                self.workspace_error.as_deref(),
-                &self.theme,
+                &WorkspaceTabBarState {
+                    workspaces: &self.workspaces,
+                    active: self.active,
+                    enabled: self.workspace_factory.is_some(),
+                    error: self.workspace_error.as_deref(),
+                    workspace_drag: self.workspace_drag,
+                    theme: self.theme,
+                },
+                window,
             )
         });
         let header = terminal_header(
@@ -4360,10 +4779,15 @@ impl Render for TerminalApp {
             .size_full()
             .track_focus(&self.chrome_focus)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|terminal, _, _, cx| terminal.end_workspace_drag(cx)),
+            )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| {
                 WindowCommand::MaximizeOrRestore.execute(window);
             })
+            .map(|root| workspace_action_handlers(root, cx))
             .on_action(move |_: &ToggleFullscreen, window, cx| {
                 window.toggle_fullscreen();
                 fullscreen_focus.focus(window, cx);
@@ -4384,46 +4808,44 @@ impl Render for TerminalApp {
     }
 }
 
+fn workspace_action_handlers(root: Div, cx: &mut Context<TerminalApp>) -> Div {
+    root.on_action(cx.listener(TerminalApp::select_next_workspace))
+        .on_action(cx.listener(TerminalApp::select_previous_workspace))
+        .on_action(cx.listener(TerminalApp::move_workspace_left))
+        .on_action(cx.listener(TerminalApp::move_workspace_right))
+        .on_action(cx.listener(TerminalApp::close_active_workspace))
+}
+
 #[derive(Clone)]
 struct WorkspaceTabDrag {
     tab_id: u64,
-    index: usize,
-    label: String,
-    active: bool,
-    theme: AxiusflowTheme,
 }
 
 impl Render for WorkspaceTabDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.theme.colors;
-        div()
-            .h(px(chart_chrome::CHART_CONTROL_SIZE))
-            .flex()
-            .items_center()
-            .px_3()
-            .rounded(px(f32::from(
-                chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
-            )))
-            .border_1()
-            .border_color(gpui_color(colors.primary))
-            .bg(gpui_color(if self.active {
-                colors.accent
-            } else {
-                colors.muted
-            }))
-            .text_sm()
-            .text_color(gpui_color(colors.foreground))
-            .child(self.label.clone())
+        div().size(px(1.0)).opacity(0.0)
     }
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceTabRenderState {
+    index: usize,
+    active: usize,
+    workspace_count: usize,
+    drag_enabled: bool,
+    drag_translation: Option<f32>,
+    theme: AxiusflowTheme,
 }
 
 fn workspace_tab_close_button(
     terminal: Entity<TerminalApp>,
     tab_id: u64,
+    index: usize,
+    label: &str,
     theme: &AxiusflowTheme,
-) -> impl IntoElement + use<> {
-    let hover = gpui_color(theme.colors.background);
-    let foreground = gpui_color(theme.colors.foreground);
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let key_terminal = terminal.clone();
     div()
         .id(("close_workspace", tab_id))
         .size(px(20.0))
@@ -4431,41 +4853,131 @@ fn workspace_tab_close_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .text_color(gpui_color(theme.colors.muted_foreground))
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .text_color(gpui_color(colors.muted_foreground))
         .cursor_pointer()
-        .hover(move |close| close.bg(hover).text_color(foreground))
+        .role(Role::Button)
+        .aria_label(format!("Close {label}"))
+        .tab_index(isize::try_from(index.saturating_mul(2).saturating_add(1)).unwrap_or(isize::MAX))
+        .hover(move |close| {
+            close
+                .bg(gpui_color(colors.destructive))
+                .text_color(gpui_color(colors.primary_foreground))
+        })
+        .focus_visible(move |close| close.border_2().border_color(gpui_color(colors.primary)))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             terminal.update(cx, |terminal, cx| {
                 terminal.close_workspace(tab_id, window, cx);
             });
             cx.stop_propagation();
         })
+        .on_key_down(move |event, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                key_terminal.update(cx, |terminal, cx| {
+                    terminal.close_workspace(tab_id, window, cx);
+                });
+                cx.stop_propagation();
+            }
+        })
         .child(header_icon(HugeIcon::CancelIcon01).size(px(12.0)))
+}
+
+fn handle_workspace_tab_key(
+    terminal: &Entity<TerminalApp>,
+    tab_id: u64,
+    index: usize,
+    event: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let key = event.keystroke.key.as_str();
+    if !matches!(
+        key,
+        "left" | "right" | "home" | "end" | "enter" | "space" | "delete"
+    ) {
+        return;
+    }
+    terminal.update(cx, |terminal, cx| match key {
+        "left" => terminal.select_relative_workspace(index, -1, window, cx),
+        "right" => terminal.select_relative_workspace(index, 1, window, cx),
+        "home" => terminal.select_and_focus_workspace(0, window, cx),
+        "end" => {
+            let last = terminal.workspaces.len().saturating_sub(1);
+            terminal.select_and_focus_workspace(last, window, cx);
+        }
+        "enter" | "space" => terminal.select_workspace_id(tab_id, cx),
+        "delete" => terminal.close_workspace(tab_id, window, cx),
+        _ => {}
+    });
+    cx.stop_propagation();
+}
+
+fn workspace_add_button(
+    terminal: Entity<TerminalApp>,
+    enabled: bool,
+    theme: &AxiusflowTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let key_terminal = terminal.clone();
+    div()
+        .id("add_workspace")
+        .size(px(24.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .text_color(gpui_color(if enabled {
+            colors.muted_foreground
+        } else {
+            colors.disabled_foreground
+        }))
+        .role(Role::Button)
+        .aria_label("Create workspace")
+        .tab_index(isize::MAX)
+        .tab_stop(enabled)
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(move |button| button.bg(gpui_color(colors.accent)))
+                .focus_visible(move |button| {
+                    button.border_2().border_color(gpui_color(colors.primary))
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
+                    cx.stop_propagation();
+                })
+                .on_key_down(move |event, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        key_terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
+                        cx.stop_propagation();
+                    }
+                })
+        })
+        .child(header_icon(HugeIcon::AddIcon01).size(px(13.0)))
 }
 
 fn workspace_tab(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
-    index: usize,
-    active: usize,
-    drag_enabled: bool,
-    theme: &AxiusflowTheme,
+    state: &WorkspaceTabRenderState,
 ) -> AnyElement {
+    let index = state.index;
+    let drag_enabled = state.drag_enabled;
+    let theme = state.theme;
     let colors = theme.colors;
     let tab_id = workspace.id;
-    let selected = index == active;
+    let selected = index == state.active;
     let select_terminal = terminal.clone();
-    let drop_terminal = terminal.clone();
-    let drag = WorkspaceTabDrag {
-        tab_id,
-        index,
-        label: workspace.label.clone(),
-        active: selected,
-        theme: *theme,
-    };
+    let key_terminal = terminal.clone();
+    let middle_click_terminal = terminal.clone();
+    let drag_terminal = terminal.clone();
+    let drag = WorkspaceTabDrag { tab_id };
+    let tab_focus = workspace.focus.clone();
+    let mouse_focus = workspace.focus.clone();
     div()
         .id(("workspace_tab", tab_id))
+        .w(px(WORKSPACE_TAB_WIDTH))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .flex_none()
         .flex()
@@ -4480,12 +4992,12 @@ fn workspace_tab(
         .border_color(gpui_color(if selected {
             colors.border
         } else {
-            colors.muted
+            colors.background
         }))
         .bg(gpui_color(if selected {
             colors.accent
         } else {
-            colors.muted
+            colors.background
         }))
         .text_sm()
         .text_color(gpui_color(if selected {
@@ -4493,88 +5005,130 @@ fn workspace_tab(
         } else {
             colors.muted_foreground
         }))
+        .track_focus(&tab_focus)
+        .role(Role::Tab)
+        .aria_label(workspace.label.clone())
+        .aria_selected(selected)
+        .aria_position_in_set(index + 1)
+        .aria_size_of_set(state.workspace_count)
         .cursor_pointer()
+        .when_some(state.drag_translation, |tab, translation| {
+            tab.relative().left(px(translation)).shadow_md()
+        })
         .hover(move |tab| {
             tab.bg(gpui_color(colors.accent))
                 .text_color(gpui_color(colors.foreground))
         })
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+        .focus_visible(move |tab| tab.border_color(gpui_color(colors.primary)).border_2())
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            mouse_focus.focus(window, cx);
             select_terminal.update(cx, |terminal, cx| {
-                terminal.select_workspace(index, cx);
+                terminal.select_workspace_id(tab_id, cx);
             });
         })
+        .on_aux_click(move |event, window, cx| {
+            if event.is_middle_click() {
+                middle_click_terminal.update(cx, |terminal, cx| {
+                    terminal.close_workspace(tab_id, window, cx);
+                });
+                cx.stop_propagation();
+            }
+        })
+        .on_key_down(move |event, window, cx| {
+            handle_workspace_tab_key(&key_terminal, tab_id, index, event, window, cx);
+        })
         .when(drag_enabled, |tab| {
-            tab.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-                .drag_over::<WorkspaceTabDrag>(move |tab, dragged, _, _| {
-                    let tab = tab
-                        .bg(gpui_color(colors.muted))
-                        .border_color(gpui_color(colors.primary));
-                    match index.cmp(&dragged.index) {
-                        std::cmp::Ordering::Less => tab.border_l_2(),
-                        std::cmp::Ordering::Greater => tab.border_r_2(),
-                        std::cmp::Ordering::Equal => tab,
-                    }
-                })
-                .on_drop(move |dragged: &WorkspaceTabDrag, _, cx| {
-                    drop_terminal.update(cx, |terminal, cx| {
-                        terminal.reorder_workspace(dragged.tab_id, tab_id, cx);
-                    });
-                })
+            tab.on_drag(drag, move |drag, cursor_offset, _, cx| {
+                drag_terminal.update(cx, |terminal, cx| {
+                    terminal.begin_workspace_drag(drag.tab_id, f32::from(cursor_offset.x), cx);
+                });
+                cx.new(|_| drag.clone())
+            })
         })
         .child(workspace.label.clone())
-        .child(workspace_tab_close_button(terminal.clone(), tab_id, theme))
+        .child(workspace_tab_close_button(
+            terminal.clone(),
+            tab_id,
+            index,
+            &workspace.label,
+            &theme,
+        ))
         .into_any_element()
 }
 
 fn workspace_tab_strip(
     terminal: &Entity<TerminalApp>,
-    workspaces: &[WorkspaceTab],
-    active: usize,
-    enabled: bool,
-    error: Option<&str>,
-    theme: &AxiusflowTheme,
+    state: &WorkspaceTabBarState<'_>,
 ) -> impl IntoElement + use<> {
+    let workspaces = state.workspaces;
+    let enabled = state.enabled;
+    let theme = state.theme;
     let colors = theme.colors;
     let tabs = workspaces.iter().enumerate().map(|(index, workspace)| {
-        workspace_tab(terminal, workspace, index, active, enabled, theme)
+        workspace_tab(
+            terminal,
+            workspace,
+            &WorkspaceTabRenderState {
+                index,
+                active: state.active,
+                workspace_count: workspaces.len(),
+                drag_enabled: enabled,
+                drag_translation: workspace_drag_translation(
+                    state.workspace_drag,
+                    workspace.id,
+                    index,
+                ),
+                theme,
+            },
+        )
     });
     let add_terminal = terminal.clone();
+    let move_terminal = terminal.clone();
+    let end_terminal = terminal.clone();
     let add_enabled = enabled && workspaces.len() < MAXIMUM_OPEN_WORKSPACES;
     div()
+        .id("workspace_tab_list")
         .h_full()
         .min_w_0()
+        .flex_none()
         .flex()
         .items_center()
         .gap_0p5()
         .pl_2()
         .overflow_x_hidden()
+        .role(Role::TabList)
+        .aria_label("Workspaces")
+        .aria_orientation(Orientation::Horizontal)
+        .tab_group()
+        .on_drag_move::<WorkspaceTabDrag>(move |event, _, cx| {
+            let tab_id = event.drag(cx).tab_id;
+            move_terminal.update(cx, |terminal, cx| {
+                terminal.move_workspace_drag(
+                    tab_id,
+                    f32::from(event.event.position.x),
+                    f32::from(event.bounds.left()),
+                    cx,
+                );
+            });
+        })
+        .on_drop(move |_: &WorkspaceTabDrag, _, cx| {
+            end_terminal.update(cx, TerminalApp::end_workspace_drag);
+        })
         .children(enabled.then_some(tabs).into_iter().flatten())
         .children(enabled.then(|| {
             chrome_tooltip(
                 "add_workspace",
                 "Create workspace",
-                button_activation(
-                    chrome_button_style(
-                        Button::new("add_workspace")
-                            .icon(header_icon(HugeIcon::AddIcon01))
-                            .compact()
-                            .border_0()
-                            .disabled(!add_enabled)
-                            .when(add_enabled, Button::cursor_pointer),
-                        theme,
-                        false,
-                        add_enabled,
-                    ),
-                    add_enabled,
-                    move |window, cx| {
-                        add_terminal.update(cx, |terminal, cx| {
-                            terminal.add_workspace(window, cx);
-                        });
-                    },
-                ),
+                workspace_add_button(add_terminal, add_enabled, &theme),
             )
         }))
-        .children(error.map(|error| {
+        .children(enabled.then(|| {
+            div()
+                .id("workspace_tab_drop_target")
+                .h(px(chart_chrome::CHART_CONTROL_SIZE))
+                .min_w(px(16.0))
+        }))
+        .children(state.error.map(|error| {
             chrome_tooltip(
                 "workspace_creation_error",
                 error.to_string(),
@@ -4599,6 +5153,7 @@ fn terminal_root(
             id: 1,
             label: workspace_label(0),
             surface,
+            focus: cx.focus_handle(),
         }],
         None,
         lifecycle,
@@ -4645,6 +5200,7 @@ fn workspace_tabs_root(
             id: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
             label: workspace_label(index),
             surface: workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx),
+            focus: cx.focus_handle(),
         })
         .collect::<Vec<_>>();
     terminal_shell_root(workspaces, Some(workspace_factory), lifecycle, window, cx)
@@ -4778,6 +5334,11 @@ fn main() {
                 KeyBinding::new("alt-f9", MinimizeWindow, None),
                 KeyBinding::new("alt-f10", ZoomWindow, None),
                 KeyBinding::new("alt-f4", CloseWindow, None),
+                KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
+                KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
+                KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
+                KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
+                KeyBinding::new("ctrl-w", CloseWorkspace, None),
             ]);
             sync_component_theme(&AxiusflowTheme::dark(), None, cx);
             let quit_lifecycle = lifecycle.clone();
@@ -4836,14 +5397,16 @@ mod tests {
         CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState,
         DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand, RithmicReadyAction,
         RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
-        TerminalProvider, WindowCommand, active_workspace_after_close, bounded_status_detail,
+        TerminalProvider, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH,
+        WindowCommand, WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
         catalog_rejection_domain, chart_status_detail, chart_surface_notice,
         chrome_control_foreground, connection_presentation, default_rithmic_contract_index,
         finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
         publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
         reorder_workspace_ids, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop, split_lifetime_mode, workspace_label, workspace_switch,
-        workspace_title_bar_visible,
+        should_apply_rithmic_worker_stop, split_lifetime_mode, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_switch, workspace_title_bar_visible,
+        wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -4936,6 +5499,11 @@ mod tests {
         assert_eq!(workspace_switch(0, 1, 2), Some((0, 1)));
         assert_eq!(workspace_switch(1, 1, 2), None);
         assert_eq!(workspace_switch(0, 2, 2), None);
+        assert_eq!(wrapped_workspace_index(0, 3, -1), Some(2));
+        assert_eq!(wrapped_workspace_index(2, 3, 1), Some(0));
+        assert_eq!(wrapped_workspace_index(1, 3, -1), Some(0));
+        assert_eq!(wrapped_workspace_index(1, 3, 1), Some(2));
+        assert_eq!(wrapped_workspace_index(0, 0, 1), None);
         assert_eq!(workspace_label(0), "Workspace 1");
         assert_eq!(workspace_label(7), "Workspace 8");
     }
@@ -4943,16 +5511,75 @@ mod tests {
     #[test]
     fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
         let mut ids = vec![1, 2, 3];
-        assert!(reorder_workspace_ids(&mut ids, 1, 3));
-        assert_eq!(ids, vec![2, 3, 1]);
         assert!(reorder_workspace_ids(&mut ids, 1, 2));
+        assert_eq!(ids, vec![2, 3, 1]);
+        assert!(reorder_workspace_ids(&mut ids, 1, 0));
         assert_eq!(ids, vec![1, 2, 3]);
-        assert!(!reorder_workspace_ids(&mut ids, 2, 2));
+        assert!(reorder_workspace_ids(&mut ids, 1, 1));
+        assert_eq!(ids, vec![2, 1, 3]);
+        assert!(reorder_workspace_ids(&mut ids, 1, 0));
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(reorder_workspace_ids(&mut ids, 3, 0));
+        assert_eq!(ids, vec![3, 1, 2]);
+        let trailing_index = ids.len();
+        assert!(reorder_workspace_ids(&mut ids, 3, trailing_index));
+        assert_eq!(ids, vec![1, 2, 3]);
+        let trailing_index = ids.len();
+        assert!(!reorder_workspace_ids(&mut ids, 3, trailing_index));
+        assert!(!reorder_workspace_ids(&mut ids, 2, 1));
+        assert!(!reorder_workspace_ids(&mut ids, 99, 0));
 
         assert_eq!(active_workspace_after_close(&ids, 2, 1), Some(2));
         assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
         assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
         assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
+    }
+
+    #[test]
+    fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
+        let strip_left = 100.0;
+        let cursor_offset = WORKSPACE_TAB_WIDTH / 2.0;
+        let first_center = strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + cursor_offset;
+        let second_center = first_center + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+        let third_center = second_center + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+
+        assert_eq!(
+            workspace_drag_destination(first_center, strip_left, cursor_offset, 3),
+            Some(0)
+        );
+        assert_eq!(
+            workspace_drag_destination(second_center, strip_left, cursor_offset, 3),
+            Some(1)
+        );
+        assert_eq!(
+            workspace_drag_destination(third_center, strip_left, cursor_offset, 3),
+            Some(2)
+        );
+        assert_eq!(
+            workspace_drag_destination(strip_left - 500.0, strip_left, cursor_offset, 3),
+            Some(0)
+        );
+        assert_eq!(
+            workspace_drag_destination(third_center + 500.0, strip_left, cursor_offset, 3),
+            Some(2)
+        );
+        assert_eq!(
+            workspace_drag_destination(first_center, strip_left, cursor_offset, 0),
+            None
+        );
+        assert_eq!(
+            workspace_drag_destination(f32::NAN, strip_left, cursor_offset, 3),
+            None
+        );
+
+        let drag = WorkspaceDragState {
+            tab_id: 7,
+            cursor_offset_x: cursor_offset,
+            pointer_x: Some(second_center + 10.0),
+            strip_left,
+        };
+        assert_eq!(workspace_drag_translation(Some(drag), 7, 1), Some(10.0));
+        assert_eq!(workspace_drag_translation(Some(drag), 8, 1), None);
     }
 
     #[test]
