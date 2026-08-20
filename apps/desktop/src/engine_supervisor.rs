@@ -180,7 +180,17 @@ impl EngineSupervisor {
         match self.client.poll_market_event(consumer_id) {
             Ok(event) => {
                 if let Some(event) = &event {
-                    self.complete_catalog_command(consumer_id, event);
+                    if !self.complete_catalog_command(consumer_id, event) {
+                        return Ok(SupervisedPoll {
+                            event: None,
+                            reconnected: false,
+                        });
+                    }
+                    if let envelope::Payload::ProviderInstrumentSelection(selection) = event
+                        && let Some(instrument) = selection.instrument.clone()
+                    {
+                        self.record_provider_instrument(instrument);
+                    }
                 }
                 Ok(SupervisedPoll {
                     event,
@@ -222,42 +232,51 @@ impl EngineSupervisor {
             .ok_or_else(|| "desktop engine consumer is not registered".to_string())
     }
 
-    fn complete_catalog_command(&mut self, consumer_id: u64, event: &envelope::Payload) {
+    fn complete_catalog_command(&mut self, consumer_id: u64, event: &envelope::Payload) -> bool {
         let Some(consumer) = self.consumers.get_mut(&consumer_id) else {
-            return;
+            return false;
         };
         match event {
             envelope::Payload::ProviderInstrumentSearchResult(result) => {
-                if consumer
-                    .pending_search
-                    .as_ref()
-                    .is_some_and(|request| request.search_generation == result.search_generation)
-                {
+                let current = consumer.pending_search.as_ref().is_some_and(|request| {
+                    request.provider == result.provider
+                        && request.search_generation == result.search_generation
+                });
+                if current {
                     consumer.pending_search = None;
                 }
+                current
             }
             envelope::Payload::ProviderInstrumentSelection(selection) => {
-                if consumer.pending_selection.as_ref().is_some_and(|request| {
+                let current = consumer.pending_selection.as_ref().is_some_and(|request| {
                     selection.instrument.as_ref().is_some_and(|instrument| {
-                        request.selection_generation == instrument.selection_generation
+                        request.provider == instrument.provider
+                            && request.selection_generation == instrument.selection_generation
                     })
-                }) {
+                });
+                if current {
                     consumer.pending_selection = None;
                 }
+                current
             }
             envelope::Payload::ProviderCatalogRejected(rejection) => {
-                if consumer.pending_search.as_ref().is_some_and(|request| {
-                    request.search_generation == rejection.command_generation
-                }) {
+                let search = consumer.pending_search.as_ref().is_some_and(|request| {
+                    request.provider == rejection.provider
+                        && request.search_generation == rejection.command_generation
+                });
+                let selection = consumer.pending_selection.as_ref().is_some_and(|request| {
+                    request.provider == rejection.provider
+                        && request.selection_generation == rejection.command_generation
+                });
+                if search {
                     consumer.pending_search = None;
                 }
-                if consumer.pending_selection.as_ref().is_some_and(|request| {
-                    request.selection_generation == rejection.command_generation
-                }) {
+                if selection {
                     consumer.pending_selection = None;
                 }
+                search || selection
             }
-            _ => {}
+            _ => true,
         }
     }
 
@@ -271,17 +290,13 @@ impl EngineSupervisor {
             .max();
         let newer_session =
             current_session.is_none_or(|session| instrument.session_generation > session);
-        if newer_session {
+        if newer_session || provider == "rithmic" {
             self.instruments
                 .retain(|_, installed| installed.provider != provider);
             self.pending_instruments
                 .retain(|(installed_provider, _)| installed_provider != &provider);
         }
         if provider == "rithmic" {
-            self.instruments
-                .retain(|_, installed| installed.provider != provider);
-            self.pending_instruments
-                .retain(|(installed_provider, _)| installed_provider != &provider);
             for consumer in self.consumers.values_mut() {
                 let obsolete = consumer.demand.as_ref().is_some_and(|(_, series)| {
                     series.provider == provider
@@ -429,19 +444,13 @@ impl EngineSupervisor {
             client.register_consumer(self.client_id, consumer.workspace_id, *consumer_id)?;
         }
         let mut instruments = self.instruments.values().cloned().collect::<Vec<_>>();
-        instruments.sort_by(|left, right| {
+        instruments.sort_by_key(|instrument| {
             (
-                left.provider.as_str(),
-                left.session_generation,
-                left.selection_generation,
-                left.instrument_id.as_str(),
+                instrument.provider.clone(),
+                instrument.session_generation,
+                instrument.selection_generation,
+                instrument.instrument_id.clone(),
             )
-                .cmp(&(
-                    right.provider.as_str(),
-                    right.session_generation,
-                    right.selection_generation,
-                    right.instrument_id.as_str(),
-                ))
         });
         for instrument in instruments {
             client.install_provider_instrument(instrument)?;

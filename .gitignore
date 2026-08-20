@@ -4,4 +4,5 @@
 /.reference/
 /provider_kit/
 /local-data/
+/.cursor/
 __pycache__/

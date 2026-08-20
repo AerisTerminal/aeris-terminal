@@ -1,6 +1,9 @@
 use crate::{CoinbaseError, CoinbaseHistoryTransport, FixedPointValue, PublicRequestGate};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 const PAGE_SIZE: usize = 100;
 const MAXIMUM_PAGES: usize = 64;
@@ -76,6 +79,15 @@ impl<T> CoinbaseProductCatalog<T> {
                 duplicate_products_dropped: 0,
                 truncated: false,
             },
+        }
+    }
+
+    #[must_use]
+    pub fn with_transport_and_stop(transport: T, stop: Arc<AtomicBool>) -> Self {
+        Self {
+            transport,
+            gate: PublicRequestGate::new(Some(stop)),
+            diagnostics: CoinbaseCatalogDiagnostics::default(),
         }
     }
 
@@ -254,7 +266,13 @@ pub fn coinbase_instrument_id(product_id: &str) -> Result<String, CoinbaseError>
 mod tests {
     use super::{CoinbaseProductCatalog, CoinbaseSpotProduct};
     use crate::CoinbaseHistoryTransport;
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
 
     struct Pages(VecDeque<Vec<u8>>);
 
@@ -328,6 +346,33 @@ mod tests {
             .fetch_active_spot_products()
             .expect("a single rate limit rejection retries");
         assert_eq!(products.len(), 1);
+    }
+
+    #[test]
+    fn catalog_pagination_honors_cooperative_cancellation() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transport = CancellingPage {
+            stop: Arc::clone(&stop),
+            calls: Arc::clone(&calls),
+        };
+        let mut catalog = CoinbaseProductCatalog::with_transport_and_stop(transport, stop);
+
+        assert!(catalog.fetch_active_spot_products().is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+
+    struct CancellingPage {
+        stop: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CoinbaseHistoryTransport for CancellingPage {
+        fn get(&mut self, _path: &str) -> Result<Vec<u8>, String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.stop.store(true, Ordering::Release);
+            Ok(br#"{"products":[],"has_next":true,"cursor":"next"}"#.to_vec())
+        }
     }
 
     struct FailingThenOk(VecDeque<Vec<u8>>);

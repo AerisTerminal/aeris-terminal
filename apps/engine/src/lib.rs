@@ -1,5 +1,6 @@
 //! Resident engine process boundary and authenticated local sessions.
 
+mod coinbase_catalog;
 mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;

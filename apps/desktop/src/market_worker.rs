@@ -12,7 +12,8 @@ use axiusflow_application::{
 };
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
+    ProviderCatalogRejectionReason, ProviderInstrumentSearchResult, SearchProviderInstruments,
+    SelectProviderInstrument, envelope,
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::DomFrame;
@@ -118,6 +119,74 @@ pub enum ProviderCatalogEvent {
     },
 }
 
+#[must_use]
+pub fn classify_provider_catalog_event(
+    event: envelope::Payload,
+    provider: &str,
+    consumer_id: u64,
+) -> (Option<ProviderCatalogEvent>, Option<envelope::Payload>) {
+    match event {
+        envelope::Payload::ProviderInstrumentSearchResult(result)
+            if result.provider == provider =>
+        {
+            if result.consumer_id == consumer_id {
+                (Some(ProviderCatalogEvent::SearchCompleted(result)), None)
+            } else {
+                (None, None)
+            }
+        }
+        envelope::Payload::ProviderInstrumentSelection(selection) => {
+            let Some(instrument) = selection.instrument else {
+                return (None, None);
+            };
+            if instrument.provider != provider {
+                return (
+                    None,
+                    Some(envelope::Payload::ProviderInstrumentSelection(
+                        axiusflow_engine_protocol::ProviderInstrumentSelection {
+                            consumer_id: selection.consumer_id,
+                            instrument: Some(instrument),
+                        },
+                    )),
+                );
+            }
+            if selection.consumer_id == consumer_id {
+                (
+                    Some(ProviderCatalogEvent::SelectionInstalled(instrument)),
+                    None,
+                )
+            } else {
+                (None, None)
+            }
+        }
+        envelope::Payload::ProviderCatalogRejected(rejection) if rejection.provider == provider => {
+            if rejection.consumer_id == consumer_id {
+                (
+                    Some(ProviderCatalogEvent::CommandRejected {
+                        command: provider_catalog_command(rejection.reason),
+                        rejection,
+                    }),
+                    None,
+                )
+            } else {
+                (None, None)
+            }
+        }
+        event => (None, Some(event)),
+    }
+}
+
+#[must_use]
+pub const fn provider_catalog_command(reason: i32) -> ProviderCatalogCommand {
+    if reason == ProviderCatalogRejectionReason::SearchRejected as i32
+        || reason == ProviderCatalogRejectionReason::SupersededSearch as i32
+    {
+        ProviderCatalogCommand::Search
+    } else {
+        ProviderCatalogCommand::Selection
+    }
+}
+
 pub struct MarketWorkerPublication {
     pub update: ReplayStreamUpdate,
     pub generation: MarketPublicationGeneration,
@@ -207,7 +276,6 @@ pub enum MarketWorkerMessage {
     CoinbaseSwitchMarker {
         sequence: u64,
     },
-    CoinbaseCatalog(Result<Vec<InstallProviderInstrument>, String>),
     CoinbaseDom(DomFrame),
     ChartViewport {
         start_unix_nanos: i64,
@@ -404,12 +472,9 @@ impl MarketWorkerSender {
             return;
         }
         if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue.iter().position(|queued| {
-                matches!(
-                    queued,
-                    MarketWorkerMessage::Diagnostics(_)
-                )
-            })
+            && let Some(index) = queue
+                .iter()
+                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
         {
             queue.remove(index);
         }
@@ -437,12 +502,9 @@ impl MarketWorkerSender {
             return;
         }
         if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue.iter().position(|queued| {
-                matches!(
-                    queued,
-                    MarketWorkerMessage::Diagnostics(_)
-                )
-            })
+            && let Some(index) = queue
+                .iter()
+                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
         {
             queue.remove(index);
         }
@@ -476,12 +538,9 @@ impl MarketWorkerSender {
             return;
         }
         if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue.iter().position(|queued| {
-                matches!(
-                    queued,
-                    MarketWorkerMessage::Diagnostics(_)
-                )
-            })
+            && let Some(index) = queue
+                .iter()
+                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
         {
             queue.remove(index);
         }
@@ -515,12 +574,9 @@ impl MarketWorkerSender {
             return;
         }
         if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue.iter().position(|queued| {
-                matches!(
-                    queued,
-                    MarketWorkerMessage::Diagnostics(_)
-                )
-            })
+            && let Some(index) = queue
+                .iter()
+                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
         {
             queue.remove(index);
         }
@@ -764,7 +820,6 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<NonZe
         | MarketWorkerMessage::RithmicLive { .. }
         | MarketWorkerMessage::RithmicDom(_)
         | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
-        | MarketWorkerMessage::CoinbaseCatalog(_)
         | MarketWorkerMessage::CoinbaseDom(_)
         | MarketWorkerMessage::ChartViewport { .. } => None,
     }
@@ -2658,8 +2713,17 @@ mod tests {
         );
         let (messages, _) = receiver.drain();
         assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], MarketWorkerMessage::State { state: ChartState::Error, .. }));
-        assert!(matches!(messages[1], MarketWorkerMessage::ProviderCatalog(_)));
+        assert!(matches!(
+            messages[0],
+            MarketWorkerMessage::State {
+                state: ChartState::Error,
+                ..
+            }
+        ));
+        assert!(matches!(
+            messages[1],
+            MarketWorkerMessage::ProviderCatalog(_)
+        ));
     }
 
     #[test]

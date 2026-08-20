@@ -588,21 +588,46 @@ impl MarketEngine {
             .verify_generation(&series.provider_id, provider_generation)?;
         self.providers
             .verify_request(&series.provider_id, ProviderRequest::HistoricalBars)?;
+        let bars = bars.into_boxed_slice();
         let snapshot = self.series.install(
             series.clone(),
             provider_generation,
             price_scale,
             quantity_scale,
-            bars,
+            &bars,
         )?;
-        self.demands
-            .matching(series)
-            .into_iter()
-            .map(|(consumer_id, generation)| {
-                self.publications
-                    .publish(consumer_id, generation, Arc::clone(&snapshot))
-            })
-            .collect()
+        self.publish_snapshot(series, &snapshot)
+    }
+
+    /// Replaces a canonical series with one validated covering image.
+    ///
+    /// Unlike ordinary history installation this permits an interior timestamp
+    /// repair and keeps consumer publication generations monotonic.
+    ///
+    /// # Errors
+    /// Returns an error for stale provider generation, precision, canonical
+    /// data, or configured capacity.
+    pub fn replace_covering_history(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: Vec<MarketBar>,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::HistoricalBars)?;
+        let bars = bars.into_boxed_slice();
+        let snapshot = self.series.replace_covering(
+            series,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            &bars,
+        )?;
+        self.publish_snapshot(series, &snapshot)
     }
 
     /// Installs validated local history before a provider session is available.
@@ -623,21 +648,15 @@ impl MarketEngine {
         if self.providers.status(&series.provider_id).is_none() {
             return Err(EngineError::UnknownProvider(series.provider_id.clone()));
         }
+        let bars = bars.into_boxed_slice();
         let snapshot = self.series.install(
             series.clone(),
             provider_generation,
             price_scale,
             quantity_scale,
-            bars,
+            &bars,
         )?;
-        self.demands
-            .matching(series)
-            .into_iter()
-            .map(|(consumer_id, generation)| {
-                self.publications
-                    .publish(consumer_id, generation, Arc::clone(&snapshot))
-            })
-            .collect()
+        self.publish_snapshot(series, &snapshot)
     }
 
     /// Installs one bounded live covering image and publishes it to matching demand.
@@ -660,20 +679,29 @@ impl MarketEngine {
             .verify_generation(&series.provider_id, provider_generation)?;
         self.providers
             .verify_request(&series.provider_id, ProviderRequest::RealtimeBars)?;
+        let bars = bars.into_boxed_slice();
         let snapshot = self.series.install_realtime(
             series.clone(),
             provider_generation,
             price_scale,
             quantity_scale,
-            bars,
+            &bars,
             forming,
         )?;
+        self.publish_snapshot(series, &snapshot)
+    }
+
+    fn publish_snapshot(
+        &mut self,
+        series: &BarSeriesKey,
+        snapshot: &Arc<SeriesSnapshot>,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
         self.demands
             .matching(series)
             .into_iter()
             .map(|(consumer_id, generation)| {
                 self.publications
-                    .publish(consumer_id, generation, Arc::clone(&snapshot))
+                    .publish(consumer_id, generation, Arc::clone(snapshot))
             })
             .collect()
     }
@@ -1355,6 +1383,30 @@ mod tests {
             .expect("revised series remains materializable");
         assert_eq!(snapshot.bars.len(), 3);
         assert_eq!(snapshot.bars[2].close, 106);
+    }
+
+    #[test]
+    fn covering_history_repair_preserves_the_current_forming_tail() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("forming bar appends");
+        let mut repaired = bars(3);
+        repaired[2].close = 107;
+        engine
+            .replace_covering_history(provider_generation(1), &btc, 2, 8, repaired)
+            .expect("covering repair installs");
+
+        let snapshot = engine
+            .series_snapshot(&btc)
+            .expect("series remains materialized");
+        assert!(snapshot.forming);
+        assert_eq!(snapshot.bars[2].close, 105);
+        assert_eq!(snapshot.publication_generation, 3);
     }
 
     #[test]

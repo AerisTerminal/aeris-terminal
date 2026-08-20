@@ -95,7 +95,13 @@ impl RithmicSymbolBrowser {
         request_id: NonZeroUsize,
         results: Vec<ProviderInstrumentSummary>,
     ) -> bool {
-        if self.pending_search_id != Some(request_id) || results.len() > MAXIMUM_SYMBOL_RESULTS {
+        let initial = request_id == NonZeroUsize::MIN && self.next_search_id == 0;
+        if self
+            .pending_search_id
+            .is_none_or(|pending| pending != request_id)
+            && !initial
+            || results.len() > MAXIMUM_SYMBOL_RESULTS
+        {
             return false;
         }
         self.pending_search_id = None;

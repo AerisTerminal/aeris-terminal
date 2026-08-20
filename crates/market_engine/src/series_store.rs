@@ -38,6 +38,7 @@ pub(crate) struct SeriesStore {
 #[derive(Clone, Copy)]
 enum InstallMode {
     History,
+    Repair,
     Realtime { forming: bool },
 }
 
@@ -57,7 +58,7 @@ impl SeriesStore {
         provider_generation: ProviderGeneration,
         price_scale: u8,
         quantity_scale: u8,
-        bars: Vec<MarketBar>,
+        bars: &[MarketBar],
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
         self.install_inner(
             series,
@@ -75,7 +76,7 @@ impl SeriesStore {
         provider_generation: ProviderGeneration,
         price_scale: u8,
         quantity_scale: u8,
-        bars: Vec<MarketBar>,
+        bars: &[MarketBar],
         forming: bool,
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
         self.install_inner(
@@ -88,53 +89,55 @@ impl SeriesStore {
         )
     }
 
+    pub(crate) fn replace_covering(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: &[MarketBar],
+    ) -> Result<Arc<SeriesSnapshot>, EngineError> {
+        self.install_inner(
+            series.clone(),
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+            InstallMode::Repair,
+        )
+    }
+
     fn install_inner(
         &mut self,
         series: BarSeriesKey,
         provider_generation: ProviderGeneration,
         price_scale: u8,
         quantity_scale: u8,
-        bars: Vec<MarketBar>,
+        bars: &[MarketBar],
         mode: InstallMode,
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
-        let (forming, realtime) = match mode {
-            InstallMode::History => (false, false),
-            InstallMode::Realtime { forming } => (forming, true),
+        let (forming, realtime, repair) = match mode {
+            InstallMode::History => (false, false, false),
+            InstallMode::Repair => (false, false, true),
+            InstallMode::Realtime { forming } => (forming, true, false),
         };
         series.validate()?;
         if price_scale > 18 || quantity_scale > 18 {
             return Err(EngineError::InvalidSeriesPrecision);
         }
-        validate_bars(&bars)?;
+        validate_bars(bars)?;
         let current = self.series.get(&series);
-        if let Some(current) = current {
-            if provider_generation < current.covering.provider_generation {
-                return Err(EngineError::StaleSeriesGeneration {
-                    current: current.covering.provider_generation,
-                    received: provider_generation,
-                });
-            }
-            if provider_generation == current.covering.provider_generation {
-                let current_snapshot = current.snapshot();
-                if current_snapshot.bars.as_ref() == bars
-                    && current_snapshot.price_scale == price_scale
-                    && current_snapshot.quantity_scale == quantity_scale
-                    && current_snapshot.forming == forming
-                {
-                    return Ok(current_snapshot);
-                }
-                if realtime {
-                    validate_realtime_transition(
-                        &current_snapshot,
-                        price_scale,
-                        quantity_scale,
-                        &bars,
-                    )?;
-                } else {
-                    validate_history_transition(&current_snapshot, &bars)?;
-                }
-            }
-        } else if self.series.len() == self.maximum_series.get() {
+        if let Some(snapshot) = Self::validate_current_install(
+            current,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+            mode,
+        )? {
+            return Ok(snapshot);
+        }
+        if current.is_none() && self.series.len() == self.maximum_series.get() {
             return Err(EngineError::SeriesLimitExceeded {
                 maximum: self.maximum_series,
             });
@@ -159,19 +162,90 @@ impl SeriesStore {
                 .ok_or(EngineError::CapacityOverflow)?,
             None => 1,
         };
-        let snapshot = Arc::new(SeriesSnapshot {
+        let retained_tail = repair
+            .then(|| current.and_then(|current| current.tail))
+            .flatten()
+            .filter(|tail| {
+                bars.len() > 1
+                    && bars.last().is_some_and(|bar| {
+                        bar.exchange_timestamp_unix_nanos == tail.bar.exchange_timestamp_unix_nanos
+                    })
+            });
+        let has_retained_tail = retained_tail.is_some();
+        let covering_bars = if has_retained_tail {
+            &bars[..bars.len() - 1]
+        } else {
+            bars
+        };
+        let covering = Arc::new(SeriesSnapshot {
             series: series.clone(),
             provider_generation,
             publication_generation,
             price_scale,
             quantity_scale,
             forming,
-            bars: bars.into(),
+            bars: covering_bars.to_vec().into(),
         });
         self.total_bars = projected;
-        let stored = stored_series(&snapshot, realtime)?;
+        let stored = if let Some(tail) = retained_tail {
+            StoredSeries {
+                covering,
+                tail: Some(SeriesTail {
+                    provider_generation,
+                    publication_generation,
+                    price_scale,
+                    quantity_scale,
+                    forming: tail.forming,
+                    bar: tail.bar,
+                }),
+            }
+        } else {
+            stored_series(&covering, realtime)?
+        };
+        let snapshot = stored.snapshot();
         self.series.insert(series, stored);
         Ok(snapshot)
+    }
+
+    fn validate_current_install(
+        current: Option<&StoredSeries>,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: &[MarketBar],
+        mode: InstallMode,
+    ) -> Result<Option<Arc<SeriesSnapshot>>, EngineError> {
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        let (forming, realtime, repair) = match mode {
+            InstallMode::History => (false, false, false),
+            InstallMode::Repair => (false, false, true),
+            InstallMode::Realtime { forming } => (forming, true, false),
+        };
+        if provider_generation < current.covering.provider_generation {
+            return Err(EngineError::StaleSeriesGeneration {
+                current: current.covering.provider_generation,
+                received: provider_generation,
+            });
+        }
+        if provider_generation != current.covering.provider_generation {
+            return Ok(None);
+        }
+        let current_snapshot = current.snapshot();
+        if current_snapshot.bars.as_ref() == bars
+            && current_snapshot.price_scale == price_scale
+            && current_snapshot.quantity_scale == quantity_scale
+            && current_snapshot.forming == forming
+        {
+            return Ok(Some(current_snapshot));
+        }
+        if realtime {
+            validate_realtime_transition(&current_snapshot, price_scale, quantity_scale, bars)?;
+        } else if !repair {
+            validate_history_transition(&current_snapshot, bars)?;
+        }
+        Ok(None)
     }
 
     pub(crate) fn install_realtime_tail(

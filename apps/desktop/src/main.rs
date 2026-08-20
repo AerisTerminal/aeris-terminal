@@ -580,6 +580,7 @@ static COINBASE_INTERVALS: &[ChartInterval] = &[
     ChartInterval::Minute15,
     ChartInterval::Hour1,
 ];
+const COINBASE_ENTITLEMENT_ID: &str = "crypto_public_realtime";
 
 fn generation_status(
     worker_label: &str,
@@ -727,11 +728,9 @@ struct WorkspaceSurface {
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
-    coinbase_products: Vec<InstallProviderInstrument>,
     coinbase_product: Option<InstallProviderInstrument>,
     coinbase_switch: CoinbaseSwitchState,
     coinbase_interval: ChartInterval,
-    coinbase_catalog: CoinbaseCatalogState,
     coinbase_pending_interval: Option<ChartInterval>,
     coinbase_pending_product: Option<InstallProviderInstrument>,
     coinbase_pending_sequence: Option<u64>,
@@ -770,13 +769,6 @@ impl CoinbaseSwitchState {
     const fn is_pending(self) -> bool {
         matches!(self, Self::Pending)
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum CoinbaseCatalogState {
-    #[default]
-    Loading,
-    Ready,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -875,40 +867,12 @@ impl RithmicSessionRetirement {
     }
 }
 
-const fn should_apply_rithmic_worker_stop(
-    disconnected: bool,
-    connection_state: Option<FeedConnectionState>,
-) -> bool {
-    disconnected
-        && matches!(
-            connection_state,
-            Some(state) if !matches!(state, FeedConnectionState::Stopped)
-        )
-}
-
 impl RithmicReconnectState {
     fn target(&self) -> Option<&RithmicReconnectTarget> {
         match self {
             Self::AwaitingSearch(target) | Self::SearchInFlight(target) => Some(target),
             Self::Idle => None,
         }
-    }
-
-    fn capture_retired_selection(
-        &mut self,
-        selection: Option<rithmic_shell::RithmicSymbolSelection>,
-        series: rithmic_history::RithmicSeries,
-    ) -> bool {
-        if *self == Self::Idle
-            && let Some(selection) = selection
-        {
-            *self = Self::AwaitingSearch(RithmicReconnectTarget {
-                symbol: selection.instrument.symbol,
-                exchange: selection.instrument.exchange,
-                series,
-            });
-        }
-        *self == Self::Idle
     }
 }
 
@@ -930,10 +894,10 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum InstrumentMenuSelection {
     Rithmic(usize),
-    Coinbase(InstallProviderInstrument),
+    Coinbase(usize),
 }
 
 #[derive(Clone)]
@@ -1159,15 +1123,6 @@ fn series_selector_label(
         .to_string()
 }
 
-fn chart_interval_for_seconds(seconds: u32) -> Option<ChartInterval> {
-    ChartInterval::ALL.iter().copied().find(|interval| {
-        matches!(
-            interval.aggregation(),
-            ChartAggregation::FixedSeconds(interval_seconds) if interval_seconds.get() == seconds
-        ) || (*interval == ChartInterval::Month1 && seconds == 30 * 24 * 60 * 60)
-    })
-}
-
 #[derive(Clone, Copy)]
 struct HeaderControls(u8);
 
@@ -1331,12 +1286,10 @@ impl WorkspaceSurface {
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
             provider,
-            coinbase_products: coinbase_product.clone().into_iter().collect(),
             coinbase_product,
             coinbase_switch: CoinbaseSwitchState::Idle,
             coinbase_interval: restored_coinbase
                 .map_or(ChartInterval::Minute1, |restored| restored.0),
-            coinbase_catalog: CoinbaseCatalogState::Loading,
             coinbase_pending_interval: None,
             coinbase_pending_product: None,
             coinbase_pending_sequence: None,
@@ -1438,20 +1391,25 @@ impl WorkspaceSurface {
                 .map(|input| input.read(cx).value().trim().to_ascii_uppercase())
                 .unwrap_or_default();
             return self
-                .coinbase_products
+                .symbol_browser
+                .results()
                 .iter()
-                .filter(|product| {
+                .enumerate()
+                .filter(|(_, result)| {
                     query.is_empty()
-                        || product.provider_symbol.contains(&query)
-                        || product.display_symbol.contains(&query)
-                        || product.instrument_id.contains(&query)
+                        || result.symbol.contains(&query)
+                        || result
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.contains(&query))
                 })
-                .map(|product| InstrumentMenuEntry {
-                    symbol: product.display_symbol.clone(),
-                    checked: self.coinbase_product.as_ref().is_some_and(|selected| {
-                        selected.provider_symbol == product.provider_symbol
-                    }),
-                    selection: InstrumentMenuSelection::Coinbase(product.clone()),
+                .map(|(index, result)| InstrumentMenuEntry {
+                    symbol: result.name.clone().unwrap_or_else(|| result.symbol.clone()),
+                    checked: self
+                        .coinbase_product
+                        .as_ref()
+                        .is_some_and(|selected| selected.provider_symbol == result.symbol),
+                    selection: InstrumentMenuSelection::Coinbase(index),
                 })
                 .collect();
         }
@@ -1479,47 +1437,34 @@ impl WorkspaceSurface {
         let started = Instant::now();
         let selected = (|| match selection {
             InstrumentMenuSelection::Rithmic(index) => self.select_rithmic_symbol(index, cx),
-            InstrumentMenuSelection::Coinbase(product) => {
-                let chart_has_market_data = self
-                    .chart
-                    .as_ref()
-                    .is_some_and(|chart| chart.read(cx).has_market_data());
-                if self
-                    .coinbase_product
-                    .as_ref()
-                    .is_some_and(|selected| selected.provider_symbol == product.provider_symbol)
-                    && self.coinbase_pending_product.is_none()
-                    && chart_has_market_data
-                {
-                    return true;
-                }
-                if self
-                    .coinbase_pending_product
-                    .as_ref()
-                    .is_some_and(|pending| pending.provider_symbol == product.provider_symbol)
-                {
-                    return true;
-                }
-                let interval = self
-                    .coinbase_pending_interval
-                    .unwrap_or(self.coinbase_interval);
-                let Ok(sequence) = self
-                    .market_worker
-                    .try_select_coinbase(product.clone(), interval)
-                else {
-                    self.symbol_message = "Coinbase product worker could not start".to_string();
+            InstrumentMenuSelection::Coinbase(index) => {
+                if self.symbol_selection_pending {
+                    self.symbol_message =
+                        "A Coinbase market selection is already in progress".to_string();
                     cx.notify();
                     return false;
+                }
+                let Some(selection) = self.symbol_browser.select(index) else {
+                    return false;
                 };
-                self.coinbase_pending_product = Some(product.clone());
-                self.coinbase_pending_interval = Some(interval);
-                self.coinbase_pending_sequence = Some(sequence);
-                self.coinbase_switch = CoinbaseSwitchState::Pending;
+                let request = SelectProviderInstrument {
+                    consumer_id: 0,
+                    selection_generation: selection.generation.get() as u64,
+                    search_generation: selection.search_generation.get() as u64,
+                    provider: "coinbase".to_string(),
+                    symbol: selection.instrument.symbol.clone(),
+                    exchange: selection.instrument.exchange.clone(),
+                    entitlement_id: COINBASE_ENTITLEMENT_ID.to_string(),
+                };
+                if self.market_worker.try_select_provider(request).is_err() {
+                    self.symbol_browser.reject_selection(selection.generation);
+                    self.symbol_message =
+                        "Coinbase market selection is busy; try again".to_string();
+                    cx.notify();
+                    return false;
+                }
                 self.symbol_selection_pending = true;
-                self.chart_state = ChartState::Loading;
-                self.chart_state_message =
-                    format!("Loading {} market history", product.provider_symbol);
-                self.symbol_message = format!("Switching to {}", product.provider_symbol);
+                self.symbol_message = format!("Selecting {}", selection.instrument.symbol);
                 cx.notify();
                 true
             }
@@ -1709,25 +1654,6 @@ impl WorkspaceSurface {
             worker_label,
             ui_diagnostics,
         } = publication;
-        if self.provider == TerminalProvider::Coinbase
-            && let ReplayStreamUpdate::Snapshot(snapshot) = &update
-        {
-            if let Some(product) = self
-                .coinbase_products
-                .iter()
-                .find(|product| {
-                    product.instrument_id == snapshot.instrument().instrument_id.as_str()
-                })
-                .cloned()
-            {
-                self.coinbase_product = Some(product);
-            }
-            if let Some(interval) =
-                chart_interval_for_seconds(snapshot.bar_definition().interval_seconds)
-            {
-                self.coinbase_interval = interval;
-            }
-        }
         self.worker_label = worker_label;
         self.subscription_id = subscription_id;
         self.replay_label =
@@ -1961,7 +1887,7 @@ impl WorkspaceSurface {
                 self.apply_connection_state(state, message, cx);
             }
             MarketWorkerMessage::ProviderCatalog(event) => {
-                self.apply_rithmic_catalog(event, cx);
+                self.apply_provider_catalog_event(event, cx);
             }
             MarketWorkerMessage::RithmicHistory {
                 selection_generation,
@@ -1980,22 +1906,6 @@ impl WorkspaceSurface {
             MarketWorkerMessage::RithmicDom(frame) => {
                 self.apply_rithmic_dom(frame, cx);
             }
-            MarketWorkerMessage::CoinbaseCatalog(result) => match result {
-                Ok(products) => {
-                    self.coinbase_catalog = CoinbaseCatalogState::Ready;
-                    self.coinbase_products = products;
-                    self.symbol_message = format!(
-                        "{} active Coinbase spot markets",
-                        self.coinbase_products.len()
-                    );
-                    cx.notify();
-                }
-                Err(error) => {
-                    self.coinbase_catalog = CoinbaseCatalogState::Loading;
-                    self.symbol_message = format!("Coinbase catalog unavailable: {error}");
-                    cx.notify();
-                }
-            },
             MarketWorkerMessage::CoinbaseDom(frame) => {
                 self.dom
                     .update(cx, |dom, dom_cx| dom.replace_frame(frame, dom_cx));
@@ -2017,6 +1927,31 @@ impl WorkspaceSurface {
                 }
             }
         }
+    }
+
+    fn apply_provider_catalog_event(
+        &mut self,
+        event: ProviderCatalogEvent,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_catalog_event(event, cx);
+    }
+
+    fn apply_catalog_results(
+        &mut self,
+        generation: u64,
+        instruments: Vec<ProviderInstrumentSummary>,
+    ) -> Option<usize> {
+        let generation = usize_generation(generation)?;
+        let count = instruments.len();
+        self.symbol_browser
+            .apply_results(generation, instruments)
+            .then_some(count)
+    }
+
+    fn confirm_catalog_selection(&mut self, generation: u64) -> bool {
+        usize_generation(generation)
+            .is_some_and(|generation| self.symbol_browser.confirm_selection(generation))
     }
 
     fn apply_coinbase_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
@@ -2054,7 +1989,8 @@ impl WorkspaceSurface {
             self.apply_market_worker_message(message, cx);
         }
         if self.provider == TerminalProvider::Rithmic
-            && should_apply_rithmic_worker_stop(disconnected, self.connection_state)
+            && disconnected
+            && !matches!(self.connection_state, Some(FeedConnectionState::Stopped))
         {
             self.apply_connection_state(
                 FeedConnectionState::Stopped,
@@ -2230,10 +2166,22 @@ impl WorkspaceSurface {
             .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
                 request.series
             });
-        if self
-            .rithmic_reconnect
-            .capture_retired_selection(self.symbol_browser.selected().cloned(), series)
-        {
+        let no_retired_selection = if self.rithmic_reconnect == RithmicReconnectState::Idle {
+            if let Some(selection) = self.symbol_browser.selected().cloned() {
+                self.rithmic_reconnect =
+                    RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
+                        symbol: selection.instrument.symbol,
+                        exchange: selection.instrument.exchange,
+                        series,
+                    });
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        if no_retired_selection {
             self.rithmic_autoload_started = false;
         }
         self.retire_rithmic_session(cx);
@@ -2287,24 +2235,32 @@ impl WorkspaceSurface {
         dispatched
     }
 
-    fn apply_rithmic_catalog(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
+    fn apply_catalog_event(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
+        let coinbase = match &event {
+            ProviderCatalogEvent::SearchCompleted(result) => result.provider == "coinbase",
+            ProviderCatalogEvent::SelectionInstalled(instrument) => {
+                instrument.provider == "coinbase"
+            }
+            ProviderCatalogEvent::CommandRejected { rejection, .. } => {
+                rejection.provider == "coinbase"
+            }
+        };
         match event {
             ProviderCatalogEvent::SearchCompleted(result) => {
-                let Some(search_generation) = usize_generation(result.search_generation) else {
+                let Some(count) =
+                    self.apply_catalog_results(result.search_generation, result.instruments)
+                else {
                     return;
                 };
-                let result_count = result.instruments.len();
-                let applied = self
-                    .symbol_browser
-                    .apply_results(search_generation, result.instruments);
-                if applied {
-                    self.symbol_message = format!("{result_count} matching symbols");
-                }
-                if applied && self.rithmic_reconnect != RithmicReconnectState::Idle {
-                    let index = self.rithmic_reconnect.target().and_then(|target| {
+                self.symbol_message = if coinbase {
+                    format!("{count} active Coinbase spot markets")
+                } else {
+                    format!("{count} matching symbols")
+                };
+                if !coinbase && self.rithmic_reconnect != RithmicReconnectState::Idle {
+                    if let Some(index) = self.rithmic_reconnect.target().and_then(|target| {
                         reconnect_contract_index(self.symbol_browser.results(), target)
-                    });
-                    if let Some(index) = index {
+                    }) {
                         self.select_rithmic_symbol(index, cx);
                     } else {
                         self.rithmic_reconnect = RithmicReconnectState::Idle;
@@ -2312,44 +2268,63 @@ impl WorkspaceSurface {
                             "The previous Rithmic contract is unavailable after reconnect"
                                 .to_string();
                     }
-                } else if applied
+                } else if !coinbase
                     && self.rithmic_autoload_started
                     && self.symbol_browser.selected().is_none()
+                    && let Some(index) =
+                        default_rithmic_contract_index(self.symbol_browser.results())
                 {
-                    let index = default_rithmic_contract_index(self.symbol_browser.results());
-                    if let Some(index) = index {
-                        self.select_rithmic_symbol(index, cx);
-                    }
+                    self.select_rithmic_symbol(index, cx);
                 }
+            }
+            ProviderCatalogEvent::SelectionInstalled(instrument) if coinbase => {
+                if !self.confirm_catalog_selection(instrument.selection_generation) {
+                    return;
+                }
+                let interval = self
+                    .coinbase_pending_interval
+                    .unwrap_or(self.coinbase_interval);
+                let Ok(sequence) = self
+                    .market_worker
+                    .try_select_coinbase(instrument.clone(), interval)
+                else {
+                    self.symbol_selection_pending = false;
+                    self.symbol_message = "Coinbase market history could not start".to_string();
+                    return;
+                };
+                self.coinbase_pending_product = Some(instrument);
+                self.coinbase_pending_interval = Some(interval);
+                self.coinbase_pending_sequence = Some(sequence);
+                self.coinbase_switch = CoinbaseSwitchState::Pending;
+                self.chart_state = ChartState::Loading;
+                self.chart_state_message = format!("Loading {} market history", interval.label());
+                self.symbol_message = "Loading the selected Coinbase market".to_string();
             }
             ProviderCatalogEvent::SelectionInstalled(instrument) => {
                 self.apply_rithmic_selection(&instrument, cx);
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
-                let Some(command_generation) = usize_generation(rejection.command_generation)
-                else {
+                let Some(generation) = usize_generation(rejection.command_generation) else {
                     return;
                 };
+                let selection = command == ProviderCatalogCommand::Selection;
+                let rejected = if selection {
+                    self.symbol_browser.reject_selection(generation)
+                } else {
+                    self.symbol_browser.reject_search(generation)
+                };
+                if !rejected {
+                    return;
+                }
+                if coinbase || selection {
+                    self.symbol_selection_pending = false;
+                }
                 let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
                     .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
-                let (rejected, selection_rejected) = match catalog_rejection_domain(command) {
-                    CatalogCommandDomain::Search => {
-                        (self.symbol_browser.reject_search(command_generation), false)
-                    }
-                    CatalogCommandDomain::Selection => (
-                        self.symbol_browser.reject_selection(command_generation),
-                        true,
-                    ),
-                };
-                if rejected {
-                    if selection_rejected {
-                        self.symbol_selection_pending = false;
-                    }
-                    self.symbol_message = catalog_rejection_message(reason, command).to_string();
-                    if let Some(target) = self.rithmic_reconnect.target().cloned() {
-                        self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
-                        self.retire_rithmic_session(cx);
-                    }
+                self.symbol_message = catalog_rejection_message(reason, command).to_string();
+                if !coinbase && let Some(target) = self.rithmic_reconnect.target().cloned() {
+                    self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
+                    self.retire_rithmic_session(cx);
                 }
             }
         }
@@ -2361,10 +2336,7 @@ impl WorkspaceSurface {
         instrument: &InstallProviderInstrument,
         cx: &mut Context<Self>,
     ) {
-        let Some(selection_generation) = usize_generation(instrument.selection_generation) else {
-            return;
-        };
-        if !self.symbol_browser.confirm_selection(selection_generation) {
+        if !self.confirm_catalog_selection(instrument.selection_generation) {
             return;
         }
         self.symbol_selection_pending = false;
@@ -3476,19 +3448,6 @@ fn catalog_rejection_message(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CatalogCommandDomain {
-    Search,
-    Selection,
-}
-
-const fn catalog_rejection_domain(command: ProviderCatalogCommand) -> CatalogCommandDomain {
-    match command {
-        ProviderCatalogCommand::Search => CatalogCommandDomain::Search,
-        ProviderCatalogCommand::Selection => CatalogCommandDomain::Selection,
-    }
-}
-
 fn usize_generation(generation: u64) -> Option<std::num::NonZeroUsize> {
     usize::try_from(generation)
         .ok()
@@ -4514,7 +4473,7 @@ fn instrument_dialog_content(
             let checked = instrument.checked;
             let app = app.clone();
             let symbol = instrument.symbol.clone();
-            let selection = instrument.selection.clone();
+            let selection = instrument.selection;
             div()
                 .id(("instrument_dialog_row", index))
                 .min_h(px(48.0))
@@ -4536,8 +4495,8 @@ fn instrument_dialog_content(
                                 .text_color(gpui_color(colors.foreground))
                         })
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            let dispatched = app
-                                .update(cx, |app, cx| app.select_instrument(selection.clone(), cx));
+                            let dispatched =
+                                app.update(cx, |app, cx| app.select_instrument(selection, cx));
                             if dispatched {
                                 app.update(cx, |app, app_cx| {
                                     app.close_chrome_overlay(window, app_cx);
@@ -6191,7 +6150,7 @@ fn active_header_state(
         controls: HeaderControls::from_state(
             workspace.symbol_input.is_some()
                 || !workspace.symbol_browser.results().is_empty()
-                || !workspace.coinbase_products.is_empty(),
+                || !workspace.symbol_browser.results().is_empty(),
             workspace.symbol_browser.selected().is_some() || workspace.coinbase_product.is_some(),
         )
         .with_chart_controls(chart_has_market_data),
@@ -7361,24 +7320,23 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CaptionPlatform, CaptionPointerOwner, CatalogCommandDomain, ChartNoticePlacement,
-        ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
-        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
+        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand,
+        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
         RithmicSessionRetirement, SidePanel, SidePanelResize, TerminalProvider, WORKSPACE_TAB_GAP,
         WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
         WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
-        caption_pointer_owner, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
+        caption_pointer_owner, chart_status_detail, chart_surface_notice,
         chrome_control_foreground, chrome_overlay_progress, claim_once, connection_presentation,
         default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
         fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
         publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
         reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop,
-        should_finish_chrome_overlay_close, split_lifetime_mode, timeframe_overlay_left,
-        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
-        wrapped_workspace_index,
+        series_selector_label, should_finish_chrome_overlay_close, split_lifetime_mode,
+        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -7391,6 +7349,49 @@ mod tests {
     use axiusflow_observability::FeedConnectionState;
     use gpui::{Bounds, point, px, size};
     use std::{cell::Cell, ffi::OsString};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CatalogCommandDomain {
+        Search,
+        Selection,
+    }
+
+    const fn catalog_rejection_domain(command: ProviderCatalogCommand) -> CatalogCommandDomain {
+        match command {
+            ProviderCatalogCommand::Search => CatalogCommandDomain::Search,
+            ProviderCatalogCommand::Selection => CatalogCommandDomain::Selection,
+        }
+    }
+
+    fn should_apply_rithmic_worker_stop(
+        disconnected: bool,
+        connection_state: Option<FeedConnectionState>,
+    ) -> bool {
+        disconnected
+            && matches!(
+                connection_state,
+                Some(state) if !matches!(state, FeedConnectionState::Stopped)
+            )
+    }
+
+    impl RithmicReconnectState {
+        fn capture_retired_selection(
+            &mut self,
+            selection: Option<super::rithmic_shell::RithmicSymbolSelection>,
+            series: super::rithmic_history::RithmicSeries,
+        ) -> bool {
+            if *self == Self::Idle
+                && let Some(selection) = selection
+            {
+                *self = Self::AwaitingSearch(super::RithmicReconnectTarget {
+                    symbol: selection.instrument.symbol,
+                    exchange: selection.instrument.exchange,
+                    series,
+                });
+            }
+            *self == Self::Idle
+        }
+    }
 
     #[test]
     fn chrome_overlay_motion_opens_and_closes_in_opposite_directions() {

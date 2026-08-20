@@ -13,9 +13,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
     CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseInterval, CoinbaseSession,
@@ -148,6 +145,7 @@ enum Command {
 enum HistoryRequestKind {
     Initial,
     ViewportBackfill,
+    SeamRepair,
 }
 
 struct HistoryRequest {
@@ -280,6 +278,7 @@ struct LiveHandoff {
     history_ready: bool,
     dirty: bool,
     published: Option<PublishedTailState>,
+    seam_repair: Option<HistoryRange>,
 }
 
 struct RithmicLiveHandoff {
@@ -600,6 +599,7 @@ impl LiveHandoff {
             history_ready: false,
             dirty: false,
             published: None,
+            seam_repair: None,
         })
     }
 
@@ -611,6 +611,7 @@ impl LiveHandoff {
         self.history_ready = false;
         self.dirty = false;
         self.published = None;
+        self.seam_repair = None;
     }
 
     fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
@@ -662,129 +663,6 @@ enum HistorySources {
 
 struct LiveCoinbaseRealtime {
     config: CoinbaseConfig,
-}
-
-#[cfg(test)]
-struct FixtureHistory {
-    bars: Vec<MarketBar>,
-    fetches: Option<Arc<AtomicUsize>>,
-}
-
-#[cfg(test)]
-enum FixtureRealtimeAction {
-    Connected,
-    Trade(CanonicalTrade),
-    Heartbeat,
-    Disconnect,
-}
-
-#[cfg(test)]
-struct FixtureRealtime {
-    actions: Receiver<FixtureRealtimeAction>,
-    generations: SyncSender<ProviderGeneration>,
-    stops: SyncSender<ProviderGeneration>,
-}
-
-#[cfg(test)]
-struct FixtureRealtimeHarness {
-    service: MarketService,
-    actions: SyncSender<FixtureRealtimeAction>,
-    generations: Receiver<ProviderGeneration>,
-    stops: Receiver<ProviderGeneration>,
-    history_fetches: Arc<AtomicUsize>,
-}
-
-#[cfg(test)]
-impl HistorySource for FixtureHistory {
-    fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
-        if request.kind == HistoryRequestKind::ViewportBackfill {
-            return Err("fixture history does not provide viewport backfill".to_string());
-        }
-        if let Some(fetches) = &self.fetches {
-            fetches.fetch_add(1, Ordering::AcqRel);
-        }
-        let (interval_seconds, price_scale, quantity_scale) =
-            if request.series.provider_id == "coinbase" {
-                let profile = coinbase_series_profile(&request.series)?;
-                (
-                    profile.interval_seconds,
-                    profile.price_scale,
-                    profile.quantity_scale,
-                )
-            } else {
-                let instrument = request
-                    .instrument
-                    .as_ref()
-                    .ok_or_else(|| "fixture provider instrument is unavailable".to_string())?;
-                let interval_seconds = request
-                    .series
-                    .period
-                    .duration_nanos()
-                    .and_then(|nanos| u32::try_from(nanos / 1_000_000_000).ok())
-                    .unwrap_or(1);
-                (
-                    interval_seconds,
-                    u8::try_from(instrument.price_scale)
-                        .map_err(|_| "fixture price scale is invalid".to_string())?,
-                    u8::try_from(instrument.quantity_scale)
-                        .map_err(|_| "fixture quantity scale is invalid".to_string())?,
-                )
-        };
-        let mut bars = self.bars.clone();
-        for (index, bar) in bars.iter_mut().enumerate() {
-            bar.exchange_timestamp_seconds = i64::try_from(index + 1)
-                .ok()
-                .and_then(|value| value.checked_mul(i64::from(interval_seconds)))
-                .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
-            bar.exchange_timestamp_unix_nanos = bar
-                .exchange_timestamp_seconds
-                .checked_mul(1_000_000_000)
-                .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
-        }
-        Ok(HistorySnapshot {
-            price_scale,
-            quantity_scale,
-            bars,
-            handoff_boundary_unix_nanos: None,
-        })
-    }
-}
-
-#[cfg(test)]
-impl RealtimeSource for FixtureRealtime {
-    fn run_generation(
-        &mut self,
-        generation: ProviderGeneration,
-        events: &SyncSender<RealtimeEvent>,
-        overflow: &AtomicBool,
-        stop: &Arc<AtomicBool>,
-    ) {
-        if self.generations.send(generation).is_err() {
-            return;
-        }
-        while !stop.load(Ordering::Acquire) {
-            let action = match self.actions.recv_timeout(Duration::from_millis(10)) {
-                Ok(action) => action,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return,
-            };
-            let event = match action {
-                FixtureRealtimeAction::Connected => {
-                    if events.send(RealtimeEvent::Connected(generation)).is_err() {
-                        return;
-                    }
-                    continue;
-                }
-                FixtureRealtimeAction::Trade(trade) => RealtimeEvent::Trade(generation, trade),
-                FixtureRealtimeAction::Heartbeat => RealtimeEvent::Heartbeat(generation),
-                FixtureRealtimeAction::Disconnect => return,
-            };
-            if !try_emit_realtime(events, overflow, event) {
-                return;
-            }
-        }
-        let _ = self.stops.send(generation);
-    }
 }
 
 impl LiveCoinbaseHistory {
@@ -960,77 +838,6 @@ impl MarketService {
         Ok(service)
     }
 
-    #[cfg(test)]
-    /// Starts a deterministic in-memory history source for IPC integration tests.
-    ///
-    /// # Errors
-    /// Returns an error when either bounded worker cannot start.
-    pub(crate) fn start_fixture(bars: Vec<MarketBar>) -> Result<Self, String> {
-        Self::start_with_sources(
-            FixtureHistory {
-                bars,
-                fetches: None,
-            },
-            None,
-            None,
-        )
-    }
-
-    #[cfg(test)]
-    fn start_fixture_realtime(bars: Vec<MarketBar>) -> Result<FixtureRealtimeHarness, String> {
-        Self::start_fixture_realtime_with_storage(bars, None)
-    }
-
-    #[cfg(test)]
-    fn start_fixture_realtime_with_storage(
-        bars: Vec<MarketBar>,
-        storage: Option<Result<LocalHistoryStore, String>>,
-    ) -> Result<FixtureRealtimeHarness, String> {
-        let (action_tx, action_rx) = mpsc::sync_channel(16);
-        let (generation_tx, generation_rx) = mpsc::sync_channel(4);
-        let (stop_tx, stop_rx) = mpsc::sync_channel(4);
-        let history_fetches = Arc::new(AtomicUsize::new(0));
-        let service = Self::start_with_sources(
-            FixtureHistory {
-                bars,
-                fetches: Some(Arc::clone(&history_fetches)),
-            },
-            Some(Box::new(FixtureRealtime {
-                actions: action_rx,
-                generations: generation_tx,
-                stops: stop_tx,
-            })),
-            storage,
-        )?;
-        Ok(FixtureRealtimeHarness {
-            service,
-            actions: action_tx,
-            generations: generation_rx,
-            stops: stop_rx,
-            history_fetches,
-        })
-    }
-
-    #[cfg(test)]
-    fn start_with_source(source: impl HistorySource) -> Result<Self, String> {
-        Self::start_with_sources(source, None, None)
-    }
-
-    #[cfg(test)]
-    fn start_with_sources(
-        source: impl HistorySource,
-        realtime: Option<Box<dyn RealtimeSource>>,
-        storage: Option<Result<LocalHistoryStore, String>>,
-    ) -> Result<Self, String> {
-        Self::start_composed(
-            HistorySources::Shared(Box::new(source)),
-            realtime,
-            storage,
-            false,
-            0,
-        )
-    }
-
     fn start_composed(
         sources: HistorySources,
         realtime: Option<Box<dyn RealtimeSource>>,
@@ -1062,6 +869,8 @@ impl MarketService {
         let realtime_overflow = Arc::new(AtomicBool::new(false));
         let realtime_stop = Arc::new(AtomicBool::new(true));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let (coinbase_catalog_control_tx, coinbase_catalog_rx, coinbase_catalog_worker) =
+            crate::coinbase_catalog::start(Arc::clone(&shutdown))?;
         let available_memory_bytes = available_memory_bytes();
         let mut workers = Vec::with_capacity(7);
         workers.push(spawn_history_worker(
@@ -1071,6 +880,7 @@ impl MarketService {
             command_tx.clone(),
             Arc::clone(&shutdown),
         )?);
+        workers.push(coinbase_catalog_worker);
         if let Some((source, requests)) = rithmic_source.zip(rithmic_history_rx) {
             workers.push(spawn_history_worker(
                 "axiusflow-rithmic-history",
@@ -1115,6 +925,8 @@ impl MarketService {
                 rithmic_realtime: rithmic_realtime_rx,
                 rithmic_catalog_control: rithmic_catalog_control_tx,
                 rithmic_catalog: rithmic_catalog_rx,
+                coinbase_catalog_control: coinbase_catalog_control_tx,
+                coinbase_catalog: coinbase_catalog_rx,
                 rithmic_enabled: rithmic_realtime,
             },
             Arc::clone(&realtime_overflow),
@@ -1746,6 +1558,8 @@ struct CoordinatorChannels<'a> {
     rithmic_realtime: &'a Receiver<RithmicRealtimeEvent>,
     rithmic_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
     rithmic_catalog: &'a Receiver<RithmicCatalogEvent>,
+    coinbase_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
+    coinbase_catalog: &'a Receiver<RithmicCatalogEvent>,
 }
 
 struct OwnedCoordinatorChannels {
@@ -1759,6 +1573,8 @@ struct OwnedCoordinatorChannels {
     rithmic_realtime: Receiver<RithmicRealtimeEvent>,
     rithmic_catalog_control: SyncSender<RithmicCatalogControl>,
     rithmic_catalog: Receiver<RithmicCatalogEvent>,
+    coinbase_catalog_control: SyncSender<RithmicCatalogControl>,
+    coinbase_catalog: Receiver<RithmicCatalogEvent>,
     rithmic_enabled: bool,
 }
 
@@ -1791,6 +1607,8 @@ fn spawn_coordinator(
                         .rithmic_enabled
                         .then_some(&channels.rithmic_catalog_control),
                     rithmic_catalog: &channels.rithmic_catalog,
+                    coinbase_catalog_control: Some(&channels.coinbase_catalog_control),
+                    coinbase_catalog: &channels.coinbase_catalog,
                 },
                 &realtime_overflow,
                 &realtime_stop,
@@ -1827,6 +1645,7 @@ fn run_coordinator(
         realtime_control: channels.realtime_control,
         rithmic_realtime_control: channels.rithmic_realtime_control,
         rithmic_catalog_control: channels.rithmic_catalog_control,
+        coinbase_catalog_control: channels.coinbase_catalog_control,
         realtime_stop,
         resource_mode: ResourceMode::Warm,
         resource_policy,
@@ -1882,6 +1701,12 @@ fn run_coordinator(
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        for _ in 0..REALTIME_DRAIN_BUDGET {
+            match channels.coinbase_catalog.try_recv() {
+                Ok(event) => coordinator.handle_rithmic_catalog(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
         if realtime_overflow.swap(false, Ordering::AcqRel) {
             coordinator
                 .realtime_interrupted(FailureStage::Handoff, "Coinbase realtime queue overflowed");
@@ -1912,6 +1737,7 @@ struct Coordinator<'a> {
     realtime_control: &'a SyncSender<RealtimeControl>,
     rithmic_realtime_control: Option<&'a SyncSender<RithmicRealtimeControl>>,
     rithmic_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
+    coinbase_catalog_control: Option<&'a SyncSender<RithmicCatalogControl>>,
     realtime_stop: &'a Arc<AtomicBool>,
     resource_mode: ResourceMode,
     resource_policy: ResourcePolicyDecision,
@@ -2076,20 +1902,10 @@ impl Coordinator<'_> {
                 );
             }
             Command::SearchProviderInstruments(client_id, search, reply) => {
-                self.handle_catalog_command(
-                    client_id,
-                    search.consumer_id,
-                    RithmicCatalogControl::Search(search),
-                    &reply,
-                );
+                self.handle_provider_search(client_id, search, &reply);
             }
             Command::SelectProviderInstrument(client_id, selection, reply) => {
-                self.handle_catalog_command(
-                    client_id,
-                    selection.consumer_id,
-                    RithmicCatalogControl::Select(selection),
-                    &reply,
-                );
+                self.handle_provider_selection(client_id, selection, &reply);
             }
             Command::InstallProviderInstrument(instrument, reply) => {
                 let _ = reply.send(self.install_provider_instrument(&instrument));
@@ -2106,6 +1922,40 @@ impl Coordinator<'_> {
             | Command::Attach(..)
             | Command::Detach(..) => unreachable!("command was routed to the wrong dispatcher"),
         }
+    }
+
+    fn handle_provider_search(
+        &self,
+        client_id: ClientId,
+        search: SearchProviderInstruments,
+        reply: &Reply<()>,
+    ) {
+        let consumer_id = search.consumer_id;
+        let provider = search.provider.clone();
+        self.handle_catalog_command(
+            client_id,
+            consumer_id,
+            RithmicCatalogControl::Search(search),
+            &provider,
+            reply,
+        );
+    }
+
+    fn handle_provider_selection(
+        &self,
+        client_id: ClientId,
+        selection: SelectProviderInstrument,
+        reply: &Reply<()>,
+    ) {
+        let consumer_id = selection.consumer_id;
+        let provider = selection.provider.clone();
+        self.handle_catalog_command(
+            client_id,
+            consumer_id,
+            RithmicCatalogControl::Select(selection),
+            &provider,
+            reply,
+        );
     }
 
     fn handle_attach(&mut self, client_id: ClientId, reply: &Reply<()>) {
@@ -2160,6 +2010,8 @@ impl Coordinator<'_> {
     }
 
     fn activate_markets_live_hot_set(&mut self) {
+        self.retained_live
+            .extend(self.live.keys().chain(self.rithmic_live.keys()).cloned());
         let priority = self.warm_priority.clone();
         for series in priority
             .iter()
@@ -2373,9 +2225,11 @@ impl Coordinator<'_> {
         client_id: ClientId,
         consumer_id: u64,
         control: RithmicCatalogControl,
+        provider: &str,
         reply: &Reply<()>,
     ) {
-        let _ = reply.send(self.dispatch_catalog_control(client_id, consumer_id, control));
+        let _ =
+            reply.send(self.dispatch_catalog_control(client_id, consumer_id, control, provider));
     }
 
     fn handle_poll(
@@ -2397,15 +2251,21 @@ impl Coordinator<'_> {
         client_id: ClientId,
         consumer_id: u64,
         control: RithmicCatalogControl,
+        provider: &str,
     ) -> Result<(), String> {
         let consumer_id = ConsumerId(id(consumer_id)?);
         authorize_consumer(&self.engine, client_id, consumer_id)?;
-        let sender = self
-            .rithmic_catalog_control
-            .ok_or_else(|| "Rithmic catalog worker is unavailable".to_string())?;
+        let sender = if provider == "coinbase" {
+            self.coinbase_catalog_control
+        } else {
+            self.rithmic_catalog_control
+        }
+        .ok_or_else(|| format!("{provider} catalog worker is unavailable"))?;
         sender.try_send(control).map_err(|error| match error {
-            TrySendError::Full(_) => "Rithmic catalog command capacity is exhausted".to_string(),
-            TrySendError::Disconnected(_) => "Rithmic catalog worker is unavailable".to_string(),
+            TrySendError::Full(_) => {
+                format!("{provider} catalog command capacity is exhausted")
+            }
+            TrySendError::Disconnected(_) => format!("{provider} catalog worker is unavailable"),
         })
     }
 
@@ -2428,7 +2288,7 @@ impl Coordinator<'_> {
             return Err("provider instrument session is stale".to_string());
         }
         let newer_session = session.is_none_or(|current| instrument.session_generation > current);
-        let selection = (!newer_session)
+        let selection = (provider == "rithmic" && !newer_session)
             .then(|| self.catalog_selections.get(&provider).copied())
             .flatten();
         if selection.is_some_and(|current| instrument.selection_generation < current) {
@@ -2475,8 +2335,10 @@ impl Coordinator<'_> {
                 .insert(provider.clone(), instrument.session_generation);
             self.catalog_selections.remove(&provider);
         }
-        self.catalog_selections
-            .insert(provider.clone(), instrument.selection_generation);
+        if provider == "rithmic" {
+            self.catalog_selections
+                .insert(provider.clone(), instrument.selection_generation);
+        }
         let instrument_id = instrument.instrument_id.clone();
         self.catalog.insert(key, instrument.clone());
         self.reconcile_rithmic_order_books();
@@ -3023,10 +2885,7 @@ impl Coordinator<'_> {
                 if series.definition_version != 1 {
                     return Err("unsupported Rithmic engine series definition".to_string());
                 }
-                let installed = self
-                    .catalog
-                    .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                    .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+                let installed = self.rithmic_instrument(series)?;
                 if installed.entitlement_id != series.entitlement_id {
                     return Err("Rithmic series entitlement is inconsistent".to_string());
                 }
@@ -3048,10 +2907,7 @@ impl Coordinator<'_> {
                 Ok((profile.price_scale, profile.quantity_scale))
             }
             "rithmic" => {
-                let installed = self
-                    .catalog
-                    .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                    .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+                let installed = self.rithmic_instrument(series)?;
                 if installed.entitlement_id != series.entitlement_id {
                     return Err("Rithmic series entitlement is inconsistent".to_string());
                 }
@@ -3064,6 +2920,15 @@ impl Coordinator<'_> {
             }
             _ => Err("resident engine market provider is unsupported".to_string()),
         }
+    }
+
+    fn rithmic_instrument(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Result<&InstallProviderInstrument, String> {
+        self.catalog
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+            .ok_or_else(|| "Rithmic instrument is not installed".to_string())
     }
 
     fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
@@ -3195,7 +3060,11 @@ impl Coordinator<'_> {
         let range = viewport_coinbase_history_range(&series, viewport)?;
         let key = (series.clone(), provider_generation);
         self.viewport_history_ranges.insert(key, range);
-        let result = self.schedule_viewport_history(&series, provider_generation);
+        let result = self.schedule_coinbase_history(
+            &series,
+            provider_generation,
+            HistoryRequestKind::ViewportBackfill,
+        );
         if result.is_err() {
             self.viewport_history_ranges
                 .remove(&(series, provider_generation));
@@ -3248,9 +3117,34 @@ impl Coordinator<'_> {
         };
         let connected = live.connected;
         let buffered = std::mem::take(&mut live.buffered);
+        let interval = coinbase_interval_nanos(series).ok();
+        let seam_repair = bars.last().and_then(|last| {
+            let interval = interval?;
+            buffered
+                .iter()
+                .filter_map(|trade| {
+                    coinbase_seam_repair(
+                        last.exchange_timestamp_unix_nanos,
+                        trade.trade_time_unix_nanos,
+                        interval,
+                    )
+                })
+                .min_by_key(|range| range.start_unix_nanos)
+        });
         live.aggregator.reset();
-        if live.aggregator.seed_canonical_history(bars).is_err()
-            || buffered
+        if live.aggregator.seed_canonical_history(bars).is_err() {
+            self.realtime_interrupted(
+                FailureStage::Handoff,
+                "Coinbase history/live handoff failed",
+            );
+            return false;
+        }
+        live.connected = connected;
+        live.seam_repair = seam_repair;
+        live.history_ready = live.seam_repair.is_none();
+        live.dirty = false;
+        if live.history_ready
+            && buffered
                 .iter()
                 .any(|trade| live.aggregator.apply_trade(trade).is_err())
         {
@@ -3260,19 +3154,22 @@ impl Coordinator<'_> {
             );
             return false;
         }
-        live.connected = connected;
-        live.history_ready = true;
-        live.dirty = live.aggregator.in_flight().is_some();
+        if live.history_ready {
+            live.dirty = live.aggregator.in_flight().is_some();
+        } else {
+            live.buffered = buffered.into_iter().collect();
+        }
         live.published = bars
             .last()
             .map(|bar| PublishedTailState::Covering(bar.source_sequence));
         true
     }
 
-    fn schedule_viewport_history(
+    fn schedule_coinbase_history(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
+        kind: HistoryRequestKind,
     ) -> Result<(), String> {
         let key = (series.clone(), generation);
         if !self.engine.has_subscription(series) {
@@ -3302,13 +3199,8 @@ impl Coordinator<'_> {
             self.viewport_history_ranges.remove(&key);
             return Ok(());
         };
-        self.enqueue_history_request(
-            series,
-            generation,
-            Some(missing),
-            HistoryRequestKind::ViewportBackfill,
-        )
-        .map_err(str::to_string)
+        self.enqueue_history_request(series, generation, Some(missing), kind)
+            .map_err(str::to_string)
     }
 
     fn enqueue_history_request(
@@ -3355,7 +3247,7 @@ impl Coordinator<'_> {
             Ok(()) => {
                 self.history_inflight.insert(key.clone(), range);
                 self.history_cancellations.insert(key, stop);
-                if kind == HistoryRequestKind::ViewportBackfill {
+                if kind != HistoryRequestKind::Initial {
                     if let Some(live) = self.live.get_mut(series) {
                         live.history_ready = false;
                     }
@@ -3398,7 +3290,8 @@ impl Coordinator<'_> {
             );
         }
         if series.provider_id == "coinbase" {
-            self.broadcast_provider(
+            self.broadcast_provider_for(
+                "coinbase",
                 ProviderConnectionState::Recovering,
                 generation,
                 Some("Coinbase history repair is retrying"),
@@ -3438,41 +3331,46 @@ impl Coordinator<'_> {
         }
         let Ok(snapshot) = result else {
             if !cancelled {
-                if kind == HistoryRequestKind::ViewportBackfill {
+                if kind == HistoryRequestKind::Initial {
+                    self.history_failed(series, generation);
+                } else {
                     self.viewport_backfill_failed(
                         series,
                         generation,
                         range,
+                        kind,
                         "Visible history backfill is unavailable; retained data remains usable",
                     );
-                } else {
-                    self.history_failed(series, generation);
                 }
             }
             return;
         };
         let arm_initial_viewport =
             self.should_arm_initial_viewport_history(series, generation, kind, &snapshot);
-        let viewport_backfill = kind == HistoryRequestKind::ViewportBackfill;
-        let Some(snapshot) =
-            self.prepare_history_repair(series, generation, snapshot, viewport_backfill)
+        let repair = kind != HistoryRequestKind::Initial;
+        let replace_covering = series.provider_id == "coinbase" && repair;
+        let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot, repair)
         else {
-            if viewport_backfill {
+            if repair {
                 self.viewport_backfill_failed(
                     series,
                     generation,
                     range,
+                    kind,
                     "Visible history could not be merged; retained data remains usable",
                 );
             }
             return;
         };
-        let Some(bars) = self.install_completed_history(series, generation, snapshot) else {
-            if viewport_backfill {
+        let Some(bars) =
+            self.install_completed_history(series, generation, snapshot, replace_covering)
+        else {
+            if repair {
                 self.viewport_backfill_failed(
                     series,
                     generation,
                     range,
+                    kind,
                     "Visible history could not be installed; retained data remains usable",
                 );
             }
@@ -3481,6 +3379,7 @@ impl Coordinator<'_> {
         if !self.complete_coinbase_live_handoff(series, &bars) {
             return;
         }
+        let seam_repair = self.live.get(series).and_then(|live| live.seam_repair);
         self.pending.remove(series);
         self.series_live_if_ready(series);
         if let Err(error) = self.record_coinbase_history_coverage(series, &bars) {
@@ -3489,7 +3388,16 @@ impl Coordinator<'_> {
         if arm_initial_viewport {
             self.arm_initial_viewport_history(series, generation);
         }
-        if let Err(error) = self.schedule_viewport_history(series, generation) {
+        if let Some(range) = seam_repair {
+            self.viewport_history_ranges
+                .insert((series.clone(), generation), range);
+        }
+        let schedule = if seam_repair.is_some() {
+            self.schedule_coinbase_history(series, generation, HistoryRequestKind::SeamRepair)
+        } else {
+            self.schedule_coinbase_history(series, generation, HistoryRequestKind::ViewportBackfill)
+        };
+        if let Err(error) = schedule {
             self.viewport_history_ranges
                 .remove(&(series.clone(), generation));
             self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
@@ -3512,15 +3420,22 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         failed_range: Option<HistoryRange>,
+        kind: HistoryRequestKind,
         detail: &'static str,
     ) {
         let key = (series.clone(), generation);
         if self.viewport_history_ranges.get(&key).copied() == failed_range {
             self.viewport_history_ranges.remove(&key);
         }
-        self.resume_live_after_viewport_failure(series);
+        if kind != HistoryRequestKind::SeamRepair {
+            self.resume_live_after_viewport_failure(series);
+        }
         if self.viewport_history_ranges.contains_key(&key) {
-            if let Err(error) = self.schedule_viewport_history(series, generation) {
+            if let Err(error) = self.schedule_coinbase_history(
+                series,
+                generation,
+                HistoryRequestKind::ViewportBackfill,
+            ) {
                 self.viewport_history_ranges.remove(&key);
                 self.broadcast_demand_error_for(
                     series,
@@ -3549,6 +3464,7 @@ impl Coordinator<'_> {
                 return true;
             }
             live.history_ready = true;
+            live.seam_repair = None;
             live.dirty = live.aggregator.in_flight().is_some();
             false
         });
@@ -3565,18 +3481,29 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         snapshot: HistorySnapshot,
+        replace_covering: bool,
     ) -> Option<Vec<MarketBar>> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
         let bars = snapshot.bars;
-        let installed = self.engine.install_history(
-            generation,
-            series,
-            price_scale,
-            quantity_scale,
-            bars.clone(),
-        );
+        let installed = if replace_covering {
+            self.engine.replace_covering_history(
+                generation,
+                series,
+                price_scale,
+                quantity_scale,
+                bars.clone(),
+            )
+        } else {
+            self.engine.install_history(
+                generation,
+                series,
+                price_scale,
+                quantity_scale,
+                bars.clone(),
+            )
+        };
         let publications = match installed {
             Ok(publications) => publications,
             Err(error) => {
@@ -3637,19 +3564,22 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         mut snapshot: HistorySnapshot,
-        viewport_backfill: bool,
+        repair: bool,
     ) -> Option<HistorySnapshot> {
-        if viewport_backfill {
+        if repair {
             let Some(current) = self.engine.series_snapshot(series) else {
                 return Some(snapshot);
             };
-            let Ok(bars) = merge_viewport_history(&current, snapshot.bars, HISTORY_BARS_PER_SERIES)
-            else {
+            let Ok(bars) = reconcile_history_repair(
+                &current,
+                snapshot.bars,
+                HISTORY_BARS_PER_SERIES,
+                Some(coinbase_interval_nanos(series).ok()?),
+            ) else {
                 return None;
             };
             snapshot.bars = bars;
             self.local_loaded.remove(&(series.clone(), generation));
-            self.engine.invalidate_series(series);
             return Some(snapshot);
         }
         if !self.local_loaded.contains(&(series.clone(), generation)) {
@@ -3659,8 +3589,9 @@ impl Coordinator<'_> {
             self.history_failed(series, generation);
             return None;
         };
-        let Ok(bars) = reconcile_history_repair(&current, snapshot.bars, HISTORY_BARS_PER_SERIES)
-        else {
+        let merged =
+            reconcile_history_repair(&current, snapshot.bars, HISTORY_BARS_PER_SERIES, None);
+        let Ok(bars) = merged else {
             self.history_failed(series, generation);
             return None;
         };
@@ -3744,7 +3675,8 @@ impl Coordinator<'_> {
         }
         live.history_ready = false;
         live.dirty = false;
-        self.broadcast_rithmic_provider(
+        self.broadcast_provider_for(
+            "rithmic",
             ProviderConnectionState::Recovering,
             generation,
             Some("Rithmic history/live handoff failed"),
@@ -4021,6 +3953,7 @@ impl Coordinator<'_> {
             return;
         };
         let command_generation = instrument.selection_generation;
+        let provider = instrument.provider.clone();
         let publication = match self.install_provider_instrument(&instrument) {
             Ok(()) => envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
                 consumer_id,
@@ -4028,7 +3961,7 @@ impl Coordinator<'_> {
             }),
             Err(_) => envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
                 consumer_id,
-                provider: "rithmic".to_string(),
+                provider,
                 provider_generation: Some(instrument.session_generation),
                 command_generation,
                 reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
@@ -4103,7 +4036,12 @@ impl Coordinator<'_> {
         let _ = self
             .engine
             .set_provider_health("rithmic", generation, ProviderHealth::Connecting);
-        self.broadcast_rithmic_provider(ProviderConnectionState::Connecting, generation, None);
+        self.broadcast_provider_for(
+            "rithmic",
+            ProviderConnectionState::Connecting,
+            generation,
+            None,
+        );
     }
 
     fn rithmic_online(&mut self, generation: u64) {
@@ -4121,7 +4059,7 @@ impl Coordinator<'_> {
         let _ = self
             .engine
             .set_provider_health("rithmic", generation, ProviderHealth::Online);
-        self.broadcast_rithmic_provider(ProviderConnectionState::Online, generation, None);
+        self.broadcast_provider_for("rithmic", ProviderConnectionState::Online, generation, None);
         let missing = self
             .rithmic_live
             .iter_mut()
@@ -4299,7 +4237,8 @@ impl Coordinator<'_> {
         let _ = self
             .engine
             .set_provider_health("rithmic", generation, ProviderHealth::Recovering);
-        self.broadcast_rithmic_provider(
+        self.broadcast_provider_for(
+            "rithmic",
             ProviderConnectionState::Recovering,
             generation,
             Some(detail),
@@ -4367,30 +4306,6 @@ impl Coordinator<'_> {
         }
     }
 
-    fn broadcast_rithmic_provider(
-        &mut self,
-        state: ProviderConnectionState,
-        generation: ProviderGeneration,
-        detail: Option<&str>,
-    ) {
-        let payload = envelope::Payload::ProviderState(ProviderState {
-            provider: "rithmic".to_string(),
-            state: state as i32,
-            generation: generation.0.get(),
-            detail: detail.map(str::to_string),
-        });
-        for (consumer_id, events) in &mut self.events {
-            if self
-                .engine
-                .current_demand(*consumer_id)
-                .and_then(|demand| demand.series.as_ref())
-                .is_some_and(|series| series.provider_id == "rithmic")
-            {
-                events.provider = Some(payload.clone());
-            }
-        }
-    }
-
     fn realtime_connecting(&mut self, generation: ProviderGeneration) {
         let current = self.coinbase_provider_generation();
         if generation < current {
@@ -4441,22 +4356,67 @@ impl Coordinator<'_> {
 
     fn realtime_trade(&mut self, generation: ProviderGeneration, trade: &CanonicalTrade) {
         let mut interrupted = None;
-        for live in self.live.values_mut().filter(|live| {
+        let mut seam_repairs = Vec::new();
+        for (series, live) in self.live.iter_mut().filter(|(_, live)| {
             live.generation == generation
                 && live.connected
                 && live.aggregator.product_id() == trade.product_id
         }) {
             if live.history_ready {
-                if live.aggregator.apply_trade(trade).is_err() {
+                let Ok(interval) = coinbase_interval_nanos(series) else {
+                    interrupted = Some("Coinbase realtime interval is invalid");
+                    break;
+                };
+                let anchor = live
+                    .aggregator
+                    .in_flight()
+                    .map(|bar| bar.exchange_timestamp_unix_nanos)
+                    .or_else(|| {
+                        live.aggregator
+                            .history()
+                            .last()
+                            .map(|bar| bar.exchange_timestamp_unix_nanos)
+                    });
+                if let Some(range) = anchor.and_then(|anchor| {
+                    coinbase_seam_repair(anchor, trade.trade_time_unix_nanos, interval)
+                }) {
+                    if live.buffered.len() == LIVE_BUFFER_CAPACITY {
+                        interrupted = Some("Coinbase history/live buffer overflowed");
+                        break;
+                    }
+                    live.history_ready = false;
+                    live.dirty = false;
+                    live.seam_repair = Some(range);
+                    live.buffered.push_back(trade.clone());
+                    seam_repairs.push((series.clone(), live.generation, range));
+                } else if live.aggregator.apply_trade(trade).is_err() {
                     interrupted = Some("Coinbase realtime aggregation failed");
                     break;
                 }
-                live.dirty = true;
+                if live.history_ready {
+                    live.dirty = true;
+                }
             } else if live.buffered.len() == LIVE_BUFFER_CAPACITY {
                 interrupted = Some("Coinbase history/live buffer overflowed");
                 break;
             } else {
                 live.buffered.push_back(trade.clone());
+            }
+        }
+        for (series, generation, range) in seam_repairs {
+            self.viewport_history_ranges
+                .insert((series.clone(), generation), range);
+            if let Err(error) =
+                self.schedule_coinbase_history(&series, generation, HistoryRequestKind::SeamRepair)
+            {
+                self.viewport_history_ranges
+                    .remove(&(series.clone(), generation));
+                self.broadcast_demand_error_for(
+                    &series,
+                    FailureStage::ProviderHistory,
+                    &error,
+                    None,
+                );
             }
         }
         if let Some(detail) = interrupted {
@@ -4651,7 +4611,8 @@ impl Coordinator<'_> {
                 if let Some(live) = self.rithmic_live.get_mut(&series) {
                     live.history_ready = false;
                 }
-                self.broadcast_rithmic_provider(
+                self.broadcast_provider_for(
+                    "rithmic",
                     ProviderConnectionState::Recovering,
                     generation,
                     Some("Rithmic live publication requires covering history"),
@@ -4666,14 +4627,15 @@ impl Coordinator<'_> {
         }
     }
 
-    fn broadcast_provider(
+    fn broadcast_provider_for(
         &mut self,
+        provider: &str,
         state: ProviderConnectionState,
         generation: ProviderGeneration,
         detail: Option<&str>,
     ) {
         let payload = envelope::Payload::ProviderState(ProviderState {
-            provider: "coinbase".to_string(),
+            provider: provider.to_string(),
             state: state as i32,
             generation: generation.0.get(),
             detail: detail.map(str::to_string),
@@ -4683,11 +4645,30 @@ impl Coordinator<'_> {
                 .engine
                 .current_demand(*consumer_id)
                 .and_then(|demand| demand.series.as_ref())
-                .is_some_and(|series| series.provider_id == "coinbase")
+                .is_some_and(|series| series.provider_id == provider)
             {
                 events.provider = Some(payload.clone());
             }
         }
+    }
+
+    fn broadcast_provider(
+        &mut self,
+        state: ProviderConnectionState,
+        generation: ProviderGeneration,
+        detail: Option<&str>,
+    ) {
+        self.broadcast_provider_for("coinbase", state, generation, detail);
+    }
+
+    #[cfg(test)]
+    fn broadcast_rithmic_provider(
+        &mut self,
+        state: ProviderConnectionState,
+        generation: ProviderGeneration,
+        detail: Option<&str>,
+    ) {
+        self.broadcast_provider_for("rithmic", state, generation, detail);
     }
 
     fn broadcast_series_state(&mut self, state: SeriesLoadState) {
@@ -5313,7 +5294,7 @@ fn id(value: u64) -> Result<NonZeroU64, String> {
 fn validate_provider_search(search: &SearchProviderInstruments) -> Result<(), String> {
     id(search.consumer_id)?;
     id(search.search_generation)?;
-    if search.provider != "rithmic"
+    if !matches!(search.provider.as_str(), "coinbase" | "rithmic")
         || search.maximum_results == 0
         || usize::try_from(search.maximum_results).unwrap_or(usize::MAX)
             > MAXIMUM_CATALOG_INSTRUMENTS
@@ -5328,7 +5309,7 @@ fn validate_provider_selection(selection: &SelectProviderInstrument) -> Result<(
     id(selection.consumer_id)?;
     id(selection.selection_generation)?;
     id(selection.search_generation)?;
-    if selection.provider != "rithmic"
+    if !matches!(selection.provider.as_str(), "coinbase" | "rithmic")
         || ![
             &selection.symbol,
             &selection.exchange,
@@ -5390,8 +5371,48 @@ fn reconcile_history_repair(
     current: &SeriesSnapshot,
     repair: Vec<MarketBar>,
     maximum_bars: usize,
+    interval: Option<i64>,
 ) -> Result<Vec<MarketBar>, String> {
-    if maximum_bars == 0 || current.bars.is_empty() || repair.is_empty() {
+    if maximum_bars == 0 || current.bars.is_empty() {
+        return Err("covering history repair is empty".to_string());
+    }
+    if let Some(interval) = interval {
+        let mut merged = BTreeMap::new();
+        for bar in current.bars.iter().copied() {
+            bar.validate().map_err(|error| error.to_string())?;
+            if bar.exchange_timestamp_unix_nanos.rem_euclid(interval) != 0
+                || merged
+                    .insert(bar.exchange_timestamp_unix_nanos, bar)
+                    .is_some()
+            {
+                return Err("Coinbase current history is not canonical".to_string());
+            }
+        }
+        for mut bar in repair {
+            bar.validate().map_err(|error| error.to_string())?;
+            if bar.exchange_timestamp_unix_nanos.rem_euclid(interval) != 0 {
+                return Err("Coinbase repair is not interval aligned".to_string());
+            }
+            bar.source_sequence = 1;
+            merged
+                .entry(bar.exchange_timestamp_unix_nanos)
+                .or_insert(bar);
+        }
+        let retained_start = merged.len().saturating_sub(maximum_bars);
+        let mut bars = merged
+            .into_values()
+            .skip(retained_start)
+            .collect::<Vec<_>>();
+        for (index, bar) in bars.iter_mut().enumerate() {
+            bar.source_sequence = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or_else(|| "Coinbase covering repair sequence overflowed".to_string())?;
+            bar.validate().map_err(|error| error.to_string())?;
+        }
+        return Ok(bars);
+    }
+    if repair.is_empty() {
         return Err("covering history repair is empty".to_string());
     }
     let mut merged = current.bars.to_vec();
@@ -5448,6 +5469,15 @@ fn recent_coinbase_history_range(
     Ok(HistoryRange {
         start_unix_nanos: end_unix_nanos.saturating_sub(span).max(0),
         end_unix_nanos,
+    })
+}
+
+fn coinbase_seam_repair(anchor: i64, trade_time: i64, interval: i64) -> Option<HistoryRange> {
+    let start = anchor.checked_add(interval)?;
+    let end = align_down(trade_time, interval);
+    (end > start).then_some(HistoryRange {
+        start_unix_nanos: start,
+        end_unix_nanos: end,
     })
 }
 
@@ -5557,48 +5587,6 @@ fn record_covered_range(
         }
     }
     *ranges = merged;
-}
-
-fn merge_viewport_history(
-    current: &SeriesSnapshot,
-    mut backfill: Vec<MarketBar>,
-    maximum_bars: usize,
-) -> Result<Vec<MarketBar>, String> {
-    if maximum_bars <= VIEWPORT_LIVE_TAIL_RESERVE || current.bars.is_empty() || backfill.is_empty()
-    {
-        return Err("visible history backfill is empty or unbounded".to_string());
-    }
-    backfill.sort_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-    backfill.dedup_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-    let backfill_limit = maximum_bars.saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE);
-    if backfill.len() > backfill_limit {
-        backfill.drain(..backfill.len() - backfill_limit);
-    }
-    let mut merged = BTreeMap::new();
-    for bar in backfill {
-        merged.insert(bar.exchange_timestamp_unix_nanos, bar);
-    }
-    for bar in current.bars.iter() {
-        merged.insert(bar.exchange_timestamp_unix_nanos, *bar);
-    }
-    let mut bars = merged.into_values().collect::<Vec<_>>();
-    if bars.len() > maximum_bars {
-        bars.drain(..bars.len() - maximum_bars);
-    }
-    for (index, bar) in bars.iter_mut().enumerate() {
-        bar.source_sequence = u64::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_add(1))
-            .ok_or_else(|| "visible history sequence overflowed".to_string())?;
-        bar.validate().map_err(|error| error.to_string())?;
-    }
-    if bars.windows(2).any(|pair| {
-        pair[0].source_sequence.checked_add(1) != Some(pair[1].source_sequence)
-            || pair[0].exchange_timestamp_unix_nanos >= pair[1].exchange_timestamp_unix_nanos
-    }) {
-        return Err("visible history backfill is not canonical".to_string());
-    }
-    Ok(bars)
 }
 
 fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggregator, String> {
@@ -5844,6 +5832,232 @@ mod tests {
     };
     use std::time::Instant;
 
+    struct FixtureHistory {
+        bars: Vec<MarketBar>,
+        fetches: Option<Arc<AtomicUsize>>,
+    }
+
+    enum FixtureRealtimeAction {
+        Connected,
+        Trade(CanonicalTrade),
+        Heartbeat,
+        Disconnect,
+    }
+
+    struct FixtureRealtime {
+        actions: Receiver<FixtureRealtimeAction>,
+        generations: SyncSender<ProviderGeneration>,
+        stops: SyncSender<ProviderGeneration>,
+    }
+
+    struct FixtureRealtimeHarness {
+        service: MarketService,
+        actions: SyncSender<FixtureRealtimeAction>,
+        generations: Receiver<ProviderGeneration>,
+        stops: Receiver<ProviderGeneration>,
+        history_fetches: Arc<AtomicUsize>,
+    }
+
+    impl HistorySource for FixtureHistory {
+        fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+            if request.kind != HistoryRequestKind::Initial {
+                return Err("fixture history does not provide viewport backfill".to_string());
+            }
+            if let Some(fetches) = &self.fetches {
+                fetches.fetch_add(1, Ordering::AcqRel);
+            }
+            let (interval_seconds, price_scale, quantity_scale) =
+                if request.series.provider_id == "coinbase" {
+                    let profile = coinbase_series_profile(&request.series)?;
+                    (
+                        profile.interval_seconds,
+                        profile.price_scale,
+                        profile.quantity_scale,
+                    )
+                } else {
+                    let instrument = request
+                        .instrument
+                        .as_ref()
+                        .ok_or_else(|| "fixture provider instrument is unavailable".to_string())?;
+                    let interval_seconds = request
+                        .series
+                        .period
+                        .duration_nanos()
+                        .and_then(|nanos| u32::try_from(nanos / 1_000_000_000).ok())
+                        .unwrap_or(1);
+                    (
+                        interval_seconds,
+                        u8::try_from(instrument.price_scale)
+                            .map_err(|_| "fixture price scale is invalid".to_string())?,
+                        u8::try_from(instrument.quantity_scale)
+                            .map_err(|_| "fixture quantity scale is invalid".to_string())?,
+                    )
+                };
+            let mut bars = self.bars.clone();
+            for (index, bar) in bars.iter_mut().enumerate() {
+                bar.exchange_timestamp_seconds = i64::try_from(index + 1)
+                    .ok()
+                    .and_then(|value| value.checked_mul(i64::from(interval_seconds)))
+                    .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
+                bar.exchange_timestamp_unix_nanos = bar
+                    .exchange_timestamp_seconds
+                    .checked_mul(1_000_000_000)
+                    .ok_or_else(|| "fixture history timestamp overflow".to_string())?;
+            }
+            Ok(HistorySnapshot {
+                price_scale,
+                quantity_scale,
+                bars,
+                handoff_boundary_unix_nanos: None,
+            })
+        }
+    }
+
+    impl RealtimeSource for FixtureRealtime {
+        fn run_generation(
+            &mut self,
+            generation: ProviderGeneration,
+            events: &SyncSender<RealtimeEvent>,
+            overflow: &AtomicBool,
+            stop: &Arc<AtomicBool>,
+        ) {
+            if self.generations.send(generation).is_err() {
+                return;
+            }
+            while !stop.load(Ordering::Acquire) {
+                let action = match self.actions.recv_timeout(Duration::from_millis(10)) {
+                    Ok(action) => action,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                };
+                let event = match action {
+                    FixtureRealtimeAction::Connected => {
+                        if events.send(RealtimeEvent::Connected(generation)).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    FixtureRealtimeAction::Trade(trade) => RealtimeEvent::Trade(generation, trade),
+                    FixtureRealtimeAction::Heartbeat => RealtimeEvent::Heartbeat(generation),
+                    FixtureRealtimeAction::Disconnect => return,
+                };
+                if !try_emit_realtime(events, overflow, event) {
+                    return;
+                }
+            }
+            let _ = self.stops.send(generation);
+        }
+    }
+
+    impl MarketService {
+        /// Starts a deterministic in-memory history source for IPC integration tests.
+        pub(crate) fn start_fixture(bars: Vec<MarketBar>) -> Result<Self, String> {
+            Self::start_with_sources(
+                FixtureHistory {
+                    bars,
+                    fetches: None,
+                },
+                None,
+                None,
+            )
+        }
+
+        fn start_fixture_realtime(bars: Vec<MarketBar>) -> Result<FixtureRealtimeHarness, String> {
+            Self::start_fixture_realtime_with_storage(bars, None)
+        }
+
+        fn start_fixture_realtime_with_storage(
+            bars: Vec<MarketBar>,
+            storage: Option<Result<LocalHistoryStore, String>>,
+        ) -> Result<FixtureRealtimeHarness, String> {
+            let (action_tx, action_rx) = mpsc::sync_channel(16);
+            let (generation_tx, generation_rx) = mpsc::sync_channel(4);
+            let (stop_tx, stop_rx) = mpsc::sync_channel(4);
+            let history_fetches = Arc::new(AtomicUsize::new(0));
+            let service = Self::start_with_sources(
+                FixtureHistory {
+                    bars,
+                    fetches: Some(Arc::clone(&history_fetches)),
+                },
+                Some(Box::new(FixtureRealtime {
+                    actions: action_rx,
+                    generations: generation_tx,
+                    stops: stop_tx,
+                })),
+                storage,
+            )?;
+            Ok(FixtureRealtimeHarness {
+                service,
+                actions: action_tx,
+                generations: generation_rx,
+                stops: stop_rx,
+                history_fetches,
+            })
+        }
+
+        fn start_with_source(source: impl HistorySource) -> Result<Self, String> {
+            Self::start_with_sources(source, None, None)
+        }
+
+        fn start_with_sources(
+            source: impl HistorySource,
+            realtime: Option<Box<dyn RealtimeSource>>,
+            storage: Option<Result<LocalHistoryStore, String>>,
+        ) -> Result<Self, String> {
+            Self::start_composed(
+                HistorySources::Shared(Box::new(source)),
+                realtime,
+                storage,
+                false,
+                0,
+            )
+        }
+    }
+
+    fn merge_viewport_history(
+        current: &SeriesSnapshot,
+        mut backfill: Vec<MarketBar>,
+        maximum_bars: usize,
+    ) -> Result<Vec<MarketBar>, String> {
+        if maximum_bars <= VIEWPORT_LIVE_TAIL_RESERVE
+            || current.bars.is_empty()
+            || backfill.is_empty()
+        {
+            return Err("visible history backfill is empty or unbounded".to_string());
+        }
+        backfill.sort_by_key(|bar| bar.exchange_timestamp_unix_nanos);
+        backfill.dedup_by_key(|bar| bar.exchange_timestamp_unix_nanos);
+        let backfill_limit = maximum_bars.saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE);
+        if backfill.len() > backfill_limit {
+            backfill.drain(..backfill.len() - backfill_limit);
+        }
+        let mut merged = BTreeMap::new();
+        for bar in backfill {
+            merged.insert(bar.exchange_timestamp_unix_nanos, bar);
+        }
+        for bar in current.bars.iter() {
+            merged.insert(bar.exchange_timestamp_unix_nanos, *bar);
+        }
+        let mut bars = merged.into_values().collect::<Vec<_>>();
+        if bars.len() > maximum_bars {
+            bars.drain(..bars.len() - maximum_bars);
+        }
+        for (index, bar) in bars.iter_mut().enumerate() {
+            bar.source_sequence = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or_else(|| "visible history sequence overflowed".to_string())?;
+            bar.validate().map_err(|error| error.to_string())?;
+        }
+        if bars.windows(2).any(|pair| {
+            pair[0].source_sequence.checked_add(1) != Some(pair[1].source_sequence)
+                || pair[0].exchange_timestamp_unix_nanos >= pair[1].exchange_timestamp_unix_nanos
+        }) {
+            return Err("visible history backfill is not canonical".to_string());
+        }
+        Ok(bars)
+    }
+
     struct ControlledHistory {
         fetches: Arc<AtomicUsize>,
         release: Receiver<()>,
@@ -5894,6 +6108,7 @@ mod tests {
             realtime_control: realtime,
             rithmic_realtime_control: None,
             rithmic_catalog_control: None,
+            coinbase_catalog_control: None,
             realtime_stop,
             resource_mode: ResourceMode::Warm,
             resource_policy: decide_resource_policy(ResourcePolicyInput {
@@ -6764,6 +6979,33 @@ mod tests {
     }
 
     #[test]
+    fn coinbase_catalog_does_not_share_selection_fences_between_consumers() {
+        let service = MarketService::start_fixture(vec![history_bar()]).expect("market service");
+        let product = |base: &str, selection_generation: u64| InstallProviderInstrument {
+            provider: "coinbase".to_string(),
+            session_generation: COINBASE_PROVIDER_GENERATION,
+            selection_generation,
+            instrument_id: format!("instrument:coinbase:{}:usd", base.to_ascii_lowercase()),
+            provider_symbol: format!("{base}-USD"),
+            display_symbol: format!("{base}/USD"),
+            venue_id: "coinbase".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+        };
+
+        service
+            .install_provider_instrument(&product("BTC", 2))
+            .expect("BTC installs");
+        service
+            .install_provider_instrument(&product("ETH", 1))
+            .expect("independent ETH generation installs");
+        service
+            .install_provider_instrument(&product("BTC", 1))
+            .expect("independent consumer generation installs");
+    }
+
+    #[test]
     fn engine_catalog_selection_installs_identity_before_publication() {
         let mut engine = configured_engine().expect("engine configures");
         let client_id = ClientId(id(7).expect("client"));
@@ -7468,6 +7710,42 @@ mod tests {
                 end_unix_nanos: 4 * 60 * 1_000_000_000,
             }]
         );
+    }
+
+    #[test]
+    fn coinbase_covering_repair_fills_holes_and_preserves_current_overlap() {
+        let series = internal_series(&btc()).expect("series");
+        let mut current_bars = sequential_history(1, 5, 1);
+        current_bars.remove(2);
+        let current = SeriesSnapshot {
+            series: series.clone(),
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            forming: true,
+            bars: current_bars.into(),
+        };
+        let mut repair = sequential_history(1, 1, 3);
+        repair[0].close = 103;
+        let mut overlap = sequential_history(2, 1, 1);
+        overlap[0].close = 102;
+        repair.extend(overlap);
+
+        let merged = reconcile_history_repair(
+            &current,
+            repair,
+            HISTORY_BARS_PER_SERIES,
+            Some(coinbase_interval_nanos(&series).expect("interval")),
+        )
+        .expect("repair merges");
+
+        assert_eq!(merged.len(), 5);
+        assert_eq!(merged[1].close, 105);
+        assert_eq!(merged[2].close, 103);
+        assert!(merged.windows(2).all(|pair| {
+            pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
+        }));
     }
 
     fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {

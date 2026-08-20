@@ -238,7 +238,6 @@ struct BenchmarkSetup {
     interaction_worker: MarketDataWorker,
     interaction_commands: Receiver<MarketWorkerCommand>,
     message_sender: MarketWorkerSender,
-    coinbase_products: [InstallProviderInstrument; 2],
     interaction_startup: MarketWorkerStartup,
 }
 
@@ -951,7 +950,6 @@ fn benchmark_root(
         interaction_worker,
         interaction_commands,
         message_sender,
-        coinbase_products,
         interaction_startup,
     } = setup;
     let chart = cx.new(move |_| NucleusChartView::with_replay(&snapshot));
@@ -968,9 +966,6 @@ fn benchmark_root(
             Some(terminal_symbol_input),
             indicator_input,
         )
-    });
-    terminal.update(cx, |terminal, _| {
-        terminal.coinbase_products = coinbase_products.into();
     });
     subscribe_symbol_input(Some(symbol_input.clone()), &terminal, window, cx);
     #[cfg(target_os = "windows")]
@@ -1074,12 +1069,8 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
         None,
         Some(Arc::new(AtomicU64::new(0))),
     );
-    let coinbase_products = [
-        benchmark_coinbase_product("BTC"),
-        benchmark_coinbase_product("ETH"),
-    ];
     let interaction_startup = MarketWorkerStartup::Loading(Box::new(CoinbaseWorkerStartup {
-        coinbase_product: coinbase_products[0].clone(),
+        coinbase_product: benchmark_coinbase_product("BTC"),
         coinbase_interval: ChartInterval::Minute1,
         restored_viewport: None,
         subscription_id: "benchmark-interaction".to_string(),
@@ -1096,7 +1087,6 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
             interaction_worker,
             interaction_commands,
             message_sender,
-            coinbase_products,
             interaction_startup,
         },
         application_outcome,

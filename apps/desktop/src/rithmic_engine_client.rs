@@ -5,16 +5,14 @@ use crate::{
 use axiusflow_desktop::market_worker::{
     EngineSeriesRequest, MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage,
     MarketWorkerSender, MarketWorkerStartup, ProviderCatalogCommand, ProviderCatalogEvent,
-    market_worker_channel,
+    classify_provider_catalog_event, market_worker_channel,
 };
 use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, ProviderInstrumentSelection, SearchProviderInstruments,
-    SelectProviderInstrument, envelope,
+    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument, envelope,
 };
 use axiusflow_observability::FeedConnectionState;
 use std::{
-    collections::BTreeSet,
     num::{NonZeroU64, NonZeroUsize},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
@@ -33,8 +31,6 @@ struct WorkerState {
     history: RithmicHistoryTask,
     installed: Option<InstallProviderInstrument>,
     pending_history: Option<RithmicSeriesRequest>,
-    pending_searches: BTreeSet<u64>,
-    pending_selections: BTreeSet<u64>,
 }
 
 /// Starts the bounded Rithmic UI bridge backed exclusively by the resident engine.
@@ -77,8 +73,6 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
             history,
             installed: None,
             pending_history: None,
-            pending_searches: BTreeSet::new(),
-            pending_selections: BTreeSet::new(),
         })
     });
     let Ok(mut state) = state else {
@@ -155,9 +149,7 @@ fn process_command(
     match command {
         MarketWorkerCommand::ProviderSearch(search) => {
             let generation = search.search_generation;
-            if state.catalog.search(&search).is_ok() {
-                state.pending_searches.insert(generation);
-            } else {
+            if state.catalog.search(search).is_err() {
                 publish_dispatch_rejection(messages, generation, ProviderCatalogCommand::Search);
             }
         }
@@ -165,9 +157,7 @@ fn process_command(
             let generation = selection.selection_generation;
             state.history.cancel();
             state.pending_history = None;
-            if state.catalog.select(&selection).is_ok() {
-                state.pending_selections.insert(generation);
-            } else {
+            if state.catalog.select(selection).is_err() {
                 publish_dispatch_rejection(messages, generation, ProviderCatalogCommand::Selection);
             }
         }
@@ -216,61 +206,39 @@ fn handle_catalog_event(
     state: &mut WorkerState,
     event: envelope::Payload,
 ) {
-    match event {
-        envelope::Payload::ProviderInstrumentSearchResult(result) => {
-            publish_search_result(messages, state, result);
+    let (catalog, passthrough) =
+        classify_provider_catalog_event(event, "rithmic", state.catalog.consumer_id);
+    match catalog {
+        Some(ProviderCatalogEvent::SearchCompleted(result)) => {
+            publish_search_result(messages, result);
         }
-        envelope::Payload::ProviderInstrumentSelection(selection) => {
-            publish_selection(messages, state, selection);
+        Some(ProviderCatalogEvent::SelectionInstalled(instrument)) => {
+            publish_selection(messages, state, instrument);
         }
-        envelope::Payload::ProviderCatalogRejected(rejection) => {
-            if rejection.provider != "rithmic" {
-                return;
-            }
-            let command = if state
-                .pending_selections
-                .remove(&rejection.command_generation)
-            {
-                ProviderCatalogCommand::Selection
-            } else {
-                state.pending_searches.remove(&rejection.command_generation);
-                ProviderCatalogCommand::Search
-            };
-            let _ = messages.send(MarketWorkerMessage::ProviderCatalog(
-                ProviderCatalogEvent::CommandRejected { rejection, command },
-            ));
+        Some(event @ ProviderCatalogEvent::CommandRejected { .. }) => {
+            let _ = messages.send(MarketWorkerMessage::ProviderCatalog(event));
             send_connection(
                 messages,
                 FeedConnectionState::Recovering,
                 "Rithmic catalog command was rejected",
             );
         }
-        envelope::Payload::ProviderState(provider) if provider.provider == "rithmic" => {}
-        envelope::Payload::Fault(fault) => {
-            send_connection(
-                messages,
-                FeedConnectionState::Recovering,
-                &fault.redacted_detail,
-            );
+        None => {
+            if let Some(envelope::Payload::Fault(fault)) = passthrough {
+                send_connection(
+                    messages,
+                    FeedConnectionState::Recovering,
+                    &fault.redacted_detail,
+                );
+            }
         }
-        _ => {}
     }
 }
 
-fn publish_search_result(
-    messages: &MarketWorkerSender,
-    state: &mut WorkerState,
-    result: ProviderInstrumentSearchResult,
-) {
-    if result.provider != "rithmic" {
-        return;
-    }
+fn publish_search_result(messages: &MarketWorkerSender, result: ProviderInstrumentSearchResult) {
     if NonZeroU64::new(result.provider_generation).is_none()
         || usize_generation(result.search_generation).is_none()
     {
-        return;
-    }
-    if !state.pending_searches.remove(&result.search_generation) {
         return;
     }
     let _ = messages.send(MarketWorkerMessage::ProviderCatalog(
@@ -286,18 +254,8 @@ fn publish_search_result(
 fn publish_selection(
     messages: &MarketWorkerSender,
     state: &mut WorkerState,
-    selection: ProviderInstrumentSelection,
+    instrument: InstallProviderInstrument,
 ) {
-    let Some(instrument) = selection.instrument else {
-        return;
-    };
-    if instrument.provider != "rithmic"
-        || !state
-            .pending_selections
-            .remove(&instrument.selection_generation)
-    {
-        return;
-    }
     if NonZeroU64::new(instrument.session_generation).is_none()
         || usize_generation(instrument.selection_generation).is_none()
     {
@@ -358,30 +316,12 @@ impl EngineCatalogSession {
         })
     }
 
-    fn search(&mut self, search: &SearchProviderInstruments) -> Result<(), String> {
-        if search.provider != "rithmic"
-            || search.search_generation == 0
-            || search.query.trim().is_empty()
-            || search.maximum_results == 0
-        {
-            return Err("Rithmic search shape is unsupported".to_string());
-        }
-        let mut search = search.clone();
+    fn search(&mut self, mut search: SearchProviderInstruments) -> Result<(), String> {
         search.consumer_id = self.consumer_id;
         self.client.search_provider_instruments(search)
     }
 
-    fn select(&mut self, selection: &SelectProviderInstrument) -> Result<(), String> {
-        if selection.provider != "rithmic"
-            || selection.selection_generation == 0
-            || selection.search_generation == 0
-            || selection.symbol.trim().is_empty()
-            || selection.exchange.trim().is_empty()
-            || selection.entitlement_id.trim().is_empty()
-        {
-            return Err("Rithmic selection shape is unsupported".to_string());
-        }
-        let mut selection = selection.clone();
+    fn select(&mut self, mut selection: SelectProviderInstrument) -> Result<(), String> {
         selection.consumer_id = self.consumer_id;
         self.client.select_provider_instrument(selection)
     }

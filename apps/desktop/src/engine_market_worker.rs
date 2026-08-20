@@ -17,8 +17,8 @@ use axiusflow_application::{
 };
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, DemandError, EngineFaultCode, FailureStage, InstallProviderInstrument,
-    ProviderConnectionState, ProviderState, SeriesCadence, SeriesKey, SeriesLoadState,
-    SeriesSnapshot, SeriesUpdate, WorkspacePaneKind, WorkspaceState, envelope,
+    ProviderConnectionState, ProviderState, SearchProviderInstruments, SeriesCadence, SeriesKey,
+    SeriesLoadState, SeriesSnapshot, SeriesUpdate, WorkspacePaneKind, WorkspaceState, envelope,
 };
 #[cfg(test)]
 use axiusflow_engine_protocol::{WorkspacePaneState, WorkspaceTabState};
@@ -29,10 +29,13 @@ use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 
 use crate::engine_supervisor::EngineSupervisor;
+#[cfg(test)]
+use axiusflow_desktop::market_worker::ProviderCatalogEvent;
 use axiusflow_desktop::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
     MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
-    MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
+    MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
+    market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -484,6 +487,17 @@ fn poll_endpoint(client: &mut EngineSupervisor, record: &mut EndpointRecord) -> 
     let Some(event) = poll.event else {
         return Ok(());
     };
+    let (catalog, event) = classify_provider_catalog_event(event, "coinbase", endpoint.consumer_id);
+    let event = match catalog {
+        Some(event) => {
+            let _ = endpoint
+                .messages
+                .send(MarketWorkerMessage::ProviderCatalog(event));
+            return Ok(());
+        }
+        None => event,
+    };
+    let Some(event) = event else { return Ok(()) };
     let outcome = apply_polled_event(
         event,
         endpoint.consumer_id,
@@ -536,9 +550,6 @@ fn initialize_endpoint(
         message: "Connecting to the resident market engine".to_string(),
     });
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
-    let _ = endpoint.messages.send(MarketWorkerMessage::CoinbaseCatalog(
-        Ok(coinbase_products()),
-    ));
     match request_snapshot(
         client,
         endpoint.consumer_id,
@@ -567,6 +578,13 @@ fn initialize_endpoint(
             });
         }
     }
+    client.search_provider_instruments(SearchProviderInstruments {
+        consumer_id: endpoint.consumer_id,
+        search_generation: 1,
+        provider: "coinbase".to_string(),
+        query: String::new(),
+        maximum_results: 4_096,
+    })?;
     Ok(())
 }
 
@@ -582,6 +600,20 @@ fn process_command(
         ..
     } = record;
     match command {
+        MarketWorkerCommand::ProviderSearch(mut request) => {
+            if request.provider != "coinbase" {
+                return Err("unsupported provider catalog command".to_string());
+            }
+            request.consumer_id = endpoint.consumer_id;
+            client.search_provider_instruments(request)
+        }
+        MarketWorkerCommand::ProviderSelect(mut request) => {
+            if request.provider != "coinbase" {
+                return Err("unsupported provider catalog command".to_string());
+            }
+            request.consumer_id = endpoint.consumer_id;
+            client.select_provider_instrument(request)
+        }
         MarketWorkerCommand::CoinbaseSelect(request) => {
             let series = match series_key(&request.product, request.interval) {
                 Ok(series) => series,
@@ -630,9 +662,7 @@ fn process_command(
             retire_endpoint(client, endpoint);
             Ok(())
         }
-        MarketWorkerCommand::ProviderSearch(_)
-        | MarketWorkerCommand::ProviderSelect(_)
-        | MarketWorkerCommand::EngineSeries(_) => {
+        MarketWorkerCommand::EngineSeries(_) => {
             Err("Rithmic commands cannot enter the Coinbase engine client".to_string())
         }
     }
@@ -690,13 +720,7 @@ fn apply_polled_event(
             if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
                 return Err("engine realtime snapshot identity mismatched".to_string());
             }
-            let replay = replay_snapshot(&snapshot)?;
-            let outcome = model
-                .apply_update(ReplayStreamUpdate::Snapshot(replay.clone()))
-                .map_err(|error| error.to_string())?;
-            let MarketBarModelOutcome::Published(generation) = outcome else {
-                return Err("engine realtime snapshot was not publishable".to_string());
-            };
+            let (replay, generation) = apply_snapshot(model, &snapshot)?;
             let status = MarketPublicationGeneration::from_generation(&generation);
             *publication = Some(status);
             send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)?;
@@ -860,13 +884,7 @@ fn request_snapshot(
                 apply_provider_state(&state, messages)?;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
-                let replay = replay_snapshot(&snapshot)?;
-                let outcome = model
-                    .apply_update(ReplayStreamUpdate::Snapshot(replay.clone()))
-                    .map_err(|error| error.to_string())?;
-                let MarketBarModelOutcome::Published(generation) = outcome else {
-                    return Err("engine snapshot did not publish a client generation".to_string());
-                };
+                let (replay, generation) = apply_snapshot(model, &snapshot)?;
                 return Ok((replay, generation));
             }
             envelope::Payload::DemandError(error) => return Err(demand_error(&error)),
@@ -874,6 +892,20 @@ fn request_snapshot(
             _ => return Err("engine returned an unexpected market response".to_string()),
         }
     }
+}
+
+fn apply_snapshot(
+    model: &mut MarketBarClientModel,
+    snapshot: &SeriesSnapshot,
+) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
+    let replay = replay_snapshot(snapshot)?;
+    let outcome = model
+        .apply_update(ReplayStreamUpdate::Snapshot(replay.clone()))
+        .map_err(|error| error.to_string())?;
+    let MarketBarModelOutcome::Published(generation) = outcome else {
+        return Err("engine snapshot did not publish a client generation".to_string());
+    };
+    Ok((replay, generation))
 }
 
 fn send_recovery(
@@ -1225,7 +1257,27 @@ fn random_identity() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_engine_protocol::{MarketBar as IpcMarketBar, SeriesState};
+    use axiusflow_engine_protocol::{
+        MarketBar as IpcMarketBar, ProviderInstrumentSearchResult, ProviderInstrumentSelection,
+        ProviderInstrumentSummary, SeriesState,
+    };
+
+    fn handle_coinbase_catalog_event(
+        endpoint: &mut WorkerEndpoint,
+        event: envelope::Payload,
+    ) -> Option<envelope::Payload> {
+        let (catalog, event) =
+            classify_provider_catalog_event(event, "coinbase", endpoint.consumer_id);
+        match catalog {
+            Some(event) => {
+                let _ = endpoint
+                    .messages
+                    .send(MarketWorkerMessage::ProviderCatalog(event));
+                None
+            }
+            None => event,
+        }
+    }
 
     #[test]
     fn workspace_creation_allocates_one_consumer_per_tab_without_identity_wraparound() {
@@ -1245,6 +1297,67 @@ mod tests {
         assert_eq!(record.endpoint.consumer_id, 41);
         assert_eq!(record.product.instrument_id, product.instrument_id);
         assert_eq!(record.interval, ChartInterval::Minute5);
+    }
+
+    #[test]
+    fn coinbase_worker_startup_routes_catalog_events() {
+        let product = coinbase_products().remove(0);
+        let (mut pane, mut record) =
+            worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
+        let MarketWorkerStartup::Loading(startup) = &pane.startup else {
+            panic!("Coinbase endpoint must start in loading state");
+        };
+        assert_eq!(startup.coinbase_product, product);
+        assert_eq!(startup.coinbase_interval, ChartInterval::Minute5);
+
+        assert!(
+            handle_coinbase_catalog_event(
+                &mut record.endpoint,
+                envelope::Payload::ProviderInstrumentSearchResult(ProviderInstrumentSearchResult {
+                    consumer_id: 41,
+                    provider: "coinbase".to_string(),
+                    provider_generation: 1,
+                    search_generation: 3,
+                    instruments: vec![ProviderInstrumentSummary {
+                        symbol: "BTC-USD".to_string(),
+                        exchange: "coinbase".to_string(),
+                        ..ProviderInstrumentSummary::default()
+                    }],
+                },),
+            )
+            .is_none()
+        );
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::ProviderCatalog(
+                ProviderCatalogEvent::SearchCompleted(result)
+            )] if result.search_generation == 3
+        ));
+
+        let mut selected = product.clone();
+        selected.selection_generation = 5;
+        assert!(
+            handle_coinbase_catalog_event(
+                &mut record.endpoint,
+                envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
+                    consumer_id: 41,
+                    instrument: Some(selected),
+                }),
+            )
+            .is_none()
+        );
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::ProviderCatalog(
+                ProviderCatalogEvent::SelectionInstalled(instrument)
+            )] if instrument.selection_generation == 5
+        ));
+
+        drop(record);
     }
 
     #[test]
