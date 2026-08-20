@@ -10,8 +10,8 @@ use std::{
 use axiusflow_engine::{EngineState, bind_listener, serve_client, serve_client_with_state};
 use axiusflow_engine_protocol::{
     ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, HotSeries,
-    PROTOCOL_VERSION, ResourceMode, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
-    encode_envelope, envelope,
+    PROTOCOL_VERSION, ResourceMode, WorkspaceLayoutState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
 use axiusflow_platform_runtime::CredentialVault;
@@ -256,7 +256,8 @@ fn workspace_selection_is_durable_across_engine_restart() {
     assert_eq!(reopened.workspace().market, "MNQU6");
     assert_eq!(reopened.workspace().interval_seconds, 300);
     assert_eq!(reopened.workspace().workspace_revision, 1);
-    assert_eq!(reopened.workspace().schema_revision, 4);
+    assert_eq!(reopened.workspace().schema_revision, 5);
+    assert!(reopened.workspace().workspace_tabs[0].layout.is_some());
     assert_eq!(reopened.workspace().cache_manifest_revision, 1);
     assert_eq!(reopened.workspace().hot_series[0].provider, "coinbase");
 }
@@ -473,7 +474,8 @@ fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
     let migrated = EngineState::open(&directory.0).expect("migrate workspace");
     let workspace = migrated.workspace();
     assert_eq!(workspace.workspace_revision, 8);
-    assert_eq!(workspace.schema_revision, 4);
+    assert_eq!(workspace.schema_revision, 5);
+    assert!(workspace.workspace_tabs[0].layout.is_some());
     assert_eq!(workspace.cache_manifest_revision, 1);
     assert_eq!(workspace.hot_series.len(), 1);
     assert_eq!(workspace.hot_series[0].market, "ETH-USD");
@@ -556,7 +558,8 @@ fn schema_two_migration_keeps_supported_coinbase_and_discards_incomplete_rithmic
     let migrated = EngineState::open(&directory.0).expect("migrate schema-two workspace");
     let workspace = migrated.workspace();
 
-    assert_eq!(workspace.schema_revision, 4);
+    assert_eq!(workspace.schema_revision, 5);
+    assert!(workspace.workspace_tabs[0].layout.is_some());
     assert_eq!(workspace.workspace_revision, 13);
     assert_eq!(workspace.hot_series.len(), 1);
     let series = &workspace.hot_series[0];
@@ -607,6 +610,19 @@ fn workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_write
             panes: vec![first, second],
             active_pane_id: 7,
             generation: 8,
+            layout: Some(WorkspaceLayoutState {
+                pane_id: 0,
+                split_axis: WorkspaceSplitAxis::Vertical as i32,
+                ratio_basis_points: 6_500,
+                first: Some(Box::new(WorkspaceLayoutState {
+                    pane_id: 1,
+                    ..WorkspaceLayoutState::default()
+                })),
+                second: Some(Box::new(WorkspaceLayoutState {
+                    pane_id: 7,
+                    ..WorkspaceLayoutState::default()
+                })),
+            }),
         },
         WorkspaceTabState {
             workspace_id: 3,
@@ -615,6 +631,10 @@ fn workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_write
             panes: vec![third],
             active_pane_id: 9,
             generation: 11,
+            layout: Some(WorkspaceLayoutState {
+                pane_id: 9,
+                ..WorkspaceLayoutState::default()
+            }),
         },
     ];
     let updated = client

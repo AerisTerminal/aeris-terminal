@@ -13,9 +13,9 @@ use axiusflow_engine_protocol::{
     RestoreWorkspace, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
     SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate,
     SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist,
-    SetWorkspaceLayout, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope,
-    envelope,
+    SetWorkspaceLayout, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceLayoutState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -143,6 +143,10 @@ fn workspace_tab() -> WorkspaceTabState {
         }],
         active_pane_id: 7,
         generation: 6,
+        layout: Some(WorkspaceLayoutState {
+            pane_id: 7,
+            ..WorkspaceLayoutState::default()
+        }),
     }
 }
 

@@ -447,7 +447,9 @@ fn run_attached_workers(
             process_pending_resource_class(client, endpoint);
             match endpoint.commands.try_recv() {
                 Ok(command) => {
-                    if let Err(error) = process_command(client, endpoint, command) {
+                    if let Err(error) =
+                        process_command(client, &record.product, record.interval, endpoint, command)
+                    {
                         let _ = endpoint.messages.send(MarketWorkerMessage::State {
                             state: ChartState::Error,
                             message: error,
@@ -460,35 +462,51 @@ fn run_attached_workers(
                     continue;
                 }
             }
-            let now = std::time::Instant::now();
-            if endpoint.active && endpoint.market_poll_due(now) {
-                let poll = client.poll_market_event(endpoint.consumer_id)?;
-                endpoint.last_market_poll = now;
-                if poll.reconnected {
-                    let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-                        state: FeedConnectionState::Recovering,
-                        message: "Resident engine restarted; restoring chart demand".to_string(),
-                    });
-                }
-                if let Some(event) = poll.event
-                    && let Err(error) = apply_polled_event(
-                        event,
-                        endpoint.consumer_id,
-                        endpoint.active_generation,
-                        &mut endpoint.model,
-                        &mut endpoint.publication,
-                        &endpoint.messages,
-                    )
-                {
-                    let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                        state: ChartState::Error,
-                        message: error,
-                    });
-                }
-            }
+            poll_endpoint(client, record)?;
         }
         endpoints.retain(|record| record.endpoint.active);
         thread::sleep(POLL_INTERVAL);
+    }
+    Ok(())
+}
+
+fn poll_endpoint(client: &mut EngineSupervisor, record: &mut EndpointRecord) -> Result<(), String> {
+    let endpoint = &mut record.endpoint;
+    let now = std::time::Instant::now();
+    if !endpoint.active || !endpoint.market_poll_due(now) {
+        return Ok(());
+    }
+    let poll = client.poll_market_event(endpoint.consumer_id)?;
+    endpoint.last_market_poll = now;
+    if poll.reconnected {
+        let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+            state: FeedConnectionState::Recovering,
+            message: "Resident engine restarted; restoring chart demand".to_string(),
+        });
+    }
+    let Some(event) = poll.event else {
+        return Ok(());
+    };
+    let outcome = apply_polled_event(
+        event,
+        endpoint.consumer_id,
+        endpoint.active_generation,
+        &mut endpoint.model,
+        &mut endpoint.publication,
+        &endpoint.messages,
+    );
+    let result = match outcome {
+        Ok(PolledEventOutcome::Applied) => return Ok(()),
+        Ok(PolledEventOutcome::ResnapshotRequired) => {
+            recover_sequence_gap(client, &record.product, record.interval, endpoint)
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        let _ = endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: error,
+        });
     }
     Ok(())
 }
@@ -557,6 +575,8 @@ fn initialize_endpoint(
 
 fn process_command(
     client: &mut EngineSupervisor,
+    product: &InstallProviderInstrument,
+    interval: ChartInterval,
     endpoint: &mut WorkerEndpoint,
     command: MarketWorkerCommand,
 ) -> Result<(), String> {
@@ -586,15 +606,9 @@ fn process_command(
             endpoint.active_generation = request.sequence;
             client.set_series_demand(endpoint.consumer_id, request.sequence, series)
         }
-        MarketWorkerCommand::Recovery(command) => send_recovery(
-            client,
-            endpoint.consumer_id,
-            endpoint.active_generation,
-            command,
-            &mut endpoint.model,
-            &mut endpoint.publication,
-            &endpoint.messages,
-        ),
+        MarketWorkerCommand::Recovery(command) => {
+            send_recovery(client, product, interval, endpoint, command)
+        }
         MarketWorkerCommand::ChartViewport(viewport) => {
             if viewport.selection_generation > 0 {
                 client.set_market_viewport(
@@ -654,6 +668,12 @@ fn retire_endpoint(client: &mut EngineSupervisor, endpoint: &mut WorkerEndpoint)
     let _ = endpoint.shutdown.try_send(());
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolledEventOutcome {
+    Applied,
+    ResnapshotRequired,
+}
+
 fn apply_polled_event(
     event: envelope::Payload,
     consumer_id: u64,
@@ -661,7 +681,7 @@ fn apply_polled_event(
     model: &mut MarketBarClientModel,
     publication: &mut Option<MarketPublicationGeneration>,
     messages: &MarketWorkerSender,
-) -> Result<(), String> {
+) -> Result<PolledEventOutcome, String> {
     match event {
         envelope::Payload::SeriesSnapshot(snapshot) => {
             if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
@@ -676,44 +696,34 @@ fn apply_polled_event(
             };
             let status = MarketPublicationGeneration::from_generation(&generation);
             *publication = Some(status);
-            send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)
+            send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)?;
+            Ok(PolledEventOutcome::Applied)
         }
         envelope::Payload::SeriesUpdate(update) => {
             if update.consumer_id != consumer_id || update.generation != active_generation {
                 return Err("engine realtime update identity mismatched".to_string());
             }
             let tail = replay_tail_update(&update)?;
-            let current = publication.ok_or_else(|| {
-                "engine realtime update arrived before a covering snapshot".to_string()
-            })?;
-            let (first_sequence, last_sequence) = current.sequence_range();
-            let sequence = tail.item().value().source_sequence;
-            if sequence < last_sequence || sequence > last_sequence.saturating_add(1) {
-                return Err(format!(
-                    "engine realtime update sequence was not contiguous: retained {first_sequence}-{last_sequence}, received {sequence}, publication {}",
-                    update.publication_generation
-                ));
+            match model
+                .apply_update(ReplayStreamUpdate::Tail(tail.clone()))
+                .map_err(|error| error.to_string())?
+            {
+                MarketBarModelOutcome::Published(generation) => {
+                    let status = MarketPublicationGeneration::from_generation(&generation);
+                    *publication = Some(status);
+                    send_publication(messages, ReplayStreamUpdate::Tail(tail), status)?;
+                    Ok(PolledEventOutcome::Applied)
+                }
+                MarketBarModelOutcome::Duplicate => Ok(PolledEventOutcome::Applied),
+                MarketBarModelOutcome::ResnapshotRequired(_) => {
+                    Ok(PolledEventOutcome::ResnapshotRequired)
+                }
             }
-            let appended = usize::from(sequence > last_sequence);
-            let retained_items = current
-                .retained_items()
-                .saturating_add(appended)
-                .min(MODEL_CAPACITY);
-            let first_sequence = if appended > 0 && retained_items == MODEL_CAPACITY {
-                first_sequence.saturating_add(1)
-            } else {
-                first_sequence
-            };
-            let status = MarketPublicationGeneration::from_tail(
-                update.publication_generation,
-                retained_items,
-                first_sequence,
-                sequence.max(last_sequence),
-            );
-            *publication = Some(status);
-            send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
         }
-        envelope::Payload::ProviderState(state) => apply_provider_state(&state, messages),
+        envelope::Payload::ProviderState(state) => {
+            apply_provider_state(&state, messages)?;
+            Ok(PolledEventOutcome::Applied)
+        }
         envelope::Payload::SeriesState(state) => {
             if state.consumer_id != consumer_id || state.generation != active_generation {
                 return Err("engine realtime state identity mismatched".to_string());
@@ -721,12 +731,15 @@ fn apply_polled_event(
             match SeriesLoadState::try_from(state.state)
                 .map_err(|_| "engine returned an invalid realtime state".to_string())?
             {
-                SeriesLoadState::Live => messages
-                    .send(MarketWorkerMessage::State {
-                        state: ChartState::Ready,
-                        message: "Coinbase history/live handoff is current".to_string(),
-                    })
-                    .map_err(|error| error.to_string()),
+                SeriesLoadState::Live => {
+                    messages
+                        .send(MarketWorkerMessage::State {
+                            state: ChartState::Ready,
+                            message: "Coinbase history/live handoff is current".to_string(),
+                        })
+                        .map_err(|error| error.to_string())?;
+                    Ok(PolledEventOutcome::Applied)
+                }
                 SeriesLoadState::Failed => Err(state
                     .detail
                     .unwrap_or_else(|| "Coinbase realtime failed".to_string())),
@@ -734,11 +747,13 @@ fn apply_polled_event(
                 | SeriesLoadState::Resolving
                 | SeriesLoadState::Partial
                 | SeriesLoadState::Ready
-                | SeriesLoadState::Superseded => Ok(()),
+                | SeriesLoadState::Superseded => Ok(PolledEventOutcome::Applied),
             }
         }
         envelope::Payload::DemandError(error) => Err(demand_error(&error)),
-        envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => Ok(()),
+        envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => {
+            Ok(PolledEventOutcome::Applied)
+        }
         envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
         _ => Err("engine returned an unexpected polled market event".to_string()),
     }
@@ -852,27 +867,21 @@ fn request_snapshot(
 
 fn send_recovery(
     client: &mut EngineSupervisor,
-    consumer_id: u64,
-    active_generation: u64,
+    product: &InstallProviderInstrument,
+    interval: ChartInterval,
+    endpoint: &mut WorkerEndpoint,
     command: ReplayRecoveryCommand,
-    model: &mut MarketBarClientModel,
-    publication: &mut Option<MarketPublicationGeneration>,
-    messages: &MarketWorkerSender,
 ) -> Result<(), String> {
-    let product = coinbase_products()
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
     let result = request_snapshot(
         client,
-        consumer_id,
-        active_generation,
-        series_key(&product, ChartInterval::Minute1)?,
-        model,
-        messages,
+        endpoint.consumer_id,
+        endpoint.active_generation,
+        series_key(product, interval)?,
+        &mut endpoint.model,
+        &endpoint.messages,
     )
     .map(|(snapshot, generation)| {
-        *publication = Some(MarketPublicationGeneration::from_generation(&generation));
+        endpoint.publication = Some(MarketPublicationGeneration::from_generation(&generation));
         MarketWorkerBootstrap {
             snapshot,
             subscription_id: SUBSCRIPTION_ID.to_string(),
@@ -880,12 +889,41 @@ fn send_recovery(
             worker_label: WORKER_LABEL.to_string(),
         }
     });
-    messages
+    endpoint
+        .messages
         .send(MarketWorkerMessage::Recovery {
             request_id: command.request_id,
             result,
         })
         .map_err(|error| error.to_string())
+}
+
+fn recover_sequence_gap(
+    client: &mut EngineSupervisor,
+    product: &InstallProviderInstrument,
+    interval: ChartInterval,
+    endpoint: &mut WorkerEndpoint,
+) -> Result<(), String> {
+    let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+        state: FeedConnectionState::Recovering,
+        message: "Realtime updates were coalesced; requesting a covering snapshot".to_string(),
+    });
+    let (snapshot, generation) = request_snapshot(
+        client,
+        endpoint.consumer_id,
+        endpoint.active_generation,
+        series_key(product, interval)?,
+        &mut endpoint.model,
+        &endpoint.messages,
+    )?;
+    let publication = MarketPublicationGeneration::from_generation(&generation);
+    send_publication(
+        &endpoint.messages,
+        ReplayStreamUpdate::Snapshot(snapshot),
+        publication,
+    )?;
+    endpoint.publication = Some(publication);
+    Ok(())
 }
 
 fn send_publication(
@@ -1297,6 +1335,83 @@ mod tests {
         assert_eq!(update.item().value().close, 115);
         assert_eq!(update.publication_generation(), 8);
         assert!(update.forming());
+    }
+
+    #[test]
+    fn non_contiguous_engine_tail_requests_a_covering_snapshot_without_erroring_chart() {
+        let series = series_key(
+            coinbase_products().first().expect("BTC product"),
+            ChartInterval::Minute1,
+        )
+        .expect("series");
+        let (sender, _receiver) =
+            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+        let mut model = empty_model();
+        let mut publication = None;
+        let snapshot = SeriesSnapshot {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series.clone()),
+            provider_generation: 7,
+            price_scale: 2,
+            quantity_scale: 8,
+            bars: vec![IpcMarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            publication_generation: 1,
+            forming: false,
+        };
+        assert_eq!(
+            apply_polled_event(
+                envelope::Payload::SeriesSnapshot(snapshot),
+                1,
+                1,
+                &mut model,
+                &mut publication,
+                &sender,
+            ),
+            Ok(PolledEventOutcome::Applied)
+        );
+        let skipped_tail = SeriesUpdate {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series),
+            provider_generation: 7,
+            bar: Some(IpcMarketBar {
+                source_sequence: 3,
+                exchange_timestamp_seconds: 180,
+                exchange_timestamp_unix_nanos: 180_000_000_000,
+                open: 105,
+                high: 120,
+                low: 100,
+                close: 115,
+                volume: 9,
+            }),
+            forming: true,
+            publication_generation: 2,
+        };
+        assert_eq!(
+            apply_polled_event(
+                envelope::Payload::SeriesUpdate(skipped_tail),
+                1,
+                1,
+                &mut model,
+                &mut publication,
+                &sender,
+            ),
+            Ok(PolledEventOutcome::ResnapshotRequired)
+        );
+        assert_eq!(
+            publication.map(MarketPublicationGeneration::sequence_range),
+            Some((1, 1))
+        );
     }
 
     #[test]

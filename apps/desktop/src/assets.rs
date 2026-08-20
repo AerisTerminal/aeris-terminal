@@ -13,6 +13,8 @@ pub enum UiIcon {
     ArrowLeftIcon01,
     ArrowRightDouble,
     ArrowRightIcon01,
+    BorderHorizontal,
+    BorderVertical,
     Brush,
     CancelIcon01,
     ChartLineDataIcon02,
@@ -30,7 +32,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 23] = [
         Self::ActivityIcon01,
         Self::AddIcon01,
         Self::AiEraser,
@@ -38,6 +40,8 @@ impl UiIcon {
         Self::ArrowLeftIcon01,
         Self::ArrowRightDouble,
         Self::ArrowRightIcon01,
+        Self::BorderHorizontal,
+        Self::BorderVertical,
         Self::Brush,
         Self::CancelIcon01,
         Self::ChartLineDataIcon02,
@@ -64,6 +68,8 @@ impl UiIcon {
             Self::ArrowLeftIcon01 => "arrow-left-01.svg",
             Self::ArrowRightDouble => "arrow-right-double.svg",
             Self::ArrowRightIcon01 => "arrow-right-01.svg",
+            Self::BorderHorizontal => "border-horizontal.svg",
+            Self::BorderVertical => "border-vertical.svg",
             Self::Brush => "brush.svg",
             Self::CancelIcon01 => "cancel-01.svg",
             Self::ChartLineDataIcon02 => "chart-line-data-02.svg",
@@ -193,6 +199,8 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
             include_bytes!("../assets/icons/ui/arrow-right-double.svg")
         }
         "arrow-right-01.svg" => include_bytes!("../assets/icons/ui/arrow-right-01.svg"),
+        "border-horizontal.svg" => include_bytes!("../assets/icons/ui/border-horizontal.svg"),
+        "border-vertical.svg" => include_bytes!("../assets/icons/ui/border-vertical.svg"),
         "brush.svg" => include_bytes!("../assets/icons/ui/brush.svg"),
         "cancel-01.svg" => include_bytes!("../assets/icons/ui/cancel-01.svg"),
         "chart-line-data-02.svg" => {

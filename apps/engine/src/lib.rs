@@ -3,6 +3,7 @@
 mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
+mod workspace_layout;
 
 pub use market_service::{MarketService, MarketServiceStatus};
 
@@ -27,8 +28,8 @@ use axiusflow_engine_protocol::{
     MarketEventIdle, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
     RegisterConsumer, RemoveConsumer, ResourceMode, SeriesCadence, SeriesDemand, SeriesKey,
     SetEngineLifecycle, SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout,
-    ViewportDemand, VisibilityDemand, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
 use axiusflow_market_data::{BarPeriod, BarSeriesKey};
@@ -36,7 +37,7 @@ use axiusflow_market_engine::{HotSetDescriptor, HotSetEntry, HotSetManager, Work
 use axiusflow_platform_runtime::BackgroundService;
 use axiusflow_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
-const WORKSPACE_SCHEMA_REVISION: u32 = 4;
+const WORKSPACE_SCHEMA_REVISION: u32 = 5;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
 const COINBASE_PRICE_SCALE: u32 = 2;
@@ -632,6 +633,13 @@ fn default_workspace_tab(series: &HotSeries) -> WorkspaceTabState {
         }],
         active_pane_id: 1,
         generation: 1,
+        layout: Some(WorkspaceLayoutState {
+            pane_id: 1,
+            split_axis: WorkspaceSplitAxis::Horizontal as i32,
+            ratio_basis_points: 0,
+            first: None,
+            second: None,
+        }),
     }
 }
 
@@ -695,6 +703,8 @@ fn validate_workspace(workspace: &WorkspaceState) -> Result<(), String> {
                     || tab.panes.len() > 4
                     || tab.active_pane_id == 0
                     || tab.generation == 0
+                    || workspace.schema_revision >= 5
+                        && !workspace_layout::layout_matches_panes(tab)
                     || tab
                         .panes
                         .iter()
@@ -958,6 +968,11 @@ fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
         workspace.workspace_tabs = vec![default_workspace_tab(&primary)];
         workspace.schema_revision = WORKSPACE_SCHEMA_REVISION;
         sync_layout_hot_series(workspace);
+        migrated = true;
+    }
+    if workspace.schema_revision < 5 {
+        workspace_layout::add_native_layouts(&mut workspace.workspace_tabs);
+        workspace.schema_revision = 5;
         migrated = true;
     }
     if workspace.cache_manifest_revision == 0 {

@@ -27,7 +27,7 @@ use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
 /// Stable per-user local socket endpoint generation.
-pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v9";
+pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v10";
 /// Exact entropy required for the installation credential.
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 /// Maximum time allowed for a newly spawned engine to publish readiness.
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn protocol_socket_name_tracks_the_active_version() {
-        assert_eq!(ENGINE_SOCKET_NAME, "axiusflow-engine-v9");
+        assert_eq!(ENGINE_SOCKET_NAME, "axiusflow-engine-v10");
     }
 
     #[test]

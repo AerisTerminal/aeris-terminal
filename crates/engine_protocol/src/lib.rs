@@ -23,15 +23,15 @@ pub use messages::{
     SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey,
     SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineLifecycle,
     SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout,
-    ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, envelope,
+    ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, envelope,
 };
 
 /// Current compatible lifecycle contract revision advertised during readiness.
 pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Maximum prost payload accepted in one frame (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1_048_576;

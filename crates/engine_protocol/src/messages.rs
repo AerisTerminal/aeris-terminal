@@ -384,6 +384,24 @@ pub struct WorkspacePaneState {
     pub generation: u64,
 }
 
+/// Persisted binary split tree for one workspace tab.
+///
+/// A leaf has a non-zero `pane_id` and no children. A split has `pane_id == 0`,
+/// two children, and stores the first child's share in basis points.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceLayoutState {
+    #[prost(uint64, tag = "1")]
+    pub pane_id: u64,
+    #[prost(enumeration = "WorkspaceSplitAxis", tag = "2")]
+    pub split_axis: i32,
+    #[prost(uint32, tag = "3")]
+    pub ratio_basis_points: u32,
+    #[prost(message, optional, boxed, tag = "4")]
+    pub first: Option<Box<WorkspaceLayoutState>>,
+    #[prost(message, optional, boxed, tag = "5")]
+    pub second: Option<Box<WorkspaceLayoutState>>,
+}
+
 /// Persisted presentation state for one workspace tab.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceTabState {
@@ -399,6 +417,9 @@ pub struct WorkspaceTabState {
     pub active_pane_id: u64,
     #[prost(uint64, tag = "6")]
     pub generation: u64,
+    /// Authoritative nested workspace layout. Legacy flat fields remain for migration.
+    #[prost(message, optional, tag = "7")]
+    pub layout: Option<WorkspaceLayoutState>,
 }
 
 /// Revision- and generation-fenced workspace composition replacement.

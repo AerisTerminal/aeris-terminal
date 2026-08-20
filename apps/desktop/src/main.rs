@@ -18,14 +18,16 @@ mod windowed_benchmark;
 use assets::UiIcon as HugeIcon;
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
-    ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, OriginChartView,
+    ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, ChartSplitDirection,
+    ChartWorkspaceLayout, OriginChartView, OriginWorkspace,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, EngineLifetimeMode, InstallProviderInstrument,
     ProviderCatalogRejectionReason, ProviderInstrumentSummary, ResourceMode,
     SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceTabState,
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
@@ -41,7 +43,7 @@ use gpui_component::{
     button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
-    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
+    resizable::{h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement,
     spinner::Spinner,
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
@@ -3333,12 +3335,14 @@ fn workspace_pane_controls(
 ) -> Div {
     let colors = theme.colors;
     let pane_count = state.workspaces[state.active].panes.len();
-    let button = |id: &'static str, label: &'static str| {
+    let button = |id: &'static str, icon: HugeIcon, tooltip: &'static str| {
         Button::new(id)
-            .label(label)
+            .icon(header_icon(icon))
+            .tooltip(tooltip)
+            .accessibility_id(id)
             .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
             .h(px(chart_chrome::CHART_CONTROL_SIZE))
-            .px_2()
+            .w(px(chart_chrome::CHART_CONTROL_SIZE))
             .border_1()
             .border_color(gpui_color(colors.border))
             .bg(gpui_color(colors.muted))
@@ -3352,25 +3356,37 @@ fn workspace_pane_controls(
         .items_center()
         .gap_1()
         .child(button_activation(
-            button("split_pane_horizontal", "Split H"),
+            button(
+                "split_pane_horizontal",
+                HugeIcon::BorderVertical,
+                "Split chart side by side",
+            ),
             pane_count < MAXIMUM_PANES_PER_WORKSPACE,
             move |window, cx| {
                 horizontal_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.split_active_pane(WorkspaceSplitAxis::Horizontal, window, terminal_cx);
+                    terminal.split_active_pane(
+                        ChartSplitDirection::Horizontal,
+                        window,
+                        terminal_cx,
+                    );
                 });
             },
         ))
         .child(button_activation(
-            button("split_pane_vertical", "Split V"),
+            button(
+                "split_pane_vertical",
+                HugeIcon::BorderHorizontal,
+                "Split chart top and bottom",
+            ),
             pane_count < MAXIMUM_PANES_PER_WORKSPACE,
             move |window, cx| {
                 vertical_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.split_active_pane(WorkspaceSplitAxis::Vertical, window, terminal_cx);
+                    terminal.split_active_pane(ChartSplitDirection::Vertical, window, terminal_cx);
                 });
             },
         ))
         .child(button_activation(
-            button("close_pane", "Close pane"),
+            button("close_pane", HugeIcon::CancelIcon01, "Close chart pane"),
             pane_count > 1,
             move |window, cx| {
                 close_terminal.update(cx, |terminal, terminal_cx| {
@@ -4560,7 +4576,6 @@ struct WorkspacePane {
     consumer_id: u64,
     surface: Entity<WorkspaceSurface>,
     focus: FocusHandle,
-    size_basis_points: u32,
 }
 
 struct WorkspaceTab {
@@ -4568,8 +4583,7 @@ struct WorkspaceTab {
     label: String,
     panes: Vec<WorkspacePane>,
     active_pane: usize,
-    split_axis: WorkspaceSplitAxis,
-    resize_state: Entity<ResizableState>,
+    layout: OriginWorkspace,
     generation: u64,
     focus: FocusHandle,
 }
@@ -4645,46 +4659,120 @@ fn workspace_series(interval: ChartInterval, instrument: &InstallProviderInstrum
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
     workspaces
         .iter()
-        .map(|workspace| WorkspaceTabState {
-            workspace_id: workspace.id,
-            label: workspace.label.clone(),
-            split_axis: workspace.split_axis as i32,
-            panes: workspace
-                .panes
-                .iter()
-                .filter_map(|pane| {
-                    let surface = pane.surface.read(cx);
-                    let instrument = surface.coinbase_product.clone()?;
-                    let viewport =
-                        surface
-                            .chart
-                            .as_ref()
-                            .map_or(surface.restored_viewport, |chart| {
-                                let chart = chart.read(cx);
-                                durable_workspace_viewport(
-                                    surface.restored_viewport,
-                                    chart.has_market_data(),
-                                    chart.is_at_latest(),
-                                    chart.visible_time_range_unix_nanos(),
-                                )
-                            });
-                    Some(WorkspacePaneState {
-                        pane_id: pane.id,
-                        consumer_id: pane.consumer_id,
-                        kind: WorkspacePaneKind::Chart as i32,
-                        instrument: Some(instrument.clone()),
-                        series: Some(workspace_series(surface.coinbase_interval, &instrument)),
-                        viewport_start_unix_nanos: viewport.map(|range| range.0),
-                        viewport_end_unix_nanos: viewport.map(|range| range.1),
-                        size_basis_points: pane.size_basis_points,
-                        generation: workspace.generation.max(1),
+        .map(|workspace| {
+            let layout = workspace.layout.layout();
+            let pane_weights = layout.pane_basis_points();
+            WorkspaceTabState {
+                workspace_id: workspace.id,
+                label: workspace.label.clone(),
+                split_axis: layout_root_axis(&layout) as i32,
+                panes: workspace
+                    .panes
+                    .iter()
+                    .filter_map(|pane| {
+                        let surface = pane.surface.read(cx);
+                        let instrument = surface.coinbase_product.clone()?;
+                        let viewport =
+                            surface
+                                .chart
+                                .as_ref()
+                                .map_or(surface.restored_viewport, |chart| {
+                                    let chart = chart.read(cx);
+                                    durable_workspace_viewport(
+                                        surface.restored_viewport,
+                                        chart.has_market_data(),
+                                        chart.is_at_latest(),
+                                        chart.visible_time_range_unix_nanos(),
+                                    )
+                                });
+                        Some(WorkspacePaneState {
+                            pane_id: pane.id,
+                            consumer_id: pane.consumer_id,
+                            kind: WorkspacePaneKind::Chart as i32,
+                            instrument: Some(instrument.clone()),
+                            series: Some(workspace_series(surface.coinbase_interval, &instrument)),
+                            viewport_start_unix_nanos: viewport.map(|range| range.0),
+                            viewport_end_unix_nanos: viewport.map(|range| range.1),
+                            size_basis_points: pane_weights
+                                .iter()
+                                .find_map(|(pane_id, basis)| {
+                                    (*pane_id == pane.id).then_some(*basis)
+                                })
+                                .unwrap_or(1),
+                            generation: workspace.generation.max(1),
+                        })
                     })
-                })
-                .collect(),
-            active_pane_id: workspace.panes[workspace.active_pane].id,
-            generation: workspace.generation.max(1),
+                    .collect(),
+                active_pane_id: workspace.panes[workspace.active_pane].id,
+                generation: workspace.generation.max(1),
+                layout: Some(workspace_layout_state(&layout)),
+            }
         })
         .collect()
+}
+
+fn layout_root_axis(layout: &ChartWorkspaceLayout) -> WorkspaceSplitAxis {
+    match layout {
+        ChartWorkspaceLayout::Split { direction, .. } => split_axis(*direction),
+        ChartWorkspaceLayout::Pane { .. } => WorkspaceSplitAxis::Horizontal,
+    }
+}
+
+fn workspace_layout_state(layout: &ChartWorkspaceLayout) -> WorkspaceLayoutState {
+    match layout {
+        ChartWorkspaceLayout::Pane { pane_id } => WorkspaceLayoutState {
+            pane_id: *pane_id,
+            split_axis: WorkspaceSplitAxis::Horizontal as i32,
+            ratio_basis_points: 0,
+            first: None,
+            second: None,
+        },
+        ChartWorkspaceLayout::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => WorkspaceLayoutState {
+            pane_id: 0,
+            split_axis: split_axis(*direction) as i32,
+            ratio_basis_points: (*ratio * 10_000.0)
+                .round()
+                .clamp(500.0, 9_500.0)
+                .to_u32()
+                .unwrap_or(5_000),
+            first: Some(Box::new(workspace_layout_state(first))),
+            second: Some(Box::new(workspace_layout_state(second))),
+        },
+    }
+}
+
+fn chart_workspace_layout(layout: &WorkspaceLayoutState) -> Option<ChartWorkspaceLayout> {
+    match (&layout.first, &layout.second) {
+        (None, None) if layout.pane_id != 0 => Some(ChartWorkspaceLayout::Pane {
+            pane_id: layout.pane_id,
+        }),
+        (Some(first), Some(second)) if layout.pane_id == 0 => Some(ChartWorkspaceLayout::Split {
+            direction: chart_split_direction(WorkspaceSplitAxis::try_from(layout.split_axis).ok()?),
+            ratio: f64::from(layout.ratio_basis_points) / 10_000.0,
+            first: Box::new(chart_workspace_layout(first)?),
+            second: Box::new(chart_workspace_layout(second)?),
+        }),
+        _ => None,
+    }
+}
+
+const fn chart_split_direction(axis: WorkspaceSplitAxis) -> ChartSplitDirection {
+    match axis {
+        WorkspaceSplitAxis::Horizontal => ChartSplitDirection::Horizontal,
+        WorkspaceSplitAxis::Vertical => ChartSplitDirection::Vertical,
+    }
+}
+
+const fn split_axis(direction: ChartSplitDirection) -> WorkspaceSplitAxis {
+    match direction {
+        ChartSplitDirection::Horizontal => WorkspaceSplitAxis::Horizontal,
+        ChartSplitDirection::Vertical => WorkspaceSplitAxis::Vertical,
+    }
 }
 
 const fn durable_workspace_viewport(
@@ -4761,61 +4849,6 @@ fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) ->
     ids.get(closing + 1)
         .or_else(|| closing.checked_sub(1).and_then(|index| ids.get(index)))
         .copied()
-}
-
-fn normalized_pane_basis_points(sizes: &[f32]) -> Option<Vec<u32>> {
-    if sizes.is_empty() || sizes.iter().any(|size| !size.is_finite() || *size <= 0.0) {
-        return None;
-    }
-    let total = sizes.iter().sum::<f32>();
-    if !total.is_finite() || total <= 0.0 {
-        return None;
-    }
-    let mut remaining = 10_000_u32;
-    let last = sizes.len().saturating_sub(1);
-    let mut normalized = Vec::with_capacity(sizes.len());
-    for (index, size) in sizes.iter().enumerate() {
-        let basis = if index == last {
-            remaining
-        } else {
-            let remaining_panes = u32::try_from(last - index).ok()?;
-            let scaled = ((*size / total) * 10_000.0).round().max(1.0).to_u32()?;
-            let basis = scaled.min(remaining.checked_sub(remaining_panes)?);
-            remaining = remaining.checked_sub(basis)?;
-            basis
-        };
-        normalized.push(basis);
-    }
-    (normalized.iter().sum::<u32>() == 10_000 && normalized.iter().all(|basis| *basis > 0))
-        .then_some(normalized)
-}
-
-fn changed_pane_basis_points(current: &[u32], sizes: &[f32]) -> Option<Vec<u32>> {
-    let normalized = normalized_pane_basis_points(sizes)?;
-    (normalized != current).then_some(normalized)
-}
-
-fn split_pane_basis_points(sizes: &[u32], active: usize) -> Option<Vec<u32>> {
-    let source = *sizes.get(active)?;
-    if source < 2 {
-        return None;
-    }
-    let inserted = (source / 2).max(1);
-    let mut split = sizes.to_vec();
-    split[active] = source.checked_sub(inserted)?;
-    split.insert(active + 1, inserted);
-    Some(split)
-}
-
-fn close_pane_basis_points(sizes: &[u32], closing: usize) -> Option<(Vec<u32>, usize)> {
-    if sizes.len() <= 1 || closing >= sizes.len() {
-        return None;
-    }
-    let mut closed = sizes.to_vec();
-    let removed = closed.remove(closing);
-    let active = closing.min(closed.len().saturating_sub(1));
-    closed[active] = closed[active].checked_add(removed)?;
-    Some((closed, active))
 }
 
 impl TerminalApp {
@@ -4931,10 +4964,12 @@ impl TerminalApp {
         }
     }
 
-    fn apply_pane_sizes(
+    fn resize_workspace_split(
         &mut self,
         workspace_id: u64,
-        sizes: &[gpui::Pixels],
+        left_pane_id: u64,
+        right_pane_id: u64,
+        ratio: f64,
         cx: &mut Context<Self>,
     ) {
         let Some(workspace) = self
@@ -4944,20 +4979,19 @@ impl TerminalApp {
         else {
             return;
         };
-        if sizes.len() != workspace.panes.len() {
+        let current = workspace.layout.layout();
+        if current
+            .boundary_ratio_for_panes(left_pane_id, right_pane_id)
+            .is_some_and(|current| (current - ratio).abs() < 0.0001)
+        {
             return;
         }
-        let current = workspace
-            .panes
-            .iter()
-            .map(|pane| pane.size_basis_points)
-            .collect::<Vec<_>>();
-        let measured = sizes.iter().map(|size| size.as_f32()).collect::<Vec<_>>();
-        let Some(normalized) = changed_pane_basis_points(&current, &measured) else {
+        if workspace
+            .layout
+            .resize_between(left_pane_id, right_pane_id, ratio)
+            .is_err()
+        {
             return;
-        };
-        for (pane, basis) in workspace.panes.iter_mut().zip(normalized) {
-            pane.size_basis_points = basis;
         }
         workspace.generation = workspace.generation.saturating_add(1);
         cx.notify();
@@ -5279,11 +5313,9 @@ impl TerminalApp {
                 consumer_id,
                 surface,
                 focus: cx.focus_handle(),
-                size_basis_points: 10_000,
             }],
             active_pane: 0,
-            split_axis: WorkspaceSplitAxis::Horizontal,
-            resize_state: cx.new(|_| ResizableState::default()),
+            layout: OriginWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE, 0.0),
             generation: 1,
             focus: cx.focus_handle(),
         });
@@ -5299,7 +5331,7 @@ impl TerminalApp {
 
     fn split_active_pane(
         &mut self,
-        split_axis: WorkspaceSplitAxis,
+        split_direction: ChartSplitDirection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5314,16 +5346,6 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let sizes = workspace
-            .panes
-            .iter()
-            .map(|pane| pane.size_basis_points)
-            .collect::<Vec<_>>();
-        let Some(split_sizes) = split_pane_basis_points(&sizes, workspace.active_pane) else {
-            self.workspace_error = Some("The active pane is too small to split".to_string());
-            cx.notify();
-            return;
-        };
         let (product, interval) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.coinbase_product.clone() else {
@@ -5351,8 +5373,19 @@ impl TerminalApp {
         });
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
         let workspace = &mut self.workspaces[self.active];
-        for (pane, basis) in workspace.panes.iter_mut().zip(&split_sizes) {
-            pane.size_basis_points = *basis;
+        let source_pane_id = workspace.panes[workspace.active_pane].id;
+        if let Err(error) =
+            workspace
+                .layout
+                .split(source_pane_id, split_direction, pane.pane_id, 0.0)
+        {
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_market_resource_class(ConsumerResourceClass::Detached);
+                surface.retire_market_worker(surface_cx);
+            });
+            self.workspace_error = Some(error.to_string());
+            cx.notify();
+            return;
         }
         workspace.panes.insert(
             insertion_index,
@@ -5361,11 +5394,9 @@ impl TerminalApp {
                 consumer_id: pane.consumer_id,
                 surface,
                 focus: cx.focus_handle(),
-                size_basis_points: split_sizes[insertion_index],
             },
         );
         workspace.active_pane = insertion_index;
-        workspace.split_axis = split_axis;
         workspace.generation = workspace.generation.saturating_add(1);
         self.workspace_error = None;
         cx.notify();
@@ -5377,7 +5408,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.split_active_pane(WorkspaceSplitAxis::Horizontal, window, cx);
+        self.split_active_pane(ChartSplitDirection::Horizontal, window, cx);
     }
 
     fn split_pane_vertical(
@@ -5386,7 +5417,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.split_active_pane(WorkspaceSplitAxis::Vertical, window, cx);
+        self.split_active_pane(ChartSplitDirection::Vertical, window, cx);
     }
 
     fn close_active_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
@@ -5394,20 +5425,27 @@ impl TerminalApp {
         if workspace.panes.len() == 1 {
             return;
         }
-        let sizes = workspace
+        let removed_pane_id = workspace.panes[workspace.active_pane].id;
+        if let Err(error) = workspace.layout.remove(removed_pane_id) {
+            self.workspace_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        let removed = workspace.panes.remove(workspace.active_pane);
+        let pane_order = workspace.layout.layout().pane_ids();
+        let recipient_id = pane_order
+            .get(
+                workspace
+                    .active_pane
+                    .min(pane_order.len().saturating_sub(1)),
+            )
+            .copied()
+            .unwrap_or(workspace.panes[0].id);
+        let recipient = workspace
             .panes
             .iter()
-            .map(|pane| pane.size_basis_points)
-            .collect::<Vec<_>>();
-        let Some((closed_sizes, recipient)) =
-            close_pane_basis_points(&sizes, workspace.active_pane)
-        else {
-            return;
-        };
-        let removed = workspace.panes.remove(workspace.active_pane);
-        for (pane, basis) in workspace.panes.iter_mut().zip(closed_sizes) {
-            pane.size_basis_points = basis;
-        }
+            .position(|pane| pane.id == recipient_id)
+            .unwrap_or(0);
         workspace.active_pane = recipient;
         workspace.generation = workspace.generation.saturating_add(1);
         removed.surface.update(cx, |surface, surface_cx| {
@@ -5674,81 +5712,130 @@ fn workspace_pane_grid(
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> AnyElement {
-    let panels = workspace
-        .panes
-        .iter()
-        .enumerate()
-        .map(|(index, pane)| {
-            let surface = pane.surface.read(cx);
-            let connection_state = surface
-                .connection_state
-                .unwrap_or(FeedConnectionState::Disconnected);
-            let chart_has_market_data = surface
-                .chart
-                .as_ref()
-                .is_some_and(|chart| chart.read(cx).has_market_data());
-            let content = market_workspace(MarketWorkspaceState {
-                app: pane.surface.clone(),
-                pane_id: pane.id,
-                chart: surface.chart.as_ref(),
-                chart_has_market_data,
-                dom: surface.dom.clone(),
-                side_panel: surface.side_panel,
-                chart_state: surface.chart_state,
-                chart_status_detail: chart_status_detail(
-                    surface.chart_state,
-                    connection_state,
-                    &surface.chart_state_message,
-                    surface.connection_message.as_deref(),
-                )
-                .to_string(),
-                theme,
-            });
-            let workspace_id = workspace.id;
-            let pane_id = pane.id;
-            let pane_focus = pane.focus.clone();
-            let select_terminal = terminal.clone();
-            resizable_panel()
-                .size(px(
-                    pane.size_basis_points.to_f32().unwrap_or(10_000.0) / 10.0
-                ))
-                .child(
-                    div()
-                        .id(("workspace_pane", pane.id))
-                        .relative()
-                        .size_full()
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(gpui_color(if index == workspace.active_pane {
-                            theme.colors.ring
-                        } else {
-                            theme.colors.border
-                        }))
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            select_terminal.update(cx, |terminal, terminal_cx| {
-                                terminal.select_pane(workspace_id, pane_id, terminal_cx);
-                            });
-                            pane_focus.focus(window, cx);
-                        })
-                        .child(content),
-                )
-        })
-        .collect::<Vec<_>>();
+    workspace_layout_element(terminal, workspace, &workspace.layout.layout(), theme, cx)
+}
+
+fn workspace_layout_element(
+    terminal: &Entity<TerminalApp>,
+    workspace: &WorkspaceTab,
+    layout: &ChartWorkspaceLayout,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> AnyElement {
+    if let ChartWorkspaceLayout::Pane { pane_id } = layout {
+        return workspace_pane_element(terminal, workspace, *pane_id, theme, cx);
+    }
+
+    let ChartWorkspaceLayout::Split {
+        direction,
+        ratio,
+        first,
+        second,
+    } = layout
+    else {
+        return div().into_any_element();
+    };
+    let first_ids = first.pane_ids();
+    let second_ids = second.pane_ids();
+    let left_pane_id = *first_ids.last().unwrap_or(&0);
+    let right_pane_id = *second_ids.first().unwrap_or(&0);
+    let first_element = workspace_layout_element(terminal, workspace, first, theme, cx);
+    let second_element = workspace_layout_element(terminal, workspace, second, theme, cx);
     let workspace_id = workspace.id;
     let resize_terminal = terminal.clone();
-    let group = match workspace.split_axis {
-        WorkspaceSplitAxis::Horizontal => h_resizable(("workspace_grid", workspace.id)),
-        WorkspaceSplitAxis::Vertical => v_resizable(("workspace_grid", workspace.id)),
+    let split_id = format!("workspace_split_{workspace_id}_{left_pane_id}_{right_pane_id}");
+    let group = match direction {
+        ChartSplitDirection::Horizontal => h_resizable(split_id),
+        ChartSplitDirection::Vertical => v_resizable(split_id),
     }
-    .with_state(&workspace.resize_state)
-    .children(panels)
+    .child(
+        resizable_panel()
+            .size(px((*ratio * 1_000.0).to_f32().unwrap_or(500.0)))
+            .child(first_element),
+    )
+    .child(
+        resizable_panel()
+            .size(px(((1.0 - *ratio) * 1_000.0).to_f32().unwrap_or(500.0)))
+            .child(second_element),
+    )
     .on_resize(move |state, _, cx| {
-        let sizes = state.read(cx).sizes().clone();
+        let sizes = state.read(cx).sizes();
+        let Some(total) = sizes
+            .first()
+            .zip(sizes.get(1))
+            .map(|(first, second)| first.as_f32() + second.as_f32())
+            .filter(|total| total.is_finite() && *total > 0.0)
+        else {
+            return;
+        };
+        let ratio = f64::from(sizes[0].as_f32() / total);
         resize_terminal.update(cx, |terminal, terminal_cx| {
-            terminal.apply_pane_sizes(workspace_id, &sizes, terminal_cx);
+            terminal.resize_workspace_split(
+                workspace_id,
+                left_pane_id,
+                right_pane_id,
+                ratio,
+                terminal_cx,
+            );
         });
     });
     group.into_any_element()
+}
+
+fn workspace_pane_element(
+    terminal: &Entity<TerminalApp>,
+    workspace: &WorkspaceTab,
+    pane_id: u64,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> AnyElement {
+    let Some(pane) = workspace.panes.iter().find(|pane| pane.id == pane_id) else {
+        return div().into_any_element();
+    };
+    let surface = pane.surface.read(cx);
+    let connection_state = surface
+        .connection_state
+        .unwrap_or(FeedConnectionState::Disconnected);
+    let chart_has_market_data = surface
+        .chart
+        .as_ref()
+        .is_some_and(|chart| chart.read(cx).has_market_data());
+    let content = market_workspace(MarketWorkspaceState {
+        app: pane.surface.clone(),
+        pane_id,
+        chart: surface.chart.as_ref(),
+        chart_has_market_data,
+        dom: surface.dom.clone(),
+        side_panel: surface.side_panel,
+        chart_state: surface.chart_state,
+        chart_status_detail: chart_status_detail(
+            surface.chart_state,
+            connection_state,
+            &surface.chart_state_message,
+            surface.connection_message.as_deref(),
+        )
+        .to_string(),
+        theme,
+    });
+    let workspace_id = workspace.id;
+    let pane_focus = pane.focus.clone();
+    let select_terminal = terminal.clone();
+    div()
+        .id(("workspace_pane", pane_id))
+        .relative()
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .pr(px(3.0))
+        .pb(px(2.0))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            select_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.select_pane(workspace_id, pane_id, terminal_cx);
+            });
+            pane_focus.focus(window, cx);
+        })
+        .child(content)
+        .into_any_element()
 }
 
 fn workspace_market_area(
@@ -6217,11 +6304,9 @@ fn terminal_root(
                     consumer_id: 1,
                     surface,
                     focus: cx.focus_handle(),
-                    size_basis_points: 10_000,
                 }],
                 active_pane: 0,
-                split_axis: WorkspaceSplitAxis::Horizontal,
-                resize_state: cx.new(|_| ResizableState::default()),
+                layout: OriginWorkspace::new(1, MAXIMUM_PANES_PER_WORKSPACE, 0.0),
                 generation: 1,
                 focus: cx.focus_handle(),
             }],
@@ -6299,24 +6384,34 @@ fn workspace_tabs_root(
                 consumer_id: pane.consumer_id,
                 surface: workspace_surface_entity(pane.startup, pane.worker, lifecycle, window, cx),
                 focus: cx.focus_handle(),
-                size_basis_points: persisted.size_basis_points,
             });
         }
         if panes.is_empty() {
             continue;
         }
+        let Some(layout) = tab.layout.as_ref().and_then(chart_workspace_layout) else {
+            continue;
+        };
+        let pane_order = layout.pane_ids();
+        panes.sort_by_key(|pane| {
+            pane_order
+                .iter()
+                .position(|pane_id| *pane_id == pane.id)
+                .unwrap_or(usize::MAX)
+        });
         let active_pane = panes
             .iter()
             .position(|pane| pane.id == tab.active_pane_id)
             .unwrap_or(0);
+        let Ok(layout) = OriginWorkspace::restore(&layout, MAXIMUM_PANES_PER_WORKSPACE, 0.0) else {
+            continue;
+        };
         workspaces.push(WorkspaceTab {
             id: tab.workspace_id,
             label: tab.label.clone(),
             panes,
             active_pane,
-            split_axis: WorkspaceSplitAxis::try_from(tab.split_axis)
-                .unwrap_or(WorkspaceSplitAxis::Horizontal),
-            resize_state: cx.new(|_| ResizableState::default()),
+            layout,
             generation: tab.generation,
             focus: cx.focus_handle(),
         });
@@ -6590,15 +6685,14 @@ mod tests {
         RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
         TerminalProvider, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH,
         WindowCommand, WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
-        catalog_rejection_domain, changed_pane_basis_points, chart_status_detail,
-        chart_surface_notice, chrome_control_foreground, close_pane_basis_points,
-        connection_presentation, default_rithmic_contract_index, durable_workspace_viewport,
-        finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
-        normalized_pane_basis_points, publication_chart_state, reconciled_bridge_state,
+        catalog_rejection_domain, chart_status_detail, chart_surface_notice,
+        chrome_control_foreground, connection_presentation, default_rithmic_contract_index,
+        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+        instrument_selector_label, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, reorder_workspace_ids, rithmic_ready_action,
         series_selector_label, should_apply_rithmic_worker_stop, split_lifetime_mode,
-        split_pane_basis_points, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
+        workspace_drag_destination, workspace_drag_translation, workspace_label, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -6760,45 +6854,6 @@ mod tests {
         assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
         assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
         assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
-    }
-
-    #[test]
-    fn pane_split_resize_and_close_keep_exact_normalized_layout_state() {
-        assert_eq!(
-            split_pane_basis_points(&[10_000], 0),
-            Some(vec![5_000, 5_000])
-        );
-        assert_eq!(
-            split_pane_basis_points(&[6_501, 3_499], 0),
-            Some(vec![3_251, 3_250, 3_499])
-        );
-        assert_eq!(split_pane_basis_points(&[1, 9_999], 0), None);
-        assert_eq!(
-            normalized_pane_basis_points(&[640.0, 320.0, 240.0]),
-            Some(vec![5_333, 2_667, 2_000])
-        );
-        assert_eq!(normalized_pane_basis_points(&[640.0, f32::NAN]), None);
-        assert_eq!(
-            close_pane_basis_points(&[5_333, 2_667, 2_000], 1),
-            Some((vec![5_333, 4_667], 1))
-        );
-        assert_eq!(
-            close_pane_basis_points(&[5_333, 4_667], 1),
-            Some((vec![10_000], 0))
-        );
-        assert_eq!(close_pane_basis_points(&[10_000], 0), None);
-    }
-
-    #[test]
-    fn pane_resize_only_persists_real_geometry_changes() {
-        assert_eq!(
-            changed_pane_basis_points(&[5_000, 5_000], &[640.0, 640.0]),
-            None
-        );
-        assert_eq!(
-            changed_pane_basis_points(&[5_000, 5_000], &[720.0, 480.0]),
-            Some(vec![6_000, 4_000])
-        );
     }
 
     #[test]

@@ -8,9 +8,11 @@ mod bridge;
 mod origin_bridge;
 mod provenance;
 mod view;
+mod workspace;
 
 pub use axiusflow_application::ReplayRecoveryCommand;
 pub use bridge::{ChartBridgeMetrics, ChartDataBridge, MergedChartData};
 pub use view::{
     ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, OriginChartView,
 };
+pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, OriginWorkspace};
