@@ -11,6 +11,16 @@ use super::{icon::Icon, loader::Loader, tooltip::TooltipSpec};
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+const DEFAULT_CONTROL_SIZE: Pixels = px(32.0);
+const DEFAULT_ICON_SIZE: Pixels = px(16.0);
+const CUSTOM_ICON_SCALE: f32 = 0.75;
+
+fn control_geometry(content_size: Option<Pixels>) -> (Pixels, Pixels) {
+    content_size.map_or((DEFAULT_CONTROL_SIZE, DEFAULT_ICON_SIZE), |control_size| {
+        (control_size, control_size * CUSTOM_ICON_SCALE)
+    })
+}
+
 #[derive(Clone, Copy)]
 struct ControlFlags(u8);
 
@@ -256,7 +266,10 @@ impl RenderOnce for Control {
         let disabled_color = self
             .theme
             .map(|theme| theme_color(theme.colors.disabled_foreground));
-        let icon_size = self.content_size.unwrap_or(px(16.0));
+        // `with_size` is the control-size contract used by the desktop shell.
+        // A custom-sized icon is painted at 75% of that square, preserving the
+        // established 32 px control / 24 px glyph geometry.
+        let (control_size, icon_size) = control_geometry(self.content_size);
         let leading = self.leading_element(loader_id, icon_size);
         let aria_label = self.aria_label.or_else(|| self.label.clone());
         let has_text = self.label.is_some() || !self.children.is_empty();
@@ -283,7 +296,7 @@ impl RenderOnce for Control {
             .gap_1()
             .rounded(px(4.0))
             .when(has_text, |this| this.px(padding))
-            .when(!has_text, |this| this.size(icon_size / 0.75))
+            .when(!has_text, |this| this.size(control_size))
             .when(policy.accepts_input(), gpui::Styled::cursor_pointer)
             .when(!policy.accepts_input(), gpui::Styled::cursor_default)
             .when_some(
@@ -343,7 +356,20 @@ fn theme_color(color: ThemeColor) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlPolicy;
+    use gpui::px;
+
+    use super::{ControlPolicy, control_geometry};
+
+    #[test]
+    fn custom_control_size_preserves_glyph_inset() {
+        let (control_size, icon_size) = control_geometry(Some(px(32.0)));
+        assert_eq!(control_size, px(32.0));
+        assert_eq!(icon_size, px(24.0));
+
+        let (control_size, icon_size) = control_geometry(Some(px(80.0 / 3.0)));
+        assert_eq!(control_size, px(80.0 / 3.0));
+        assert_eq!(icon_size, px(20.0));
+    }
 
     #[test]
     fn activation_requires_one_enabled_handler() {

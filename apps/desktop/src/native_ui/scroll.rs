@@ -6,13 +6,13 @@ use gpui::{
 const SCROLLBAR_WIDTH: Pixels = px(6.0);
 const MIN_THUMB_LENGTH: f32 = 18.0;
 
-/// Adds raw GPUI vertical scrolling while reserving only Axiusflow's narrow
-/// scrollbar width.
+/// Adds raw GPUI vertical scrolling without changing the content geometry.
+/// The Axiusflow scrollbar is painted as an overlay, so reserving a second
+/// gutter here would shift centered controls away from their container center.
 #[track_caller]
 pub(crate) fn tracked_overflow_y_scrollbar(body: Div, handle: &ScrollHandle) -> Stateful<Div> {
     body.id(std::panic::Location::caller())
         .overflow_y_scroll()
-        .scrollbar_width(SCROLLBAR_WIDTH)
         .track_scroll(handle)
 }
 
@@ -90,7 +90,16 @@ impl RenderOnce for ThinScrollbar {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_THUMB_LENGTH, ThumbMetrics, thumb_metrics};
+    use gpui::{ScrollHandle, Styled, div};
+
+    use super::{MIN_THUMB_LENGTH, ThumbMetrics, thumb_metrics, tracked_overflow_y_scrollbar};
+
+    #[test]
+    fn overlay_scrollbar_does_not_reserve_a_layout_gutter() {
+        let handle = ScrollHandle::new();
+        let mut body = tracked_overflow_y_scrollbar(div(), &handle);
+        assert!(body.style().scrollbar_width.is_none());
+    }
 
     #[test]
     fn thumb_is_hidden_when_content_fits() {
