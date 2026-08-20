@@ -1,4 +1,4 @@
-//! Bounded replay-to-Origin data bridge with correlated recovery commands.
+//! Bounded replay-to-Nucleus data bridge with correlated recovery commands.
 
 use axiusflow_application::{
     ProvenancedMarketBar, ReplayRecoveryCommand, ReplaySession, ReplaySnapshot, ReplayStreamUpdate,
@@ -44,7 +44,7 @@ impl ChartSeriesIdentity {
     }
 }
 
-/// One queue drain collapsed into at most one authoritative Origin mutation.
+/// One queue drain collapsed into at most one authoritative Nucleus mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MergedChartData {
     snapshot: Option<ReplaySnapshot>,

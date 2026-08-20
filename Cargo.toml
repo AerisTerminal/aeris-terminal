@@ -70,12 +70,12 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", default-feature
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f2f0f563292114fecf55fb8ab92a97e14989dbd0", version = "=0.5.2" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f2f0f563292114fecf55fb8ab92a97e14989dbd0", version = "=0.5.1" }
 gpui-hugeicons = { version = "=0.1.0", default-features = false }
-origin_engine = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0" }
-origin_render = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0" }
-origin_render_gpui = { git = "https://github.com/Axiusflow-app/Origin_charts.git", rev = "5a567f679ea23f2c612ca68d5fbfa1ada8f44738", version = "=0.1.0", features = ["gpui-backend"] }
+nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "90c3b453417e23790b64f3cef17c7b4fc27b65f9", version = "=0.1.0" }
+nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "90c3b453417e23790b64f3cef17c7b4fc27b65f9", version = "=0.1.0" }
+nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "90c3b453417e23790b64f3cef17c7b4fc27b65f9", version = "=0.1.0", features = ["gpui-backend"] }
 
 [patch.crates-io]
-# Origin pins the published `gpui = 0.2.2`; replace it with the same Git source
+# Nucleus Charts pins the published `gpui = 0.2.2`; replace it with the same Git source
 # used by GPUI Component. Cargo.lock records the immutable Zed commit.
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2" }
 

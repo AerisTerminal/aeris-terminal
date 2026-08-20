@@ -1,9 +1,9 @@
-//! Origin engine installation and fixed-point conversion helpers.
+//! Nucleus engine installation and fixed-point conversion helpers.
 
 use crate::bridge::MergedChartData;
 use axiusflow_application::{ProvenancedMarketBar, ReplaySnapshot};
+use nucleuscharts_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
 use num_traits::ToPrimitive;
-use origin_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
 use std::num::NonZeroUsize;
 
 const DEFAULT_CHART_DATA_QUEUE_CAPACITY: usize = 64;
@@ -16,13 +16,20 @@ pub(crate) fn replay_price_divisor(replay: &ReplaySnapshot) -> f64 {
     10_f64.powi(i32::from(replay.instrument().precision.price_scale()))
 }
 
-pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> usize {
+pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
     let id = engine.add_series(SeriesKind::Histogram);
-    let series = &mut engine.series[id];
-    series.visible = false;
-    series.histogram_updown = true;
-    series.title = "Volume".to_string();
-    series.title_visible = true;
+    if let Some(series) = engine
+        .series
+        .iter_mut()
+        .find(|series| series.id == id && !series.removed)
+    {
+        series.visible = false;
+        series.histogram_updown = true;
+        series.title = "Volume".to_string();
+        series.title_visible = true;
+    } else {
+        debug_assert!(false, "new Nucleus series identity must resolve");
+    }
     engine.set_series_price_scale(id, PriceScaleTarget::Overlay);
     engine.set_price_scale_margins_for(0, PriceScaleTarget::Overlay, 0.8, 0.0);
     let applied = engine.series_apply_price_format_json(id, r#"{"type":"volume"}"#);
@@ -32,7 +39,7 @@ pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> usize {
 
 pub(crate) fn apply_merged_chart_data(
     engine: &mut ChartEngine,
-    volume_series: usize,
+    volume_series: u32,
     price_divisor: &mut f64,
     update: &MergedChartData,
 ) {
@@ -74,7 +81,7 @@ pub(crate) fn apply_merged_chart_data(
 
 pub(crate) fn install_replay(
     engine: &mut ChartEngine,
-    volume_series: usize,
+    volume_series: u32,
     replay: &ReplaySnapshot,
 ) {
     install_replay_with_deltas(engine, volume_series, replay, &[]);
@@ -82,7 +89,7 @@ pub(crate) fn install_replay(
 
 pub(crate) fn install_replay_with_deltas(
     engine: &mut ChartEngine,
-    volume_series: usize,
+    volume_series: u32,
     replay: &ReplaySnapshot,
     deltas: &[ProvenancedMarketBar],
 ) {

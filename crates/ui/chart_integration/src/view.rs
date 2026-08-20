@@ -1,7 +1,7 @@
-//! GPUI entity hosting one authoritative Origin chart engine and renderer.
+//! GPUI entity hosting one authoritative Nucleus chart engine and renderer.
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
-use crate::origin_bridge::{
+use crate::nucleus_bridge::{
     apply_merged_chart_data, chart_data_queue_capacity, install_replay, install_volume_series,
     replay_price_divisor,
 };
@@ -17,13 +17,13 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
     prelude::*, px,
 };
-use num_traits::ToPrimitive;
-use origin_engine::{
+use nucleuscharts_engine::{
     ChartEngine, ChartFrame, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
 };
-use origin_render::draw_list::Prim;
-use origin_render_gpui::backend::measure_text;
-use origin_render_gpui::{GpuiChartRenderer, OriginViewport, PreparedOriginFrame};
+use nucleuscharts_render::draw_list::Prim;
+use nucleuscharts_render_gpui::backend::measure_text;
+use nucleuscharts_render_gpui::{GpuiChartRenderer, NucleusViewport, PreparedNucleusFrame};
+use num_traits::ToPrimitive;
 use std::collections::HashSet;
 use std::fmt;
 #[cfg(feature = "diagnostics")]
@@ -112,7 +112,7 @@ impl fmt::Display for ChartIndicatorError {
             Self::CreationRejected(indicator) => {
                 write!(
                     formatter,
-                    "Origin rejected the {} indicator",
+                    "Nucleus rejected the {} indicator",
                     indicator.label()
                 )
             }
@@ -174,14 +174,14 @@ enum ChartDrag {
     },
 }
 
-/// A GPUI entity hosting one authoritative Origin chart engine and renderer.
-pub struct OriginChartView {
+/// A GPUI entity hosting one authoritative Nucleus chart engine and renderer.
+pub struct NucleusChartView {
     engine: ChartEngine,
     renderer: GpuiChartRenderer,
     data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
-    volume_series: usize,
+    volume_series: u32,
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
     built_for: (f32, f32, f32),
@@ -246,8 +246,8 @@ fn apply_platform_theme(
     engine.apply_options(&patch.to_string())
 }
 
-impl OriginChartView {
-    /// Creates an empty Origin-owned surface without inventing market data.
+impl NucleusChartView {
+    /// Creates an empty Nucleus-owned surface without inventing market data.
     #[must_use]
     pub fn empty() -> Self {
         Self::empty_with_theme(&AxiusflowTheme::dark())
@@ -288,7 +288,7 @@ impl OriginChartView {
         }
     }
 
-    /// Creates a chart from the bounded embedded replay using Origin's own styling.
+    /// Creates a chart from the bounded embedded replay using Nucleus's own styling.
     ///
     /// # Panics
     ///
@@ -350,7 +350,7 @@ impl OriginChartView {
         }
     }
 
-    /// Replaces Origin's authoritative series data with one validated snapshot.
+    /// Replaces Nucleus's authoritative series data with one validated snapshot.
     ///
     /// # Errors
     ///
@@ -398,7 +398,7 @@ impl OriginChartView {
     ///
     /// # Errors
     ///
-    /// Returns a serialization error if Origin rejects the generated options patch.
+    /// Returns a serialization error if Nucleus rejects the generated options patch.
     pub fn set_platform_theme(&mut self, theme: &AxiusflowTheme) -> Result<(), serde_json::Error> {
         apply_platform_theme(&mut self.engine, theme)?;
         self.invalidate_series_frame();
@@ -438,18 +438,18 @@ impl OriginChartView {
     ///
     /// # Errors
     ///
-    /// Returns an error when no market snapshot has populated the primary series or Origin
+    /// Returns an error when no market snapshot has populated the primary series or Nucleus
     /// cannot create every output required by the selected indicator.
     pub fn add_indicator(
         &mut self,
         indicator: ChartIndicator,
-    ) -> Result<Vec<usize>, ChartIndicatorError> {
+    ) -> Result<Vec<u32>, ChartIndicatorError> {
         if !self.has_market_data() {
             return Err(ChartIndicatorError::MarketDataUnavailable);
         }
         let ids = match indicator {
             ChartIndicator::Volume => {
-                self.engine.series[self.volume_series].visible = true;
+                self.engine.set_series_visible(self.volume_series, true);
                 vec![self.volume_series]
             }
             ChartIndicator::Vwap => self
@@ -718,7 +718,7 @@ impl OriginChartView {
         }
     }
 
-    /// Returns canonical evidence for the latest value installed into Origin.
+    /// Returns canonical evidence for the latest value installed into Nucleus.
     #[must_use]
     pub fn latest_market_provenance(&self) -> Option<&MarketEventProvenance> {
         self.displayed_provenance.latest()
@@ -1006,7 +1006,7 @@ impl OriginChartView {
 
     fn apply_wheel(&mut self, pane_x: f64, y: f64, normalized_x: f64, normalized_y: f64) {
         if normalized_y != 0.0 {
-            let zoom = origin_engine::wheel_zoom_scale(normalized_y);
+            let zoom = nucleuscharts_engine::wheel_zoom_scale(normalized_y);
             let pane = self.engine.pane_index_at_y(y);
             if pane_x < 0.0 {
                 self.engine
@@ -1022,7 +1022,7 @@ impl OriginChartView {
             self.engine.time_scale.start_scroll(0.0);
             self.engine
                 .time_scale
-                .scroll_to(origin_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
+                .scroll_to(nucleuscharts_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
             self.engine.time_scale.end_scroll();
         }
         self.update_cursor(pane_x, y);
@@ -1186,7 +1186,7 @@ impl OriginChartView {
         self.engine.css_height = f64::from(height);
         self.engine.dpr = f64::from(scale_factor);
 
-        let layout = self.engine.options.get().layout;
+        let layout = self.engine.options.get().layout.clone();
         let font_size = layout.font_size.to_f32().unwrap_or(12.0);
         let measure = |text: &str| {
             f64::from(measure_text(window, text, &layout.font_family, font_size, 400, false).width)
@@ -1208,30 +1208,30 @@ impl OriginChartView {
     }
 
     fn paint(&mut self, bounds: Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App) {
-        let viewport = OriginViewport::from_bounds(
+        let viewport = NucleusViewport::from_bounds(
             bounds.origin.x.into(),
             bounds.origin.y.into(),
             bounds.size.width.into(),
             bounds.size.height.into(),
         );
-        let prepared = PreparedOriginFrame::from_engine(&self.frame, &self.engine)
+        let prepared = PreparedNucleusFrame::from_engine(&self.frame, &self.engine)
             .with_axis(&self.axis_prims, &[]);
         if let Err(error) =
             self.renderer
                 .paint_frame(&prepared, viewport, window.scale_factor(), window, cx)
         {
-            eprintln!("origin frame skipped: {error}");
+            eprintln!("nucleus frame skipped: {error}");
         }
     }
 }
 
-impl Default for OriginChartView {
+impl Default for NucleusChartView {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Render for OriginChartView {
+impl Render for NucleusChartView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
@@ -1242,14 +1242,14 @@ impl Render for OriginChartView {
             .clone();
 
         div()
-            .id("origin_chart_surface")
+            .id("nucleus_chart_surface")
             .size_full()
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
-            .key_context("OriginChart")
+            .key_context("NucleusChart")
             .on_hover(move |hovered, _, cx| {
                 if !*hovered {
-                    hover_entity.update(cx, OriginChartView::clear_pointer);
+                    hover_entity.update(cx, NucleusChartView::clear_pointer);
                 }
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1287,8 +1287,8 @@ mod tests {
     use super::*;
     use axiusflow_application::{Provenanced, ReplayTailUpdate};
 
-    fn interactive_chart() -> OriginChartView {
-        let mut chart = OriginChartView::new();
+    fn interactive_chart() -> NucleusChartView {
+        let mut chart = NucleusChartView::new();
         chart.engine.recompute_layout_with_measure(true, |_| 48.0);
         chart.engine.fit_content();
         chart.engine.recompute_layout_with_measure(true, |_| 48.0);
@@ -1296,9 +1296,18 @@ mod tests {
         chart
     }
 
+    fn series_entry(chart: &NucleusChartView, id: u32) -> &nucleuscharts_engine::SeriesEntry {
+        chart
+            .engine
+            .series_entries()
+            .iter()
+            .find(|series| series.id == id && !series.removed)
+            .expect("live series identity resolves")
+    }
+
     #[test]
     fn empty_chart_surface_accepts_its_first_real_snapshot() {
-        let mut chart = OriginChartView::empty();
+        let mut chart = NucleusChartView::empty();
         assert!(!chart.has_market_data());
         assert_eq!(chart.queued_replay_update_count(), 0);
         assert_eq!(chart.expected_replay_sequence(), None);
@@ -1322,7 +1331,7 @@ mod tests {
         let replay = EmbeddedReplaySource
             .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
             .expect("embedded replay validates");
-        let mut chart = OriginChartView::with_replay(&replay);
+        let mut chart = NucleusChartView::with_replay(&replay);
         let initial_expected = chart
             .expected_replay_sequence()
             .expect("snapshot establishes sequence");
@@ -1382,7 +1391,7 @@ mod tests {
                 replay.evidence().publication_generation.saturating_add(1),
             )
             .expect("replacement generation validates");
-        let mut chart = OriginChartView::with_replay(&replay);
+        let mut chart = NucleusChartView::with_replay(&replay);
 
         assert!(
             chart
@@ -1421,7 +1430,7 @@ mod tests {
 
     #[test]
     fn platform_theme_owns_neutrals_and_market_series_semantics() {
-        let chart = OriginChartView::empty();
+        let chart = NucleusChartView::empty();
         let series = &chart.engine.series[0];
 
         assert_eq!(
@@ -1469,13 +1478,13 @@ mod tests {
 
         let price_data = chart
             .engine
-            .data
+            .data_layer()
             .series_data(0)
             .map(|(times, columns)| (times.to_vec(), columns.map(<[f64]>::to_vec)))
             .expect("price data");
         let volume_data = chart
             .engine
-            .data
+            .data_layer()
             .series_data(chart.volume_series)
             .map(|(times, columns)| (times.to_vec(), columns.map(<[f64]>::to_vec)))
             .expect("volume data");
@@ -1513,7 +1522,7 @@ mod tests {
         assert_eq!(
             chart
                 .engine
-                .data
+                .data_layer()
                 .series_data(0)
                 .map(|(times, columns)| { (times.to_vec(), columns.map(<[f64]>::to_vec)) }),
             Some(price_data)
@@ -1521,7 +1530,7 @@ mod tests {
         assert_eq!(
             chart
                 .engine
-                .data
+                .data_layer()
                 .series_data(chart.volume_series)
                 .map(|(times, columns)| { (times.to_vec(), columns.map(<[f64]>::to_vec)) }),
             Some(volume_data)
@@ -1532,7 +1541,7 @@ mod tests {
         assert_eq!(chart.engine.panes.len(), pane_count);
         assert_eq!(chart.engine.series.len(), series_count);
         assert_eq!(volume, vec![chart.volume_series]);
-        assert!(chart.engine.series[chart.volume_series].visible);
+        assert!(series_entry(&chart, chart.volume_series).visible);
         assert_eq!(
             chart.engine.indicator_info(vwap[0]).map(|info| info.kind),
             Some("vwap")
@@ -1540,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_zoom_and_horizontal_scroll_mutate_origin_without_refitting() {
+    fn wheel_zoom_and_horizontal_scroll_mutate_nucleus_without_refitting() {
         let mut chart = interactive_chart();
         let spacing = chart.engine.bar_spacing();
         chart.apply_wheel(400.0, 200.0, 0.0, 1.0);
@@ -1567,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    fn axes_drag_and_double_click_reset_through_origin() {
+    fn axes_drag_and_double_click_reset_through_nucleus() {
         let mut chart = interactive_chart();
         chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1);
         assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
@@ -1641,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn indicator_catalog_maps_to_origin_with_legacy_defaults() {
+    fn indicator_catalog_maps_to_nucleus_with_legacy_defaults() {
         let cases = [
             (ChartIndicator::Sma, 1, "sma", "SMA 20"),
             (ChartIndicator::Ema, 1, "ema", "EMA 20"),
@@ -1665,7 +1674,7 @@ mod tests {
                 .expect("supported indicator is created");
 
             assert_eq!(ids.len(), output_count);
-            assert_eq!(chart.engine.series[ids[0]].title, title);
+            assert_eq!(series_entry(&chart, ids[0]).title, title);
             for id in ids {
                 assert_eq!(
                     chart
@@ -1684,10 +1693,10 @@ mod tests {
         let replay = EmbeddedReplaySource
             .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
             .expect("embedded replay validates");
-        let mut chart = OriginChartView::with_replay(&replay);
+        let mut chart = NucleusChartView::with_replay(&replay);
         let (_, volume_columns) = chart
             .engine
-            .data
+            .data_layer()
             .series_data(chart.volume_series)
             .expect("parallel volume series");
         let expected_volume = replay
@@ -1701,9 +1710,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(volume_columns[3], expected_volume);
-        assert!(!chart.engine.series[chart.volume_series].visible);
-        assert!(chart.engine.series[chart.volume_series].histogram_updown);
-        assert!(chart.engine.series[chart.volume_series].overlay);
+        assert!(!series_entry(&chart, chart.volume_series).visible);
+        assert!(series_entry(&chart, chart.volume_series).histogram_updown);
+        assert_eq!(
+            series_entry(&chart, chart.volume_series).price_scale_target,
+            PriceScaleTarget::Overlay
+        );
 
         assert_eq!(
             chart
@@ -1711,7 +1723,7 @@ mod tests {
                 .expect("volume histogram"),
             vec![chart.volume_series]
         );
-        assert!(chart.engine.series[chart.volume_series].visible);
+        assert!(series_entry(&chart, chart.volume_series).visible);
 
         let vwap = chart
             .add_indicator(ChartIndicator::Vwap)
@@ -1723,7 +1735,7 @@ mod tests {
         );
         let (_, vwap_columns) = chart
             .engine
-            .data
+            .data_layer()
             .series_data(vwap[0])
             .expect("vwap output data");
         assert_eq!(vwap_columns[3].len(), replay.bars().len());
@@ -1732,7 +1744,7 @@ mod tests {
 
     #[test]
     fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
-        let mut chart = OriginChartView::empty();
+        let mut chart = NucleusChartView::empty();
         let initial_series = chart.engine.series.len();
 
         for indicator in ChartIndicator::ALL {
@@ -1765,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn anchored_drawing_tools_commit_real_origin_drawings_and_return_to_cursor() {
+    fn anchored_drawing_tools_commit_real_nucleus_drawings_and_return_to_cursor() {
         let mut chart = interactive_chart();
         let tools = [
             (ChartDrawingTool::TrendLine, 2, 160.0),

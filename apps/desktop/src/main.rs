@@ -19,7 +19,7 @@ use assets::UiIcon as HugeIcon;
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, ChartSplitDirection,
-    ChartWorkspaceLayout, OriginChartView, OriginWorkspace,
+    ChartWorkspaceLayout, NucleusChartView, NucleusWorkspace,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use axiusflow_engine_protocol::{
@@ -688,7 +688,7 @@ fn elapsed_nanos(started: Instant) -> u64 {
 }
 
 struct WorkspaceSurface {
-    chart: Option<Entity<OriginChartView>>,
+    chart: Option<Entity<NucleusChartView>>,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     chart_state: ChartState,
@@ -868,7 +868,7 @@ impl RithmicReconnectState {
     }
 }
 
-fn observe_chart(chart: Option<&Entity<OriginChartView>>, cx: &mut Context<WorkspaceSurface>) {
+fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
             if app.provider == TerminalProvider::Coinbase
@@ -1138,7 +1138,7 @@ impl HeaderControls {
 }
 
 struct TerminalStartupState {
-    chart: Option<Entity<OriginChartView>>,
+    chart: Option<Entity<NucleusChartView>>,
     chart_state: ChartState,
     chart_state_message: String,
     replay_label: String,
@@ -1162,7 +1162,7 @@ fn terminal_startup_state(
             let connection = shell.connection();
             let message = shell.message().to_string();
             TerminalStartupState {
-                chart: Some(cx.new(move |_| OriginChartView::empty())),
+                chart: Some(cx.new(move |_| NucleusChartView::empty())),
                 chart_state: ChartState::Loading,
                 chart_state_message: message.clone(),
                 replay_label: profile.clone(),
@@ -1591,7 +1591,7 @@ impl WorkspaceSurface {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
                 let theme = self.theme;
                 let chart =
-                    cx.new(move |_| OriginChartView::with_replay_and_theme(&snapshot, &theme));
+                    cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, &theme));
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
@@ -1745,7 +1745,7 @@ impl WorkspaceSurface {
 
     fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
         let theme = self.theme;
-        self.chart = Some(cx.new(move |_| OriginChartView::empty_with_theme(&theme)));
+        self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(&theme)));
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
@@ -2305,7 +2305,7 @@ impl WorkspaceSurface {
         let visible_bar_count = snapshot.bars().len();
         let theme = self.theme;
         self.chart =
-            Some(cx.new(move |_| OriginChartView::with_replay_and_theme(&snapshot, &theme)));
+            Some(cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, &theme)));
         self.worker_label = bootstrap.worker_label;
         self.subscription_id = bootstrap.subscription_id;
         self.replay_label = replay_label;
@@ -2643,7 +2643,7 @@ fn timeframe_overlay_content(
 struct MarketWorkspaceState<'a> {
     app: Entity<WorkspaceSurface>,
     pane_id: u64,
-    chart: Option<&'a Entity<OriginChartView>>,
+    chart: Option<&'a Entity<NucleusChartView>>,
     chart_has_market_data: bool,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
@@ -2722,7 +2722,7 @@ enum DrawingToolbarAvailability {
 }
 
 impl DrawingToolbarState {
-    fn from_chart(chart: &OriginChartView) -> Self {
+    fn from_chart(chart: &NucleusChartView) -> Self {
         Self {
             availability: DrawingToolbarAvailability::Available,
             active_tool: chart.drawing_tool(),
@@ -4586,7 +4586,7 @@ struct WorkspaceTab {
     label: String,
     panes: Vec<WorkspacePane>,
     active_pane: usize,
-    layout: OriginWorkspace,
+    layout: NucleusWorkspace,
     generation: u64,
     focus: FocusHandle,
 }
@@ -5318,7 +5318,7 @@ impl TerminalApp {
                 focus: cx.focus_handle(),
             }],
             active_pane: 0,
-            layout: OriginWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE, 0.0),
+            layout: NucleusWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE),
             generation: 1,
             focus: cx.focus_handle(),
         });
@@ -5377,10 +5377,9 @@ impl TerminalApp {
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
         let workspace = &mut self.workspaces[self.active];
         let source_pane_id = workspace.panes[workspace.active_pane].id;
-        if let Err(error) =
-            workspace
-                .layout
-                .split(source_pane_id, split_direction, pane.pane_id, 0.0)
+        if let Err(error) = workspace
+            .layout
+            .split(source_pane_id, split_direction, pane.pane_id)
         {
             surface.update(cx, |surface, surface_cx| {
                 surface.set_market_resource_class(ConsumerResourceClass::Detached);
@@ -6427,7 +6426,7 @@ fn terminal_root(
                     focus: cx.focus_handle(),
                 }],
                 active_pane: 0,
-                layout: OriginWorkspace::new(1, MAXIMUM_PANES_PER_WORKSPACE, 0.0),
+                layout: NucleusWorkspace::new(1, MAXIMUM_PANES_PER_WORKSPACE),
                 generation: 1,
                 focus: cx.focus_handle(),
             }],
@@ -6524,7 +6523,7 @@ fn workspace_tabs_root(
             .iter()
             .position(|pane| pane.id == tab.active_pane_id)
             .unwrap_or(0);
-        let Ok(layout) = OriginWorkspace::restore(&layout, MAXIMUM_PANES_PER_WORKSPACE, 0.0) else {
+        let Ok(layout) = NucleusWorkspace::restore(&layout, MAXIMUM_PANES_PER_WORKSPACE) else {
             continue;
         };
         workspaces.push(WorkspaceTab {

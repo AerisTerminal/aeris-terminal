@@ -1,17 +1,17 @@
-//! Axiusflow's stable-pane adapter around Origin's authoritative split workspace.
+//! Axiusflow's stable-pane adapter around Nucleus's authoritative split workspace.
 
+use nucleuscharts_engine::{SplitDirection, Workspace, WorkspaceError, WorkspaceLayout};
 use num_traits::ToPrimitive;
-use origin_engine::{SplitDirection, Workspace, WorkspaceError, WorkspaceLayout};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Host-facing split direction without leaking Origin types into the desktop crate.
+/// Host-facing split direction without leaking Nucleus types into the desktop crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartSplitDirection {
     Horizontal,
     Vertical,
 }
 
-/// Stable-pane projection of Origin's native split tree.
+/// Stable-pane projection of Nucleus's native split tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChartWorkspaceLayout {
     Pane {
@@ -26,7 +26,7 @@ pub enum ChartWorkspaceLayout {
 }
 
 impl ChartWorkspaceLayout {
-    /// Returns pane identities in Origin's visual traversal order.
+    /// Returns pane identities in Nucleus's visual traversal order.
     #[must_use]
     pub fn pane_ids(&self) -> Vec<u64> {
         let mut pane_ids = Vec::new();
@@ -115,32 +115,31 @@ impl ChartWorkspaceLayout {
     }
 }
 
-/// Origin-owned workspace model with stable Axiusflow pane identity mapping.
-pub struct OriginWorkspace {
+/// Nucleus-owned workspace model with stable Axiusflow pane identity mapping.
+pub struct NucleusWorkspace {
     workspace: Workspace,
     pane_by_cell: BTreeMap<u64, u64>,
+    maximum_panes: usize,
 }
 
-impl OriginWorkspace {
-    /// Creates one native Origin workspace rooted at `pane_id`.
+impl NucleusWorkspace {
+    /// Creates one native Nucleus workspace rooted at `pane_id`.
     #[must_use]
-    pub fn new(pane_id: u64, maximum_panes: usize, now_seconds: f64) -> Self {
-        let mut workspace = Workspace::new(now_seconds);
-        workspace.set_max_charts(Some(maximum_panes));
+    pub fn new(pane_id: u64, maximum_panes: usize) -> Self {
         Self {
-            workspace,
+            workspace: Workspace::new(),
             pane_by_cell: BTreeMap::from([(1, pane_id)]),
+            maximum_panes,
         }
     }
 
-    /// Replays a persisted stable-pane tree through Origin's native split API.
+    /// Replays a persisted stable-pane tree through Nucleus's native split API.
     ///
     /// # Errors
     /// Returns an error for invalid identities, ratios, capacity, or native replay failure.
     pub fn restore(
         layout: &ChartWorkspaceLayout,
         maximum_panes: usize,
-        now_seconds: f64,
     ) -> Result<Self, &'static str> {
         let pane_ids = layout.pane_ids();
         if pane_ids.is_empty()
@@ -148,15 +147,14 @@ impl OriginWorkspace {
             || pane_ids.contains(&0)
             || pane_ids.iter().copied().collect::<BTreeSet<_>>().len() != pane_ids.len()
         {
-            return Err("Origin workspace layout has invalid pane identities");
+            return Err("Nucleus workspace layout has invalid pane identities");
         }
-        let mut workspace = Workspace::new(now_seconds);
-        workspace.set_max_charts(Some(maximum_panes));
         let mut restored = Self {
-            workspace,
+            workspace: Workspace::new(),
             pane_by_cell: BTreeMap::new(),
+            maximum_panes,
         };
-        restored.replay_layout(1, layout, now_seconds)?;
+        restored.replay_layout(1, layout)?;
         Ok(restored)
     }
 
@@ -164,7 +162,6 @@ impl OriginWorkspace {
         &mut self,
         cell_id: u64,
         layout: &ChartWorkspaceLayout,
-        now_seconds: f64,
     ) -> Result<(u64, u64), &'static str> {
         match layout {
             ChartWorkspaceLayout::Pane { pane_id } => {
@@ -178,14 +175,14 @@ impl OriginWorkspace {
                 second,
             } => {
                 if !ratio.is_finite() || !(0.05..=0.95).contains(ratio) {
-                    return Err("Origin workspace split ratio is invalid");
+                    return Err("Nucleus workspace split ratio is invalid");
                 }
                 let second_cell = self
                     .workspace
-                    .split(cell_id, origin_direction(*direction), now_seconds)
+                    .split(cell_id, nucleus_direction(*direction))
                     .map_err(workspace_error)?;
-                let first_edge = self.replay_layout(cell_id, first, now_seconds)?;
-                let second_edge = self.replay_layout(second_cell, second, now_seconds)?;
+                let first_edge = self.replay_layout(cell_id, first)?;
+                let second_edge = self.replay_layout(second_cell, second)?;
                 self.workspace
                     .resize_between(first_edge.1, second_edge.0, *ratio - 0.5)
                     .map_err(workspace_error)?;
@@ -194,7 +191,7 @@ impl OriginWorkspace {
         }
     }
 
-    /// Splits a stable pane through Origin and maps the new native cell to `new_pane_id`.
+    /// Splits a stable pane through Nucleus and maps the new native cell to `new_pane_id`.
     ///
     /// # Errors
     /// Returns an error for duplicate identities, capacity, or an unknown source pane.
@@ -203,7 +200,6 @@ impl OriginWorkspace {
         pane_id: u64,
         direction: ChartSplitDirection,
         new_pane_id: u64,
-        now_seconds: f64,
     ) -> Result<(), &'static str> {
         if new_pane_id == 0
             || self
@@ -211,18 +207,21 @@ impl OriginWorkspace {
                 .values()
                 .any(|current| *current == new_pane_id)
         {
-            return Err("Origin workspace received a duplicate pane identity");
+            return Err("Nucleus workspace received a duplicate pane identity");
+        }
+        if self.pane_by_cell.len() >= self.maximum_panes {
+            return Err("Nucleus workspace is at pane capacity");
         }
         let cell_id = self.cell_for_pane(pane_id)?;
         let new_cell = self
             .workspace
-            .split(cell_id, origin_direction(direction), now_seconds)
+            .split(cell_id, nucleus_direction(direction))
             .map_err(workspace_error)?;
         self.pane_by_cell.insert(new_cell, new_pane_id);
         Ok(())
     }
 
-    /// Removes a stable pane and lets Origin collapse its split parent.
+    /// Removes a stable pane and lets Nucleus collapse its split parent.
     ///
     /// # Errors
     /// Returns an error when the pane is unknown or is the workspace's final pane.
@@ -244,12 +243,12 @@ impl OriginWorkspace {
         ratio: f64,
     ) -> Result<(), &'static str> {
         if !ratio.is_finite() {
-            return Err("Origin workspace split ratio is invalid");
+            return Err("Nucleus workspace split ratio is invalid");
         }
         let layout = self.layout();
         let current = layout
             .boundary_ratio_for_panes(left_pane_id, right_pane_id)
-            .ok_or("Origin workspace divider was not found")?;
+            .ok_or("Nucleus workspace divider was not found")?;
         let left_cell = self.cell_for_pane(left_pane_id)?;
         let right_cell = self.cell_for_pane(right_pane_id)?;
         self.workspace
@@ -257,7 +256,7 @@ impl OriginWorkspace {
             .map_err(workspace_error)
     }
 
-    /// Returns the stable-pane projection of Origin's current native layout.
+    /// Returns the stable-pane projection of Nucleus's current native layout.
     #[must_use]
     pub fn layout(&self) -> ChartWorkspaceLayout {
         project_layout(&self.workspace.layout(), &self.pane_by_cell)
@@ -267,11 +266,11 @@ impl OriginWorkspace {
         self.pane_by_cell
             .iter()
             .find_map(|(cell_id, current)| (*current == pane_id).then_some(*cell_id))
-            .ok_or("Origin workspace pane was not found")
+            .ok_or("Nucleus workspace pane was not found")
     }
 }
 
-fn origin_direction(direction: ChartSplitDirection) -> SplitDirection {
+fn nucleus_direction(direction: ChartSplitDirection) -> SplitDirection {
     match direction {
         ChartSplitDirection::Horizontal => SplitDirection::Horizontal,
         ChartSplitDirection::Vertical => SplitDirection::Vertical,
@@ -280,9 +279,9 @@ fn origin_direction(direction: ChartSplitDirection) -> SplitDirection {
 
 fn workspace_error(error: WorkspaceError) -> &'static str {
     match error {
-        WorkspaceError::AtCapacity => "Origin workspace is at pane capacity",
-        WorkspaceError::NotFound => "Origin workspace pane was not found",
-        WorkspaceError::LastCell => "Origin workspace cannot remove its final pane",
+        WorkspaceError::NotFound => "Nucleus workspace pane was not found",
+        WorkspaceError::LastCell => "Nucleus workspace cannot remove its final pane",
+        WorkspaceError::InvalidLayout => "Nucleus workspace layout is invalid",
     }
 }
 
@@ -317,12 +316,12 @@ mod tests {
 
     #[test]
     fn native_workspace_preserves_stable_panes_and_nested_direction() {
-        let mut workspace = OriginWorkspace::new(41, 4, 0.0);
+        let mut workspace = NucleusWorkspace::new(41, 4);
         workspace
-            .split(41, ChartSplitDirection::Horizontal, 42, 1.0)
+            .split(41, ChartSplitDirection::Horizontal, 42)
             .unwrap();
         workspace
-            .split(42, ChartSplitDirection::Vertical, 43, 2.0)
+            .split(42, ChartSplitDirection::Vertical, 43)
             .unwrap();
         assert_eq!(workspace.layout().pane_ids(), [41, 42, 43]);
         assert!(matches!(
@@ -339,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_tree_restores_through_native_origin_operations() {
+    fn persisted_tree_restores_through_native_nucleus_operations() {
         let layout = ChartWorkspaceLayout::Split {
             direction: ChartSplitDirection::Horizontal,
             ratio: 0.4,
@@ -351,7 +350,7 @@ mod tests {
                 second: Box::new(ChartWorkspaceLayout::Pane { pane_id: 11 }),
             }),
         };
-        let restored = OriginWorkspace::restore(&layout, 4, 0.0).unwrap();
+        let restored = NucleusWorkspace::restore(&layout, 4).unwrap();
         assert_eq!(restored.layout(), layout);
         assert_eq!(
             restored.layout().pane_basis_points(),
@@ -360,10 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn remove_and_resize_delegate_to_origin_tree() {
-        let mut workspace = OriginWorkspace::new(1, 4, 0.0);
+    fn remove_and_resize_delegate_to_nucleus_tree() {
+        let mut workspace = NucleusWorkspace::new(1, 4);
         workspace
-            .split(1, ChartSplitDirection::Horizontal, 2, 1.0)
+            .split(1, ChartSplitDirection::Horizontal, 2)
             .unwrap();
         workspace.resize_between(1, 2, 0.7).unwrap();
         assert!(matches!(
@@ -375,5 +374,18 @@ mod tests {
             workspace.layout(),
             ChartWorkspaceLayout::Pane { pane_id: 2 }
         );
+    }
+
+    #[test]
+    fn host_preserves_the_product_pane_capacity() {
+        let mut workspace = NucleusWorkspace::new(1, 2);
+        workspace
+            .split(1, ChartSplitDirection::Horizontal, 2)
+            .unwrap();
+        assert_eq!(
+            workspace.split(2, ChartSplitDirection::Vertical, 3),
+            Err("Nucleus workspace is at pane capacity")
+        );
+        assert_eq!(workspace.layout().pane_ids(), [1, 2]);
     }
 }

@@ -11,7 +11,7 @@
 //! report says so.
 
 use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay, ReplaySnapshot};
-use axiusflow_chart_integration::{ChartBridgeMetrics, OriginChartView};
+use axiusflow_chart_integration::{ChartBridgeMetrics, NucleusChartView};
 use axiusflow_desktop::market_worker::{
     CoinbaseWorkerStartup, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
     MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
@@ -183,7 +183,7 @@ struct FrameSample {
 }
 
 struct BenchmarkDriver {
-    chart: Entity<OriginChartView>,
+    chart: Entity<NucleusChartView>,
     terminal: Entity<WorkspaceSurface>,
     symbol_input: Entity<InputState>,
     worker: FixtureMarketWorker,
@@ -439,7 +439,7 @@ impl BenchmarkDriver {
 }
 
 struct WindowedBenchmarkApp {
-    chart: Entity<OriginChartView>,
+    chart: Entity<NucleusChartView>,
 }
 
 impl Render for WindowedBenchmarkApp {
@@ -936,7 +936,7 @@ fn benchmark_root(
         coinbase_products,
         interaction_startup,
     } = setup;
-    let chart = cx.new(move |_| OriginChartView::with_replay(&snapshot));
+    let chart = cx.new(move |_| NucleusChartView::with_replay(&snapshot));
     let symbol_input = cx.new(|cx| InputState::new(window, cx));
     let indicator_input = cx.new(|cx| InputState::new(window, cx));
     let terminal_symbol_input = symbol_input.clone();

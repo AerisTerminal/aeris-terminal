@@ -16,9 +16,9 @@ axiusflow_market_data = { path = "../../domain/market_data" }
 axiusflow_terminal_ui = { path = "../terminal_ui" }
 gpui.workspace = true
 num-traits = "=0.2.19"
-origin_engine.workspace = true
-origin_render.workspace = true
-origin_render_gpui.workspace = true
+nucleuscharts_engine.workspace = true
+nucleuscharts_render.workspace = true
+nucleuscharts_render_gpui.workspace = true
 serde_json.workspace = true
 
 [lints]

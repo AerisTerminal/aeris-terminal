@@ -667,10 +667,10 @@ dependencies = [
  "axiusflow_market_data",
  "axiusflow_terminal_ui",
  "gpui",
+ "nucleuscharts_engine",
+ "nucleuscharts_render",
+ "nucleuscharts_render_gpui",
  "num-traits",
- "origin_engine",
- "origin_render",
- "origin_render_gpui",
  "serde_json",
 ]
 
@@ -4492,6 +4492,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleuscharts_core"
+version = "0.1.0"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=90c3b453417e23790b64f3cef17c7b4fc27b65f9#90c3b453417e23790b64f3cef17c7b4fc27b65f9"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nucleuscharts_engine"
+version = "0.1.0"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=90c3b453417e23790b64f3cef17c7b4fc27b65f9#90c3b453417e23790b64f3cef17c7b4fc27b65f9"
+dependencies = [
+ "nucleuscharts_core",
+ "nucleuscharts_indicators",
+ "nucleuscharts_render",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nucleuscharts_indicators"
+version = "0.1.0"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=90c3b453417e23790b64f3cef17c7b4fc27b65f9#90c3b453417e23790b64f3cef17c7b4fc27b65f9"
+
+[[package]]
+name = "nucleuscharts_render"
+version = "0.1.0"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=90c3b453417e23790b64f3cef17c7b4fc27b65f9#90c3b453417e23790b64f3cef17c7b4fc27b65f9"
+dependencies = [
+ "nucleuscharts_core",
+]
+
+[[package]]
+name = "nucleuscharts_render_gpui"
+version = "0.1.0"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=90c3b453417e23790b64f3cef17c7b4fc27b65f9#90c3b453417e23790b64f3cef17c7b4fc27b65f9"
+dependencies = [
+ "gpui",
+ "image",
+ "nucleuscharts_core",
+ "nucleuscharts_engine",
+ "nucleuscharts_render",
+ "smallvec",
+]
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5033,51 +5080,6 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
-]
-
-[[package]]
-name = "origin_core"
-version = "0.1.0"
-source = "git+https://github.com/Axiusflow-app/Origin_charts.git?rev=5a567f679ea23f2c612ca68d5fbfa1ada8f44738#5a567f679ea23f2c612ca68d5fbfa1ada8f44738"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "origin_engine"
-version = "0.1.0"
-source = "git+https://github.com/Axiusflow-app/Origin_charts.git?rev=5a567f679ea23f2c612ca68d5fbfa1ada8f44738#5a567f679ea23f2c612ca68d5fbfa1ada8f44738"
-dependencies = [
- "origin_core",
- "origin_indicators",
- "origin_render",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "origin_indicators"
-version = "0.1.0"
-source = "git+https://github.com/Axiusflow-app/Origin_charts.git?rev=5a567f679ea23f2c612ca68d5fbfa1ada8f44738#5a567f679ea23f2c612ca68d5fbfa1ada8f44738"
-
-[[package]]
-name = "origin_render"
-version = "0.1.0"
-source = "git+https://github.com/Axiusflow-app/Origin_charts.git?rev=5a567f679ea23f2c612ca68d5fbfa1ada8f44738#5a567f679ea23f2c612ca68d5fbfa1ada8f44738"
-dependencies = [
- "origin_core",
-]
-
-[[package]]
-name = "origin_render_gpui"
-version = "0.1.0"
-source = "git+https://github.com/Axiusflow-app/Origin_charts.git?rev=5a567f679ea23f2c612ca68d5fbfa1ada8f44738#5a567f679ea23f2c612ca68d5fbfa1ada8f44738"
-dependencies = [
- "gpui",
- "origin_core",
- "origin_engine",
- "origin_render",
 ]
 
 [[package]]

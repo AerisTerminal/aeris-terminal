@@ -125,7 +125,7 @@ impl ThemeColor {
             | u32::from(channel_to_u8(self.blue))
     }
 
-    /// Returns a CSS color accepted by Origin's options and series contracts.
+    /// Returns a CSS color accepted by Nucleus's options and series contracts.
     #[must_use]
     pub fn css_value(self) -> String {
         let red = channel_to_u8(self.red);

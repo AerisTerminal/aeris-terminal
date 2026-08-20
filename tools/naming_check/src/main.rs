@@ -9,7 +9,7 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     ".git",
     "__pycache__",
     "node_modules",
-    "origin_charts",
+    "financial-charts",
     "target",
     "third_party",
 ];
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_wire_and_origin_boundaries_remain_isolated() {
+    fn provider_wire_and_nucleus_boundaries_remain_isolated() {
         let rithmic_adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
         assert!(
             rithmic_adapter.contains("mod generated {"),
@@ -364,17 +364,45 @@ mod tests {
             "Rithmic generated protobuf must not be exported above the adapter boundary"
         );
 
+        let root_manifest = manifest("Cargo.toml");
+        let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
+        let expected_revision = "90c3b453417e23790b64f3cef17c7b4fc27b65f9";
+        for dependency in [
+            "nucleuscharts_engine",
+            "nucleuscharts_render",
+            "nucleuscharts_render_gpui",
+        ] {
+            assert!(
+                root_manifest.contains(&format!(
+                    "{dependency} = {{ git = \"{expected_source}\", rev = \"{expected_revision}\""
+                )),
+                "{dependency} must remain pinned to the approved Nucleus Charts revision"
+            );
+        }
+
+        for retired in [
+            concat!("Axiusflow-app/", "Ori", "gin_", "charts"),
+            concat!("ori", "gin_", "engine ="),
+            concat!("ori", "gin_", "render ="),
+            concat!("ori", "gin_", "render_gpui ="),
+        ] {
+            assert!(
+                !root_manifest.contains(retired),
+                "retired chart dependency identity returned: {retired}"
+            );
+        }
+
         for path in workspace_manifests() {
             let relative = relative_string(&path);
             let contents = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            if contents.contains("origin_engine.workspace")
-                || contents.contains("origin_render.workspace")
-                || contents.contains("origin_render_gpui.workspace")
+            if contents.contains("nucleuscharts_engine.workspace")
+                || contents.contains("nucleuscharts_render.workspace")
+                || contents.contains("nucleuscharts_render_gpui.workspace")
             {
                 assert_eq!(
                     relative, "crates/ui/chart_integration/Cargo.toml",
-                    "Origin crates may be consumed only by chart_integration"
+                    "Nucleus crates may be consumed only by chart_integration"
                 );
             }
         }
@@ -384,9 +412,21 @@ mod tests {
             let contents = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
             let production = production_prefix(&contents);
-            if production.contains("origin_engine")
-                || production.contains("origin_render")
-                || production.contains("origin_render_gpui")
+            for retired in [
+                concat!("ori", "gin_", "engine"),
+                concat!("ori", "gin_", "render"),
+                concat!("Ori", "gin", "ChartView"),
+                concat!("Ori", "gin", "Workspace"),
+                concat!("ori", "gin_", "bridge"),
+            ] {
+                assert!(
+                    !production.contains(retired),
+                    "{relative} contains retired chart identity {retired}"
+                );
+            }
+            if production.contains("nucleuscharts_engine")
+                || production.contains("nucleuscharts_render")
+                || production.contains("nucleuscharts_render_gpui")
             {
                 assert!(
                     relative.starts_with("crates/ui/chart_integration/src/"),
@@ -397,6 +437,25 @@ mod tests {
                 assert!(
                     !production.contains("rithmic.protobuf"),
                     "{relative} leaks Rithmic vendor protobuf above its adapter"
+                );
+            }
+        }
+
+        for relative in [
+            "AGENTS.md",
+            "ARCHITECTURE.md",
+            "AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md",
+        ] {
+            let contents = manifest(relative);
+            for retired in [
+                concat!("Ori", "gin", " Charts"),
+                concat!("Ori", "gin_", "charts"),
+                concat!("Ori", "gin", "ChartView"),
+                concat!("Ori", "gin", "Workspace"),
+            ] {
+                assert!(
+                    !contents.contains(retired),
+                    "{relative} contains retired chart identity {retired}"
                 );
             }
         }
@@ -541,7 +600,7 @@ mod tests {
         let chart_view = manifest("crates/ui/chart_integration/src/view.rs");
         assert!(
             chart_view.contains("empty_chart_surface_accepts_its_first_real_snapshot"),
-            "Origin chart integration must retain first-snapshot coverage"
+            "Nucleus chart integration must retain first-snapshot coverage"
         );
     }
 

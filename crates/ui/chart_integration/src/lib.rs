@@ -1,11 +1,11 @@
-//! Axiusflow host integration for Origin Charts' existing GPUI backend.
+//! Axiusflow host integration for Nucleus Charts' existing GPUI backend.
 //!
-//! Origin owns chart state, layout, scales, interactions, frames, and rendering.
+//! Nucleus owns chart state, layout, scales, interactions, frames, and rendering.
 //! This crate only negotiates GPUI window geometry and submits the resulting
-//! immutable Origin frame to `origin_render_gpui`.
+//! immutable Nucleus frame to `nucleuscharts_render_gpui`.
 
 mod bridge;
-mod origin_bridge;
+mod nucleus_bridge;
 mod provenance;
 mod view;
 mod workspace;
@@ -13,6 +13,6 @@ mod workspace;
 pub use axiusflow_application::ReplayRecoveryCommand;
 pub use bridge::{ChartBridgeMetrics, ChartDataBridge, MergedChartData};
 pub use view::{
-    ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, OriginChartView,
+    ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, NucleusChartView,
 };
-pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, OriginWorkspace};
+pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

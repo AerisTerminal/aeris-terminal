@@ -128,7 +128,7 @@ The new architecture must dramatically shorten the path between valid canonical 
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): the durable forensic and regression suites preserve the original `history.install_failed` invariant at the resident-engine owner. Tests prove valid provider history installs and publishes from memory before persistence, storage failure produces an independent degraded persistence state rather than permanent Loading, generation-fenced IPC reaches the desktop application model, and release-native verification reaches Origin rendering. Repository conformance requires these regression entry points and prevents the deleted runtime from returning.
+Evidence (2026-08-19): the durable forensic and regression suites preserve the original `history.install_failed` invariant at the resident-engine owner. Tests prove valid provider history installs and publishes from memory before persistence, storage failure produces an independent degraded persistence state rather than permanent Loading, generation-fenced IPC reaches the desktop application model, and release-native verification reaches Nucleus rendering. Repository conformance requires these regression entry points and prevents the deleted runtime from returning.
 
 Before deleting the baseline runtime path, preserve enough forensic instrumentation to answer:
 
@@ -153,7 +153,7 @@ provider data
 → engine publication
 → IPC
 → desktop chart model
-→ Origin chart rendering
+→ Nucleus chart rendering
 
 A persistent storage failure must be tested separately and must not leave an already-valid chart permanently Loading.
 
@@ -215,7 +215,7 @@ The final high-level topology is:
 │  EngineClient                                      │
 │      └── IPC connection to axiusflow_engine        │
 │                                                    │
-│  Origin chart integration                          │
+│  Nucleus chart integration                          │
 │                                                    │
 └────────────────────────────────────────────────────┘
 ```
@@ -244,7 +244,7 @@ The desktop must not create Rithmic or Coinbase network sessions.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): desktop production sources own GPUI state, bounded engine-client bridges, application projections, and Origin integration only. The resident engine coordinator owns demand/subscription registries, provider sessions, provider history, canonical bars, live aggregation, depth reconstruction, local persistence, recovery, resource policy, and per-consumer publication. Static conformance rejects provider sockets, storage APIs, `HistoryStore`, and provider connection types from presentation layers, while runtime regressions prove shared provider work, independent consumers, disconnect cleanup, storage-failure isolation, and generation-fenced publication.
+Evidence (2026-08-18): desktop production sources own GPUI state, bounded engine-client bridges, application projections, and Nucleus integration only. The resident engine coordinator owns demand/subscription registries, provider sessions, provider history, canonical bars, live aggregation, depth reconstruction, local persistence, recovery, resource policy, and per-consumer publication. Static conformance rejects provider sockets, storage APIs, `HistoryStore`, and provider connection types from presentation layers, while runtime regressions prove shared provider work, independent consumers, disconnect cleanup, storage-failure isolation, and generation-fenced publication.
 
 ## `axiusflow_desktop`
 
@@ -623,7 +623,7 @@ Treat it as vendor material/build input/reference material.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): Rithmic vendor protobuf generation and the private `generated` module remain confined to `crates/adapters/rithmic_protocol`; the module is not publicly exported. The adapter converts decoded trades, quotes, depth, catalog, history, timestamps, and session outcomes into canonical domain or bounded adapter contract values before the engine consumes them. Desktop, application, domain, market-engine, storage, and chart crates have no production dependency on either provider adapter. Repository conformance now fails if Rithmic protobuf escapes its adapter or an Origin/presentation layer acquires a provider implementation dependency.
+Evidence (2026-08-18): Rithmic vendor protobuf generation and the private `generated` module remain confined to `crates/adapters/rithmic_protocol`; the module is not publicly exported. The adapter converts decoded trades, quotes, depth, catalog, history, timestamps, and session outcomes into canonical domain or bounded adapter contract values before the engine consumes them. Desktop, application, domain, market-engine, storage, and chart crates have no production dependency on either provider adapter. Repository conformance now fails if Rithmic protobuf escapes its adapter or a Nucleus/presentation layer acquires a provider implementation dependency.
 
 Rithmic protobuf/wire types must stop inside:
 
@@ -909,7 +909,7 @@ But they must NOT automatically become five independent provider sessions.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): workspace schema 5 persists a bounded ordered tab list, active workspace, an authoritative recursive Origin split tree with per-node direction and ratio, stable workspace/pane/consumer identities, provider-neutral series, viewport, and generations. Schema-4 flat pane geometry is migrated once and is not a second runtime layout owner. The single GPUI shell implements create/select/reorder/close and delegates multi-pane split/resize/collapse to Origin's native `Workspace` without constructing provider sessions, chart scales, storage owners, runtimes, or application wrappers per tab. Revision-fenced protocol-v12 layout IPC is coalesced through one background persistence owner, and deterministic restore replays the tree through Origin while allocating new identities above every persisted high watermark. Icon-only Hugeicons controls expose split and close actions, logical pane focus paints no chart border, and each leaf keeps its Origin-owned axes inside a small drawable-edge allowance.
+Evidence (2026-08-20): workspace schema 5 persists a bounded ordered tab list, active workspace, an authoritative recursive Nucleus split tree with per-node direction and ratio, stable workspace/pane/consumer identities, provider-neutral series, viewport, and generations. Schema-4 flat pane geometry is migrated once and is not a second runtime layout owner. The single GPUI shell implements create/select/reorder/close; `NucleusWorkspace` enforces Axiusflow's product pane limit before delegating multi-pane split/resize/collapse to Nucleus Charts' generic native `Workspace`, without constructing provider sessions, chart scales, storage owners, runtimes, or application wrappers per tab. Revision-fenced protocol-v12 layout IPC is coalesced through one background persistence owner, and deterministic restore replays the tree through Nucleus Charts while allocating new identities above every persisted high watermark. Icon-only Hugeicons controls expose split and close actions, logical pane focus paints no chart border, and each leaf keeps its Nucleus-owned axes inside a small drawable-edge allowance. Regression coverage proves a split beyond the product cap is rejected without mutating the native tree.
 
 Axiusflow must support TradingView-like multi-workspace/multi-tab behavior using GPUI.
 
@@ -948,7 +948,7 @@ They do not create Tokio runtimes.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): the deterministic twenty-consumer test represents five workspace IDs with four chart consumers each and proves shared series, exactly one provider generation, bounded consumer/series capacity, independent generations, switch isolation, and close isolation. The release `--multi-chart` proof renders two independent GPUI/Origin charts through one desktop coordinator and resident engine. Multi-pane workspace composition remains explicitly open in sections 18 and 99; the shared backend architecture required by this section is complete.
+Evidence (2026-08-19): the deterministic twenty-consumer test represents five workspace IDs with four chart consumers each and proves shared series, exactly one provider generation, bounded consumer/series capacity, independent generations, switch isolation, and close isolation. The release `--multi-chart` proof renders two independent GPUI/Nucleus charts through one desktop coordinator and resident engine. Multi-pane workspace composition remains explicitly open in sections 18 and 99; the shared backend architecture required by this section is complete.
 
 Suppose the user opens:
 
@@ -1275,7 +1275,7 @@ No GPUI callback may synchronously wait for provider/network/storage work.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): the shipping path is provider or retained-local input -> adapter/domain validation -> fixed-point canonical bars/book -> bounded in-memory `SeriesStore`/order-book owner -> generation-qualified engine snapshot or tail -> authenticated local IPC -> desktop application model -> `chart_integration` -> Origin Charts -> GPUI frame. Provider and storage work stay on bounded engine workers, persistence is not a publication gate, and the desktop performs only validation/projection before frame-conflated presentation. Authenticated IPC snapshot tests, desktop fixed-point/tail projection tests, Origin frame-boundary tests, and the release windowed benchmark exercise the same boundaries without a compatibility backend path.
+Evidence (2026-08-18): the shipping path is provider or retained-local input -> adapter/domain validation -> fixed-point canonical bars/book -> bounded in-memory `SeriesStore`/order-book owner -> generation-qualified engine snapshot or tail -> authenticated local IPC -> desktop application model -> `chart_integration` -> Nucleus Charts -> GPUI frame. Provider and storage work stay on bounded engine workers, persistence is not a publication gate, and the desktop performs only validation/projection before frame-conflated presentation. Authenticated IPC snapshot tests, desktop fixed-point/tail projection tests, Nucleus frame-boundary tests, and the release windowed benchmark exercise the same boundaries without a compatibility backend path.
 
 The critical visible chart path should be:
 
@@ -1296,7 +1296,7 @@ local IPC
         ↓
 desktop chart model
         ↓
-Origin chart
+Nucleus chart
         ↓
 GPUI frame
 ```
@@ -1939,7 +1939,7 @@ Do not reconstruct the engine.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): canonical completed bars are held as `Arc<[MarketBar]>`, and consumer snapshots clone the shared allocation rather than its bars. The existing twenty-consumer regression proves all charts receive one provider generation and pointer-identical canonical history while retaining independent consumer publication state; chart-local application and Origin representations remain presentation-owned.
+Evidence (2026-08-18): canonical completed bars are held as `Arc<[MarketBar]>`, and consumer snapshots clone the shared allocation rather than its bars. The existing twenty-consumer regression proves all charts receive one provider generation and pointer-identical canonical history while retaining independent consumer publication state; chart-local application and Nucleus representations remain presentation-owned.
 
 Avoid copying giant bar vectors per chart.
 
@@ -2597,13 +2597,13 @@ OrderBookEngine
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): `crates/ui/chart_integration` is the sole Axiusflow bridge to Origin. Its bounded `ChartDataBridge` validates series/session/publication generations, rejects stale or uncorrelated recovery snapshots, merges covering snapshots and contiguous tails, applies viewport and frame updates, and converts validated application data for Origin rendering. Workspace conformance now rejects any Origin manifest dependency or production source import outside this crate.
+Evidence (2026-08-18): `crates/ui/chart_integration` is the sole Axiusflow bridge to Nucleus. Its bounded `ChartDataBridge` validates series/session/publication generations, rejects stale or uncorrelated recovery snapshots, merges covering snapshots and contiguous tails, applies viewport and frame updates, and converts validated application data for Nucleus rendering. Workspace conformance now rejects any Nucleus manifest dependency or production source import outside this crate.
 
-`crates/ui/chart_integration` remains the only Axiusflow-specific bridge to Origin Charts.
+`crates/ui/chart_integration` remains the only Axiusflow-specific bridge to Nucleus Charts.
 
 Responsibilities:
 
-- convert canonical/presentation snapshot into Origin input,
+- convert canonical/presentation snapshot into Nucleus input,
 - install new series,
 - update active tail,
 - apply viewport,
@@ -2614,15 +2614,15 @@ It does not request provider data directly.
 
 ---
 
-# 65. ORIGIN CHART ENGINE
+# 65. NUCLEUS CHART ENGINE
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): Axiusflow consumes Origin only through pinned Git dependencies in `crates/ui/chart_integration`; no engine, provider, storage, protocol, application, desktop, or terminal-UI crate imports Origin directly. Origin remains a separate repository and receives already validated chart data, viewport commands, and rendering interaction through the bridge. The repository conformance test makes this dependency boundary executable.
+Evidence (2026-08-20): Axiusflow consumes `nucleuscharts_engine`, `nucleuscharts_render`, and `nucleuscharts_render_gpui` only through pinned Git dependencies in `crates/ui/chart_integration`. All three resolve from `https://github.com/NucleusCharts/financial-charts.git` at commit `90c3b453417e23790b64f3cef17c7b4fc27b65f9`; no engine, provider, storage, protocol, application, desktop, or terminal-UI crate imports Nucleus Charts directly. Nucleus Charts remains a separate repository and receives already validated chart data, viewport commands, and rendering interaction through the bridge. Repository conformance makes this dependency boundary and the retired chart dependency identity executable.
 
-Do not migrate provider/backend responsibilities into Origin Charts.
+Do not migrate provider/backend responsibilities into Nucleus Charts.
 
-Origin remains:
+Nucleus remains:
 
 - framework agnostic,
 - independent,
@@ -2634,7 +2634,7 @@ Origin remains:
 
 Axiusflow feeds it data.
 
-Origin renders/interacts.
+Nucleus renders/interacts.
 
 ---
 
@@ -3157,7 +3157,7 @@ Internal work uses threads/tasks/modules.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): the audited production Rust footprint is 61,796 lines across the 19 application and product-library packages under the repository's test-aware counting method. The count excludes dedicated tests/benchmarks, vendor material, and Origin Charts. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
+Evidence (2026-08-19): the audited production Rust footprint is 61,796 lines across the 19 application and product-library packages under the repository's test-aware counting method. The count excludes dedicated tests/benchmarks, vendor material, and Nucleus Charts. A repository conformance test fails above the unchanged 65,000-line soft review threshold, while the required all-target build and lint gates protect correctness from line-count-driven deletion.
 
 The baseline platform-side code was too large relative to working functionality.
 
@@ -3173,7 +3173,7 @@ Approximately 65,000 production LOC.
 
 These figures EXCLUDE:
 
-- Origin chart repository,
+- Nucleus chart repository,
 - generated protobuf Rust,
 - vendor `provider_kit`,
 - tests,
@@ -3513,7 +3513,7 @@ Verify:
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): an optimized Windows `axiusflow_desktop --workspace-tabs` run restored three tabs with two chart panes each through one resident engine/client and rendered real Origin candles. UI split/close and active-workspace mutations advanced persisted layout revisions; tab activity retained the same provider generation, three canonical series, bounded resident state, and a responsive desktop at approximately 64-84 MB working set. The run exposed hidden-pane overflow, lossy resource-class, publication-watermark, and stale-tail ordering failures; each was fixed at its owner with a regression, and the final optimized capture had no chart error banner or stderr fault. Deterministic tests additionally prove hidden tabs do not poll/render continuously, foreground restoration receives a covering snapshot, shared instruments share backend state, and layout operations do not create provider sessions.
+Evidence (2026-08-19): an optimized Windows `axiusflow_desktop --workspace-tabs` run restored three tabs with two chart panes each through one resident engine/client and rendered real Nucleus candles. UI split/close and active-workspace mutations advanced persisted layout revisions; tab activity retained the same provider generation, three canonical series, bounded resident state, and a responsive desktop at approximately 64-84 MB working set. The run exposed hidden-pane overflow, lossy resource-class, publication-watermark, and stale-tail ordering failures; each was fixed at its owner with a regression, and the final optimized capture had no chart error banner or stderr fault. Deterministic tests additionally prove hidden tabs do not poll/render continuously, foreground restoration receives a covering snapshot, shared instruments share backend state, and layout operations do not create provider sessions.
 
 Run the real desktop.
 
@@ -3826,7 +3826,7 @@ Write deterministic tests.
 
 - [x] **Status: Verified complete**
 
-Historical phase evidence (2026-08-11): the default desktop Coinbase startup attached a bounded `EngineClient` through protocol v5; current protocol v12 preserves that path. `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Origin.
+Historical phase evidence (2026-08-11): the default desktop Coinbase startup attached a bounded `EngineClient` through protocol v5; current protocol v12 preserves that path. `axiusflow_engine` owns one market coordinator, one Coinbase historical worker, one Coinbase realtime worker, the canonical `MarketEngine`/`SeriesStore`, and fixed-point per-consumer snapshots. Deterministic tests prove authenticated IPC delivery, shared engine cache use, generation fencing, disconnect cleanup, desktop precision/provenance conversion, and the history/live gate subsequently verified in section 154. Clean Windows release runs started with no resident process, spawned the sibling release engine, remained responsive with a green connection state, and rendered updating BTC-USD one-minute candles in Nucleus.
 
 Move Coinbase execution into `axiusflow_engine`.
 
@@ -3853,7 +3853,7 @@ IPC snapshot
 ↓
 GPUI
 ↓
-Origin
+Nucleus
 ```
 
 Do not migrate Rithmic simultaneously.
@@ -3866,7 +3866,7 @@ Prove Coinbase first.
 
 - [x] **Status: Verified complete**
 
-Historical phase evidence (2026-08-11): protocol v5 first proved BTC-USD and ETH-USD at 1m, 5m, 15m, and 1h through asynchronous demand and bounded event polling; current protocol v12 preserves that behavior. One shared Coinbase realtime session routes both products into per-series fixed-interval history/live handoffs; cached forming tails resume without rewriting their canonical sequence. Deterministic delayed-history churn drives the exact `BTC 1m to 5m to 15m to 1h to 1m to ETH 1m to BTC 1m` sequence and proves only the latest generation can publish, while a separate test proves all switches reuse one realtime start. A Windows release desktop/engine run captured all seven corresponding Origin chart states with green connection status and visible candles; both processes remained responsive, the engine retained only two established Coinbase TLS connections, and no stale overwrite, hang, or infinite loading state appeared.
+Historical phase evidence (2026-08-11): protocol v5 first proved BTC-USD and ETH-USD at 1m, 5m, 15m, and 1h through asynchronous demand and bounded event polling; current protocol v12 preserves that behavior. One shared Coinbase realtime session routes both products into per-series fixed-interval history/live handoffs; cached forming tails resume without rewriting their canonical sequence. Deterministic delayed-history churn drives the exact `BTC 1m to 5m to 15m to 1h to 1m to ETH 1m to BTC 1m` sequence and proves only the latest generation can publish, while a separate test proves all switches reuse one realtime start. A Windows release desktop/engine run captured all seven corresponding Nucleus chart states with green connection status and visible candles; both processes remained responsive, the engine retained only two established Coinbase TLS connections, and no stale overwrite, hang, or infinite loading state appeared.
 
 Before moving Rithmic:
 
@@ -3902,7 +3902,7 @@ No infinite loading.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the desktop engine bridge now assigns one consumer ID and one bounded command/message endpoint per chart while a single coordinator thread owns the one authenticated `EngineClient`. The opt-in `--multi-chart` proof opens BTC and ETH as two real GPUI/Origin chart windows without creating a second desktop engine client, provider session, or backend runtime; endpoint shutdown removes only that chart's consumer and detaches the client only after the last endpoint closes. A Windows release run visibly rendered both charts together with green streaming state while the single desktop and single resident engine remained responsive. Closing one native chart window left the other chart rendering and responsive. The deterministic section 98 test separately proves the 20-consumer, shared-series, single-provider-generation, switch-isolation, and close-isolation invariants.
+Evidence (2026-08-11): the desktop engine bridge now assigns one consumer ID and one bounded command/message endpoint per chart while a single coordinator thread owns the one authenticated `EngineClient`. The opt-in `--multi-chart` proof opens BTC and ETH as two real GPUI/Nucleus chart windows without creating a second desktop engine client, provider session, or backend runtime; endpoint shutdown removes only that chart's consumer and detaches the client only after the last endpoint closes. A Windows release run visibly rendered both charts together with green streaming state while the single desktop and single resident engine remained responsive. Closing one native chart window left the other chart rendering and responsive. The deterministic section 98 test separately proves the 20-consumer, shared-series, single-provider-generation, switch-isolation, and close-isolation invariants.
 
 Implement multiple consumer IDs.
 
@@ -4024,7 +4024,7 @@ Progress evidence (2026-08-11): the Phase 0 diagnostics verifier defect is repai
 
 Progress evidence (2026-08-11): the release-only resident-engine verifier now measures cached direct demand-to-snapshot, authenticated IPC demand-to-decoded-snapshot, cached timeframe and symbol switching, connect/authenticate/attach/restore, and one shared 350-bar series demanded by 20 independent consumers. The post-refactor schema-1 run measured direct demand at `0.0038/0.0041/0.0054 ms`, IPC demand at `0.0877/0.1216/0.1477 ms`, attach/restore at `0.1022/0.1714/0.1860 ms`, and the complete 20-consumer IPC batch at `1.9414/2.3279/2.4852 ms` p50/p95/p99 (`0.09707 ms` p50 per consumer). Schema 2 adds cached 1m/5m timeframe switching at `0.0912/0.1109/0.1710 ms` and cached BTC/ETH symbol switching at `0.0929/0.1451/0.2205 ms` p50/p95/p99. The verifier exercises the shipping coordinator, generation fences, protobuf framing, authenticated local socket, and desktop client rather than a benchmark-only transport. This closes the local demand, IPC snapshot, cached symbol/timeframe switching, and deterministic multi-consumer latency gaps and verifies the Sections 102 and 103 targets. Full desktop-process warm reopen through first rendered frame, startup, tab switching, provider-to-engine latency, foreground input, memory, queue occupancy, and reconnect measurement remain open, so Phase 10 remains unchecked.
 
-Progress evidence (2026-08-11): schema 8 of the optimized desktop `--windowed-benchmark` samples process working set before GPUI setup and after completion, observes the real Origin replay queue immediately before and after every one-update-per-frame delta submission, installs one real 600-bar same-series covering snapshot through `OriginChartView::load_replay`, times every GPUI frame registration, and records the production input, instrument, and interval callback boundaries. Four immediate Windows runs opened a native window and rendered 256 measured replay frames; every run observed queue depth `0` before submission, `1` after submission, zero overflows, one covering-install sample, 418 frame-scheduling samples, 128 samples for each interaction handler, an advancing DWM timeline, and zero late, dropped, or missed-frame growth. Input-change, Enter-submit, instrument-selection, and interval-selection p99 ranges were `0.0003-0.0007 ms`, `0.0067-0.0810 ms`, `0.0014-0.0028 ms`, and `0.0064-0.0132 ms`; snapshot installation measured `0.2105-0.2379 ms`, replacement start to next-frame callback measured `5.3870-6.0956 ms`, frame-registration p99 measured `0.0006-0.0008 ms`, worst update-to-frame p99 was `7.3820 ms`, first-frame latency ranged from `23.1223` to `30.1152 ms`, and working-set growth ranged from `66,101,248` to `66,744,320` bytes. The verifier fails without writing evidence if queue, replacement, callback, command-batch, or foreground-timing invariants fail. It makes no resident-engine demand-latency claim, while Section 102 retains independent cached symbol/timeframe evidence. This closes the deterministic input/symbol/timeframe foreground-handler gap in addition to the single-window working-set, chart-queue, snapshot-install, and frame-scheduling gaps. Full desktop-process warm reopen through a resident-engine snapshot and rendered frame, cold startup, multi-tab switching and memory, resident-engine memory, provider-to-engine latency, and reconnect measurement remain open, so Phase 10 remains unchecked.
+Progress evidence (2026-08-20): schema 8 of the optimized desktop `--windowed-benchmark` samples process working set before GPUI setup and after completion, observes the real Nucleus replay queue immediately before and after every one-update-per-frame delta submission, installs one real 600-bar same-series covering snapshot through `NucleusChartView::load_replay`, times every GPUI frame registration, and records the production input, instrument, and interval callback boundaries. A Windows run against pinned Nucleus Charts commit `90c3b453417e23790b64f3cef17c7b4fc27b65f9` opened a native window and rendered 256 measured replay frames. It observed queue depth `0` before submission, `1` after submission, zero overflows, one 0.1894 ms covering-install sample, 418 frame-scheduling samples at 0.0005 ms p99, 128 samples for each interaction handler, a 24.791 ms first frame, a 5.9965 ms replacement-to-next-frame interval, 6.3694 ms update-to-frame p99, an advancing 420-refresh DWM timeline, zero late/dropped/missed-frame growth, and 70,344,704 bytes of working-set growth. Input-change, Enter-submit, instrument-selection, and interval-selection p99 were `0.0002 ms`, `0.0351 ms`, `0.0030 ms`, and `0.0040 ms`. The verifier fails without writing evidence if queue, replacement, callback, command-batch, or foreground-timing invariants fail. It makes no resident-engine demand-latency or physical-panel-scanout claim, while Section 102 retains independent cached symbol/timeframe evidence. This closes the deterministic input/symbol/timeframe foreground-handler gap in addition to the single-window working-set, chart-queue, snapshot-install, and frame-scheduling gaps. Full desktop-process warm reopen through a resident-engine snapshot and rendered frame, cold startup, multi-tab switching and memory, resident-engine memory, provider-to-engine latency, and reconnect measurement remain open, so Phase 10 remains unchecked.
 
 Progress evidence (2026-08-11): schema 3 of the release-only engine verifier adds sampled process working set to the existing production coordinator, authenticated local IPC, cached timeframe/symbol switching, attach/restore, and 20-consumer shared-series workload. The first Windows release run measured 9,940,992 bytes before engine startup, 11,128,832 bytes after startup, and 12,255,232 bytes after the complete workload: 2,314,240 bytes sampled total growth and 1,126,400 bytes sampled post-start workload growth. The same run measured IPC demand at `0.0769/0.0963/0.1129 ms`, timeframe switching at `0.0957/0.1249/0.1693 ms`, symbol switching at `0.0990/0.1317/0.1978 ms`, attach/restore at `0.1023/0.1742/0.2298 ms`, and the complete 20-consumer batch at `1.8255/2.0952/2.2435 ms` p50/p95/p99. This closes the deterministic engine-workload memory-measurement gap without inventing a budget, but it is test-process evidence rather than a standalone resident-engine endurance measurement. Full desktop-process warm reopen through a resident-engine snapshot and rendered frame, cold startup, multi-tab switching and memory, standalone resident-engine endurance memory, provider-to-engine latency, and reconnect measurement remain open, so Phase 10 remains unchecked.
 
@@ -4058,7 +4058,7 @@ Then optimize observed hot spots.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): `ARCHITECTURE.md` is synchronized with manifests and call paths. It explicitly assigns provider sessions, canonical market state, shared subscriptions, local persistence, lifecycle, and bounded publication to `axiusflow_engine`; assigns GPUI presentation and chart interaction to `axiusflow_desktop`; documents authenticated local IPC, persistence-independent first pixels, warm/markets-live/complete-exit behavior, independent multi-consumer charts, the current one-chart and `--multi-chart` surfaces, and the future desktop-owned tab/pane model. It also records the sole `chart_integration`/Origin boundary and the current unimplemented persistent multi-tab limitation without claiming target behavior as shipped.
+Evidence (2026-08-18): `ARCHITECTURE.md` is synchronized with manifests and call paths. It explicitly assigns provider sessions, canonical market state, shared subscriptions, local persistence, lifecycle, and bounded publication to `axiusflow_engine`; assigns GPUI presentation and chart interaction to `axiusflow_desktop`; documents authenticated local IPC, persistence-independent first pixels, warm/markets-live/complete-exit behavior, independent multi-consumer charts, the current one-chart and `--multi-chart` surfaces, and the future desktop-owned tab/pane model. It also records the sole `chart_integration`/Nucleus boundary and the current unimplemented persistent multi-tab limitation without claiming target behavior as shipped.
 
 Update the existing root `ARCHITECTURE.md`.
 
@@ -4184,10 +4184,10 @@ Final desktop dependencies should primarily be:
 - GPUI/UI crates,
 - application/presentation models,
 - engine protocol/client support,
-- Origin chart integration,
+- Nucleus chart integration,
 - platform runtime where needed.
 
-Evidence (2026-08-14): `apps/desktop/Cargo.toml` no longer depends on `coinbase_market` or `provider_history` and has none of the forbidden Rithmic adapter, storage, history, or `market_engine` dependencies. Its shipping and diagnostics paths compile through application/domain models, local engine protocol/client support, observability, platform runtime, UI crates, GPUI, and Origin integration. The manifest constraint is covered by the workspace dependency-direction regression test.
+Evidence (2026-08-14): `apps/desktop/Cargo.toml` no longer depends on `coinbase_market` or `provider_history` and has none of the forbidden Rithmic adapter, storage, history, or `market_engine` dependencies. Its shipping and diagnostics paths compile through application/domain models, local engine protocol/client support, observability, platform runtime, UI crates, GPUI, and Nucleus integration. The manifest constraint is covered by the workspace dependency-direction regression test.
 
 ---
 
@@ -4432,7 +4432,7 @@ Do not put secrets in forensic logs.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): the deterministic release suite now covers every minimum local boundary without provider-network variance. `axiusflow_market_data_performance` measures encrypted cold publication, warm catalog/read/decode, first recent segment, cold interval derivation, and repeated immutable derived-cache lookup through production storage and aggregation. Schema 8 of the desktop `--windowed-benchmark` measures real GPUI/Origin startup, direct same-series covering snapshot installation, replay-to-frame, frame-registration duration, production symbol-input/instrument/interval foreground handlers, callback cadence, native compositor progress, process working-set growth, and exact before/after chart-queue occupancy with overflow rejection. The ignored engine verifier measures cached direct demand-to-snapshot, authenticated IPC demand-to-decoded-snapshot, cached timeframe and symbol switching, connect/authenticate/attach/restore, and a complete 20-consumer shared-series batch; it also enforces the Sections 102 and 103 p50/p95 budgets. Provider connection, authentication, history, and realtime startup remain explicitly separate credentialed evidence.
+Evidence (2026-08-11): the deterministic release suite now covers every minimum local boundary without provider-network variance. `axiusflow_market_data_performance` measures encrypted cold publication, warm catalog/read/decode, first recent segment, cold interval derivation, and repeated immutable derived-cache lookup through production storage and aggregation. Schema 8 of the desktop `--windowed-benchmark` measures real GPUI/Nucleus startup, direct same-series covering snapshot installation, replay-to-frame, frame-registration duration, production symbol-input/instrument/interval foreground handlers, callback cadence, native compositor progress, process working-set growth, and exact before/after chart-queue occupancy with overflow rejection. The ignored engine verifier measures cached direct demand-to-snapshot, authenticated IPC demand-to-decoded-snapshot, cached timeframe and symbol switching, connect/authenticate/attach/restore, and a complete 20-consumer shared-series batch; it also enforces the Sections 102 and 103 p50/p95 budgets. Provider connection, authentication, history, and realtime startup remain explicitly separate credentialed evidence.
 
 Maintain deterministic local benchmarks.
 
@@ -4504,7 +4504,7 @@ Desktop may create chart-engine-specific vertex/geometry representations where n
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): the desktop mailbox raises one edge-triggered wake until it is drained, and `FramePollGate` admits at most one pending GPUI next-frame poll for an active window. Between frames, superseded live tails conflate safely; at the frame boundary `ChartDataBridge` validates append-or-replace semantics and Origin receives one merged streaming update. Deterministic mailbox and chart tests cover one wake for 63 revisions plus replacement and contiguous append through one frame drain. An optimized Windows `--windowed-benchmark` run rendered 256 measured frames with chart queue depth `0/1`, zero overflows, `6.8755 ms` update-to-frame p99, `24.3698 ms` first pixel, an advancing 420-refresh DWM timeline, and zero late, dropped, or missed-frame growth.
+Evidence (2026-08-18): the desktop mailbox raises one edge-triggered wake until it is drained, and `FramePollGate` admits at most one pending GPUI next-frame poll for an active window. Between frames, superseded live tails conflate safely; at the frame boundary `ChartDataBridge` validates append-or-replace semantics and Nucleus receives one merged streaming update. Deterministic mailbox and chart tests cover one wake for 63 revisions plus replacement and contiguous append through one frame drain. An optimized Windows `--windowed-benchmark` run rendered 256 measured frames with chart queue depth `0/1`, zero overflows, `6.8755 ms` update-to-frame p99, `24.3698 ms` first pixel, an advancing 420-refresh DWM timeline, and zero late, dropped, or missed-frame growth.
 
 Market data may arrive faster than screen refresh.
 
@@ -4591,7 +4591,7 @@ One coordinator plus provider/history/storage workers is preferable to fifty tin
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): the production path now matches the stated one-minute model: GPUI creates independent consumers; authenticated `EngineClient` commands cross one local IPC path; the resident engine owns demand, providers, history, canonical caches, aggregation, order books, subscriptions, and persistence; and versioned provider-neutral snapshots/tails return to desktop presentation and Origin. The desktop manifest excludes provider, history, storage, and `market_engine` implementations, while Rithmic protobuf remains private to its adapter. Warm and complete-exit modes use the same engine owner rather than another runtime.
+Evidence (2026-08-18): the production path now matches the stated one-minute model: GPUI creates independent consumers; authenticated `EngineClient` commands cross one local IPC path; the resident engine owns demand, providers, history, canonical caches, aggregation, order books, subscriptions, and persistence; and versioned provider-neutral snapshots/tails return to desktop presentation and Nucleus. The desktop manifest excludes provider, history, storage, and `market_engine` implementations, while Rithmic protobuf remains private to its adapter. Warm and complete-exit modes use the same engine owner rather than another runtime.
 
 A developer should be able to explain Axiusflow in one minute:
 
@@ -4605,7 +4605,7 @@ If the system requires a ten-minute explanation involving many overlapping runti
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): authenticated engine IPC tests drive provider-neutral series demand through the resident coordinator and receive a canonical snapshot. Engine regressions prove memory reuse, local-history-first progressive publication, provider repair, live continuation, and publication before asynchronous persistence failure handling. Desktop conversion tests preserve fixed-point provenance and incremental tails, and chart integration accepts the first real snapshot into Origin. Naming conformance now requires those boundary regressions to remain present.
+Evidence (2026-08-18): authenticated engine IPC tests drive provider-neutral series demand through the resident coordinator and receive a canonical snapshot. Engine regressions prove memory reuse, local-history-first progressive publication, provider repair, live continuation, and publication before asynchronous persistence failure handling. Desktop conversion tests preserve fixed-point provenance and incremental tails, and chart integration accepts the first real snapshot into Nucleus. Naming conformance now requires those boundary regressions to remain present.
 
 For BTC 1m:
 
@@ -4872,7 +4872,7 @@ axiusflow_desktop (GPUI presentation only)
         -> bounded encrypted local_history worker
         -> per-consumer conflated snapshots/tails/order books
 
-Origin Charts <- chart_integration <- desktop application models
+Nucleus Charts <- chart_integration <- desktop application models
 ```
 
 The normal launch is one chart. `--multi-chart` opens two independent native windows. `--workspace-tabs` opens one native window with one application shell and one active chart surface. Its dedicated title bar owns bounded transient tabs plus the single native caption-control set; the chart-controls row and drawing rail are shared application chrome. Each tab owns one isolated presentation surface and one generation-fenced consumer. Hidden tabs retain their models and publish visibility/resource-priority changes; adding, closing, selecting, or reordering a tab uses the existing desktop coordinator, authenticated engine client, resident `MarketEngine`, canonical series storage, and upstream provider subscriptions rather than creating backend instances.
@@ -4912,7 +4912,7 @@ market_data_performance
 naming_check -> no local workspace dependency
 ```
 
-The desktop has no dependency on provider adapters, provider history, storage implementations, or `market_engine`. The engine manifest is the only backend composition root. Origin dependencies remain confined to `chart_integration`.
+The desktop has no dependency on provider adapters, provider history, storage implementations, or `market_engine`. The engine manifest is the only backend composition root. Nucleus dependencies remain confined to `chart_integration`.
 
 ### Final source tree
 
@@ -4951,7 +4951,7 @@ tools/
 
 ### Final production LOC by crate
 
-Measured 2026-08-19 from application and product-library Rust sources under `apps/` and `crates/`, excluding dedicated `tests`/`benches`, vendor/third-party source, Origin Charts, and trailing embedded `#[cfg(test)] mod ...` modules:
+Measured 2026-08-19 from application and product-library Rust sources under `apps/` and `crates/`, excluding dedicated `tests`/`benches`, vendor/third-party source, Nucleus Charts, and trailing embedded `#[cfg(test)] mod ...` modules:
 
 | Package | Production LOC |
 | --- | ---: |
@@ -4981,7 +4981,7 @@ Exclude:
 - generated protobuf,
 - vendor files,
 - tests,
-- Origin chart repository.
+- Nucleus chart repository.
 
 ### Deleted legacy files/crates
 
@@ -5073,7 +5073,7 @@ When implementation is complete, these statements must all be true:
 16. The engine may be completely terminated when the user opts out.
 17. After reboot, warm state is reconstructed from persisted hot-set/local data; RAM is not magically preserved.
 18. Rithmic protobuf types never leak above the Rithmic adapter.
-19. Origin Charts remains independent.
+19. Nucleus Charts remains independent.
 20. No duplicate legacy runtime remains after migration.
 21. No unbounded Loading state exists.
 22. No per-chart provider session exists.
@@ -5081,7 +5081,7 @@ When implementation is complete, these statements must all be true:
 24. No hidden dead code remains solely because it existed before.
 25. Runtime correctness, not compilation, defines success.
 
-Completion evidence (2026-08-19): statements 1-4, 7-10, 13-14, 18-20, and 22-24 are enforced by the workspace manifests and `axiusflow_naming_check`: the desktop is presentation-only, the engine is the backend composition root, `MarketEngine` is the sole demand/state owner, adapters contain provider protocols, Origin imports stop at chart integration, retired runtime/protocol/storage crates cannot return, and no provider session or runtime is owned per chart. Statements 5-6, 11-12, 17, and 21 are covered by deterministic memory-before-persistence, degraded-storage, restart/hot-set, rapid-switch cancellation, stale-generation, snapshot-before-tail, and bounded terminal-state regressions. Statements 15-16 are proven by the same-PID warm close/reattach sequence and the zero-process `--exit-with-desktop` sequence. The native workspace run proves statement 8 with presentation tabs retaining four independent consumers over one coordinator and one engine. The credentialed Rithmic smoke plus release Coinbase, workspace, lifecycle, and GPUI performance runs satisfy statement 25 with observable runtime behavior. The bounded `local_engine_client` response demultiplexer and its command-fault regression preserve multi-consumer IPC alignment without creating another market owner.
+Completion evidence (2026-08-19): statements 1-4, 7-10, 13-14, 18-20, and 22-24 are enforced by the workspace manifests and `axiusflow_naming_check`: the desktop is presentation-only, the engine is the backend composition root, `MarketEngine` is the sole demand/state owner, adapters contain provider protocols, Nucleus imports stop at chart integration, retired runtime/protocol/storage crates cannot return, and no provider session or runtime is owned per chart. Statements 5-6, 11-12, 17, and 21 are covered by deterministic memory-before-persistence, degraded-storage, restart/hot-set, rapid-switch cancellation, stale-generation, snapshot-before-tail, and bounded terminal-state regressions. Statements 15-16 are proven by the same-PID warm close/reattach sequence and the zero-process `--exit-with-desktop` sequence. The native workspace run proves statement 8 with presentation tabs retaining four independent consumers over one coordinator and one engine. The credentialed Rithmic smoke plus release Coinbase, workspace, lifecycle, and GPUI performance runs satisfy statement 25 with observable runtime behavior. The bounded `local_engine_client` response demultiplexer and its command-fault regression preserve multi-consumer IPC alignment without creating another market owner.
 
 Build toward this architecture incrementally, prove each stage with running behavior, remove the architecture it replaces, and stop adding layers unless measured requirements actually demand them. 
 
@@ -5097,7 +5097,7 @@ If any earlier wording appears weaker than a rule below, follow the stricter rul
 
 - [x] **Status: Verified complete**
 
-Historical phase evidence (2026-08-11): protocol v5 first proved bounded market-event polling with explicit provider/series state and forming-tail covering snapshots from the resident engine to the desktop model and Origin chart; current protocol v12 preserves and extends that contract. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
+Historical phase evidence (2026-08-11): protocol v5 first proved bounded market-event polling with explicit provider/series state and forming-tail covering snapshots from the resident engine to the desktop model and Nucleus chart; current protocol v12 preserves and extends that contract. Deterministic engine tests drive historical installation, a live active candle, deliberate disconnect, provider-generation recovery, history repair, and resumed active publication for two unchanged consumers; the unaffected consumer retains its covering history and neither desktop consumer is reconstructed. A capacity-one queue test proves overflow closes and restarts the provider generation, store tests reject completed-bar overlap rewrites while permitting only the forming tail to revise, and the Coinbase socket test makes established-session cancellation terminal through buffered TLS/WebSocket readers. Two exact-final-source Windows release captures twenty seconds apart changed 12,850 sampled chart-region pixels while the window remained responsive and healthy. The same native lifecycle observed two Coinbase TLS connections while streaming and one after desktop exit, proving the realtime WebSocket closed within three seconds while the bounded REST agent retained its idle pooled connection.
 
 Do not interpret successful Coinbase historical candles as completion of the Coinbase migration.
 
@@ -5111,7 +5111,7 @@ Coinbase provider connection
 → canonical historical bars
 → in-memory SeriesStore
 → covering SeriesSnapshot
-→ desktop/Origin visible candles
+→ desktop/Nucleus visible candles
 → realtime subscription
 → verified history/live handoff
 → active candle updates
@@ -5149,7 +5149,7 @@ This is a hard migration gate.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-11): code scope is limited to protocol publication metadata, the existing `market_engine`, the resident engine service, one desktop engine-client bridge, and the existing Coinbase history/application/Origin boundaries. Rithmic, realtime, order book, footprint, shared memory, storage migration, and advanced warm policy were not added. Authenticated IPC and desktop conversion tests pass, and the clean Windows release run visibly rendered cold BTC-USD provider history through the spawned engine and Origin.
+Evidence (2026-08-11): code scope is limited to protocol publication metadata, the existing `market_engine`, the resident engine service, one desktop engine-client bridge, and the existing Coinbase history/application/Nucleus boundaries. Rithmic, realtime, order book, footprint, shared memory, storage migration, and advanced warm policy were not added. Authenticated IPC and desktop conversion tests pass, and the clean Windows release run visibly rendered cold BTC-USD provider history through the spawned engine and Nucleus.
 
 The first new engine path must not contain every eventual feature.
 
@@ -5164,7 +5164,7 @@ Desktop
 → Engine in-memory state
 → IPC snapshot
 → desktop chart integration
-→ Origin
+→ Nucleus
 → visible GPUI candles
 ```
 
@@ -6017,7 +6017,7 @@ Crosshair synchronization is primarily desktop/chart presentation state and shou
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-19): the current audited production Rust footprint is 61,796 lines across the 19 application and product-library packages under the repository's test-aware counting method. It remains within the intended complexity range after adding the resident engine, provider-neutral protocol, Rithmic depth/history ownership, lifecycle safety, and native Origin workspace tree. Repository conformance applies a 65,000-line soft review ceiling while excluding dedicated tests/benchmarks, vendor material, and Origin Charts; the guard exposes duplication and owner drift rather than encouraging code compression.
+Evidence (2026-08-19): the current audited production Rust footprint is 61,796 lines across the 19 application and product-library packages under the repository's test-aware counting method. It remains within the intended complexity range after adding the resident engine, provider-neutral protocol, Rithmic depth/history ownership, lifecycle safety, and native Nucleus workspace tree. Repository conformance applies a 65,000-line soft review ceiling while excluding dedicated tests/benchmarks, vendor material, and Nucleus Charts; the guard exposes duplication and owner drift rather than encouraging code compression.
 
 Do not aggressively force the platform into 45,000–60,000 lines merely because a previous architecture prompt mentioned that range.
 
@@ -6044,7 +6044,7 @@ A safer architectural guardrail for handwritten production Rust is approximately
 
 excluding:
 
-* Origin chart repository,
+* Nucleus chart repository,
 * generated protobuf Rust,
 * vendor `provider_kit`,
 * tests,
@@ -6153,7 +6153,7 @@ Historical evidence (2026-08-11): the following implementation-grounded pre-migr
 - Shared provider lifecycle: `desktop_provider_runtime::{DesktopMarketWorker, ProviderSessionDriver}`.
 - Coinbase history request and handoff: `live_market_worker.rs::{maybe_start_history, history_command_loop, fetch_history_repairs}` plus `live_market_worker/history.rs::{fetch_history_range_with_adapter_cancelled, install_repaired_snapshot, install_merged_history}` and `desktop_history::HistoryWorker`.
 - Persistence: `desktop_storage::HistoryStore`, synchronously called by desktop market/history workers.
-- Chart publication: `live_market_worker/publication.rs::publish_update → MarketWorkerSender → TerminalApp message drain → OriginChartView`.
+- Chart publication: `live_market_worker/publication.rs::publish_update → MarketWorkerSender → TerminalApp message drain → NucleusChartView`.
 - Selection generation and demand: `TerminalApp::{select_interval, select_instrument} → MarketDataWorker::try_select_coinbase`; viewport demand uses `try_set_chart_viewport`.
 - Loading state: `desktop_market_runtime::ChartState::Loading` plus `TerminalApp::{chart_state, coinbase_switch}`.
 
@@ -6172,11 +6172,11 @@ Historical evidence (2026-08-11): the following implementation-grounded pre-migr
 - MOVE/MERGE generic execution ownership from `desktop_market_runtime` and `desktop_provider_runtime` into `market_engine`; move history/storage ownership behind the engine.
 - RENAME the former `local_engine_protocol`, `desktop_history`, and `desktop_storage` identities only after their callers cut over. This cutover completed on 2026-08-18 as `engine_protocol`, `local_history`, and `local_storage`.
 - DELETE the two desktop runtime crates, Rithmic desktop product-runtime duplication, and obsolete execution bridges after the new owner replaces them.
-- KEEP only GPUI presentation, bounded engine client behavior, UI-side generation defense, and Origin integration in desktop.
+- KEEP only GPUI presentation, bounded engine client behavior, UI-side generation defense, and Nucleus integration in desktop.
 
 ## D. First vertical slice
 
-Touch only the workspace manifest, engine protocol, a small `market_engine` crate, engine service, desktop engine-client bridge, existing Coinbase history adapter, existing chart bridge, and the two architecture documents. Prove BTC-USD historical bars through `Desktop → IPC → Engine → Coinbase → canonical bars → engine memory → IPC snapshot → Origin`. Exclude Rithmic, realtime, shared memory, storage migration, and warm-daemon policy.
+Touch only the workspace manifest, engine protocol, a small `market_engine` crate, engine service, desktop engine-client bridge, existing Coinbase history adapter, existing chart bridge, and the two architecture documents. Prove BTC-USD historical bars through `Desktop → IPC → Engine → Coinbase → canonical bars → engine memory → IPC snapshot → Nucleus`. Exclude Rithmic, realtime, shared memory, storage migration, and warm-daemon policy.
 
 ## E. Risks
 
@@ -6258,7 +6258,7 @@ Desktop
 → canonical bars
 → Engine memory
 → IPC snapshot
-→ GPUI/Origin visible candles
+→ GPUI/Nucleus visible candles
 ```
 
 work.
