@@ -33,10 +33,10 @@ use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Hsla, KeyBinding,
-    KeyDownEvent, MouseButton, Orientation, QuitMode, Render, Role, Stateful, Task, WeakEntity,
-    Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, prelude::*, px, relative,
-    rgb, size,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity,
+    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, Orientation, QuitMode, Render, Role,
+    Stateful, Task, WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, actions,
+    div, ease_out_quint, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
@@ -143,6 +143,8 @@ const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
+const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
+const CHROME_OVERLAY_TRANSITION_OFFSET: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum DesktopLifetimeMode {
@@ -714,6 +716,8 @@ struct WorkspaceSurface {
     indicator_input: Entity<InputState>,
     indicator_message: Option<String>,
     chrome_overlay: Option<ChromeOverlay>,
+    chrome_overlay_phase: ChromeOverlayPhase,
+    chrome_overlay_generation: u64,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
@@ -763,6 +767,29 @@ enum ChromeOverlay {
     Instrument,
     Indicator,
     Timeframe,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ChromeOverlayPhase {
+    #[default]
+    Opening,
+    Closing,
+}
+
+fn chrome_overlay_progress(phase: ChromeOverlayPhase, delta: f32) -> f32 {
+    let delta = delta.clamp(0.0, 1.0);
+    match phase {
+        ChromeOverlayPhase::Opening => delta,
+        ChromeOverlayPhase::Closing => 1.0 - delta,
+    }
+}
+
+const fn should_finish_chrome_overlay_close(
+    phase: ChromeOverlayPhase,
+    current_generation: u64,
+    closing_generation: u64,
+) -> bool {
+    matches!(phase, ChromeOverlayPhase::Closing) && current_generation == closing_generation
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1256,6 +1283,8 @@ impl WorkspaceSurface {
             indicator_input,
             indicator_message: None,
             chrome_overlay: None,
+            chrome_overlay_phase: ChromeOverlayPhase::Opening,
+            chrome_overlay_generation: 0,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
             provider,
@@ -1471,6 +1500,8 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
+        self.chrome_overlay_phase = ChromeOverlayPhase::Opening;
         self.chrome_overlay = Some(overlay);
         self.chrome_selection = match overlay {
             ChromeOverlay::Timeframe => self
@@ -1496,13 +1527,42 @@ impl WorkspaceSurface {
     }
 
     fn close_chrome_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome_overlay.is_none() || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
+        {
+            return;
+        }
         if self.chrome_overlay == Some(ChromeOverlay::Indicator) {
             self.indicator_input.update(cx, |input, input_cx| {
                 input.set_value("", window, input_cx);
             });
         }
-        self.chrome_overlay = None;
         self.chrome_focus.focus(window, cx);
+        if cx.reduce_motion() {
+            self.chrome_overlay = None;
+            cx.notify();
+            return;
+        }
+
+        self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
+        self.chrome_overlay_phase = ChromeOverlayPhase::Closing;
+        let generation = self.chrome_overlay_generation;
+        cx.spawn_in(window, async move |app, cx| {
+            cx.background_executor()
+                .timer(CHROME_OVERLAY_TRANSITION_DURATION)
+                .await;
+            let _ = app.update_in(cx, |app, _, app_cx| {
+                if should_finish_chrome_overlay_close(
+                    app.chrome_overlay_phase,
+                    app.chrome_overlay_generation,
+                    generation,
+                ) {
+                    app.chrome_overlay = None;
+                    app.chrome_overlay_phase = ChromeOverlayPhase::Opening;
+                    app_cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1519,7 +1579,8 @@ impl WorkspaceSurface {
             cx.stop_propagation();
             return;
         }
-        if self.chrome_overlay.is_none() {
+        if self.chrome_overlay.is_none() || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
+        {
             return;
         }
         match event.keystroke.key.as_str() {
@@ -2507,6 +2568,9 @@ fn chrome_overlay_layer(
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
     let timeframe = overlay == ChromeOverlay::Timeframe;
+    let phase = app_state.chrome_overlay_phase;
+    let generation = app_state.chrome_overlay_generation;
+    let closing = phase == ChromeOverlayPhase::Closing;
     let panel = match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
@@ -2564,6 +2628,7 @@ fn chrome_overlay_layer(
             .child(
                 div()
                     .id("chrome_overlay_panel")
+                    .relative()
                     .flex_none()
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_1()
@@ -2571,7 +2636,29 @@ fn chrome_overlay_layer(
                     .bg(gpui_color(theme.colors.background))
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(panel),
+                    .child(panel)
+                    .children(closing.then(|| {
+                        div()
+                            .id("chrome_overlay_closing_blocker")
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .left_0()
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    }))
+                    .with_animation(
+                        ("chrome_overlay_transition", generation),
+                        Animation::new(CHROME_OVERLAY_TRANSITION_DURATION)
+                            .with_easing(ease_out_quint()),
+                        move |panel, delta| {
+                            let progress = chrome_overlay_progress(phase, delta);
+                            panel
+                                .opacity(progress)
+                                .mt(px(-CHROME_OVERLAY_TRANSITION_OFFSET * (1.0 - progress)))
+                        },
+                    ),
             )
             .into_any_element(),
     )
@@ -3361,7 +3448,7 @@ fn workspace_pane_controls(
         .child(button_activation(
             button(
                 "split_pane_horizontal",
-                HugeIcon::BorderVertical,
+                HugeIcon::SplitSideBySide,
                 "Split chart side by side",
             ),
             pane_count < MAXIMUM_PANES_PER_WORKSPACE,
@@ -3378,7 +3465,7 @@ fn workspace_pane_controls(
         .child(button_activation(
             button(
                 "split_pane_vertical",
-                HugeIcon::BorderHorizontal,
+                HugeIcon::SplitStacked,
                 "Split chart top and bottom",
             ),
             pane_count < MAXIMUM_PANES_PER_WORKSPACE,
@@ -6801,19 +6888,20 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 mod tests {
     use super::{
         CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState,
-        DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand, RithmicReadyAction,
-        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
-        TerminalProvider, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH,
-        WindowCommand, WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
-        catalog_rejection_domain, chart_status_detail, chart_surface_notice,
-        chrome_control_foreground, connection_presentation, default_rithmic_contract_index,
+        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand,
+        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        RithmicSessionRetirement, SidePanel, TerminalProvider, WORKSPACE_TAB_GAP,
+        WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand, WorkspaceDragState,
+        active_workspace_after_close, bounded_status_detail, catalog_rejection_domain,
+        chart_status_detail, chart_surface_notice, chrome_control_foreground,
+        chrome_overlay_progress, connection_presentation, default_rithmic_contract_index,
         durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
         instrument_selector_label, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, reorder_workspace_ids, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop, split_lifetime_mode,
-        workspace_drag_destination, workspace_drag_translation, workspace_label,
-        workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
-        wrapped_workspace_index,
+        series_selector_label, should_apply_rithmic_worker_stop,
+        should_finish_chrome_overlay_close, split_lifetime_mode, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -6825,6 +6913,56 @@ mod tests {
     use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};
+
+    #[test]
+    fn chrome_overlay_motion_opens_and_closes_in_opposite_directions() {
+        let assert_progress = |actual: f32, expected: f32| {
+            assert!((actual - expected).abs() < f32::EPSILON);
+        };
+        assert_progress(
+            chrome_overlay_progress(ChromeOverlayPhase::Opening, 0.0),
+            0.0,
+        );
+        assert_progress(
+            chrome_overlay_progress(ChromeOverlayPhase::Opening, 1.0),
+            1.0,
+        );
+        assert_progress(
+            chrome_overlay_progress(ChromeOverlayPhase::Closing, 0.0),
+            1.0,
+        );
+        assert_progress(
+            chrome_overlay_progress(ChromeOverlayPhase::Closing, 1.0),
+            0.0,
+        );
+        assert_progress(
+            chrome_overlay_progress(ChromeOverlayPhase::Opening, -1.0),
+            0.0,
+        );
+        assert_progress(
+            chrome_overlay_progress(ChromeOverlayPhase::Closing, 2.0),
+            0.0,
+        );
+    }
+
+    #[test]
+    fn stale_close_completion_cannot_remove_a_reopened_overlay() {
+        assert!(should_finish_chrome_overlay_close(
+            ChromeOverlayPhase::Closing,
+            7,
+            7
+        ));
+        assert!(!should_finish_chrome_overlay_close(
+            ChromeOverlayPhase::Opening,
+            8,
+            7
+        ));
+        assert!(!should_finish_chrome_overlay_close(
+            ChromeOverlayPhase::Closing,
+            8,
+            7
+        ));
+    }
 
     #[test]
     fn workspace_split_ratio_tracks_the_active_axis_and_clamps_safe_bounds() {

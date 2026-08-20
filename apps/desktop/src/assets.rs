@@ -13,8 +13,6 @@ pub enum UiIcon {
     ArrowLeftIcon01,
     ArrowRightDouble,
     ArrowRightIcon01,
-    BorderHorizontal,
-    BorderVertical,
     Brush,
     CancelIcon01,
     ChartLineDataIcon02,
@@ -27,6 +25,8 @@ pub enum UiIcon {
     MoonIcon02,
     SearchIcon01,
     SidebarRightIcon01,
+    SplitSideBySide,
+    SplitStacked,
     SunIcon03,
     Text,
 }
@@ -40,8 +40,6 @@ impl UiIcon {
         Self::ArrowLeftIcon01,
         Self::ArrowRightDouble,
         Self::ArrowRightIcon01,
-        Self::BorderHorizontal,
-        Self::BorderVertical,
         Self::Brush,
         Self::CancelIcon01,
         Self::ChartLineDataIcon02,
@@ -54,6 +52,8 @@ impl UiIcon {
         Self::MoonIcon02,
         Self::SearchIcon01,
         Self::SidebarRightIcon01,
+        Self::SplitSideBySide,
+        Self::SplitStacked,
         Self::SunIcon03,
         Self::Text,
     ];
@@ -68,8 +68,6 @@ impl UiIcon {
             Self::ArrowLeftIcon01 => "arrow-left-01.svg",
             Self::ArrowRightDouble => "arrow-right-double.svg",
             Self::ArrowRightIcon01 => "arrow-right-01.svg",
-            Self::BorderHorizontal => "border-horizontal.svg",
-            Self::BorderVertical => "border-vertical.svg",
             Self::Brush => "brush.svg",
             Self::CancelIcon01 => "cancel-01.svg",
             Self::ChartLineDataIcon02 => "chart-line-data-02.svg",
@@ -82,6 +80,8 @@ impl UiIcon {
             Self::MoonIcon02 => "moon-02.svg",
             Self::SearchIcon01 => "search-01.svg",
             Self::SidebarRightIcon01 => "sidebar-right-01.svg",
+            Self::SplitSideBySide => "split-side-by-side.svg",
+            Self::SplitStacked => "split-stacked.svg",
             Self::SunIcon03 => "sun-03.svg",
             Self::Text => "text.svg",
         };
@@ -199,8 +199,6 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
             include_bytes!("../assets/icons/ui/arrow-right-double.svg")
         }
         "arrow-right-01.svg" => include_bytes!("../assets/icons/ui/arrow-right-01.svg"),
-        "border-horizontal.svg" => include_bytes!("../assets/icons/ui/border-horizontal.svg"),
-        "border-vertical.svg" => include_bytes!("../assets/icons/ui/border-vertical.svg"),
         "brush.svg" => include_bytes!("../assets/icons/ui/brush.svg"),
         "cancel-01.svg" => include_bytes!("../assets/icons/ui/cancel-01.svg"),
         "chart-line-data-02.svg" => {
@@ -217,6 +215,8 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "moon-02.svg" => include_bytes!("../assets/icons/ui/moon-02.svg"),
         "search-01.svg" => include_bytes!("../assets/icons/ui/search-01.svg"),
         "sidebar-right-01.svg" => include_bytes!("../assets/icons/ui/sidebar-right-01.svg"),
+        "split-side-by-side.svg" => include_bytes!("../assets/icons/ui/split-side-by-side.svg"),
+        "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),
         "sun-03.svg" => include_bytes!("../assets/icons/ui/sun-03.svg"),
         "text.svg" => include_bytes!("../assets/icons/ui/text.svg"),
         _ => return None,
