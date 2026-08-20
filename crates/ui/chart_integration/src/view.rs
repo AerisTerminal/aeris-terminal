@@ -666,6 +666,13 @@ impl NucleusChartView {
         self.last_snapshot_installation_nanos.take()
     }
 
+    /// Returns the CSS viewport dimensions observed by the most recent native canvas prepaint.
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub const fn rendered_viewport_size(&self) -> (f32, f32) {
+        (self.built_for.0, self.built_for.1)
+    }
+
     /// Offers recovery to a bounded worker queue and marks dispatch only after acceptance.
     ///
     /// # Errors

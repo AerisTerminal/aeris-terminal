@@ -2753,14 +2753,9 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
     } = state;
     let colors = theme.colors;
     let notice = chart_surface_notice(chart_state, chart_has_market_data, &chart_status_detail);
-    let chart_surface = div()
+    let chart_surface = chart_pane_host(chart)
         .id(("primary_chart", pane_id))
-        .relative()
-        .v_flex()
-        .flex_1()
-        .overflow_hidden()
         .bg(gpui_color(colors.background))
-        .child(div().flex_1().overflow_hidden().children(chart.cloned()))
         .children(notice.map(|notice| chart_notice(notice, theme)));
     let content = if let Some(side_panel) = side_panel {
         let side_panel_content = resizable_panel()
@@ -2789,6 +2784,17 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         chart_surface.into_any_element()
     };
     div().size_full().overflow_hidden().child(content)
+}
+
+fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
+    div()
+        .relative()
+        .v_flex()
+        .size_full()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .children(chart.cloned())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

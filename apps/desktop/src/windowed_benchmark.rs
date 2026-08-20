@@ -45,7 +45,10 @@ use std::{
 };
 
 use crate::readiness_conformance::ProcessMemoryProbe;
-use crate::{DesktopLifecycle, DesktopLifetimeMode, WorkspaceSurface, subscribe_symbol_input};
+use crate::{
+    DesktopLifecycle, DesktopLifetimeMode, WorkspaceSurface, chart_pane_host,
+    subscribe_symbol_input,
+};
 
 const SNAPSHOT_BARS: usize = 256;
 const REPLACEMENT_SNAPSHOT_BARS: usize = 600;
@@ -444,7 +447,10 @@ struct WindowedBenchmarkApp {
 
 impl Render for WindowedBenchmarkApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.chart.clone())
+        div()
+            .size_full()
+            .overflow_hidden()
+            .child(chart_pane_host(Some(&self.chart)))
     }
 }
 
@@ -787,10 +793,22 @@ fn foreground_duration_evidence(
     })
 }
 
+fn verify_chart_viewport(driver: &BenchmarkDriver, cx: &App) -> Result<(), String> {
+    let (width, height) = driver.chart.read(cx).rendered_viewport_size();
+    if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "windowed benchmark chart viewport is not drawable: {width}x{height}"
+        ))
+    }
+}
+
 fn write_report(driver: &mut BenchmarkDriver, cx: &App) -> Result<(), Box<dyn Error>> {
     if let Some(failure) = driver.failure.take() {
         return Err(failure.into());
     }
+    verify_chart_viewport(driver, cx)?;
     driver.memory.sample()?;
     let observed_growth_bytes = driver.memory.observed_growth_bytes();
     let chart_queue = chart_queue_evidence(driver)?;
