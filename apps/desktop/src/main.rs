@@ -34,12 +34,13 @@ use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity,
-    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, Orientation, QuitMode, Render, Role,
-    Stateful, Task, WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, actions,
-    div, ease_out_quint, prelude::*, px, relative, rgb, size,
+    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode,
+    Render, Role, Stateful, Task, WeakEntity, Window, WindowBounds, WindowControlArea,
+    WindowOptions, actions, div, ease_out_quint, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
+    ActiveTheme, Disableable, ElementExt, Icon, IconName, Root, Selectable, Sizable, StyledExt,
+    TitleBar,
     button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
@@ -718,6 +719,7 @@ struct WorkspaceSurface {
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
+    timeframe_trigger_bounds: Option<Bounds<Pixels>>,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
@@ -1285,6 +1287,7 @@ impl WorkspaceSurface {
             chrome_overlay: None,
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
+            timeframe_trigger_bounds: None,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
             provider,
@@ -2567,6 +2570,7 @@ fn chrome_overlay_layer(
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
     let timeframe = overlay == ChromeOverlay::Timeframe;
+    let timeframe_left = timeframe_overlay_left(app_state.timeframe_trigger_bounds);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
@@ -2616,7 +2620,7 @@ fn chrome_overlay_layer(
             .occlude()
             .flex()
             .items_start()
-            .when(timeframe, |scrim| scrim.justify_start().pl(px(320.0)))
+            .when(timeframe, |scrim| scrim.justify_start().pl(timeframe_left))
             .when(!timeframe, |scrim| scrim.justify_center().pt_2())
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
@@ -2661,6 +2665,10 @@ fn chrome_overlay_layer(
             )
             .into_any_element(),
     )
+}
+
+fn timeframe_overlay_left(trigger_bounds: Option<Bounds<Pixels>>) -> Pixels {
+    trigger_bounds.map_or(px(0.0), |bounds| bounds.origin.x.max(px(0.0)))
 }
 
 fn timeframe_overlay_content(
@@ -4311,19 +4319,32 @@ fn series_selector(
         .loading(pending)
         .when(enabled, Button::cursor_pointer)
         .when(!enabled, Button::cursor_not_allowed);
-    chrome_tooltip(
-        "series_selector",
-        "Select chart timeframe",
-        button_activation(
-            chrome_button_style(button, theme, false, enabled),
-            enabled && !pending,
-            move |window, cx| {
-                app.update(cx, |app, app_cx| {
-                    app.open_chrome_overlay(ChromeOverlay::Timeframe, window, app_cx);
-                });
-            },
-        ),
-    )
+    let open_app = app.clone();
+    let bounds_app = app;
+    let button = button_activation(
+        chrome_button_style(button, theme, false, enabled),
+        enabled && !pending,
+        move |window, cx| {
+            open_app.update(cx, |app, app_cx| {
+                app.open_chrome_overlay(ChromeOverlay::Timeframe, window, app_cx);
+            });
+        },
+    );
+    let trigger = div()
+        .flex_none()
+        .child(button)
+        .on_prepaint(move |bounds, _, cx| {
+            bounds_app.update(cx, |app, app_cx| {
+                if app.timeframe_trigger_bounds == Some(bounds) {
+                    return;
+                }
+                app.timeframe_trigger_bounds = Some(bounds);
+                if app.chrome_overlay == Some(ChromeOverlay::Timeframe) {
+                    app_cx.notify();
+                }
+            });
+        });
+    chrome_tooltip("series_selector", "Select chart timeframe", trigger)
 }
 
 fn chrome_button_style(
@@ -6926,9 +6947,10 @@ mod tests {
         instrument_selector_label, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, reorder_workspace_ids, rithmic_ready_action,
         series_selector_label, should_apply_rithmic_worker_stop,
-        should_finish_chrome_overlay_close, split_lifetime_mode, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_split_ratio, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        should_finish_chrome_overlay_close, split_lifetime_mode, timeframe_overlay_left,
+        workspace_drag_destination, workspace_drag_translation, workspace_label,
+        workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
+        wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -6939,6 +6961,7 @@ mod tests {
     };
     use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
+    use gpui::{Bounds, point, px, size};
     use std::{cell::Cell, ffi::OsString};
 
     #[test]
@@ -6989,6 +7012,13 @@ mod tests {
             8,
             7
         ));
+    }
+
+    #[test]
+    fn timeframe_overlay_uses_the_trigger_left_edge() {
+        let trigger = Bounds::new(point(px(214.0), px(52.0)), size(px(64.0), px(32.0)));
+        assert_eq!(timeframe_overlay_left(Some(trigger)), px(214.0));
+        assert_eq!(timeframe_overlay_left(None), px(0.0));
     }
 
     #[test]
