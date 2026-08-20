@@ -5736,7 +5736,24 @@ does not need engine persistence.
 
 - [ ] **Status: Not verified complete**
 
-Because `axiusflow_engine` may remain alive for hours or days, test long-running memory behavior.
+Because `axiusflow_engine` may remain alive for hours or days, verify that repeated lifecycle
+and market-demand churn remains bounded. This verification must not require a developer to
+leave a personal workstation running for a fixed eight-hour period.
+
+The required development gate is:
+
+* deterministic accelerated stress covering repeated chart open/close, workspace attach/detach,
+  symbol/timeframe switching, reconnect, history cancellation, and bounded queue pressure,
+* a configurable native soak that fits the available verification window,
+* sampled memory and resource high-water marks that remain within declared bounds or reach a
+  stable plateau after retained hot state is accounted for,
+* clean shutdown with no surviving engine or provider worker.
+
+No specific uninterrupted duration is sufficient by itself, and an exact eight-hour endurance
+run is not a migration-completion or release gate. Longer production-like observations may be
+recorded when practical, but they are supplemental evidence and must not be represented as a
+mandatory developer workflow. The legacy exact-eight-hour capture tooling may remain available
+for optional diagnostics; incomplete captures neither pass nor fail this contract.
 
 Track at minimum:
 
