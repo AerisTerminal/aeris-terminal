@@ -32,6 +32,7 @@ use std::time::Instant;
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
+const PANE_SEPARATOR_HIT: f64 = 4.0;
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -159,13 +160,17 @@ pub struct DrawingsLockSummary {
     pub all_locked: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum ChartDrag {
     Pane,
     TimeAxis,
     PriceAxis {
         pane: usize,
         target: PriceScaleTarget,
+    },
+    PaneSeparator {
+        index: usize,
+        last_y: f64,
     },
 }
 
@@ -855,14 +860,34 @@ impl OriginChartView {
     }
 
     fn update_crosshair(&mut self, pane_x: f64, y: f64) {
-        self.engine.crosshair =
-            (pane_x >= 0.0 && pane_x <= self.engine.pane_w && y >= 0.0 && y <= self.engine.pane_h)
-                .then_some((pane_x, y));
+        self.engine.crosshair = (self.separator_at(y).is_none()
+            && pane_x >= 0.0
+            && pane_x <= self.engine.pane_w
+            && y >= 0.0
+            && y <= self.engine.pane_h)
+            .then_some((pane_x, y));
         self.invalidate_series_frame();
     }
 
+    fn separator_at(&self, y: f64) -> Option<usize> {
+        self.engine
+            .panes
+            .iter()
+            .skip(1)
+            .position(|pane| (y - pane.top).abs() <= PANE_SEPARATOR_HIT)
+    }
+
     fn update_cursor(&mut self, pane_x: f64, y: f64) {
-        self.cursor_style = if self.engine.drawing_drag_active() {
+        let active_separator = matches!(self.drag, Some(ChartDrag::PaneSeparator { .. }));
+        let separator = self.separator_at(y);
+        let separator_hover = (!active_separator).then_some(separator).flatten();
+        if self.engine.separator_hover != separator_hover {
+            self.engine.set_separator_hover(separator_hover);
+            self.invalidate_series_frame();
+        }
+        self.cursor_style = if active_separator || separator.is_some() {
+            CursorStyle::ResizeRow
+        } else if self.engine.drawing_drag_active() {
             CursorStyle::ClosedHand
         } else if self.drawing_tool != ChartDrawingTool::Cursor {
             CursorStyle::Crosshair
@@ -881,6 +906,7 @@ impl OriginChartView {
                 Some(ChartDrag::Pane) => CursorStyle::ClosedHand,
                 Some(ChartDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
                 Some(ChartDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
+                Some(ChartDrag::PaneSeparator { .. }) => CursorStyle::ResizeRow,
                 None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
                 None if pane_x < 0.0 || pane_x > self.engine.pane_w => CursorStyle::ResizeUpDown,
                 None => CursorStyle::Crosshair,
@@ -904,7 +930,10 @@ impl OriginChartView {
             self.update_crosshair(pane_x, y);
             return;
         }
-        self.drag = if y > self.engine.pane_h {
+        self.drag = if let Some(index) = self.separator_at(y) {
+            self.engine.set_separator_hover(None);
+            Some(ChartDrag::PaneSeparator { index, last_y: y })
+        } else if y > self.engine.pane_h {
             self.engine.time_axis_start_scale(pane_x);
             Some(ChartDrag::TimeAxis)
         } else if pane_x < 0.0
@@ -946,10 +975,20 @@ impl OriginChartView {
             Some(ChartDrag::PriceAxis { pane, target }) => {
                 self.engine.price_axis_scale_to(pane, target, y);
             }
+            Some(ChartDrag::PaneSeparator { index, last_y }) => {
+                self.engine.drag_pane_separator(index, y - last_y);
+                self.drag = Some(ChartDrag::PaneSeparator { index, last_y: y });
+                self.invalidate_series_frame();
+            }
             None => {}
         }
         self.update_cursor(pane_x, y);
-        self.update_crosshair(pane_x, y);
+        if matches!(self.drag, Some(ChartDrag::PaneSeparator { .. })) {
+            self.engine.crosshair = None;
+            self.invalidate_series_frame();
+        } else {
+            self.update_crosshair(pane_x, y);
+        }
     }
 
     fn end_drag(&mut self, pane_x: f64, y: f64) {
@@ -959,7 +998,7 @@ impl OriginChartView {
             Some(ChartDrag::PriceAxis { pane, target }) => {
                 self.engine.price_axis_end_scale(pane, target);
             }
-            None => {}
+            Some(ChartDrag::PaneSeparator { .. }) | None => {}
         }
         self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
@@ -1000,6 +1039,7 @@ impl OriginChartView {
         self.engine.drawing_drag_end();
         self.engine.brush_create_cancel();
         self.engine.crosshair = None;
+        self.engine.set_separator_hover(None);
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }
@@ -1065,7 +1105,9 @@ impl OriginChartView {
             window.focus(focus_handle, cx);
         }
         let (pane_x, y) = self.local_position(event.position);
-        if self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
+        if self.separator_at(y).is_some() {
+            self.begin_drag(pane_x, y, event.click_count);
+        } else if self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
             self.update_cursor(pane_x, y);
             self.update_crosshair(pane_x, y);
         } else {
@@ -1872,6 +1914,40 @@ mod tests {
         assert!(chart.drag.is_none());
         assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
         assert_eq!(chart.engine.crosshair, Some((340.0, 200.0)));
+    }
+
+    #[test]
+    fn indicator_separator_resize_has_bounded_native_pointer_state() {
+        let mut chart = interactive_chart();
+        chart
+            .add_indicator(ChartIndicator::Rsi)
+            .expect("RSI creates its indicator pane");
+        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        assert_eq!(chart.engine.panes.len(), 2);
+        let separator_y = chart.engine.panes[1].top;
+        let first_stretch = chart.engine.panes[0].stretch_factor;
+
+        chart.update_cursor(300.0, separator_y);
+        assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
+        assert_eq!(chart.engine.separator_hover, Some(0));
+
+        chart.begin_drag(300.0, separator_y, 1);
+        assert!(matches!(
+            chart.drag,
+            Some(ChartDrag::PaneSeparator { index: 0, .. })
+        ));
+        assert!(chart.engine.crosshair.is_none());
+        chart.drag_to(300.0, separator_y + 20.0);
+        assert!(chart.engine.panes[0].stretch_factor > first_stretch);
+
+        chart.move_pointer(
+            300.0,
+            separator_y + 40.0,
+            false,
+            DrawingModifiers::default(),
+        );
+        assert!(chart.drag.is_none());
+        assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
     }
 
     #[test]

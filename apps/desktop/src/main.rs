@@ -35,15 +35,15 @@ use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Hsla, KeyBinding,
     KeyDownEvent, MouseButton, Orientation, QuitMode, Render, Role, Stateful, Task, WeakEntity,
-    Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, prelude::*, px, rgb,
-    size,
+    Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, prelude::*, px, relative,
+    rgb, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt, TitleBar,
     button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
-    resizable::{h_resizable, resizable_panel, v_resizable},
+    resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
     spinner::Spinner,
     theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
@@ -2675,30 +2675,33 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         .bg(gpui_color(colors.background))
         .child(div().flex_1().overflow_hidden().children(chart.cloned()))
         .children(notice.map(|notice| chart_notice(notice, theme)));
-    let side_panel_content = resizable_panel()
-        .visible(side_panel.is_some())
-        .size(px(SIDE_PANEL_INITIAL_WIDTH))
-        .size_range(px(SIDE_PANEL_MINIMUM_WIDTH)..px(SIDE_PANEL_MAXIMUM_WIDTH))
-        .flex_none()
-        .child(
-            div()
-                .size_full()
-                .v_flex()
-                .overflow_hidden()
-                .bg(gpui_color(colors.background))
-                .children(side_panel.map(|panel| side_panel_header(panel, app.clone(), theme)))
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .children((side_panel == Some(SidePanel::Dom)).then_some(dom)),
-                ),
-        );
-    div().size_full().overflow_hidden().child(
+    let content = if let Some(side_panel) = side_panel {
+        let side_panel_content = resizable_panel()
+            .size(px(SIDE_PANEL_INITIAL_WIDTH))
+            .size_range(px(SIDE_PANEL_MINIMUM_WIDTH)..px(SIDE_PANEL_MAXIMUM_WIDTH))
+            .flex_none()
+            .child(
+                div()
+                    .size_full()
+                    .v_flex()
+                    .overflow_hidden()
+                    .bg(gpui_color(colors.background))
+                    .child(side_panel_header(side_panel, app, theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .children((side_panel == SidePanel::Dom).then_some(dom)),
+                    ),
+            );
         h_resizable(("market_workspace", pane_id))
             .child(resizable_panel().child(chart_surface))
-            .child(side_panel_content),
-    )
+            .child(side_panel_content)
+            .into_any_element()
+    } else {
+        chart_surface.into_any_element()
+    };
+    div().size_full().overflow_hidden().child(content)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -5742,44 +5745,146 @@ fn workspace_layout_element(
     let first_element = workspace_layout_element(terminal, workspace, first, theme, cx);
     let second_element = workspace_layout_element(terminal, workspace, second, theme, cx);
     let workspace_id = workspace.id;
-    let resize_terminal = terminal.clone();
     let split_id = format!("workspace_split_{workspace_id}_{left_pane_id}_{right_pane_id}");
-    let group = match direction {
-        ChartSplitDirection::Horizontal => h_resizable(split_id),
-        ChartSplitDirection::Vertical => v_resizable(split_id),
-    }
-    .child(
-        resizable_panel()
-            .size(px((*ratio * 1_000.0).to_f32().unwrap_or(500.0)))
-            .child(first_element),
-    )
-    .child(
-        resizable_panel()
-            .size(px(((1.0 - *ratio) * 1_000.0).to_f32().unwrap_or(500.0)))
-            .child(second_element),
-    )
-    .on_resize(move |state, _, cx| {
-        let sizes = state.read(cx).sizes();
-        let Some(total) = sizes
-            .first()
-            .zip(sizes.get(1))
-            .map(|(first, second)| first.as_f32() + second.as_f32())
-            .filter(|total| total.is_finite() && *total > 0.0)
-        else {
-            return;
-        };
-        let ratio = f64::from(sizes[0].as_f32() / total);
-        resize_terminal.update(cx, |terminal, terminal_cx| {
-            terminal.resize_workspace_split(
-                workspace_id,
-                left_pane_id,
-                right_pane_id,
-                ratio,
-                terminal_cx,
-            );
-        });
-    });
-    group.into_any_element()
+    let direction = *direction;
+    let drag = WorkspaceSplitDrag {
+        workspace_id,
+        left_pane_id,
+        right_pane_id,
+        direction,
+    };
+    let drag_terminal = terminal.clone();
+    let handle_drag = drag.clone();
+    let handle_id = format!("{split_id}_handle");
+    let ratio = ratio.to_f32().unwrap_or(0.5).clamp(0.05, 0.95);
+    let first = div()
+        .flex_none()
+        .min_w_0()
+        .min_h_0()
+        .when(direction == ChartSplitDirection::Horizontal, |panel| {
+            panel.w(relative(ratio)).h_full()
+        })
+        .when(direction == ChartSplitDirection::Vertical, |panel| {
+            panel.h(relative(ratio)).w_full()
+        })
+        .child(first_element);
+    let second = div().flex_1().min_w_0().min_h_0().child(second_element);
+    let handle = workspace_split_handle(
+        handle_id,
+        direction,
+        ratio,
+        handle_drag,
+        gpui_color(theme.colors.border),
+    );
+    div()
+        .id(split_id)
+        .relative()
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .when(direction == ChartSplitDirection::Vertical, |group| {
+            group.flex_col()
+        })
+        .on_drag_move::<WorkspaceSplitDrag>(move |event, _, cx| {
+            let drag = event.drag(cx);
+            if drag.workspace_id != workspace_id
+                || drag.left_pane_id != left_pane_id
+                || drag.right_pane_id != right_pane_id
+            {
+                return;
+            }
+            let Some(ratio) = workspace_split_ratio(
+                drag.direction,
+                f32::from(event.event.position.x),
+                f32::from(event.event.position.y),
+                f32::from(event.bounds.left()),
+                f32::from(event.bounds.top()),
+                f32::from(event.bounds.size.width),
+                f32::from(event.bounds.size.height),
+            ) else {
+                return;
+            };
+            drag_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.resize_workspace_split(
+                    workspace_id,
+                    left_pane_id,
+                    right_pane_id,
+                    ratio,
+                    terminal_cx,
+                );
+            });
+        })
+        .child(first)
+        .child(second)
+        .child(handle)
+        .into_any_element()
+}
+
+fn workspace_split_handle(
+    id: String,
+    direction: ChartSplitDirection,
+    ratio: f32,
+    drag: WorkspaceSplitDrag,
+    border: Hsla,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .absolute()
+        .occlude()
+        .when(direction == ChartSplitDirection::Horizontal, |handle| {
+            handle
+                .top_0()
+                .left(relative(ratio))
+                .ml(px(-4.0))
+                .h_full()
+                .w(px(8.0))
+                .cursor_col_resize()
+        })
+        .when(direction == ChartSplitDirection::Vertical, |handle| {
+            handle
+                .left_0()
+                .top(relative(ratio))
+                .mt(px(-4.0))
+                .w_full()
+                .h(px(8.0))
+                .cursor_row_resize()
+        })
+        .on_drag(drag, move |drag, _, _, cx| cx.new(|_| drag.clone()))
+        .child(
+            div()
+                .absolute()
+                .bg(border)
+                .when(direction == ChartSplitDirection::Horizontal, |line| {
+                    line.left(px(3.0)).top_0().h_full().w(px(1.0))
+                })
+                .when(direction == ChartSplitDirection::Vertical, |line| {
+                    line.left_0().top(px(3.0)).w_full().h(px(1.0))
+                }),
+        )
+}
+
+fn workspace_split_ratio(
+    direction: ChartSplitDirection,
+    pointer_x: f32,
+    pointer_y: f32,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+) -> Option<f64> {
+    let ratio = match direction {
+        ChartSplitDirection::Horizontal if width.is_finite() && width > 0.0 => {
+            (pointer_x - left) / width
+        }
+        ChartSplitDirection::Vertical if height.is_finite() && height > 0.0 => {
+            (pointer_y - top) / height
+        }
+        _ => return None,
+    };
+    ratio
+        .is_finite()
+        .then(|| f64::from(ratio.clamp(0.05, 0.95)))
 }
 
 fn workspace_pane_element(
@@ -5849,7 +5954,8 @@ fn workspace_market_area(
     let grid = workspace_pane_grid(terminal, workspace, theme, cx);
     let drawing_state = active_surface.read(cx).drawing_toolbar_state(cx);
     let grid = div()
-        .size_full()
+        .h_full()
+        .flex_1()
         .min_w_0()
         .when(!drawing_toolbar_collapsed, |grid| {
             grid.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
@@ -5857,6 +5963,7 @@ fn workspace_market_area(
         .child(grid);
     div()
         .relative()
+        .flex()
         .size_full()
         .overflow_hidden()
         .child(grid)
@@ -5968,6 +6075,20 @@ struct WorkspaceTabDrag {
 }
 
 impl Render for WorkspaceTabDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+#[derive(Clone)]
+struct WorkspaceSplitDrag {
+    workspace_id: u64,
+    left_pane_id: u64,
+    right_pane_id: u64,
+    direction: ChartSplitDirection,
+}
+
+impl Render for WorkspaceSplitDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size(px(1.0)).opacity(0.0)
     }
@@ -6691,11 +6812,13 @@ mod tests {
         instrument_selector_label, publication_chart_state, reconciled_bridge_state,
         reconnect_contract_index, reorder_workspace_ids, rithmic_ready_action,
         series_selector_label, should_apply_rithmic_worker_stop, split_lifetime_mode,
-        workspace_drag_destination, workspace_drag_translation, workspace_label, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        workspace_drag_destination, workspace_drag_translation, workspace_label,
+        workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
+        wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
+    use axiusflow_chart_integration::ChartSplitDirection;
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
     use axiusflow_engine_protocol::{
         EngineLifetimeMode, ProviderInstrumentSummary, ResourceMode, WorkspaceState,
@@ -6703,6 +6826,57 @@ mod tests {
     use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
     use std::{cell::Cell, ffi::OsString};
+
+    #[test]
+    fn workspace_split_ratio_tracks_the_active_axis_and_clamps_safe_bounds() {
+        assert_eq!(
+            workspace_split_ratio(
+                ChartSplitDirection::Horizontal,
+                350.0,
+                0.0,
+                100.0,
+                0.0,
+                500.0,
+                200.0,
+            ),
+            Some(0.5)
+        );
+        assert_eq!(
+            workspace_split_ratio(
+                ChartSplitDirection::Vertical,
+                0.0,
+                325.0,
+                0.0,
+                25.0,
+                500.0,
+                400.0,
+            ),
+            Some(0.75)
+        );
+        let minimum = workspace_split_ratio(
+            ChartSplitDirection::Horizontal,
+            -100.0,
+            0.0,
+            0.0,
+            0.0,
+            500.0,
+            200.0,
+        )
+        .expect("finite horizontal bounds produce a ratio");
+        assert!((minimum - 0.05).abs() < f64::from(f32::EPSILON));
+        assert_eq!(
+            workspace_split_ratio(
+                ChartSplitDirection::Vertical,
+                0.0,
+                100.0,
+                0.0,
+                0.0,
+                500.0,
+                0.0,
+            ),
+            None
+        );
+    }
 
     #[test]
     fn desktop_lifetime_modes_are_explicit_per_launch_policies() {
