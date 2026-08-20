@@ -8,7 +8,6 @@ mod frame_poll_gate;
 mod native_ui;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
-mod resident_market_worker;
 mod rithmic_engine_client;
 mod rithmic_engine_history;
 mod rithmic_history;
@@ -20,9 +19,15 @@ use assets::UiIcon as HugeIcon;
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, ChartSplitDirection,
-    ChartWorkspaceLayout, NucleusChartView, NucleusWorkspace,
+    ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView, NucleusWorkspace,
 };
-use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
+use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
+use axiusflow_desktop::market_worker::{
+    ChartState, EngineSeriesRequest, MarketDataWorker, MarketPublicationGeneration,
+    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
+    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
+    UiDiagnosticsFeedback,
+};
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, EngineLifetimeMode, InstallProviderInstrument,
     ProviderCatalogRejectionReason, ProviderInstrumentSummary, ResourceMode,
@@ -50,12 +55,6 @@ use native_ui::{
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
-use resident_market_worker::{
-    ChartState, EngineSeriesRequest, MarketDataWorker, MarketPublicationGeneration,
-    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
-    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
-    UiDiagnosticsFeedback,
-};
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
@@ -139,6 +138,9 @@ const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
+// Bound UI work when a provider delivers a burst of updates. Remaining mailbox
+// messages stay queued and wake the next GPUI frame.
+const MARKET_MESSAGES_PER_FRAME: usize = 8;
 const WORKSPACE_TAB_WIDTH: f32 = 132.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
@@ -738,6 +740,10 @@ struct WorkspaceSurface {
     resource_class: ConsumerResourceClass,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
+    #[cfg(feature = "diagnostics")]
+    live_evidence_enabled: bool,
+    #[cfg(feature = "diagnostics")]
+    live_evidence_publications: u16,
 }
 
 #[derive(Default)]
@@ -919,7 +925,6 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
             {
                 app.last_persisted_viewport = Some(viewport);
             }
-            cx.notify();
         })
         .detach();
     }
@@ -969,6 +974,7 @@ fn rithmic_ready_action(
 
 struct HeaderState {
     theme: AxiusflowTheme,
+    pane_count: usize,
     provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
@@ -1289,9 +1295,7 @@ impl WorkspaceSurface {
         );
         observe_chart(chart.as_ref(), cx);
         let dom = cx.new(move |_| ReadOnlyDomView::new(theme));
-        let ui_wake = UiWake::default();
-        market_worker.set_message_wake(ui_wake.callback());
-        let app = Self {
+        Self {
             chart,
             dom,
             side_panel: None,
@@ -1341,27 +1345,11 @@ impl WorkspaceSurface {
             resource_class: ConsumerResourceClass::Foreground,
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
-        };
-        let mut async_cx = cx.to_async();
-        let this = cx.weak_entity();
-        cx.foreground_executor()
-            .spawn(async move {
-                loop {
-                    ui_wake.notified().await;
-                    if this
-                        .update(&mut async_cx, |app, app_cx| {
-                            if market_wake_requests_render(app.resource_class) {
-                                app_cx.notify();
-                            }
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .detach();
-        app
+            #[cfg(feature = "diagnostics")]
+            live_evidence_enabled: std::env::var_os("AXIUSFLOW_LIVE_EVIDENCE").is_some(),
+            #[cfg(feature = "diagnostics")]
+            live_evidence_publications: 0,
+        }
     }
 
     fn retire_market_worker(&mut self, cx: &App) {
@@ -1375,6 +1363,10 @@ impl WorkspaceSurface {
         let _ = self
             .market_worker
             .try_set_market_resource_class(resource_class);
+    }
+
+    fn set_market_message_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.market_worker.set_message_wake(wake);
     }
 
     fn should_poll_market(&self) -> bool {
@@ -1488,11 +1480,16 @@ impl WorkspaceSurface {
         let selected = (|| match selection {
             InstrumentMenuSelection::Rithmic(index) => self.select_rithmic_symbol(index, cx),
             InstrumentMenuSelection::Coinbase(product) => {
+                let chart_has_market_data = self
+                    .chart
+                    .as_ref()
+                    .is_some_and(|chart| chart.read(cx).has_market_data());
                 if self
                     .coinbase_product
                     .as_ref()
                     .is_some_and(|selected| selected.provider_symbol == product.provider_symbol)
                     && self.coinbase_pending_product.is_none()
+                    && chart_has_market_data
                 {
                     return true;
                 }
@@ -1656,7 +1653,55 @@ impl WorkspaceSurface {
         cx.stop_propagation();
     }
 
+    #[cfg(feature = "diagnostics")]
+    fn record_live_evidence_publication(&mut self, update: &ReplayStreamUpdate) {
+        if !self.live_evidence_enabled || self.live_evidence_publications >= 256 {
+            return;
+        }
+        self.live_evidence_publications = self.live_evidence_publications.saturating_add(1);
+        match update {
+            ReplayStreamUpdate::Snapshot(snapshot) => {
+                let interval_nanos = i64::from(snapshot.bar_definition().interval_seconds)
+                    .saturating_mul(1_000_000_000);
+                let interior_gaps = snapshot
+                    .bars()
+                    .windows(2)
+                    .filter(|pair| {
+                        pair[1]
+                            .provenance()
+                            .exchange_timestamp_unix_nanos
+                            .saturating_sub(pair[0].provenance().exchange_timestamp_unix_nanos)
+                            != interval_nanos
+                    })
+                    .count();
+                let first_timestamp = snapshot
+                    .bars()
+                    .first()
+                    .map_or(0, |bar| bar.provenance().exchange_timestamp_unix_nanos);
+                let last_timestamp = snapshot
+                    .bars()
+                    .last()
+                    .map_or(0, |bar| bar.provenance().exchange_timestamp_unix_nanos);
+                eprintln!(
+                    "AXIUSFLOW_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos}}}",
+                    snapshot.bars().len()
+                );
+            }
+            ReplayStreamUpdate::Delta(delta) => eprintln!(
+                "AXIUSFLOW_LIVE_UPDATE {{\"kind\":\"delta\",\"timestamp\":{}}}",
+                delta.item().provenance().exchange_timestamp_unix_nanos
+            ),
+            ReplayStreamUpdate::Tail(tail) => eprintln!(
+                "AXIUSFLOW_LIVE_UPDATE {{\"kind\":\"tail\",\"timestamp\":{},\"forming\":{}}}",
+                tail.item().provenance().exchange_timestamp_unix_nanos,
+                tail.forming()
+            ),
+        }
+    }
+
     fn apply_publication(&mut self, publication: MarketWorkerPublication, cx: &mut Context<Self>) {
+        #[cfg(feature = "diagnostics")]
+        self.record_live_evidence_publication(&publication.update);
         let MarketWorkerPublication {
             update,
             generation,
@@ -1689,9 +1734,9 @@ impl WorkspaceSurface {
             generation_status(&self.worker_label, &self.subscription_id, generation);
         let next_state = match (&self.chart, update) {
             (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
-                let theme = self.theme;
-                let chart =
-                    cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, &theme));
+                let chart_theme = nucleus_chart_theme(self.theme.mode);
+                let chart = cx
+                    .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
@@ -1702,12 +1747,11 @@ impl WorkspaceSurface {
                 ChartState::Ready
             }
             (Some(chart), update) => {
-                let (accepted, recovery_pending) = chart.update(cx, |chart, chart_cx| {
+                let (accepted, recovery_pending) = chart.update(cx, |chart, _| {
                     let accepted = chart.try_queue_replay_update(update).is_ok();
                     if !accepted {
                         eprintln!("bounded chart queue overflowed; fixture resnapshot required");
                     }
-                    chart_cx.notify();
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
                 });
                 publication_chart_state(accepted, recovery_pending)
@@ -1748,7 +1792,6 @@ impl WorkspaceSurface {
                 cx,
             );
         }
-        cx.notify();
     }
 
     fn reject_incremental_publication(
@@ -1844,8 +1887,8 @@ impl WorkspaceSurface {
     }
 
     fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
-        let theme = self.theme;
-        self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(&theme)));
+        let chart_theme = nucleus_chart_theme(self.theme.mode);
+        self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(chart_theme)));
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
@@ -1999,8 +2042,14 @@ impl WorkspaceSurface {
     }
 
     fn poll_market_worker(&mut self, cx: &mut Context<Self>) -> usize {
-        let (messages, disconnected) = self.market_worker.drain_messages();
+        let chart_was_missing = self.chart.is_none();
+        let (messages, disconnected) = self
+            .market_worker
+            .drain_messages_up_to(MARKET_MESSAGES_PER_FRAME);
         let applied = messages.len();
+        let chart_update_received = messages
+            .iter()
+            .any(|message| matches!(message, MarketWorkerMessage::Update(_)));
         for message in messages {
             self.apply_market_worker_message(message, cx);
         }
@@ -2042,6 +2091,13 @@ impl WorkspaceSurface {
         if self.bridge_label != status {
             self.bridge_label = status;
             cx.notify();
+        }
+        if applied > 0 {
+            if chart_was_missing && self.chart.is_some() {
+                cx.notify();
+            } else if chart_update_received && let Some(chart) = &self.chart {
+                chart.update(cx, |_, chart_cx| chart_cx.notify());
+            }
         }
         applied + usize::from(disconnected)
     }
@@ -2102,8 +2158,7 @@ impl WorkspaceSurface {
         });
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                let theme_applied = chart.set_platform_theme(theme).is_ok();
-                debug_assert!(theme_applied);
+                chart.set_theme(nucleus_chart_theme(theme.mode));
                 chart_cx.notify();
             });
         }
@@ -2403,9 +2458,9 @@ impl WorkspaceSurface {
         );
         let snapshot = bootstrap.snapshot;
         let visible_bar_count = snapshot.bars().len();
-        let theme = self.theme;
+        let chart_theme = nucleus_chart_theme(self.theme.mode);
         self.chart =
-            Some(cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, &theme)));
+            Some(cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme)));
         self.worker_label = bootstrap.worker_label;
         self.subscription_id = bootstrap.subscription_id;
         self.replay_label = replay_label;
@@ -2440,12 +2495,8 @@ impl WorkspaceSurface {
             return;
         };
         if chart
-            .update(cx, |chart, chart_cx| {
-                let result = chart.try_queue_replay_update(update).map_err(|_| ());
-                if result.is_ok() {
-                    chart_cx.notify();
-                }
-                result
+            .update(cx, |chart, _| {
+                chart.try_queue_replay_update(update).map_err(|_| ())
             })
             .is_err()
         {
@@ -2459,7 +2510,6 @@ impl WorkspaceSurface {
         self.series_message = "Live candle is current".to_string();
         self.chart_state = ChartState::Ready;
         self.chart_state_message = "Rithmic live candle is current".to_string();
-        cx.notify();
     }
 
     fn apply_rithmic_dom(&mut self, frame: DomFrame, cx: &mut Context<Self>) {
@@ -3709,7 +3759,6 @@ fn workspace_title_bar(
                 .overflow_x_hidden()
                 .child(brand_region)
                 .child(tabs)
-                .child(workspace_pane_controls(terminal, state, &theme))
                 .child(drag_region),
         )
         .child(engine_lifecycle_controls(
@@ -3723,25 +3772,21 @@ fn workspace_title_bar(
 
 fn workspace_pane_controls(
     terminal: &Entity<TerminalApp>,
-    state: &WorkspaceTabBarState<'_>,
+    pane_count: usize,
     theme: &AxiusflowTheme,
 ) -> Div {
-    let colors = theme.colors;
-    let pane_count = state.workspaces[state.active].panes.len();
-    let button = |id: &'static str, icon: HugeIcon, tooltip: &'static str| {
-        Button::new(id)
-            .theme(theme)
+    let button = |id: &'static str, icon: HugeIcon, tooltip: &'static str, enabled: bool| {
+        let button = Button::new(id)
             .icon(header_icon(icon))
             .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
             .aria_label(tooltip)
             .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-            .h(px(chart_chrome::CHART_CONTROL_SIZE))
             .w(px(chart_chrome::CHART_CONTROL_SIZE))
-            .border_1()
-            .border_color(gpui_color(colors.border))
-            .bg(gpui_color(colors.muted))
-            .text_color(gpui_color(colors.foreground))
+            .disabled(!enabled);
+        chrome_button_style(button, theme, false, enabled)
     };
+    let can_split = pane_count < MAXIMUM_PANES_PER_WORKSPACE;
+    let can_close = pane_count > 1;
     let horizontal_terminal = terminal.clone();
     let vertical_terminal = terminal.clone();
     let close_terminal = terminal.clone();
@@ -3754,8 +3799,9 @@ fn workspace_pane_controls(
                 "split_pane_horizontal",
                 HugeIcon::SplitSideBySide,
                 "Split chart side by side",
+                can_split,
             ),
-            pane_count < MAXIMUM_PANES_PER_WORKSPACE,
+            can_split,
             move |window, cx| {
                 horizontal_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.split_active_pane(
@@ -3771,8 +3817,9 @@ fn workspace_pane_controls(
                 "split_pane_vertical",
                 HugeIcon::SplitStacked,
                 "Split chart top and bottom",
+                can_split,
             ),
-            pane_count < MAXIMUM_PANES_PER_WORKSPACE,
+            can_split,
             move |window, cx| {
                 vertical_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.split_active_pane(ChartSplitDirection::Vertical, window, terminal_cx);
@@ -3780,8 +3827,13 @@ fn workspace_pane_controls(
             },
         ))
         .child(button_activation(
-            button("close_pane", HugeIcon::CancelIcon01, "Close chart pane"),
-            pane_count > 1,
+            button(
+                "close_pane",
+                HugeIcon::CancelIcon01,
+                "Close chart pane",
+                can_close,
+            ),
+            can_close,
             move |window, cx| {
                 close_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.close_active_pane(&ClosePane, window, terminal_cx);
@@ -4074,6 +4126,11 @@ fn header_controls(
             state.pending.series,
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
+        ))
+        .child(workspace_pane_controls(
+            terminal,
+            state.pane_count,
+            &state.theme,
         ))
         .child(panel_toggle(
             PanelToggleState {
@@ -4802,6 +4859,13 @@ fn connection_presentation(
     }
 }
 
+const fn nucleus_chart_theme(mode: ThemeMode) -> NucleusChartTheme {
+    match mode {
+        ThemeMode::Light => NucleusChartTheme::Light,
+        ThemeMode::Dark => NucleusChartTheme::Dark,
+    }
+}
+
 fn gpui_color(color: ThemeColor) -> Hsla {
     let mut resolved: Hsla = rgb(color.rgb_u32()).into();
     resolved.a = color.alpha();
@@ -5020,6 +5084,8 @@ struct TerminalApp {
     drawing_toolbar: DrawingToolbarVisibility,
     window_active: bool,
     frame_poll_gate: frame_poll_gate::FramePollGate,
+    market_frame_wake: UiWake,
+    market_wake_listener_started: Option<()>,
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
@@ -5280,6 +5346,7 @@ impl TerminalApp {
         workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let market_frame_wake = UiWake::default();
         for (index, workspace) in workspaces.iter_mut().enumerate() {
             workspace.focus = workspace
                 .focus
@@ -5289,6 +5356,9 @@ impl TerminalApp {
         }
         for workspace in &workspaces {
             for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.set_market_message_wake(market_frame_wake.callback());
+                });
                 cx.observe(&pane.surface, |_, _, cx| cx.notify()).detach();
             }
         }
@@ -5324,6 +5394,8 @@ impl TerminalApp {
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
             window_active: true,
             frame_poll_gate: frame_poll_gate::FramePollGate::default(),
+            market_frame_wake,
+            market_wake_listener_started: None,
             chrome_focus: cx.focus_handle().tab_stop(true),
             lifecycle,
             workspace_factory,
@@ -5722,6 +5794,7 @@ impl TerminalApp {
             workspace_surface_entity(pane.startup, pane.worker, &self.lifecycle, window, cx);
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
+            workspace.set_market_message_wake(self.market_frame_wake.callback());
             let _ = workspace_cx;
         });
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
@@ -5791,6 +5864,7 @@ impl TerminalApp {
         surface.update(cx, |surface, surface_cx| {
             surface.apply_theme(&self.theme, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Foreground);
+            surface.set_market_message_wake(self.market_frame_wake.callback());
         });
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
         let workspace = &mut self.workspaces[self.active];
@@ -6045,10 +6119,8 @@ impl TerminalApp {
                     for pane in &workspace.panes {
                         let surface = pane.surface.clone();
                         let pending = surface.update(cx, |workspace, workspace_cx| {
-                            if workspace.should_poll_market()
-                                && workspace.poll_market_worker(workspace_cx) > 0
-                            {
-                                workspace_cx.notify();
+                            if workspace.should_poll_market() {
+                                workspace.poll_market_worker(workspace_cx);
                             }
                             workspace.pending_ui_diagnostics.take()
                         });
@@ -6076,18 +6148,16 @@ impl TerminalApp {
     }
 }
 
-const fn market_wake_requests_render(resource_class: ConsumerResourceClass) -> bool {
-    matches!(resource_class, ConsumerResourceClass::Foreground)
-}
-
 fn active_header_state(
     workspace: &WorkspaceSurface,
+    pane_count: usize,
     theme: &AxiusflowTheme,
     chart_has_market_data: bool,
     cx: &App,
 ) -> HeaderState {
     HeaderState {
         theme: *theme,
+        pane_count,
         provider: workspace.provider,
         instrument_label: terminal_instrument_label(workspace),
         series_label: if workspace.provider == TerminalProvider::Coinbase {
@@ -6437,14 +6507,40 @@ fn workspace_market_area(
         })
 }
 
+impl TerminalApp {
+    fn start_market_wake_listener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.market_wake_listener_started.is_some() {
+            return;
+        }
+        self.market_wake_listener_started = Some(());
+        let wake = self.market_frame_wake.clone();
+        cx.spawn_in(window, async move |terminal, cx| {
+            loop {
+                wake.notified().await;
+                if terminal
+                    .update_in(cx, |terminal, window, terminal_cx| {
+                        terminal.schedule_market_frame(window, terminal_cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+}
+
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.start_market_wake_listener(window, cx);
         if self.workspace_drag.is_some() && !cx.has_active_drag() {
             self.workspace_drag = None;
         }
         self.track_window_activation(window, cx);
         self.schedule_market_frame(window, cx);
         let terminal = cx.entity();
+        let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
         let workspace = active.read(cx);
         let chart_has_market_data = workspace
@@ -6468,7 +6564,13 @@ impl Render for TerminalApp {
         let header = terminal_header(
             &terminal,
             &active,
-            active_header_state(workspace, &self.theme, chart_has_market_data, cx),
+            active_header_state(
+                workspace,
+                pane_count,
+                &self.theme,
+                chart_has_market_data,
+                cx,
+            ),
         );
         let market = workspace_market_area(
             &terminal,
@@ -7106,11 +7208,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 std::process::exit(2);
             }
             let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-            (
-                vec![resident_market_worker::start_rithmic()?],
-                Vec::new(),
-                lifecycle,
-            )
+            (vec![rithmic_engine_client::start()?], Vec::new(), lifecycle)
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
@@ -7138,11 +7236,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         }
     } else {
         let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-        (
-            vec![resident_market_worker::start()?],
-            Vec::new(),
-            lifecycle,
-        )
+        (vec![engine_market_worker::start()?], Vec::new(), lifecycle)
     };
     Ok(Some(ConfiguredDesktop {
         market_workers,
@@ -7277,18 +7371,19 @@ mod tests {
         caption_pointer_owner, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
         chrome_control_foreground, chrome_overlay_progress, claim_once, connection_presentation,
         default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
-        fullscreen_escape_command, gpui_color, instrument_selector_label, publication_chart_state,
-        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
-        resized_side_panel_width, rithmic_ready_action, series_selector_label,
-        should_apply_rithmic_worker_stop, should_finish_chrome_overlay_close, split_lifetime_mode,
-        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_split_ratio, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
+        series_selector_label, should_apply_rithmic_worker_stop,
+        should_finish_chrome_overlay_close, split_lifetime_mode, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
+        wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-    use axiusflow_chart_integration::ChartSplitDirection;
-    use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
+    use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme};
+    use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
     use axiusflow_engine_protocol::{
         EngineLifetimeMode, ProviderInstrumentSummary, ResourceMode, WorkspaceState,
     };
@@ -7722,6 +7817,18 @@ mod tests {
         assert_eq!(
             chrome_control_foreground(&colors, false, false),
             colors.disabled_foreground
+        );
+    }
+
+    #[test]
+    fn shell_theme_maps_only_to_nucleus_theme_selection() {
+        assert_eq!(
+            nucleus_chart_theme(ThemeMode::Light),
+            NucleusChartTheme::Light
+        );
+        assert_eq!(
+            nucleus_chart_theme(ThemeMode::Dark),
+            NucleusChartTheme::Dark
         );
     }
 

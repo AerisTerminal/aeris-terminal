@@ -28,10 +28,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    engine_supervisor::EngineSupervisor,
-    resident_market_worker::{MarketWorkerBootstrap, MarketWorkerMessage},
-};
+use crate::engine_supervisor::EngineSupervisor;
+use axiusflow_desktop::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_DOM_LEVELS: usize = 20;

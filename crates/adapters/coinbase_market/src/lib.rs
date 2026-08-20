@@ -46,5 +46,5 @@ pub use level2::{
 pub use network_cache::{
     COINBASE_ACCELERATION_CACHE_BYTES, CoinbaseCacheDiagnostics, CoinbaseNetworkFirstCache,
 };
-pub use review::{ENTITLEMENT_CLASS, PROVIDER, PROVIDER_REVIEW, TERMS_REVIEW, WEBSOCKET_ENDPOINT};
+pub use review::{ENTITLEMENT_CLASS, PROVIDER, WEBSOCKET_ENDPOINT};
 pub use session::{CoinbaseConnection, CoinbaseSession, SessionHealth, SessionOutcome};

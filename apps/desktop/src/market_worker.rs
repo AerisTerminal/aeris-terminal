@@ -941,6 +941,14 @@ impl MarketWorkerReceiver {
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .mailbox
+            .market_publications_enabled
+            .load(Ordering::Acquire)
+            == enabled
+        {
+            return;
+        }
         queue.retain(|message| !is_market_publication(message));
         self.mailbox
             .market_publications_enabled
@@ -964,14 +972,29 @@ impl MarketWorkerReceiver {
         }
     }
 
+    #[must_use]
     pub fn drain(&self) -> (Vec<MarketWorkerMessage>, bool) {
-        let messages = self
+        self.drain_up_to(usize::MAX)
+    }
+
+    /// Drains at most `limit` messages while preserving the mailbox wake edge.
+    ///
+    /// The desktop consumes this bounded form from its frame callback so a burst
+    /// of provider updates cannot monopolize GPUI's event loop. Any remaining
+    /// messages stay queued and trigger another wake/frame.
+    pub fn drain_up_to(&self, limit: usize) -> (Vec<MarketWorkerMessage>, bool) {
+        let mut queue = self
             .mailbox
             .queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .collect::<Vec<_>>();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let messages = if limit == usize::MAX {
+            queue.drain(..).collect::<Vec<_>>()
+        } else {
+            let end = limit.min(queue.len());
+            queue.drain(..end).collect::<Vec<_>>()
+        };
+        drop(queue);
         self.mailbox.wake_pending.store(false, Ordering::Release);
         let (queued, disconnected) = {
             let queue = self
@@ -1538,12 +1561,16 @@ impl MarketDataWorker {
     }
 
     pub fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
+        self.drain_messages_up_to(usize::MAX)
+    }
+
+    pub fn drain_messages_up_to(&mut self, limit: usize) -> (Vec<MarketWorkerMessage>, bool) {
         let Some(receiver) = self.messages.as_ref() else {
             let newly_disconnected = self.connected;
             self.connected = false;
             return (Vec::new(), newly_disconnected);
         };
-        let (messages, disconnected) = receiver.drain();
+        let (messages, disconnected) = receiver.drain_up_to(limit);
         if disconnected {
             let newly_disconnected = self.connected;
             self.connected = false;
@@ -1956,6 +1983,34 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_foreground_assignment_preserves_initial_covering_snapshot() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
+        sender
+            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+                update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
+                subscription_id: bootstrap.subscription_id,
+                worker_label: bootstrap.worker_label,
+                ui_diagnostics: None,
+            }))
+            .expect("initial snapshot queues");
+
+        receiver.set_market_publications_enabled(true);
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(_),
+                ..
+            })]
+        ));
+    }
+
+    #[test]
     fn state_publications_coalesce_in_the_bounded_mailbox() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
@@ -2108,6 +2163,32 @@ mod tests {
         assert_eq!(drained.len(), 1);
         sender.send(message()).expect("state after drain sends");
         assert_eq!(wake_count.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn bounded_drain_rearms_wake_while_messages_remain() {
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_count);
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+        receiver.set_wake(Arc::new(move || {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+        }));
+        for sequence in 1..=3 {
+            sender
+                .send(MarketWorkerMessage::CoinbaseSwitchMarker { sequence })
+                .expect("switch marker sends");
+        }
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+
+        let (first, disconnected) = receiver.drain_up_to(1);
+
+        assert!(!disconnected);
+        assert_eq!(first.len(), 1);
+        assert_eq!(wake_count.load(Ordering::Acquire), 2);
+        let (remaining, disconnected) = receiver.drain_up_to(8);
+        assert!(!disconnected);
+        assert_eq!(remaining.len(), 2);
     }
 
     #[test]

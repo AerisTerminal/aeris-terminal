@@ -6,7 +6,6 @@ const UI_ASSET_PREFIX: &str = "axiusflow/icons/ui/";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiIcon {
-    ActivityIcon01,
     AddIcon01,
     AiEraser,
     AiLock,
@@ -38,8 +37,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 29] = [
-        Self::ActivityIcon01,
+    pub const ALL: [Self; 28] = [
         Self::AddIcon01,
         Self::AiEraser,
         Self::AiLock,
@@ -73,7 +71,6 @@ impl UiIcon {
     #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
-            Self::ActivityIcon01 => "activity-01.svg",
             Self::AddIcon01 => "add-01.svg",
             Self::AiEraser => "ai-eraser.svg",
             Self::AiLock => "ai-lock.svg",
@@ -114,21 +111,15 @@ pub enum DrawingIcon {
     VerticalLine,
     Ray,
     Rectangle,
-    Ruler,
-    Fibonacci,
-    ExtendedLine,
 }
 
 impl DrawingIcon {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 5] = [
         Self::TrendLine,
         Self::HorizontalLine,
         Self::VerticalLine,
         Self::Ray,
         Self::Rectangle,
-        Self::Ruler,
-        Self::Fibonacci,
-        Self::ExtendedLine,
     ];
 
     #[must_use]
@@ -141,9 +132,6 @@ impl DrawingIcon {
             Self::VerticalLine => concat!("axiusflow/icons/drawing/", "vertical-line.svg"),
             Self::Ray => concat!("axiusflow/icons/drawing/", "ray.svg"),
             Self::Rectangle => concat!("axiusflow/icons/drawing/", "rectangle.svg"),
-            Self::Ruler => concat!("axiusflow/icons/drawing/", "ruler.svg"),
-            Self::Fibonacci => concat!("axiusflow/icons/drawing/", "fibonacci.svg"),
-            Self::ExtendedLine => concat!("axiusflow/icons/drawing/", "extended-line.svg"),
         }
         .into()
     }
@@ -176,16 +164,12 @@ fn drawing_asset(path: &str) -> Option<&'static [u8]> {
         "vertical-line.svg" => include_bytes!("../assets/icons/drawing/vertical-line.svg"),
         "ray.svg" => include_bytes!("../assets/icons/drawing/ray.svg"),
         "rectangle.svg" => include_bytes!("../assets/icons/drawing/rectangle.svg"),
-        "ruler.svg" => include_bytes!("../assets/icons/drawing/ruler.svg"),
-        "fibonacci.svg" => include_bytes!("../assets/icons/drawing/fibonacci.svg"),
-        "extended-line.svg" => include_bytes!("../assets/icons/drawing/extended-line.svg"),
         _ => return None,
     })
 }
 
 fn ui_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(UI_ASSET_PREFIX)? {
-        "activity-01.svg" => include_bytes!("../assets/icons/ui/activity-01.svg"),
         "add-01.svg" => include_bytes!("../assets/icons/ui/add-01.svg"),
         "ai-eraser.svg" => include_bytes!("../assets/icons/ui/ai-eraser.svg"),
         "ai-lock.svg" => include_bytes!("../assets/icons/ui/ai-lock.svg"),

@@ -46,29 +46,22 @@ impl ChartSeriesIdentity {
 
 /// One queue drain collapsed into at most one authoritative Nucleus mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MergedChartData {
+pub(crate) struct MergedChartData {
     snapshot: Option<ReplaySnapshot>,
     accepted_deltas: Vec<ProvenancedMarketBar>,
-    last_sequence_decision: Option<SequenceDecision>,
 }
 
 impl MergedChartData {
     /// Returns the last snapshot in this drain, if one replaced prior state.
     #[must_use]
-    pub const fn snapshot(&self) -> Option<&ReplaySnapshot> {
+    pub(crate) const fn snapshot(&self) -> Option<&ReplaySnapshot> {
         self.snapshot.as_ref()
     }
 
     /// Returns contiguous deltas accepted after the retained snapshot or baseline.
     #[must_use]
-    pub fn accepted_deltas(&self) -> &[ProvenancedMarketBar] {
+    pub(crate) fn accepted_deltas(&self) -> &[ProvenancedMarketBar] {
         &self.accepted_deltas
-    }
-
-    /// Returns the last delta classification observed in this drain.
-    #[must_use]
-    pub const fn last_sequence_decision(&self) -> Option<SequenceDecision> {
-        self.last_sequence_decision
     }
 
     #[must_use]
@@ -98,7 +91,7 @@ pub struct ChartBridgeMetrics {
 
 /// Bounded consumer bridge between replay producers and one chart frame.
 #[derive(Debug)]
-pub struct ChartDataBridge {
+pub(crate) struct ChartDataBridge {
     queue: BoundedUiQueue<ReplayStreamUpdate>,
     session: Option<ReplaySession>,
     accepted_series: ChartSeriesIdentity,
@@ -126,7 +119,7 @@ impl ChartDataBridge {
     /// # Errors
     ///
     /// Returns an error if the snapshot cannot establish resumable session state.
-    pub fn try_new(
+    pub(crate) fn try_new(
         capacity: NonZeroUsize,
         snapshot: &ReplaySnapshot,
     ) -> Result<Self, ReplayValidationError> {
@@ -158,7 +151,10 @@ impl ChartDataBridge {
     /// # Errors
     ///
     /// Returns the unchanged update when the bridge is at capacity.
-    pub fn try_push(&mut self, update: ReplayStreamUpdate) -> Result<(), Box<ReplayStreamUpdate>> {
+    pub(crate) fn try_push(
+        &mut self,
+        update: ReplayStreamUpdate,
+    ) -> Result<(), Box<ReplayStreamUpdate>> {
         match self.queue.try_push(update) {
             Ok(()) => Ok(()),
             Err(rejected) => {
@@ -176,7 +172,7 @@ impl ChartDataBridge {
     /// # Errors
     ///
     /// Returns an error if the snapshot cannot establish resumable session state.
-    pub fn install_snapshot(
+    pub(crate) fn install_snapshot(
         &mut self,
         snapshot: &ReplaySnapshot,
     ) -> Result<(), ReplayValidationError> {
@@ -202,7 +198,9 @@ impl ChartDataBridge {
     ///
     /// Returns an error when an otherwise contiguous delta violates replay
     /// market-data or timestamp invariants.
-    pub fn drain_merged(&mut self) -> Result<Option<MergedChartData>, ReplayValidationError> {
+    pub(crate) fn drain_merged(
+        &mut self,
+    ) -> Result<Option<MergedChartData>, ReplayValidationError> {
         let updates: Vec<_> = self.queue.drain().collect();
         if updates.is_empty() {
             return Ok(None);
@@ -215,7 +213,6 @@ impl ChartDataBridge {
         let mut merged = MergedChartData {
             snapshot: None,
             accepted_deltas: Vec::with_capacity(updates.len()),
-            last_sequence_decision: None,
         };
         for update in updates {
             match update {
@@ -223,7 +220,6 @@ impl ChartDataBridge {
                     if self.pending_resnapshot.is_some() {
                         self.rejected_uncorrelated_snapshots =
                             self.rejected_uncorrelated_snapshots.saturating_add(1);
-                        merged.last_sequence_decision = Some(SequenceDecision::SnapshotRequired);
                         continue;
                     }
                     if !snapshot_may_replace(
@@ -245,7 +241,6 @@ impl ChartDataBridge {
                     candidate_last_sequence = snapshot.evidence().last_sequence;
                     merged.snapshot = Some(snapshot);
                     merged.accepted_deltas.clear();
-                    merged.last_sequence_decision = None;
                 }
                 ReplayStreamUpdate::Delta(delta) => {
                     if merged
@@ -256,11 +251,9 @@ impl ChartDataBridge {
                         continue;
                     }
                     let Some(session) = candidate_session.as_mut() else {
-                        merged.last_sequence_decision = Some(SequenceDecision::SnapshotRequired);
                         continue;
                     };
                     let decision = session.accept_delta(&delta)?;
-                    merged.last_sequence_decision = Some(decision);
                     if matches!(decision, SequenceDecision::Gap { .. }) {
                         self.request_resnapshot(ResnapshotReason::SequenceGap);
                     }
@@ -278,11 +271,9 @@ impl ChartDataBridge {
                         continue;
                     }
                     let Some(session) = candidate_session.as_mut() else {
-                        merged.last_sequence_decision = Some(SequenceDecision::SnapshotRequired);
                         continue;
                     };
                     let decision = session.accept_tail(&update)?;
-                    merged.last_sequence_decision = Some(decision);
                     if matches!(decision, SequenceDecision::Gap { .. }) {
                         self.request_resnapshot(ResnapshotReason::SequenceGap);
                     }
@@ -305,25 +296,25 @@ impl ChartDataBridge {
 
     /// Returns the number of producer updates waiting for the next drain.
     #[must_use]
-    pub fn queued_update_count(&self) -> usize {
+    pub(crate) fn queued_update_count(&self) -> usize {
         self.queue.len()
     }
 
     /// Returns whether sequence state requires a replacement snapshot.
     #[must_use]
-    pub fn requires_snapshot(&self) -> bool {
+    pub(crate) fn requires_snapshot(&self) -> bool {
         self.session.is_none_or(ReplaySession::requires_snapshot)
     }
 
     /// Returns the next expected sequence when a snapshot is installed.
     #[must_use]
-    pub fn expected_sequence(&self) -> Option<u64> {
+    pub(crate) fn expected_sequence(&self) -> Option<u64> {
         self.session.and_then(ReplaySession::expected_sequence)
     }
 
     /// Peeks the retryable command without claiming that a worker queue accepted it.
     #[must_use]
-    pub fn pending_resnapshot_request(&self) -> Option<ReplayRecoveryCommand> {
+    pub(crate) fn pending_resnapshot_request(&self) -> Option<ReplayRecoveryCommand> {
         if self.recovery_dispatched {
             None
         } else {
@@ -336,7 +327,7 @@ impl ChartDataBridge {
     /// # Errors
     ///
     /// Returns the dispatcher's rejection without changing command state.
-    pub fn try_dispatch_recovery<DispatchError>(
+    pub(crate) fn try_dispatch_recovery<DispatchError>(
         &mut self,
         dispatch: impl FnOnce(ReplayRecoveryCommand) -> Result<(), DispatchError>,
     ) -> Result<bool, DispatchError> {
@@ -356,7 +347,7 @@ impl ChartDataBridge {
     /// # Errors
     ///
     /// Returns an error if a correlated snapshot cannot establish resumable session state.
-    pub fn install_recovery_snapshot(
+    pub(crate) fn install_recovery_snapshot(
         &mut self,
         request_id: u64,
         snapshot: &ReplaySnapshot,
@@ -381,12 +372,12 @@ impl ChartDataBridge {
     }
 
     /// Latches recovery after a decoder/model invariant failure.
-    pub fn mark_stream_invalid(&mut self) {
+    pub(crate) fn mark_stream_invalid(&mut self) {
         self.mark_stream_invalid_for(ResnapshotReason::SequenceGap);
     }
 
     /// Latches recovery with the transport-neutral reason reported by a runtime port.
-    pub fn mark_stream_invalid_for(&mut self, reason: ResnapshotReason) {
+    pub(crate) fn mark_stream_invalid_for(&mut self, reason: ResnapshotReason) {
         self.queue.drain().for_each(drop);
         self.session = None;
         if self.pending_resnapshot.map(|command| command.reason) != Some(reason) {
@@ -400,7 +391,7 @@ impl ChartDataBridge {
 
     /// Records a failed correlated background recovery and makes the command retryable
     /// only while its bounded dispatch budget remains.
-    pub fn mark_recovery_failed(&mut self, request_id: u64) -> bool {
+    pub(crate) fn mark_recovery_failed(&mut self, request_id: u64) -> bool {
         if self.pending_resnapshot.map(|command| command.request_id) != Some(request_id) {
             return false;
         }
@@ -410,16 +401,6 @@ impl ChartDataBridge {
         } else {
             self.recovery_dispatched = false;
         }
-        true
-    }
-
-    /// Terminally cancels the matching recovery after the worker exhausts its retry cycle.
-    pub fn cancel_recovery(&mut self, request_id: u64) -> bool {
-        if self.pending_resnapshot.map(|command| command.request_id) != Some(request_id) {
-            return false;
-        }
-        self.failed_recoveries = self.failed_recoveries.saturating_add(1);
-        self.cancel_recovery_state();
         true
     }
 
@@ -500,7 +481,7 @@ impl ChartDataBridge {
 
     /// Returns queue depth, overload, and recovery telemetry.
     #[must_use]
-    pub fn metrics(&self) -> ChartBridgeMetrics {
+    pub(crate) fn metrics(&self) -> ChartBridgeMetrics {
         ChartBridgeMetrics {
             queued_updates: self.queue.len(),
             queue_overflows: self.queue_overflows,

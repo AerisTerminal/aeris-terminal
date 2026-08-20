@@ -124,19 +124,6 @@ impl ThemeColor {
             | (u32::from(channel_to_u8(self.green)) << 8)
             | u32::from(channel_to_u8(self.blue))
     }
-
-    /// Returns a CSS color accepted by Nucleus's options and series contracts.
-    #[must_use]
-    pub fn css_value(self) -> String {
-        let red = channel_to_u8(self.red);
-        let green = channel_to_u8(self.green);
-        let blue = channel_to_u8(self.blue);
-        if self.alpha >= 0.999_5 {
-            format!("#{red:02x}{green:02x}{blue:02x}")
-        } else {
-            format!("rgba({red}, {green}, {blue}, {:.3})", self.alpha)
-        }
-    }
 }
 
 fn linear_to_srgb(channel: f32) -> f32 {

@@ -11,7 +11,8 @@ mod view;
 mod workspace;
 
 pub use axiusflow_application::ReplayRecoveryCommand;
-pub use bridge::{ChartBridgeMetrics, ChartDataBridge, MergedChartData};
+pub use bridge::ChartBridgeMetrics;
+pub use nucleuscharts_engine::ChartTheme as NucleusChartTheme;
 pub use view::{
     ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, NucleusChartView,
 };

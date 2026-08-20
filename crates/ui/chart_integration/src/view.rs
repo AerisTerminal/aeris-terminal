@@ -11,14 +11,13 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
-use axiusflow_design_system::AxiusflowTheme;
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
     prelude::*, px,
 };
 use nucleuscharts_engine::{
-    ChartEngine, ChartFrame, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
+    ChartEngine, ChartFrame, ChartTheme, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
 };
 use nucleuscharts_render::draw_list::Prim;
 use nucleuscharts_render_gpui::backend::measure_text;
@@ -174,6 +173,31 @@ enum ChartDrag {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SeriesMutation {
+    #[default]
+    None,
+    Snapshot,
+    Append,
+    TailReplace,
+}
+
+impl SeriesMutation {
+    #[cfg(feature = "diagnostics")]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Snapshot => "snapshot",
+            Self::Append => "append",
+            Self::TailReplace => "tail_replace",
+        }
+    }
+}
+
+const fn should_stop_mouse_up_propagation(outside_chart: bool) -> bool {
+    !outside_chart
+}
+
 /// A GPUI entity hosting one authoritative Nucleus chart engine and renderer.
 pub struct NucleusChartView {
     engine: ChartEngine,
@@ -185,6 +209,7 @@ pub struct NucleusChartView {
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
     built_for: (f32, f32, f32),
+    layout_dirty: bool,
     fitted: bool,
     viewport_origin: (f32, f32),
     drag: Option<ChartDrag>,
@@ -194,69 +219,26 @@ pub struct NucleusChartView {
     cursor_style: CursorStyle,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
-}
-
-fn apply_platform_theme(
-    engine: &mut ChartEngine,
-    theme: &AxiusflowTheme,
-) -> Result<(), serde_json::Error> {
-    let colors = theme.colors;
-    let surface = colors.background.css_value();
-    let border = colors.border.css_value();
-    let axis_text = colors.foreground.css_value();
-    let crosshair = colors.muted_foreground.css_value();
-    let separator_hover = colors.accent.css_value();
-    let positive = colors.positive.css_value();
-    let negative = colors.negative.css_value();
-    for series in &mut engine.series {
-        series.up_color = Some(positive.clone());
-        series.down_color = Some(negative.clone());
-        series.wick_up_color = Some(positive.clone());
-        series.wick_down_color = Some(negative.clone());
-        series.border_up_color = Some(positive.clone());
-        series.border_down_color = Some(negative.clone());
-    }
-    let patch = serde_json::json!({
-        "layout": {
-            "fontFamily": "Inter",
-            "background": {
-                "type": "solid",
-                "color": surface,
-                "topColor": surface,
-                "bottomColor": surface
-            },
-            "textColor": axis_text,
-            "panes": {
-                "separatorColor": border,
-                "separatorHoverColor": separator_hover
-            }
-        },
-        "grid": {
-            "vertLines": { "color": border },
-            "horzLines": { "color": border }
-        },
-        "crosshair": {
-            "vertLine": { "color": crosshair, "labelBackgroundColor": crosshair },
-            "horzLine": { "color": crosshair, "labelBackgroundColor": crosshair }
-        },
-        "leftPriceScale": { "borderColor": border, "textColor": axis_text },
-        "rightPriceScale": { "borderColor": border, "textColor": axis_text },
-        "timeScale": { "borderColor": border }
-    });
-    engine.apply_options(&patch.to_string())
+    #[cfg(feature = "diagnostics")]
+    live_evidence_enabled: bool,
+    #[cfg(feature = "diagnostics")]
+    live_evidence_rebuilds: u16,
+    #[cfg(feature = "diagnostics")]
+    live_evidence_mouse_downs: u8,
 }
 
 impl NucleusChartView {
     /// Creates an empty Nucleus-owned surface without inventing market data.
     #[must_use]
     pub fn empty() -> Self {
-        Self::empty_with_theme(&AxiusflowTheme::dark())
+        Self::empty_with_theme(ChartTheme::Dark)
     }
 
-    /// Creates an empty chart with the supplied platform theme applied atomically.
+    /// Creates an empty chart using Nucleus's canonical theme tokens.
     #[must_use]
-    pub fn empty_with_theme(theme: &AxiusflowTheme) -> Self {
+    pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
+        engine.set_theme(theme);
         let volume_series = install_volume_series(&mut engine);
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
@@ -264,8 +246,6 @@ impl NucleusChartView {
         let volume_retention_applied =
             engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(volume_retention_applied);
-        let theme_applied = apply_platform_theme(&mut engine, theme).is_ok();
-        debug_assert!(theme_applied);
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
@@ -276,6 +256,7 @@ impl NucleusChartView {
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
             built_for: (0.0, 0.0, 0.0),
+            layout_dirty: true,
             fitted: false,
             viewport_origin: (0.0, 0.0),
             drag: None,
@@ -285,6 +266,12 @@ impl NucleusChartView {
             cursor_style: CursorStyle::Crosshair,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
+            #[cfg(feature = "diagnostics")]
+            live_evidence_enabled: std::env::var_os("AXIUSFLOW_LIVE_EVIDENCE").is_some(),
+            #[cfg(feature = "diagnostics")]
+            live_evidence_rebuilds: 0,
+            #[cfg(feature = "diagnostics")]
+            live_evidence_mouse_downs: 0,
         }
     }
 
@@ -308,13 +295,14 @@ impl NucleusChartView {
     /// without a live bridge instead of panicking the UI thread.
     #[must_use]
     pub fn with_replay(replay: &ReplaySnapshot) -> Self {
-        Self::with_replay_and_theme(replay, &AxiusflowTheme::dark())
+        Self::with_replay_and_theme(replay, ChartTheme::Dark)
     }
 
-    /// Creates a replay-backed chart with the supplied platform theme applied atomically.
+    /// Creates a replay-backed chart using Nucleus's canonical theme tokens.
     #[must_use]
-    pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: &AxiusflowTheme) -> Self {
+    pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
+        engine.set_theme(theme);
         let volume_series = install_volume_series(&mut engine);
         install_replay(&mut engine, volume_series, replay);
         let retention_applied =
@@ -325,9 +313,6 @@ impl NucleusChartView {
         debug_assert!(volume_retention_applied);
         let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay).ok();
         debug_assert!(data_bridge.is_some());
-        let theme_applied = apply_platform_theme(&mut engine, theme).is_ok();
-        debug_assert!(theme_applied);
-
         Self {
             engine,
             renderer: GpuiChartRenderer::new(),
@@ -338,6 +323,7 @@ impl NucleusChartView {
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
             built_for: (0.0, 0.0, 0.0),
+            layout_dirty: true,
             fitted: false,
             viewport_origin: (0.0, 0.0),
             drag: None,
@@ -347,6 +333,12 @@ impl NucleusChartView {
             cursor_style: CursorStyle::Crosshair,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
+            #[cfg(feature = "diagnostics")]
+            live_evidence_enabled: std::env::var_os("AXIUSFLOW_LIVE_EVIDENCE").is_some(),
+            #[cfg(feature = "diagnostics")]
+            live_evidence_rebuilds: 0,
+            #[cfg(feature = "diagnostics")]
+            live_evidence_mouse_downs: 0,
         }
     }
 
@@ -369,7 +361,7 @@ impl NucleusChartView {
         install_replay(&mut self.engine, self.volume_series, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
         self.fitted = false;
         #[cfg(feature = "diagnostics")]
         {
@@ -390,25 +382,20 @@ impl NucleusChartView {
             self.engine
                 .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Right, true);
         }
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
         self.fitted = true;
     }
 
-    /// Applies the platform's resolved neutral palette without changing chart data or viewport.
-    ///
-    /// # Errors
-    ///
-    /// Returns a serialization error if Nucleus rejects the generated options patch.
-    pub fn set_platform_theme(&mut self, theme: &AxiusflowTheme) -> Result<(), serde_json::Error> {
-        apply_platform_theme(&mut self.engine, theme)?;
-        self.invalidate_series_frame();
-        Ok(())
+    /// Selects a Nucleus-owned theme without changing chart data or viewport.
+    pub fn set_theme(&mut self, theme: ChartTheme) {
+        self.engine.set_theme(theme);
+        self.invalidate_series_layout();
     }
 
     /// Returns the time scale to the newest bar without changing its zoom.
     pub fn scroll_to_latest(&mut self) {
         self.engine.scroll_to_real_time();
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
     }
 
     /// Returns the settled visible time range in Unix nanoseconds.
@@ -429,7 +416,7 @@ impl NucleusChartView {
             start.to_f64().unwrap_or(0.0) / 1_000_000_000.0,
             end.to_f64().unwrap_or(0.0) / 1_000_000_000.0,
         );
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
         self.fitted = true;
         true
     }
@@ -483,7 +470,7 @@ impl NucleusChartView {
             }
             return Err(ChartIndicatorError::CreationRejected(indicator));
         }
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
         Ok(ids)
     }
 
@@ -632,7 +619,7 @@ impl NucleusChartView {
         } else if !self.engine.remove_series(series) {
             return false;
         }
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
         true
     }
 
@@ -742,7 +729,7 @@ impl NucleusChartView {
         install_replay(&mut self.engine, self.volume_series, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
-        self.invalidate_series_frame();
+        self.invalidate_series_layout();
         Ok(true)
     }
 
@@ -766,14 +753,29 @@ impl NucleusChartView {
         self.displayed_provenance.latest()
     }
 
-    fn apply_pending_data(&mut self) {
+    fn apply_pending_data(&mut self) -> SeriesMutation {
         let Some(bridge) = &mut self.data_bridge else {
-            return;
+            return SeriesMutation::None;
         };
         match bridge.drain_merged() {
             Ok(Some(update)) if update.mutates_series() => {
                 #[cfg(feature = "diagnostics")]
                 let snapshot_install_started = update.snapshot().map(|_| Instant::now());
+                let previous_timestamp = self
+                    .displayed_provenance
+                    .latest()
+                    .map(|provenance| provenance.exchange_timestamp_unix_nanos);
+                let mutation = if update.snapshot().is_some() {
+                    SeriesMutation::Snapshot
+                } else if update.accepted_deltas().iter().any(|item| {
+                    previous_timestamp.is_none_or(|previous| {
+                        item.provenance().exchange_timestamp_unix_nanos > previous
+                    })
+                }) {
+                    SeriesMutation::Append
+                } else {
+                    SeriesMutation::TailReplace
+                };
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
                 }
@@ -784,17 +786,23 @@ impl NucleusChartView {
                     &mut self.price_divisor,
                     &update,
                 );
-                self.invalidate_series_frame();
+                if mutation == SeriesMutation::TailReplace {
+                    self.invalidate_series_frame();
+                } else {
+                    self.invalidate_series_layout();
+                }
                 #[cfg(feature = "diagnostics")]
                 if let Some(started) = snapshot_install_started {
                     self.last_snapshot_installation_nanos =
                         Some(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
                 }
+                mutation
             }
-            Ok(_) => {}
+            Ok(_) => SeriesMutation::None,
             Err(error) => {
                 bridge.mark_stream_invalid();
                 eprintln!("replay update rejected; snapshot required: {error}");
+                SeriesMutation::None
             }
         }
     }
@@ -802,7 +810,11 @@ impl NucleusChartView {
     fn invalidate_series_frame(&mut self) {
         self.frame = ChartFrame::default();
         self.axis_prims.clear();
-        self.built_for = (0.0, 0.0, 0.0);
+    }
+
+    fn invalidate_series_layout(&mut self) {
+        self.invalidate_series_frame();
+        self.layout_dirty = true;
     }
 
     fn local_position(&self, position: gpui::Point<gpui::Pixels>) -> (f64, f64) {
@@ -1176,6 +1188,13 @@ impl NucleusChartView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "diagnostics")]
+        if self.live_evidence_enabled && self.live_evidence_mouse_downs < 8 {
+            self.live_evidence_mouse_downs = self.live_evidence_mouse_downs.saturating_add(1);
+            let x: f32 = event.position.x.into();
+            let y: f32 = event.position.y.into();
+            eprintln!("AXIUSFLOW_CHART_MOUSE_DOWN {{\"x\":{x},\"y\":{y}}}");
+        }
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
@@ -1224,12 +1243,31 @@ impl NucleusChartView {
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_mouse_up(&mut self, event: &MouseUpEvent) {
         let (pane_x, y) = self.local_position(event.position);
         if !self.drawing_pointer_up(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
             self.end_drag(pane_x, y);
         }
-        cx.stop_propagation();
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_mouse_up(event);
+        if should_stop_mouse_up_propagation(false) {
+            cx.stop_propagation();
+        }
+        cx.notify();
+    }
+
+    fn on_mouse_up_out(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_mouse_up(event);
+        if should_stop_mouse_up_propagation(true) {
+            cx.stop_propagation();
+        }
         cx.notify();
     }
 
@@ -1251,20 +1289,27 @@ impl NucleusChartView {
     }
 
     fn rebuild(&mut self, width: f32, height: f32, scale_factor: f32, window: &Window) {
-        self.apply_pending_data();
+        #[cfg(feature = "diagnostics")]
+        let rebuild_started = Instant::now();
+        let mutation = self.apply_pending_data();
         let dimensions = (width, height, scale_factor);
-        if self.built_for == dimensions && !self.frame.panes.is_empty() {
+        let dimensions_changed = self.built_for != dimensions;
+        let layout_recomputed = dimensions_changed || self.layout_dirty;
+        if !layout_recomputed && !self.frame.panes.is_empty() {
             return;
         }
 
-        if self.built_for.2 > 0.0 && (self.built_for.2 - scale_factor).abs() > SCALE_FACTOR_EPSILON
-        {
-            self.renderer.invalidate_caches();
+        if dimensions_changed {
+            if self.built_for.2 > 0.0
+                && (self.built_for.2 - scale_factor).abs() > SCALE_FACTOR_EPSILON
+            {
+                self.renderer.invalidate_caches();
+            }
+            self.built_for = dimensions;
+            self.engine.css_width = f64::from(width);
+            self.engine.css_height = f64::from(height);
+            self.engine.dpr = f64::from(scale_factor);
         }
-        self.built_for = dimensions;
-        self.engine.css_width = f64::from(width);
-        self.engine.css_height = f64::from(height);
-        self.engine.dpr = f64::from(scale_factor);
 
         let layout = self.engine.options.get().layout.clone();
         let font_size = layout.font_size.to_f32().unwrap_or(12.0);
@@ -1272,11 +1317,14 @@ impl NucleusChartView {
             f64::from(measure_text(window, text, &layout.font_family, font_size, 400, false).width)
         };
 
-        self.engine.recompute_layout_with_measure(true, measure);
-        if !self.fitted {
-            self.engine.fit_content();
-            self.fitted = true;
+        if layout_recomputed {
             self.engine.recompute_layout_with_measure(true, measure);
+            if !self.fitted {
+                self.engine.fit_content();
+                self.fitted = true;
+                self.engine.recompute_layout_with_measure(true, measure);
+            }
+            self.layout_dirty = false;
         }
 
         let max_label_width = (layout.font_size + 4.0) * 5.0 / 8.0
@@ -1285,9 +1333,31 @@ impl NucleusChartView {
         self.engine.build_frame_into(&mut self.frame);
         self.engine
             .build_axis_primitives_into(&axis_frame, &mut self.axis_prims, |_| 0.0);
+        #[cfg(feature = "diagnostics")]
+        {
+            let elapsed = rebuild_started.elapsed();
+            if self.live_evidence_enabled && self.live_evidence_rebuilds < 256 {
+                self.live_evidence_rebuilds = self.live_evidence_rebuilds.saturating_add(1);
+                eprintln!(
+                    "AXIUSFLOW_CHART_REBUILD {{\"micros\":{},\"layout\":{},\"data\":\"{}\"}}",
+                    elapsed.as_micros(),
+                    layout_recomputed,
+                    mutation.label()
+                );
+            }
+            if elapsed.as_millis() >= 4 {
+                eprintln!(
+                    "chart rebuild: {} ms (layout={})",
+                    elapsed.as_millis(),
+                    layout_recomputed
+                );
+            }
+        }
     }
 
     fn paint(&mut self, bounds: Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App) {
+        #[cfg(feature = "diagnostics")]
+        let paint_started = Instant::now();
         let viewport = NucleusViewport::from_bounds(
             bounds.origin.x.into(),
             bounds.origin.y.into(),
@@ -1301,6 +1371,13 @@ impl NucleusChartView {
                 .paint_frame(&prepared, viewport, window.scale_factor(), window, cx)
         {
             eprintln!("nucleus frame skipped: {error}");
+        }
+        #[cfg(feature = "diagnostics")]
+        {
+            let elapsed = paint_started.elapsed();
+            if elapsed.as_millis() >= 4 {
+                eprintln!("chart paint: {} ms", elapsed.as_millis());
+            }
         }
     }
 }
@@ -1334,7 +1411,7 @@ impl Render for NucleusChartView {
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1385,6 +1462,26 @@ mod tests {
             .expect("live series identity resolves")
     }
 
+    fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
+        let (surface, foreground, border, crosshair, label_background) = match theme {
+            ChartTheme::Light => ("#ffffff", "#333333", "#f3f3f3", "#333333", "#333333"),
+            ChartTheme::Dark => ("#070a0f", "#fafafa", "#16191f", "#16191f", "#0c1115"),
+        };
+        let options = chart.engine.options.get();
+        assert_eq!(options.layout.background.color, surface);
+        assert_eq!(options.layout.text_color, foreground);
+        assert_eq!(
+            options.layout.font_family,
+            "-apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif"
+        );
+        assert_eq!(options.grid.vert_lines.color, border);
+        assert_eq!(options.crosshair.vert_line.color, crosshair);
+        assert_eq!(
+            options.crosshair.vert_line.label_background_color,
+            label_background
+        );
+    }
+
     fn visible_series_point(chart: &NucleusChartView, id: u32) -> (f64, f64) {
         chart
             .engine
@@ -1422,6 +1519,26 @@ mod tests {
     }
 
     #[test]
+    fn series_updates_dirty_layout_without_discarding_viewport_dimensions() {
+        let mut chart = NucleusChartView::new();
+        chart.built_for = (1280.0, 720.0, 1.25);
+        chart.layout_dirty = false;
+
+        chart.invalidate_series_layout();
+
+        assert_eq!(chart.built_for, (1280.0, 720.0, 1.25));
+        assert!(chart.layout_dirty);
+        assert!(chart.frame.panes.is_empty());
+        assert!(chart.axis_prims.is_empty());
+    }
+
+    #[test]
+    fn mouse_up_out_finishes_chart_gesture_without_stopping_window_propagation() {
+        assert!(should_stop_mouse_up_propagation(false));
+        assert!(!should_stop_mouse_up_propagation(true));
+    }
+
+    #[test]
     fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
         let replay = EmbeddedReplaySource
             .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
@@ -1444,7 +1561,9 @@ mod tests {
         chart
             .try_queue_replay_update(ReplayStreamUpdate::Tail(replacement))
             .expect("replacement queues");
-        chart.apply_pending_data();
+        chart.layout_dirty = false;
+        assert_eq!(chart.apply_pending_data(), SeriesMutation::TailReplace);
+        assert!(!chart.layout_dirty);
         assert_eq!(chart.expected_replay_sequence(), Some(initial_expected));
         assert_eq!(
             chart
@@ -1466,7 +1585,8 @@ mod tests {
         chart
             .try_queue_replay_update(ReplayStreamUpdate::Tail(appended))
             .expect("append queues");
-        chart.apply_pending_data();
+        assert_eq!(chart.apply_pending_data(), SeriesMutation::Append);
+        assert!(chart.layout_dirty);
         assert_eq!(
             chart.expected_replay_sequence(),
             initial_expected.checked_add(1)
@@ -1524,32 +1644,21 @@ mod tests {
     }
 
     #[test]
-    fn platform_theme_owns_neutrals_and_market_series_semantics() {
+    fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
         let chart = NucleusChartView::empty();
         let series = &chart.engine.series[0];
-
-        assert_eq!(
-            chart.engine.options.get().layout.background.color,
-            "#070a0f"
-        );
-        assert_eq!(chart.engine.options.get().layout.text_color, "#fafafa");
-        assert_eq!(chart.engine.options.get().layout.font_family, "Inter");
-        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#16191f");
-        assert_eq!(
-            chart.engine.options.get().crosshair.vert_line.color,
-            "#9da3aa"
-        );
+        assert_nucleus_theme(&chart, ChartTheme::Dark);
         assert!(series.line_color.is_none());
-        assert_eq!(series.up_color.as_deref(), Some("#089981"));
-        assert_eq!(series.down_color.as_deref(), Some("#f7525f"));
-        assert_eq!(series.wick_up_color.as_deref(), Some("#089981"));
-        assert_eq!(series.wick_down_color.as_deref(), Some("#f7525f"));
-        assert_eq!(series.border_up_color.as_deref(), Some("#089981"));
-        assert_eq!(series.border_down_color.as_deref(), Some("#f7525f"));
+        assert!(series.up_color.is_none());
+        assert!(series.down_color.is_none());
+        assert!(series.wick_up_color.is_none());
+        assert!(series.wick_down_color.is_none());
+        assert!(series.border_up_color.is_none());
+        assert!(series.border_down_color.is_none());
     }
 
     #[test]
-    fn platform_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
+    fn nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
         let mut chart = interactive_chart();
         let volume = chart
             .add_indicator(ChartIndicator::Volume)
@@ -1589,31 +1698,10 @@ mod tests {
         let pane_count = chart.engine.panes.len();
         let series_count = chart.engine.series.len();
 
-        chart
-            .set_platform_theme(&AxiusflowTheme::light())
-            .expect("platform theme patch is valid");
-        assert_eq!(
-            chart.engine.options.get().layout.background.color,
-            "#ffffff"
-        );
-        assert_eq!(chart.engine.options.get().layout.text_color, "#333333");
-        assert_eq!(chart.engine.options.get().layout.font_family, "Inter");
-        assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#f3f3f3");
-        assert_eq!(
-            chart.engine.options.get().crosshair.vert_line.color,
-            "#737373"
-        );
-        chart
-            .set_platform_theme(&AxiusflowTheme::dark())
-            .expect("platform theme patch is valid");
-        assert_eq!(
-            chart.engine.options.get().layout.background.color,
-            "#070a0f"
-        );
-        assert_eq!(
-            chart.engine.options.get().crosshair.vert_line.color,
-            "#9da3aa"
-        );
+        chart.set_theme(ChartTheme::Light);
+        assert_nucleus_theme(&chart, ChartTheme::Light);
+        chart.set_theme(ChartTheme::Dark);
+        assert_nucleus_theme(&chart, ChartTheme::Dark);
         assert_eq!(
             chart
                 .engine

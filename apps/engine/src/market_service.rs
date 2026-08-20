@@ -2,7 +2,7 @@
 
 use std::{
     cell::Cell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
@@ -45,7 +45,7 @@ use axiusflow_market_engine::{
     ProviderHealth, ProviderRequest, ResourcePolicyDecision, ResourcePolicyInput, SeriesSnapshot,
     StreamRequirements, Viewport, WorkspaceId, decide_resource_policy,
 };
-use axiusflow_provider_history::{DataClass, HistoryPageRequest, HistoryRange};
+use axiusflow_provider_history::{CoverageSnapshot, DataClass, HistoryPageRequest, HistoryRange};
 use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
@@ -67,7 +67,9 @@ const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
-const HISTORY_BARS_PER_SERIES: usize = 350;
+const HISTORY_BARS_PER_SERIES: usize = 4_096;
+const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
+const VIEWPORT_BACKFILL_BARS: usize = HISTORY_BARS_PER_SERIES - VIEWPORT_LIVE_TAIL_RESERVE;
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
@@ -125,6 +127,8 @@ enum Command {
     HistoryCompleted(
         BarSeriesKey,
         ProviderGeneration,
+        Option<HistoryRange>,
+        HistoryRequestKind,
         Result<HistorySnapshot, String>,
     ),
     LocalHistoryCompleted(
@@ -140,11 +144,19 @@ enum Command {
     ),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryRequestKind {
+    Initial,
+    ViewportBackfill,
+}
+
 struct HistoryRequest {
     series: BarSeriesKey,
     provider_generation: ProviderGeneration,
     instrument: Option<InstallProviderInstrument>,
     maximum_bars: usize,
+    range: Option<HistoryRange>,
+    kind: HistoryRequestKind,
     stop: Arc<AtomicBool>,
 }
 
@@ -685,6 +697,9 @@ struct FixtureRealtimeHarness {
 #[cfg(test)]
 impl HistorySource for FixtureHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+        if request.kind == HistoryRequestKind::ViewportBackfill {
+            return Err("fixture history does not provide viewport backfill".to_string());
+        }
         if let Some(fetches) = &self.fetches {
             fetches.fetch_add(1, Ordering::AcqRel);
         }
@@ -714,7 +729,7 @@ impl HistorySource for FixtureHistory {
                     u8::try_from(instrument.quantity_scale)
                         .map_err(|_| "fixture quantity scale is invalid".to_string())?,
                 )
-            };
+        };
         let mut bars = self.bars.clone();
         for (index, bar) in bars.iter_mut().enumerate() {
             bar.exchange_timestamp_seconds = i64::try_from(index + 1)
@@ -794,11 +809,17 @@ impl HistorySource for LiveCoinbaseHistory {
             .ok()
             .and_then(|seconds| seconds.checked_mul(1_000_000_000))
             .ok_or_else(|| "Coinbase history end time overflowed".to_string())?;
-        let span_nanos = i64::try_from(request.maximum_bars)
-            .ok()
-            .and_then(|count| count.checked_mul(i64::from(profile.interval_seconds)))
-            .and_then(|seconds| seconds.checked_mul(1_000_000_000))
-            .ok_or_else(|| "Coinbase history span overflowed".to_string())?;
+        let range = request.range.unwrap_or_else(|| {
+            let span_nanos = i64::try_from(request.maximum_bars)
+                .ok()
+                .and_then(|count| count.checked_mul(i64::from(profile.interval_seconds)))
+                .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+                .unwrap_or(i64::MAX);
+            HistoryRange {
+                start_unix_nanos: end_unix_nanos.saturating_sub(span_nanos),
+                end_unix_nanos,
+            }
+        });
         let request = HistoryPageRequest {
             provider_id: "coinbase".to_string(),
             account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
@@ -806,11 +827,9 @@ impl HistorySource for LiveCoinbaseHistory {
             instrument_id: series.instrument_id.clone(),
             data_class: DataClass::Bars,
             resolution: profile.resolution.to_string(),
-            range: HistoryRange {
-                start_unix_nanos: end_unix_nanos.saturating_sub(span_nanos),
-                end_unix_nanos,
-            },
-            maximum_items: NonZeroUsize::new(request.maximum_bars).unwrap_or(NonZeroUsize::MIN),
+            range,
+            maximum_items: NonZeroUsize::new(request.maximum_bars.min(350))
+                .unwrap_or(NonZeroUsize::MIN),
             continuation: None,
         };
         let batch = self.adapter.fetch_paginated(&request)?;
@@ -832,7 +851,7 @@ impl HistorySource for LiveCoinbaseHistory {
             price_scale: profile.price_scale,
             quantity_scale: profile.quantity_scale,
             bars,
-            handoff_boundary_unix_nanos: Some(end_unix_nanos),
+            handoff_boundary_unix_nanos: Some(range.end_unix_nanos),
         })
     }
 }
@@ -1543,6 +1562,8 @@ fn run_history_worker(
             .send(Command::HistoryCompleted(
                 request.series,
                 request.provider_generation,
+                request.range,
+                request.kind,
                 result,
             ))
             .is_err()
@@ -1814,8 +1835,10 @@ fn run_coordinator(
         last_consumer_activity: Instant::now(),
         attached: BTreeSet::new(),
         pending: BTreeMap::new(),
-        history_inflight: BTreeSet::new(),
+        history_inflight: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
+        history_coverage: BTreeMap::new(),
+        viewport_history_ranges: BTreeMap::new(),
         local_history_deadlines: BTreeMap::new(),
         local_loaded: BTreeSet::new(),
         warming: BTreeSet::new(),
@@ -1897,8 +1920,10 @@ struct Coordinator<'a> {
     last_consumer_activity: Instant,
     attached: BTreeSet<ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
-    history_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
+    history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
     history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
+    history_coverage: BTreeMap<BarSeriesKey, Vec<HistoryRange>>,
+    viewport_history_ranges: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
     local_history_deadlines: BTreeMap<(BarSeriesKey, ProviderGeneration), Instant>,
     local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     warming: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
@@ -1937,8 +1962,8 @@ impl Coordinator<'_> {
 
     fn handle_command(&mut self, command: Command) {
         match command {
-            Command::HistoryCompleted(series, generation, result) => {
-                self.history_completed(&series, generation, result);
+            Command::HistoryCompleted(series, generation, range, kind, result) => {
+                self.history_completed(&series, generation, range, kind, result);
             }
             Command::LocalHistoryCompleted(series, generation, result) => {
                 self.local_history_completed(&series, generation, result);
@@ -2011,7 +2036,10 @@ impl Coordinator<'_> {
                 let result =
                     authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
                         match self.engine.set_viewport(consumer_id, generation, viewport) {
-                            Ok(()) | Err(EngineError::StaleConsumerGeneration { .. }) => Ok(()),
+                            Ok(()) => {
+                                self.request_viewport_history(consumer_id, generation, viewport)
+                            }
+                            Err(EngineError::StaleConsumerGeneration { .. }) => Ok(()),
                             Err(error) => Err(error.to_string()),
                         }
                     });
@@ -2566,6 +2594,7 @@ impl Coordinator<'_> {
             self.ensure_realtime(series)
         };
         self.prune_unused_live_series();
+        self.prune_history_tracking();
         self.stop_realtime_if_idle();
         if let Err(error) = realtime {
             let _ = reply.send(Err(error));
@@ -2743,6 +2772,7 @@ impl Coordinator<'_> {
                 bars.clone(),
             )
             .map_err(|error| error.to_string())?;
+        self.record_coinbase_history_coverage(series, &bars)?;
         self.local_loaded.insert((series.clone(), generation));
         for publication in publications {
             if let Some(events) = self.events.get_mut(&publication.consumer_id) {
@@ -2824,31 +2854,7 @@ impl Coordinator<'_> {
         result: Result<Option<StoredHistory>, String>,
     ) {
         if self.warming.remove(&(series.clone(), generation)) {
-            if let Ok(Some(stored)) = result
-                && !stored.bars.is_empty()
-            {
-                if series.provider_id == "rithmic" {
-                    self.retained_history.insert(series.clone(), stored);
-                } else if let Some(warm) = self.warm_series.get(series)
-                    && let (Ok(price_scale), Ok(quantity_scale)) = (
-                        u8::try_from(warm.instrument.price_scale),
-                        u8::try_from(warm.instrument.quantity_scale),
-                    )
-                    && self
-                        .engine
-                        .install_retained_history(
-                            generation,
-                            series,
-                            price_scale,
-                            quantity_scale,
-                            stored.bars,
-                        )
-                        .is_ok()
-                {
-                    self.prewarmed.insert(series.clone());
-                    self.local_loaded.insert((series.clone(), generation));
-                }
-            }
+            self.install_warm_local_history(series, generation, result);
             return;
         }
         let expected = self
@@ -2876,6 +2882,7 @@ impl Coordinator<'_> {
                 } else {
                     PersistenceState::Degraded
                 };
+                let coverage = coinbase_bar_coverage_ranges(series, &stored.bars);
                 if let Ok(publications) = self.engine.install_history(
                     generation,
                     series,
@@ -2883,6 +2890,11 @@ impl Coordinator<'_> {
                     quantity_scale,
                     stored.bars,
                 ) {
+                    if let Ok(ranges) = coverage {
+                        for range in ranges {
+                            record_covered_range(&mut self.history_coverage, series, range);
+                        }
+                    }
                     self.local_loaded.insert((series.clone(), generation));
                     for publication in publications {
                         if let Some(events) = self.events.get_mut(&publication.consumer_id) {
@@ -2923,6 +2935,48 @@ impl Coordinator<'_> {
                 detail,
             );
         }
+    }
+
+    fn install_warm_local_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        result: Result<Option<StoredHistory>, String>,
+    ) {
+        let Ok(Some(stored)) = result else {
+            return;
+        };
+        if stored.bars.is_empty() {
+            return;
+        }
+        if series.provider_id == "rithmic" {
+            self.retained_history.insert(series.clone(), stored);
+            return;
+        }
+        let Some(warm) = self.warm_series.get(series) else {
+            return;
+        };
+        let (Ok(price_scale), Ok(quantity_scale)) = (
+            u8::try_from(warm.instrument.price_scale),
+            u8::try_from(warm.instrument.quantity_scale),
+        ) else {
+            return;
+        };
+        let coverage = coinbase_bar_coverage_ranges(series, &stored.bars);
+        if self
+            .engine
+            .install_retained_history(generation, series, price_scale, quantity_scale, stored.bars)
+            .is_err()
+        {
+            return;
+        }
+        if let Ok(ranges) = coverage {
+            for range in ranges {
+                record_covered_range(&mut self.history_coverage, series, range);
+            }
+        }
+        self.prewarmed.insert(series.clone());
+        self.local_loaded.insert((series.clone(), generation));
     }
 
     fn expire_local_history_reads(&mut self) {
@@ -3110,6 +3164,160 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) -> Result<(), &'static str> {
+        let range = if series.provider_id == "coinbase" {
+            recent_coinbase_history_range(series, self.resource_policy.history_prefetch_bars.max(1))
+                .ok()
+        } else {
+            None
+        };
+        self.enqueue_history_request(series, generation, range, HistoryRequestKind::Initial)
+    }
+
+    fn request_viewport_history(
+        &mut self,
+        consumer_id: ConsumerId,
+        generation: GenerationId,
+        viewport: Viewport,
+    ) -> Result<(), String> {
+        let Some(demand) = self.engine.current_demand(consumer_id) else {
+            return Err("market consumer is unavailable".to_string());
+        };
+        if demand.generation != Some(generation) {
+            return Ok(());
+        }
+        let Some(series) = demand.series.clone() else {
+            return Ok(());
+        };
+        if series.provider_id != "coinbase" {
+            return Ok(());
+        }
+        let provider_generation = self.provider_generation_for_series(&series)?;
+        let range = viewport_coinbase_history_range(&series, viewport)?;
+        let key = (series.clone(), provider_generation);
+        self.viewport_history_ranges.insert(key, range);
+        let result = self.schedule_viewport_history(&series, provider_generation);
+        if result.is_err() {
+            self.viewport_history_ranges
+                .remove(&(series, provider_generation));
+        }
+        result
+    }
+
+    fn arm_initial_viewport_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        let Ok(range) = recent_coinbase_history_range(series, HISTORY_BARS_PER_SERIES) else {
+            self.broadcast_demand_error_for(
+                series,
+                FailureStage::ProviderHistory,
+                "Coinbase initial-history range is unavailable",
+                None,
+            );
+            return;
+        };
+        if let Entry::Vacant(entry) = self
+            .viewport_history_ranges
+            .entry((series.clone(), generation))
+        {
+            entry.insert(range);
+        }
+    }
+
+    fn should_arm_initial_viewport_history(
+        &self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        kind: HistoryRequestKind,
+        snapshot: &HistorySnapshot,
+    ) -> bool {
+        series.provider_id == "coinbase"
+            && kind == HistoryRequestKind::Initial
+            && !self.local_loaded.contains(&(series.clone(), generation))
+            && snapshot.bars.len() >= self.resource_policy.history_prefetch_bars.max(1)
+    }
+
+    fn complete_coinbase_live_handoff(
+        &mut self,
+        series: &BarSeriesKey,
+        bars: &[MarketBar],
+    ) -> bool {
+        let Some(live) = self.live.get_mut(series) else {
+            return true;
+        };
+        let connected = live.connected;
+        let buffered = std::mem::take(&mut live.buffered);
+        live.aggregator.reset();
+        if live.aggregator.seed_canonical_history(bars).is_err()
+            || buffered
+                .iter()
+                .any(|trade| live.aggregator.apply_trade(trade).is_err())
+        {
+            self.realtime_interrupted(
+                FailureStage::Handoff,
+                "Coinbase history/live handoff failed",
+            );
+            return false;
+        }
+        live.connected = connected;
+        live.history_ready = true;
+        live.dirty = live.aggregator.in_flight().is_some();
+        live.published = bars
+            .last()
+            .map(|bar| PublishedTailState::Covering(bar.source_sequence));
+        true
+    }
+
+    fn schedule_viewport_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> Result<(), String> {
+        let key = (series.clone(), generation);
+        if !self.engine.has_subscription(series) {
+            self.viewport_history_ranges.remove(&key);
+            return Ok(());
+        }
+        if self.history_inflight.contains_key(&key) {
+            return Ok(());
+        }
+        let Some(requested) = self.viewport_history_ranges.get(&key).copied() else {
+            return Ok(());
+        };
+        let coverage = CoverageSnapshot::try_new(
+            self.history_coverage
+                .get(series)
+                .cloned()
+                .unwrap_or_default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let plan = coverage
+            .plan(requested)
+            .map_err(|error| error.to_string())?;
+        let Some(missing) = plan.repair_ranges().first().copied() else {
+            self.viewport_history_ranges.remove(&key);
+            return Ok(());
+        };
+        self.enqueue_history_request(
+            series,
+            generation,
+            Some(missing),
+            HistoryRequestKind::ViewportBackfill,
+        )
+        .map_err(str::to_string)
+    }
+
+    fn enqueue_history_request(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        kind: HistoryRequestKind,
+    ) -> Result<(), &'static str> {
         if self
             .engine
             .verify_provider_request(&series.provider_id, ProviderRequest::HistoricalBars)
@@ -3118,7 +3326,7 @@ impl Coordinator<'_> {
             return Err("provider does not support historical bars");
         }
         let key = (series.clone(), generation);
-        if self.history_inflight.contains(&key) {
+        if self.history_inflight.contains_key(&key) {
             return Ok(());
         }
         let instrument = if series.provider_id == "rithmic" {
@@ -3134,6 +3342,8 @@ impl Coordinator<'_> {
             provider_generation: generation,
             instrument,
             maximum_bars: self.resource_policy.history_prefetch_bars.max(1),
+            range,
+            kind,
             stop: Arc::clone(&stop),
         };
         let history = if series.provider_id == "rithmic" {
@@ -3143,8 +3353,17 @@ impl Coordinator<'_> {
         };
         match try_enqueue_history(history, request) {
             Ok(()) => {
-                self.history_inflight.insert(key.clone());
+                self.history_inflight.insert(key.clone(), range);
                 self.history_cancellations.insert(key, stop);
+                if kind == HistoryRequestKind::ViewportBackfill {
+                    if let Some(live) = self.live.get_mut(series) {
+                        live.history_ready = false;
+                    }
+                    self.broadcast_series_recovery_for(
+                        series,
+                        "Loading missing visible Coinbase history",
+                    );
+                }
                 Ok(())
             }
             Err(error) => Err(error),
@@ -3191,6 +3410,8 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        kind: HistoryRequestKind,
         result: Result<HistorySnapshot, String>,
     ) {
         let key = (series.clone(), generation);
@@ -3202,50 +3423,141 @@ impl Coordinator<'_> {
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
         if current != Some(generation) {
+            let pending_viewport = self.viewport_history_ranges.remove(&key);
             if series.provider_id == "coinbase"
                 && let Some(current) = current
                 && self.live.contains_key(series)
             {
+                if let Some(range) = pending_viewport {
+                    self.viewport_history_ranges
+                        .insert((series.clone(), current), range);
+                }
                 let _ = self.enqueue_history(series, current);
             }
             return;
         }
         let Ok(snapshot) = result else {
             if !cancelled {
-                self.history_failed(series, generation);
+                if kind == HistoryRequestKind::ViewportBackfill {
+                    self.viewport_backfill_failed(
+                        series,
+                        generation,
+                        range,
+                        "Visible history backfill is unavailable; retained data remains usable",
+                    );
+                } else {
+                    self.history_failed(series, generation);
+                }
             }
             return;
         };
-        let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot) else {
+        let arm_initial_viewport =
+            self.should_arm_initial_viewport_history(series, generation, kind, &snapshot);
+        let viewport_backfill = kind == HistoryRequestKind::ViewportBackfill;
+        let Some(snapshot) =
+            self.prepare_history_repair(series, generation, snapshot, viewport_backfill)
+        else {
+            if viewport_backfill {
+                self.viewport_backfill_failed(
+                    series,
+                    generation,
+                    range,
+                    "Visible history could not be merged; retained data remains usable",
+                );
+            }
             return;
         };
         let Some(bars) = self.install_completed_history(series, generation, snapshot) else {
+            if viewport_backfill {
+                self.viewport_backfill_failed(
+                    series,
+                    generation,
+                    range,
+                    "Visible history could not be installed; retained data remains usable",
+                );
+            }
             return;
         };
-        if let Some(live) = self.live.get_mut(series) {
-            let connected = live.connected;
-            let buffered = std::mem::take(&mut live.buffered);
-            live.aggregator.reset();
-            if live.aggregator.seed_canonical_history(&bars).is_err()
-                || buffered
-                    .iter()
-                    .any(|trade| live.aggregator.apply_trade(trade).is_err())
-            {
-                self.realtime_interrupted(
-                    FailureStage::Handoff,
-                    "Coinbase history/live handoff failed",
-                );
-                return;
-            }
-            live.connected = connected;
-            live.history_ready = true;
-            live.dirty = live.aggregator.in_flight().is_some();
-            live.published = bars
-                .last()
-                .map(|bar| PublishedTailState::Covering(bar.source_sequence));
+        if !self.complete_coinbase_live_handoff(series, &bars) {
+            return;
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
+        if let Err(error) = self.record_coinbase_history_coverage(series, &bars) {
+            self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
+        }
+        if arm_initial_viewport {
+            self.arm_initial_viewport_history(series, generation);
+        }
+        if let Err(error) = self.schedule_viewport_history(series, generation) {
+            self.viewport_history_ranges
+                .remove(&(series.clone(), generation));
+            self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
+        }
+    }
+
+    fn record_coinbase_history_coverage(
+        &mut self,
+        series: &BarSeriesKey,
+        bars: &[MarketBar],
+    ) -> Result<(), String> {
+        for range in coinbase_bar_coverage_ranges(series, bars)? {
+            record_covered_range(&mut self.history_coverage, series, range);
+        }
+        Ok(())
+    }
+
+    fn viewport_backfill_failed(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        failed_range: Option<HistoryRange>,
+        detail: &'static str,
+    ) {
+        let key = (series.clone(), generation);
+        if self.viewport_history_ranges.get(&key).copied() == failed_range {
+            self.viewport_history_ranges.remove(&key);
+        }
+        self.resume_live_after_viewport_failure(series);
+        if self.viewport_history_ranges.contains_key(&key) {
+            if let Err(error) = self.schedule_viewport_history(series, generation) {
+                self.viewport_history_ranges.remove(&key);
+                self.broadcast_demand_error_for(
+                    series,
+                    FailureStage::ProviderHistory,
+                    &error,
+                    None,
+                );
+            }
+            return;
+        }
+        self.broadcast_series_resolution_for(
+            series,
+            SeriesLoadState::Partial,
+            PersistenceState::Durable,
+            Some(detail),
+        );
+    }
+
+    fn resume_live_after_viewport_failure(&mut self, series: &BarSeriesKey) {
+        let failed = self.live.get_mut(series).is_some_and(|live| {
+            let buffered = std::mem::take(&mut live.buffered);
+            if buffered
+                .iter()
+                .any(|trade| live.aggregator.apply_trade(trade).is_err())
+            {
+                return true;
+            }
+            live.history_ready = true;
+            live.dirty = live.aggregator.in_flight().is_some();
+            false
+        });
+        if failed {
+            self.realtime_interrupted(
+                FailureStage::Handoff,
+                "Coinbase visible-history recovery could not resume the live handoff",
+            );
+        }
     }
 
     fn install_completed_history(
@@ -3325,7 +3637,21 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         mut snapshot: HistorySnapshot,
+        viewport_backfill: bool,
     ) -> Option<HistorySnapshot> {
+        if viewport_backfill {
+            let Some(current) = self.engine.series_snapshot(series) else {
+                return Some(snapshot);
+            };
+            let Ok(bars) = merge_viewport_history(&current, snapshot.bars, HISTORY_BARS_PER_SERIES)
+            else {
+                return None;
+            };
+            snapshot.bars = bars;
+            self.local_loaded.remove(&(series.clone(), generation));
+            self.engine.invalidate_series(series);
+            return Some(snapshot);
+        }
         if !self.local_loaded.contains(&(series.clone(), generation)) {
             return Some(snapshot);
         }
@@ -3810,7 +4136,7 @@ impl Coordinator<'_> {
         for series in missing {
             if !self
                 .history_inflight
-                .contains(&(series.clone(), generation))
+                .contains_key(&(series.clone(), generation))
             {
                 let _ = self.enqueue_history(&series, generation);
             }
@@ -3916,7 +4242,7 @@ impl Coordinator<'_> {
         self.broadcast_series_recovery_for(series, detail);
         if !self
             .history_inflight
-            .contains(&(series.clone(), generation))
+            .contains_key(&(series.clone(), generation))
         {
             let _ = self.enqueue_history(series, generation);
         }
@@ -4498,7 +4824,39 @@ impl Coordinator<'_> {
         });
     }
 
+    fn prune_history_tracking(&mut self) {
+        let unused_coverage = self
+            .history_coverage
+            .keys()
+            .filter(|series| {
+                !self.engine.has_subscription(series)
+                    && self.engine.series_snapshot(series).is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for series in unused_coverage {
+            self.history_coverage.remove(&series);
+        }
+        let obsolete_viewports = self
+            .viewport_history_ranges
+            .keys()
+            .filter(|(series, generation)| {
+                !self.engine.has_subscription(series)
+                    || self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        != Some(*generation)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in obsolete_viewports {
+            self.viewport_history_ranges.remove(&key);
+        }
+    }
+
     fn release_unused_live_market_data(&mut self) {
+        self.prune_history_tracking();
         if self.resource_mode == ResourceMode::MarketsLive {
             return;
         }
@@ -5076,6 +5434,173 @@ fn reconcile_history_repair(
     Ok(retained)
 }
 
+fn recent_coinbase_history_range(
+    series: &BarSeriesKey,
+    maximum_bars: usize,
+) -> Result<HistoryRange, String> {
+    let interval_nanos = coinbase_interval_nanos(series)?;
+    let now = current_unix_nanos()?;
+    let end_unix_nanos = align_down(now, interval_nanos);
+    let span = i64::try_from(maximum_bars)
+        .ok()
+        .and_then(|bars| bars.checked_mul(interval_nanos))
+        .ok_or_else(|| "Coinbase recent-history span overflowed".to_string())?;
+    Ok(HistoryRange {
+        start_unix_nanos: end_unix_nanos.saturating_sub(span).max(0),
+        end_unix_nanos,
+    })
+}
+
+fn viewport_coinbase_history_range(
+    series: &BarSeriesKey,
+    viewport: Viewport,
+) -> Result<HistoryRange, String> {
+    let interval_nanos = coinbase_interval_nanos(series)?;
+    let now_end = align_down(current_unix_nanos()?, interval_nanos);
+    let visible_start = align_down(viewport.start_unix_nanos.max(0), interval_nanos);
+    let visible_end = align_up(viewport.end_unix_nanos.max(0), interval_nanos).min(now_end);
+    if visible_start >= visible_end {
+        return recent_coinbase_history_range(series, VIEWPORT_LIVE_TAIL_RESERVE);
+    }
+    let visible_span = visible_end.saturating_sub(visible_start);
+    let maximum_span = i64::try_from(VIEWPORT_BACKFILL_BARS)
+        .ok()
+        .and_then(|bars| bars.checked_mul(interval_nanos))
+        .ok_or_else(|| "Coinbase viewport-history span overflowed".to_string())?;
+    let prefetched_start = visible_start.saturating_sub(visible_span);
+    let bounded_start = prefetched_start.max(visible_end.saturating_sub(maximum_span));
+    Ok(HistoryRange {
+        start_unix_nanos: align_down(bounded_start.max(0), interval_nanos),
+        end_unix_nanos: visible_end,
+    })
+}
+
+fn coinbase_interval_nanos(series: &BarSeriesKey) -> Result<i64, String> {
+    i64::from(coinbase_series_profile(series)?.interval_seconds)
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| "Coinbase interval overflowed".to_string())
+}
+
+fn current_unix_nanos() -> Result<i64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .ok_or_else(|| "system clock is unavailable".to_string())
+}
+
+const fn align_down(value: i64, interval: i64) -> i64 {
+    value - value.rem_euclid(interval)
+}
+
+fn align_up(value: i64, interval: i64) -> i64 {
+    let remainder = value.rem_euclid(interval);
+    if remainder == 0 {
+        value
+    } else {
+        value.saturating_add(interval - remainder)
+    }
+}
+
+fn coinbase_bar_coverage_ranges(
+    series: &BarSeriesKey,
+    bars: &[MarketBar],
+) -> Result<Vec<HistoryRange>, String> {
+    if series.provider_id != "coinbase" || bars.is_empty() {
+        return Ok(Vec::new());
+    }
+    let interval = coinbase_interval_nanos(series)?;
+    let mut ranges = Vec::new();
+    let mut start = bars[0].exchange_timestamp_unix_nanos;
+    let mut previous = start;
+    for bar in &bars[1..] {
+        let timestamp = bar.exchange_timestamp_unix_nanos;
+        if timestamp <= previous {
+            return Err("Coinbase history timestamps are not strictly increasing".to_string());
+        }
+        if previous.checked_add(interval) != Some(timestamp) {
+            ranges.push(HistoryRange {
+                start_unix_nanos: start,
+                end_unix_nanos: previous
+                    .checked_add(interval)
+                    .ok_or_else(|| "Coinbase history coverage overflowed".to_string())?,
+            });
+            start = timestamp;
+        }
+        previous = timestamp;
+    }
+    ranges.push(HistoryRange {
+        start_unix_nanos: start,
+        end_unix_nanos: previous
+            .checked_add(interval)
+            .ok_or_else(|| "Coinbase history coverage overflowed".to_string())?,
+    });
+    Ok(ranges)
+}
+
+fn record_covered_range(
+    coverage: &mut BTreeMap<BarSeriesKey, Vec<HistoryRange>>,
+    series: &BarSeriesKey,
+    range: HistoryRange,
+) {
+    let ranges = coverage.entry(series.clone()).or_default();
+    ranges.push(range);
+    ranges.sort_unstable();
+    let mut merged: Vec<HistoryRange> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        if let Some(previous) = merged.last_mut()
+            && range.start_unix_nanos <= previous.end_unix_nanos
+        {
+            previous.end_unix_nanos = previous.end_unix_nanos.max(range.end_unix_nanos);
+        } else {
+            merged.push(range);
+        }
+    }
+    *ranges = merged;
+}
+
+fn merge_viewport_history(
+    current: &SeriesSnapshot,
+    mut backfill: Vec<MarketBar>,
+    maximum_bars: usize,
+) -> Result<Vec<MarketBar>, String> {
+    if maximum_bars <= VIEWPORT_LIVE_TAIL_RESERVE || current.bars.is_empty() || backfill.is_empty()
+    {
+        return Err("visible history backfill is empty or unbounded".to_string());
+    }
+    backfill.sort_by_key(|bar| bar.exchange_timestamp_unix_nanos);
+    backfill.dedup_by_key(|bar| bar.exchange_timestamp_unix_nanos);
+    let backfill_limit = maximum_bars.saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE);
+    if backfill.len() > backfill_limit {
+        backfill.drain(..backfill.len() - backfill_limit);
+    }
+    let mut merged = BTreeMap::new();
+    for bar in backfill {
+        merged.insert(bar.exchange_timestamp_unix_nanos, bar);
+    }
+    for bar in current.bars.iter() {
+        merged.insert(bar.exchange_timestamp_unix_nanos, *bar);
+    }
+    let mut bars = merged.into_values().collect::<Vec<_>>();
+    if bars.len() > maximum_bars {
+        bars.drain(..bars.len() - maximum_bars);
+    }
+    for (index, bar) in bars.iter_mut().enumerate() {
+        bar.source_sequence = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| "visible history sequence overflowed".to_string())?;
+        bar.validate().map_err(|error| error.to_string())?;
+    }
+    if bars.windows(2).any(|pair| {
+        pair[0].source_sequence.checked_add(1) != Some(pair[1].source_sequence)
+            || pair[0].exchange_timestamp_unix_nanos >= pair[1].exchange_timestamp_unix_nanos
+    }) {
+        return Err("visible history backfill is not canonical".to_string());
+    }
+    Ok(bars)
+}
+
 fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggregator, String> {
     CoinbaseBarAggregatorConfig::try_new_interval(
         profile.product_id,
@@ -5391,8 +5916,10 @@ mod tests {
                     started_at: Instant::now(),
                 }],
             )]),
-            history_inflight: BTreeSet::new(),
+            history_inflight: BTreeMap::new(),
             history_cancellations: BTreeMap::new(),
+            history_coverage: BTreeMap::new(),
+            viewport_history_ranges: BTreeMap::new(),
             local_history_deadlines: BTreeMap::new(),
             local_loaded: BTreeSet::new(),
             warming: BTreeSet::new(),
@@ -5735,6 +6262,8 @@ mod tests {
         coordinator.history_completed(
             series,
             generation,
+            None,
+            HistoryRequestKind::Initial,
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 0,
@@ -6692,6 +7221,255 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn viewport_demand_enqueues_one_bounded_missing_history_range() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = GenerationId(id(1).expect("generation"));
+        let series = internal_series(&btc()).expect("series");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(consumer_id, generation, &series)
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let interval = 60_000_000_000_i64;
+        let end = align_down(current_unix_nanos().expect("clock"), interval)
+            .saturating_sub(100 * interval);
+        let viewport =
+            Viewport::try_new(end.saturating_sub(200 * interval), end).expect("viewport");
+
+        coordinator
+            .request_viewport_history(consumer_id, generation, viewport)
+            .expect("viewport demand applies");
+
+        let request = history_rx.try_recv().expect("missing range is queued");
+        let range = request.range.expect("Coinbase range is explicit");
+        assert_eq!(request.kind, HistoryRequestKind::ViewportBackfill);
+        assert!(range.start_unix_nanos <= viewport.start_unix_nanos);
+        assert!(range.end_unix_nanos >= viewport.end_unix_nanos);
+        assert!(
+            range.end_unix_nanos - range.start_unix_nanos
+                <= i64::try_from(VIEWPORT_BACKFILL_BARS).expect("bound fits") * interval
+        );
+        assert!(history_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn initial_coinbase_request_with_explicit_range_arms_bounded_viewport_repair() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = GenerationId(id(1).expect("generation"));
+        let series = internal_series(&btc()).expect("series");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(consumer_id, generation, &series)
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let provider_generation = coordinator
+            .provider_generation_for_series(&series)
+            .expect("provider generation");
+        let interval = 60_000_000_000_i64;
+        let end_minute = current_unix_nanos().expect("clock") / interval;
+        let initial_range = recent_coinbase_history_range(
+            &series,
+            coordinator.resource_policy.history_prefetch_bars.max(1),
+        )
+        .expect("initial range");
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            Some(initial_range),
+            HistoryRequestKind::Initial,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: sequential_history(1, 350, end_minute - 350),
+                handoff_boundary_unix_nanos: Some(end_minute * interval),
+            }),
+        );
+
+        let request = history_rx
+            .try_recv()
+            .expect("initial viewport repair queues");
+        let range = request.range.expect("initial repair range is explicit");
+        assert_eq!(request.kind, HistoryRequestKind::ViewportBackfill);
+        assert!(
+            range.end_unix_nanos - range.start_unix_nanos
+                <= i64::try_from(HISTORY_BARS_PER_SERIES).expect("history bound fits") * interval
+        );
+        assert!(request.maximum_bars <= 350);
+    }
+
+    #[test]
+    fn newer_viewport_rearms_after_an_older_backfill_fails() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = GenerationId(id(1).expect("generation"));
+        let series = internal_series(&btc()).expect("series");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(consumer_id, generation, &series)
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let provider_generation = coordinator
+            .provider_generation_for_series(&series)
+            .expect("provider generation");
+        let interval = 60_000_000_000_i64;
+        let end = align_down(current_unix_nanos().expect("clock"), interval);
+        let older =
+            Viewport::try_new(end - 800 * interval, end - 700 * interval).expect("older viewport");
+        let newest = Viewport::try_new(end - 1_600 * interval, end - 1_500 * interval)
+            .expect("newest viewport");
+
+        coordinator
+            .request_viewport_history(consumer_id, generation, older)
+            .expect("older viewport queues");
+        let first = history_rx.try_recv().expect("older request");
+        coordinator
+            .request_viewport_history(consumer_id, generation, newest)
+            .expect("newer viewport is retained");
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            first.range,
+            HistoryRequestKind::ViewportBackfill,
+            Err("fixture failure".to_string()),
+        );
+
+        let replacement = history_rx.try_recv().expect("newer viewport rearms");
+        assert_eq!(replacement.kind, HistoryRequestKind::ViewportBackfill);
+        assert_ne!(replacement.range, first.range);
+        assert!(
+            replacement
+                .range
+                .is_some_and(|range| range.start_unix_nanos <= newest.start_unix_nanos)
+        );
+    }
+
+    #[test]
+    fn viewport_history_merge_retains_visible_backfill_and_latest_live_tail() {
+        let series = internal_series(&btc()).expect("series");
+        let backfill = sequential_history(1, VIEWPORT_BACKFILL_BARS + 100, 1);
+        let current = SeriesSnapshot {
+            series,
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            forming: true,
+            bars: sequential_history(1, 1_000, 10_000).into(),
+        };
+
+        let merged =
+            merge_viewport_history(&current, backfill, HISTORY_BARS_PER_SERIES).expect("merge");
+
+        assert_eq!(merged.len(), HISTORY_BARS_PER_SERIES);
+        assert_eq!(merged[0].exchange_timestamp_seconds, 589 * 60);
+        assert_eq!(
+            merged.last().map(|bar| bar.exchange_timestamp_seconds),
+            Some(10_999 * 60)
+        );
+        assert_eq!(merged[0].source_sequence, 1);
+        assert_eq!(
+            merged.last().map(|bar| bar.source_sequence),
+            Some(u64::try_from(HISTORY_BARS_PER_SERIES).expect("bound fits"))
+        );
+    }
+
+    #[test]
+    fn coinbase_coverage_keeps_interior_missing_bars_repairable() {
+        let series = internal_series(&btc()).expect("series");
+        let mut bars = sequential_history(1, 5, 1);
+        bars.remove(2);
+
+        let ranges = coinbase_bar_coverage_ranges(&series, &bars).expect("coverage");
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].start_unix_nanos, 60 * 1_000_000_000);
+        assert_eq!(ranges[0].end_unix_nanos, 3 * 60 * 1_000_000_000);
+        assert_eq!(ranges[1].start_unix_nanos, 4 * 60 * 1_000_000_000);
+        assert_eq!(ranges[1].end_unix_nanos, 6 * 60 * 1_000_000_000);
+        let coverage = CoverageSnapshot::try_new(ranges, Vec::new(), Vec::new(), Vec::new())
+            .expect("snapshot");
+        let requested = HistoryRange {
+            start_unix_nanos: 60 * 1_000_000_000,
+            end_unix_nanos: 6 * 60 * 1_000_000_000,
+        };
+        assert_eq!(
+            coverage
+                .plan(requested)
+                .expect("repair plan")
+                .repair_ranges(),
+            &[HistoryRange {
+                start_unix_nanos: 3 * 60 * 1_000_000_000,
+                end_unix_nanos: 4 * 60 * 1_000_000_000,
+            }]
+        );
+    }
+
     fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {
         trade_for("BTC-USD", minute, price, provider_sequence)
     }
@@ -7404,6 +8182,8 @@ mod tests {
         coordinator.history_completed(
             &series,
             generation,
+            None,
+            HistoryRequestKind::Initial,
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 8,
@@ -7443,6 +8223,7 @@ mod tests {
         let realtime_stop = Arc::new(AtomicBool::new(true));
         let mut engine = configured_engine().expect("engine configures");
         let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let series = internal_series(&btc()).expect("series");
         engine
             .register_consumer(
                 ConsumerIdentity {
@@ -7457,10 +8238,9 @@ mod tests {
             .set_series_demand(
                 consumer_id,
                 GenerationId(id(1).expect("generation")),
-                &internal_series(&btc()).expect("series"),
+                &series,
             )
             .expect("demand installs");
-        let series = internal_series(&btc()).expect("series");
         let generation = ProviderGeneration(NonZeroU64::MIN);
         let mut coordinator = retained_history_coordinator(
             engine,
@@ -7485,21 +8265,18 @@ mod tests {
             })),
         );
         assert!(matches!(
-            coordinator.events[&consumer_id].series_state,
-            Some(envelope::Payload::SeriesState(ref state))
-                if state.state == SeriesLoadState::Partial as i32
-                    && state.persistence == PersistenceState::Durable as i32
-        ));
-        assert!(matches!(
             coordinator.events[&consumer_id].snapshot,
             Some(envelope::Payload::SeriesSnapshot(ref snapshot))
                 if snapshot.bars[0].close == 99
         ));
-        assert!(
-            history_rx.try_recv().is_ok(),
-            "provider repair is queued after local publication"
+        assert!(history_rx.try_recv().is_ok());
+        coordinator.history_completed(
+            &series,
+            generation,
+            None,
+            HistoryRequestKind::Initial,
+            Err("provider unavailable".to_string()),
         );
-        coordinator.history_completed(&series, generation, Err("provider unavailable".to_string()));
         assert!(matches!(
             coordinator.events[&consumer_id].series_state,
             Some(envelope::Payload::SeriesState(ref state))
@@ -7510,6 +8287,8 @@ mod tests {
         coordinator.history_completed(
             &series,
             generation,
+            None,
+            HistoryRequestKind::Initial,
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 8,
@@ -7585,6 +8364,8 @@ mod tests {
         coordinator.history_completed(
             &series,
             generation,
+            None,
+            HistoryRequestKind::Initial,
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 8,
@@ -7598,15 +8379,15 @@ mod tests {
         else {
             panic!("covering repair publishes a snapshot");
         };
-        assert_eq!(snapshot.bars.len(), 350);
-        assert_eq!(snapshot.bars[0].source_sequence, 2);
-        assert_eq!(snapshot.bars[0].exchange_timestamp_seconds, 120);
-        assert_eq!(snapshot.bars[349].source_sequence, 351);
-        assert_eq!(snapshot.bars[349].exchange_timestamp_seconds, 21_060);
+        assert_eq!(snapshot.bars.len(), 351);
+        assert_eq!(snapshot.bars[0].source_sequence, 1);
+        assert_eq!(snapshot.bars[0].exchange_timestamp_seconds, 60);
+        assert_eq!(snapshot.bars[350].source_sequence, 351);
+        assert_eq!(snapshot.bars[350].exchange_timestamp_seconds, 21_060);
         assert!(matches!(
             storage_rx.try_recv(),
             Ok(StorageRequest::Persist(_, _, ref bars, false, _))
-                if bars.first().is_some_and(|bar| bar.source_sequence == 2)
+                if bars.first().is_some_and(|bar| bar.source_sequence == 1)
                     && bars.last().is_some_and(|bar| bar.source_sequence == 351)
         ));
     }
@@ -7693,6 +8474,8 @@ mod tests {
         coordinator.history_completed(
             &series,
             generation,
+            None,
+            HistoryRequestKind::Initial,
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 0,
@@ -8309,6 +9092,8 @@ mod tests {
                 provider_generation: ProviderGeneration(id(1).expect("provider generation")),
                 instrument: None,
                 maximum_bars: HISTORY_BARS_PER_SERIES,
+                range: None,
+                kind: HistoryRequestKind::Initial,
                 stop: Arc::new(AtomicBool::new(false)),
             })
             .expect("fill history queue");
@@ -8322,6 +9107,8 @@ mod tests {
                     provider_generation: ProviderGeneration(id(1).expect("provider generation")),
                     instrument: None,
                     maximum_bars: HISTORY_BARS_PER_SERIES,
+                    range: None,
+                    kind: HistoryRequestKind::Initial,
                     stop: Arc::new(AtomicBool::new(false)),
                 },
             ),

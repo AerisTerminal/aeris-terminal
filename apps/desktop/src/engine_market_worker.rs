@@ -29,7 +29,7 @@ use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 
 use crate::engine_supervisor::EngineSupervisor;
-use crate::resident_market_worker::{
+use axiusflow_desktop::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
     MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
     MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
@@ -39,7 +39,7 @@ const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 32;
-const MODEL_CAPACITY: usize = 350;
+const MODEL_CAPACITY: usize = 4_096;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -443,14 +443,11 @@ fn run_attached_workers(
             }
         }
         for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
-            let endpoint = &mut record.endpoint;
-            process_pending_resource_class(client, endpoint);
-            match endpoint.commands.try_recv() {
+            process_pending_resource_class(client, &mut record.endpoint);
+            match record.endpoint.commands.try_recv() {
                 Ok(command) => {
-                    if let Err(error) =
-                        process_command(client, &record.product, record.interval, endpoint, command)
-                    {
-                        let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                    if let Err(error) = process_command(client, record, command) {
+                        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                             state: ChartState::Error,
                             message: error,
                         });
@@ -458,7 +455,7 @@ fn run_attached_workers(
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    retire_endpoint(client, endpoint);
+                    retire_endpoint(client, &mut record.endpoint);
                     continue;
                 }
             }
@@ -575,11 +572,15 @@ fn initialize_endpoint(
 
 fn process_command(
     client: &mut EngineSupervisor,
-    product: &InstallProviderInstrument,
-    interval: ChartInterval,
-    endpoint: &mut WorkerEndpoint,
+    record: &mut EndpointRecord,
     command: MarketWorkerCommand,
 ) -> Result<(), String> {
+    let EndpointRecord {
+        product,
+        interval,
+        endpoint,
+        ..
+    } = record;
     match command {
         MarketWorkerCommand::CoinbaseSelect(request) => {
             let series = match series_key(&request.product, request.interval) {
@@ -604,10 +605,12 @@ fn process_command(
             endpoint.model = empty_model();
             endpoint.publication = None;
             endpoint.active_generation = request.sequence;
+            product.clone_from(&request.product);
+            *interval = request.interval;
             client.set_series_demand(endpoint.consumer_id, request.sequence, series)
         }
         MarketWorkerCommand::Recovery(command) => {
-            send_recovery(client, product, interval, endpoint, command)
+            send_recovery(client, product, *interval, endpoint, command)
         }
         MarketWorkerCommand::ChartViewport(viewport) => {
             if viewport.selection_generation > 0 {
@@ -732,6 +735,11 @@ fn apply_polled_event(
                 .map_err(|_| "engine returned an invalid realtime state".to_string())?
             {
                 SeriesLoadState::Live => {
+                    if publication.is_none() {
+                        return Err(
+                            "engine marked history live without a covering snapshot".to_string()
+                        );
+                    }
                     messages
                         .send(MarketWorkerMessage::State {
                             state: ChartState::Ready,
@@ -743,10 +751,13 @@ fn apply_polled_event(
                 SeriesLoadState::Failed => Err(state
                     .detail
                     .unwrap_or_else(|| "Coinbase realtime failed".to_string())),
-                SeriesLoadState::Empty
+                SeriesLoadState::Ready if publication.is_none() => {
+                    Err("engine marked history ready without a covering snapshot".to_string())
+                }
+                SeriesLoadState::Ready
+                | SeriesLoadState::Empty
                 | SeriesLoadState::Resolving
                 | SeriesLoadState::Partial
-                | SeriesLoadState::Ready
                 | SeriesLoadState::Superseded => Ok(PolledEventOutcome::Applied),
             }
         }
@@ -1214,7 +1225,7 @@ fn random_identity() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_engine_protocol::MarketBar as IpcMarketBar;
+    use axiusflow_engine_protocol::{MarketBar as IpcMarketBar, SeriesState};
 
     #[test]
     fn workspace_creation_allocates_one_consumer_per_tab_without_identity_wraparound() {
@@ -1411,6 +1422,32 @@ mod tests {
         assert_eq!(
             publication.map(MarketPublicationGeneration::sequence_range),
             Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn live_state_without_covering_snapshot_is_rejected() {
+        let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut model = empty_model();
+        let mut publication = None;
+
+        let result = apply_polled_event(
+            envelope::Payload::SeriesState(SeriesState {
+                consumer_id: 1,
+                generation: 7,
+                state: SeriesLoadState::Live as i32,
+                ..SeriesState::default()
+            }),
+            1,
+            7,
+            &mut model,
+            &mut publication,
+            &sender,
+        );
+
+        assert_eq!(
+            result,
+            Err("engine marked history live without a covering snapshot".to_string())
         );
     }
 

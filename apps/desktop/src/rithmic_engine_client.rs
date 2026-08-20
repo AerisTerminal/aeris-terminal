@@ -1,11 +1,11 @@
 use crate::{
-    resident_market_worker::{
-        EngineSeriesRequest, MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage,
-        MarketWorkerSender, MarketWorkerStartup, ProviderCatalogCommand, ProviderCatalogEvent,
-        market_worker_channel,
-    },
     rithmic_engine_history::{RithmicHistoryTask, history_message, validate_engine_instrument},
     rithmic_history::{RithmicSeries, RithmicSeriesRequest},
+};
+use axiusflow_desktop::market_worker::{
+    EngineSeriesRequest, MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage,
+    MarketWorkerSender, MarketWorkerStartup, ProviderCatalogCommand, ProviderCatalogEvent,
+    market_worker_channel,
 };
 use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
