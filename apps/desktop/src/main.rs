@@ -2477,11 +2477,10 @@ impl WorkspaceSurface {
         }
     }
 
-    fn remove_selected_drawing(&mut self, cx: &mut Context<Self>) {
+    fn remove_selected_chart_object(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                if chart.remove_selected_drawing() {
-                    chart.cancel_drawing();
+                if chart.remove_selected_chart_object() {
                     chart_cx.notify();
                 }
             });
@@ -2802,7 +2801,7 @@ struct DrawingToolbarState {
     availability: DrawingToolbarAvailability,
     active_tool: ChartDrawingTool,
     drawing_count: usize,
-    has_selection: bool,
+    selection: DrawingToolbarSelection,
     selected_locked: bool,
     all_locked: bool,
 }
@@ -2814,13 +2813,28 @@ enum DrawingToolbarAvailability {
     Available,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DrawingToolbarSelection {
+    #[default]
+    None,
+    Drawing,
+    Series,
+}
+
 impl DrawingToolbarState {
     fn from_chart(chart: &NucleusChartView) -> Self {
+        let selection = if chart.selected_drawing_id().is_some() {
+            DrawingToolbarSelection::Drawing
+        } else if chart.has_deletable_selection() {
+            DrawingToolbarSelection::Series
+        } else {
+            DrawingToolbarSelection::None
+        };
         Self {
             availability: DrawingToolbarAvailability::Available,
             active_tool: chart.drawing_tool(),
             drawing_count: chart.drawing_count(),
-            has_selection: chart.selected_drawing_id().is_some(),
+            selection,
             selected_locked: chart.selected_drawing_locked(),
             all_locked: chart.drawings_lock_summary().all_locked,
         }
@@ -2976,12 +2990,12 @@ fn drawing_toolbar_actions(
         .child(drawing_action_control(
             DrawingActionSpec::new(
                 "drawing_delete_selected",
-                "Delete selected drawing",
+                "Delete selected chart object",
                 HugeIcon::DeleteIcon02,
                 24.0,
                 false,
-                state.has_selection,
-                WorkspaceSurface::remove_selected_drawing,
+                state.selection != DrawingToolbarSelection::None,
+                WorkspaceSurface::remove_selected_chart_object,
             ),
             app.clone(),
             theme,
@@ -2993,7 +3007,7 @@ fn drawing_toolbar_actions(
                 HugeIcon::Lock,
                 20.0,
                 state.selected_locked,
-                state.has_selection,
+                state.selection == DrawingToolbarSelection::Drawing,
                 WorkspaceSurface::toggle_selected_drawing_lock,
             ),
             app.clone(),
@@ -3901,6 +3915,7 @@ fn indicator_dialog_content(
             div()
                 .id(("indicator_dialog_row", index))
                 .min_h(px(52.0))
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap_2()
@@ -4166,15 +4181,21 @@ fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTh
     chrome_menu_search_header(input, &theme.colors).into_any_element()
 }
 
+const CHROME_MENU_WIDTH: f32 = 720.0;
+const CHROME_MENU_HEIGHT: f32 = chart_chrome::CHART_CHROME_HEIGHT + 480.0 + 40.0;
+
 fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
-        .w(px(720.0))
+        .v_flex()
+        .w(px(CHROME_MENU_WIDTH))
+        .h(px(CHROME_MENU_HEIGHT))
+        .overflow_hidden()
         .bg(gpui_color(colors.background))
         .text_color(gpui_color(colors.muted_foreground))
 }
 
 fn chrome_menu_scroll_body() -> Div {
-    div().v_flex().gap_1().p_2().max_h(px(480.0))
+    div().v_flex().flex_1().min_h_0().gap_1().p_2()
 }
 
 fn chrome_menu_footer(colors: &axiusflow_design_system::ThemeColors) -> Div {

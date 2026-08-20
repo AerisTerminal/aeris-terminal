@@ -601,6 +601,41 @@ impl NucleusChartView {
         removed
     }
 
+    /// Returns whether the current chart-object selection can be deleted by product chrome.
+    #[must_use]
+    pub fn has_deletable_selection(&self) -> bool {
+        self.engine.selected_drawing().is_some()
+            || self
+                .engine
+                .selected_series()
+                .is_some_and(|series| series != 0)
+    }
+
+    /// Removes the selected drawing or native Nucleus indicator/volume series.
+    ///
+    /// The price series is product-owned and cannot be deleted. Volume is hidden rather than
+    /// tombstoned so selecting it again from the indicator catalog can reuse its live data.
+    pub fn remove_selected_chart_object(&mut self) -> bool {
+        if self.remove_selected_drawing() {
+            self.cancel_drawing();
+            return true;
+        }
+        let Some(series) = self.engine.selected_series() else {
+            return false;
+        };
+        if series == 0 {
+            return false;
+        }
+        if series == self.volume_series {
+            self.engine.set_series_visible(series, false);
+            self.engine.set_selected_series(None);
+        } else if !self.engine.remove_series(series) {
+            return false;
+        }
+        self.invalidate_series_frame();
+        true
+    }
+
     /// Removes every committed drawing.
     pub fn clear_drawings(&mut self) {
         self.cancel_drawing_gesture();
@@ -892,14 +927,30 @@ impl NucleusChartView {
             self.engine.set_separator_hover(separator_hover);
             self.invalidate_series_frame();
         }
+        let drawing_cursor = (self.drawing_tool == ChartDrawingTool::Cursor
+            && self.drag.is_none()
+            && separator.is_none())
+        .then(|| self.engine.hit_test_drawing(pane_x, y))
+        .flatten()
+        .map(|hit| hit.cursor);
+        let hovered_series = (self.drawing_tool == ChartDrawingTool::Cursor
+            && self.drag.is_none()
+            && separator.is_none()
+            && drawing_cursor.is_none())
+        .then(|| self.engine.hit_test_series(pane_x, y))
+        .flatten();
+        if self.engine.hovered_series() != hovered_series {
+            self.engine.set_hovered_series(hovered_series);
+            self.invalidate_series_frame();
+        }
         self.cursor_style = if active_separator || separator.is_some() {
             CursorStyle::ResizeRow
         } else if self.engine.drawing_drag_active() {
             CursorStyle::ClosedHand
         } else if self.drawing_tool != ChartDrawingTool::Cursor {
             CursorStyle::Crosshair
-        } else if let Some(hit) = self.engine.hit_test_drawing(pane_x, y) {
-            match hit.cursor {
+        } else if let Some(cursor) = drawing_cursor {
+            match cursor {
                 "pointer" => CursorStyle::PointingHand,
                 "move" => CursorStyle::OpenHand,
                 "ns-resize" => CursorStyle::ResizeUpDown,
@@ -908,6 +959,8 @@ impl NucleusChartView {
                 "nesw-resize" => CursorStyle::ResizeUpLeftDownRight,
                 _ => CursorStyle::Crosshair,
             }
+        } else if hovered_series.is_some() {
+            CursorStyle::PointingHand
         } else {
             match self.drag {
                 Some(ChartDrag::Pane) => CursorStyle::ClosedHand,
@@ -919,6 +972,20 @@ impl NucleusChartView {
                 None => CursorStyle::Crosshair,
             }
         };
+    }
+
+    fn select_series_at(&mut self, pane_x: f64, y: f64) -> bool {
+        let selected = self.engine.hit_test_series(pane_x, y);
+        let previous_series = self.engine.selected_series();
+        let previous_drawing = self.engine.selected_drawing();
+        self.engine.set_selected_series(selected);
+        if selected.is_some() {
+            self.engine.set_selected_drawing(None);
+        }
+        if previous_series != selected || (selected.is_some() && previous_drawing.is_some()) {
+            self.invalidate_series_frame();
+        }
+        selected.is_some()
     }
 
     fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize) {
@@ -1047,6 +1114,7 @@ impl NucleusChartView {
         self.engine.brush_create_cancel();
         self.engine.crosshair = None;
         self.engine.set_separator_hover(None);
+        self.engine.set_hovered_series(None);
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }
@@ -1091,7 +1159,7 @@ impl NucleusChartView {
             "home" => self.reset_view(),
             "end" => self.scroll_to_latest(),
             "delete" | "backspace" => {
-                if !self.remove_selected_drawing() {
+                if !self.remove_selected_chart_object() {
                     return false;
                 }
             }
@@ -1115,6 +1183,11 @@ impl NucleusChartView {
         if self.separator_at(y).is_some() {
             self.begin_drag(pane_x, y, event.click_count);
         } else if self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
+            self.engine.set_selected_series(None);
+            self.update_cursor(pane_x, y);
+            self.update_crosshair(pane_x, y);
+        } else if self.drawing_tool == ChartDrawingTool::Cursor && self.select_series_at(pane_x, y)
+        {
             self.update_cursor(pane_x, y);
             self.update_crosshair(pane_x, y);
         } else {
@@ -1310,6 +1383,21 @@ mod tests {
             .iter()
             .find(|series| series.id == id && !series.removed)
             .expect("live series identity resolves")
+    }
+
+    fn visible_series_point(chart: &NucleusChartView, id: u32) -> (f64, f64) {
+        chart
+            .engine
+            .series_data(id)
+            .into_iter()
+            .rev()
+            .find_map(|point| {
+                let x = chart.engine.time_to_coordinate(point.time.to_f64()?)?;
+                let y = chart.engine.series_price_to_coordinate(id, point.close)?;
+                (x >= 0.0 && x <= chart.engine.pane_w && y >= 0.0 && y <= chart.engine.pane_h)
+                    .then_some((x, y))
+            })
+            .expect("series has a visible point")
     }
 
     #[test]
@@ -1693,6 +1781,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn native_indicator_hover_selection_and_delete_reach_nucleus() {
+        let mut chart = interactive_chart();
+        let indicator = chart
+            .add_indicator(ChartIndicator::Sma)
+            .expect("SMA is created")[0];
+        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        let (x, y) = visible_series_point(&chart, indicator);
+        assert_eq!(chart.engine.hit_test_series(x, y), Some(indicator));
+
+        chart.update_cursor(x, y);
+        assert_eq!(chart.engine.hovered_series(), Some(indicator));
+        assert_eq!(chart.cursor_style, CursorStyle::PointingHand);
+        assert!(chart.select_series_at(x, y));
+        assert_eq!(chart.engine.selected_series(), Some(indicator));
+        assert!(chart.has_deletable_selection());
+
+        assert!(chart.remove_selected_chart_object());
+        assert!(chart.engine.indicator_info(indicator).is_none());
+        assert!(
+            chart
+                .engine
+                .series_entries()
+                .iter()
+                .all(|series| series.id != indicator || series.removed)
+        );
+    }
+
+    #[test]
+    fn grouped_indicator_delete_removes_every_native_output() {
+        let mut chart = interactive_chart();
+        let outputs = chart
+            .add_indicator(ChartIndicator::Macd)
+            .expect("MACD is created");
+        chart.engine.set_selected_series(Some(outputs[1]));
+
+        assert!(chart.remove_selected_chart_object());
+        for output in outputs {
+            assert!(
+                chart
+                    .engine
+                    .series_entries()
+                    .iter()
+                    .all(|series| series.id != output || series.removed)
+            );
+        }
+    }
+
+    #[test]
+    fn product_series_are_protected_and_volume_remains_reusable() {
+        let mut chart = interactive_chart();
+        chart.engine.set_selected_series(Some(0));
+        assert!(!chart.has_deletable_selection());
+        assert!(!chart.remove_selected_chart_object());
+        assert!(series_entry(&chart, 0).visible);
+
+        let volume = chart
+            .add_indicator(ChartIndicator::Volume)
+            .expect("volume is shown")[0];
+        chart.engine.set_selected_series(Some(volume));
+        assert!(chart.has_deletable_selection());
+        assert!(chart.remove_selected_chart_object());
+        assert!(!series_entry(&chart, volume).visible);
+        assert_eq!(
+            chart
+                .add_indicator(ChartIndicator::Volume)
+                .expect("volume can be shown again"),
+            vec![volume]
+        );
+        assert!(series_entry(&chart, volume).visible);
     }
 
     #[test]
