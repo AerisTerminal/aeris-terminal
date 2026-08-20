@@ -1,0 +1,378 @@
+use std::{rc::Rc, sync::Arc};
+
+use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
+use gpui::{
+    AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
+    Interactivity, IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
+    StyleRefinement, Styled, Window, div, prelude::*, px, rgb,
+};
+
+use super::{icon::Icon, loader::Loader, tooltip::TooltipSpec};
+
+type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+#[derive(Clone, Copy)]
+struct ControlFlags(u8);
+
+impl ControlFlags {
+    const SELECTED: u8 = 1 << 0;
+    const DISABLED: u8 = 1 << 1;
+    const LOADING: u8 = 1 << 2;
+    const COMPACT: u8 = 1 << 3;
+    const TAB_STOP: u8 = 1 << 4;
+
+    const fn new() -> Self {
+        Self(Self::TAB_STOP)
+    }
+
+    const fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    fn set(&mut self, flag: u8, enabled: bool) {
+        if enabled {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ControlPolicy {
+    disabled: bool,
+    loading: bool,
+    has_activation: bool,
+}
+
+impl ControlPolicy {
+    const fn accepts_input(self) -> bool {
+        !self.disabled && !self.loading && self.has_activation
+    }
+}
+
+/// A narrow Axiusflow-owned push/toggle control built directly on GPUI's
+/// click, focus, accessibility, and styling primitives.
+///
+/// GPUI owns press/release pairing and keyboard click synthesis. This control
+/// deliberately registers one click listener and no parallel mouse-down or
+/// key-down activation path.
+#[derive(IntoElement)]
+pub(crate) struct Control {
+    id: ElementId,
+    base: Stateful<Div>,
+    style: StyleRefinement,
+    icon: Option<Icon>,
+    label: Option<SharedString>,
+    caret: Option<Icon>,
+    loading_icon: Option<Icon>,
+    children: Vec<AnyElement>,
+    theme: Option<AxiusflowTheme>,
+    tooltip: Option<TooltipSpec>,
+    activation: Option<Activation>,
+    focus_handle: Option<FocusHandle>,
+    aria_label: Option<SharedString>,
+    flags: ControlFlags,
+    tab_index: isize,
+    content_size: Option<Pixels>,
+}
+
+/// Compatibility name for the control used throughout the desktop shell.
+pub(crate) type Button = Control;
+
+impl Control {
+    pub(crate) fn new(id: impl Into<ElementId>) -> Self {
+        let id = id.into();
+        Self {
+            base: div().id(id.clone()),
+            id,
+            style: StyleRefinement::default(),
+            icon: None,
+            label: None,
+            caret: None,
+            loading_icon: None,
+            children: Vec::new(),
+            theme: None,
+            tooltip: None,
+            activation: None,
+            focus_handle: None,
+            aria_label: None,
+            flags: ControlFlags::new(),
+            tab_index: 0,
+            content_size: None,
+        }
+    }
+
+    pub(crate) fn theme(mut self, theme: &AxiusflowTheme) -> Self {
+        self.theme = Some(*theme);
+        self
+    }
+
+    pub(crate) fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub(crate) fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub(crate) fn caret(mut self, caret: Icon) -> Self {
+        self.caret = Some(caret);
+        self
+    }
+
+    pub(crate) fn loading_icon(mut self, icon: Icon) -> Self {
+        self.loading_icon = Some(icon);
+        self
+    }
+
+    pub(crate) fn selected(mut self, selected: bool) -> Self {
+        self.flags.set(ControlFlags::SELECTED, selected);
+        self
+    }
+
+    pub(crate) fn disabled(mut self, disabled: bool) -> Self {
+        self.flags.set(ControlFlags::DISABLED, disabled);
+        self
+    }
+
+    pub(crate) fn loading(mut self, loading: bool) -> Self {
+        self.flags.set(ControlFlags::LOADING, loading);
+        self
+    }
+
+    pub(crate) fn compact(mut self) -> Self {
+        self.flags.set(ControlFlags::COMPACT, true);
+        self
+    }
+
+    pub(crate) fn with_size(mut self, size: Pixels) -> Self {
+        self.content_size = Some(size);
+        self
+    }
+
+    pub(crate) fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
+    }
+
+    pub(crate) fn tab_index(mut self, tab_index: isize) -> Self {
+        self.tab_index = tab_index;
+        self
+    }
+
+    pub(crate) fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.flags.set(ControlFlags::TAB_STOP, tab_stop);
+        self
+    }
+
+    pub(crate) fn tooltip(mut self, tooltip: TooltipSpec) -> Self {
+        self.tooltip = Some(tooltip);
+        self
+    }
+
+    pub(crate) fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.activation = Some(Rc::new(handler));
+        self
+    }
+
+    fn policy(&self) -> ControlPolicy {
+        ControlPolicy {
+            disabled: self.flags.contains(ControlFlags::DISABLED),
+            loading: self.flags.contains(ControlFlags::LOADING),
+            has_activation: self.activation.is_some(),
+        }
+    }
+
+    fn loader_id(&self) -> ElementId {
+        ElementId::NamedChild(Arc::new(self.id.clone()), "loader".into())
+    }
+
+    fn resolved_focus_handle(&self, window: &mut Window, cx: &mut App) -> FocusHandle {
+        self.focus_handle.clone().unwrap_or_else(|| {
+            window
+                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone()
+        })
+    }
+
+    fn leading_element(&mut self, loader_id: ElementId, icon_size: Pixels) -> Option<AnyElement> {
+        if self.flags.contains(ControlFlags::LOADING) {
+            self.loading_icon
+                .take()
+                .or_else(|| self.icon.take())
+                .map(|icon| {
+                    Loader::new(loader_id, icon)
+                        .with_size(icon_size)
+                        .into_any_element()
+                })
+        } else {
+            self.icon
+                .take()
+                .map(|icon| icon.with_size(icon_size).into_any_element())
+        }
+    }
+}
+
+impl Styled for Control {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl ParentElement for Control {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl InteractiveElement for Control {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.base.interactivity()
+    }
+}
+
+impl RenderOnce for Control {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let policy = self.policy();
+        let loader_id = self.loader_id();
+        let focus_handle = self.resolved_focus_handle(window, cx);
+        let focus_handle = focus_handle.tab_index(self.tab_index).tab_stop(
+            self.flags.contains(ControlFlags::TAB_STOP)
+                && !self.flags.contains(ControlFlags::DISABLED),
+        );
+        let focus_color = self.theme.map_or_else(
+            || window.text_style().color,
+            |theme| theme_color(theme.colors.ring),
+        );
+        let hover_color = self.theme.map(|theme| theme_color(theme.colors.accent));
+        let selected_color = self.theme.map(|theme| theme_color(theme.colors.accent));
+        let disabled_color = self
+            .theme
+            .map(|theme| theme_color(theme.colors.disabled_foreground));
+        let icon_size = self.content_size.unwrap_or(px(16.0));
+        let leading = self.leading_element(loader_id, icon_size);
+        let aria_label = self.aria_label.or_else(|| self.label.clone());
+        let has_text = self.label.is_some() || !self.children.is_empty();
+        let padding = if self.flags.contains(ControlFlags::COMPACT) {
+            px(4.0)
+        } else {
+            px(8.0)
+        };
+        let tooltip = self.tooltip;
+        let activation = self.activation;
+        let base = self.base;
+        let caller_style = self.style;
+
+        let mut control = base
+            .occlude()
+            .role(Role::Button)
+            .when_some(aria_label, StatefulInteractiveElement::aria_label)
+            .aria_selected(self.flags.contains(ControlFlags::SELECTED))
+            .track_focus(&focus_handle)
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .rounded(px(4.0))
+            .when(has_text, |this| this.px(padding))
+            .when(!has_text, |this| this.size(icon_size / 0.75))
+            .when(policy.accepts_input(), gpui::Styled::cursor_pointer)
+            .when(!policy.accepts_input(), gpui::Styled::cursor_default)
+            .when_some(
+                hover_color.filter(|_| policy.accepts_input()),
+                |this, color| this.hover(move |style| style.bg(color)),
+            )
+            .when_some(
+                selected_color.filter(|_| self.flags.contains(ControlFlags::SELECTED)),
+                gpui::Styled::bg,
+            )
+            .when(self.flags.contains(ControlFlags::LOADING), |this| {
+                this.opacity(0.8)
+            })
+            .when(self.flags.contains(ControlFlags::DISABLED), |this| {
+                this.opacity(0.55)
+                    .when_some(disabled_color, gpui::Styled::text_color)
+            })
+            .focus_visible(move |style| style.border_2().border_color(focus_color))
+            .when_some(
+                activation.filter(|_| policy.accepts_input()),
+                |this, handler| this.on_click(move |event, window, cx| handler(event, window, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .children(leading)
+                    .children(self.label)
+                    .children(self.children)
+                    .children(self.caret.map(|caret| {
+                        caret
+                            .with_size((icon_size * 0.75).max(px(10.0)))
+                            .into_any_element()
+                    })),
+            );
+        control.style().refine(&caller_style);
+
+        if let Some(tooltip) = tooltip {
+            let delay = tooltip.delay();
+            control
+                .tooltip(tooltip.builder())
+                .tooltip_show_delay(delay)
+                .into_any_element()
+        } else {
+            control.into_any_element()
+        }
+    }
+}
+
+fn theme_color(color: ThemeColor) -> Hsla {
+    let mut resolved: Hsla = rgb(color.rgb_u32()).into();
+    resolved.a = color.alpha();
+    resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControlPolicy;
+
+    #[test]
+    fn activation_requires_one_enabled_handler() {
+        assert!(
+            ControlPolicy {
+                disabled: false,
+                loading: false,
+                has_activation: true,
+            }
+            .accepts_input()
+        );
+        for policy in [
+            ControlPolicy {
+                disabled: true,
+                loading: false,
+                has_activation: true,
+            },
+            ControlPolicy {
+                disabled: false,
+                loading: true,
+                has_activation: true,
+            },
+            ControlPolicy {
+                disabled: false,
+                loading: false,
+                has_activation: false,
+            },
+        ] {
+            assert!(!policy.accepts_input());
+        }
+    }
+}

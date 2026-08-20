@@ -5,6 +5,7 @@ mod chart_chrome;
 mod engine_market_worker;
 mod engine_supervisor;
 mod frame_poll_gate;
+mod native_ui;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
 mod resident_market_worker;
@@ -33,23 +34,21 @@ use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity,
-    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode,
-    Render, Role, Stateful, Task, WeakEntity, Window, WindowBounds, WindowControlArea,
-    WindowOptions, actions, div, ease_out_quint, prelude::*, px, relative, rgb, size,
-};
-use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, Icon, IconName, InteractiveElementExt, Root, Selectable,
-    Sizable, StyledExt, TitleBar,
-    button::Button,
-    hover_card::HoverCard,
-    input::{Input, InputEvent, InputState},
-    resizable::{h_resizable, resizable_panel},
-    scroll::ScrollableElement,
-    spinner::Spinner,
-    theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode, ThemeTokens},
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Hsla,
+    KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode, Render, Role,
+    ScrollHandle, Stateful, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowControlArea, WindowOptions, actions, canvas, div, ease_out_quint, point, prelude::*, px,
+    relative, rgb, size,
 };
 use gpui_platform::application;
+use native_ui::{
+    control::Button,
+    icon::Icon,
+    input::{Input, InputEvent, InputState},
+    loader::Loader,
+    scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
+    tooltip::{TooltipSpec, with_tooltip},
+};
 use num_traits::ToPrimitive;
 use resident_market_worker::{
     ChartState, EngineSeriesRequest, MarketDataWorker, MarketPublicationGeneration,
@@ -135,6 +134,7 @@ impl std::future::Future for UiWakeNotified {
 const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
+const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
@@ -143,7 +143,6 @@ const WORKSPACE_TAB_WIDTH: f32 = 132.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
-const TOOLTIP_CLOSE_DELAY: Duration = Duration::ZERO;
 const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const CHROME_OVERLAY_TRANSITION_OFFSET: f32 = 5.0;
 
@@ -694,6 +693,9 @@ struct WorkspaceSurface {
     chart: Option<Entity<NucleusChartView>>,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
+    side_panel_width: f32,
+    side_panel_resize: Option<SidePanelResize>,
+    scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
     theme: AxiusflowTheme,
@@ -736,6 +738,13 @@ struct WorkspaceSurface {
     resource_class: ConsumerResourceClass,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
+}
+
+#[derive(Default)]
+struct WorkspaceScrollHandles {
+    drawing: ScrollHandle,
+    indicator: ScrollHandle,
+    instrument: ScrollHandle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -975,6 +984,7 @@ struct HeaderState {
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
+    instrument_scroll: ScrollHandle,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -986,6 +996,25 @@ struct HeaderPendingState {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SidePanel {
     Dom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SidePanelResize {
+    pointer_x: f32,
+    width: f32,
+}
+
+fn resized_side_panel_width(resize: SidePanelResize, pointer_x: f32) -> f32 {
+    (resize.width + resize.pointer_x - pointer_x)
+        .clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
+}
+
+fn claim_once(claimed: &mut bool) -> bool {
+    if *claimed {
+        return false;
+    }
+    *claimed = true;
+    true
 }
 
 impl SidePanel {
@@ -1218,6 +1247,14 @@ fn terminal_startup_state(
     }
 }
 
+fn initial_symbol_message(provider: TerminalProvider) -> String {
+    match provider {
+        TerminalProvider::Coinbase => "Loading Coinbase public spot catalog",
+        TerminalProvider::Rithmic => "Search for an entitled Rithmic Test symbol",
+    }
+    .to_string()
+}
+
 impl WorkspaceSurface {
     fn new(
         cx: &mut Context<Self>,
@@ -1258,6 +1295,9 @@ impl WorkspaceSurface {
             chart,
             dom,
             side_panel: None,
+            side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
+            side_panel_resize: None,
+            scrolls: WorkspaceScrollHandles::default(),
             chart_state,
             chart_state_message,
             theme,
@@ -1271,11 +1311,7 @@ impl WorkspaceSurface {
             connection_state,
             connection_message,
             symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
-            symbol_message: if provider == TerminalProvider::Coinbase {
-                "Loading Coinbase public spot catalog".to_string()
-            } else {
-                "Search for an entitled Rithmic Test symbol".to_string()
-            },
+            symbol_message: initial_symbol_message(provider),
             symbol_selection_pending: false,
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
@@ -2447,9 +2483,41 @@ impl WorkspaceSurface {
     }
 
     fn close_side_panel(&mut self, cx: &mut Context<Self>) {
+        self.side_panel_resize = None;
         if self.side_panel.take().is_some() {
             cx.notify();
         }
+    }
+
+    fn begin_side_panel_resize(&mut self, pointer_x: f32) {
+        self.side_panel_resize = Some(SidePanelResize {
+            pointer_x,
+            width: self.side_panel_width,
+        });
+    }
+
+    fn update_side_panel_resize(
+        &mut self,
+        pointer_x: f32,
+        left_pressed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(resize) = self.side_panel_resize else {
+            return;
+        };
+        if !left_pressed {
+            self.side_panel_resize = None;
+            return;
+        }
+        let width = resized_side_panel_width(resize, pointer_x);
+        if (width - self.side_panel_width).abs() > f32::EPSILON {
+            self.side_panel_width = width;
+            cx.notify();
+        }
+    }
+
+    fn end_side_panel_resize(&mut self) {
+        self.side_panel_resize = None;
     }
 
     fn reset_chart_view(&mut self, cx: &mut Context<Self>) {
@@ -2585,6 +2653,7 @@ fn chrome_overlay_layer(
                 enabled: true,
                 provider: app_state.provider,
                 keyboard_selection: app_state.chrome_selection,
+                scroll: app_state.scrolls.instrument.clone(),
             },
             theme,
         )
@@ -2594,6 +2663,7 @@ fn chrome_overlay_layer(
             &app_state.indicator_input,
             app_state.indicator_message.as_deref(),
             app_state.chrome_selection,
+            &app_state.scrolls.indicator,
             theme,
             cx,
         )
@@ -2678,11 +2748,12 @@ fn timeframe_overlay_content(
     keyboard_selection: usize,
     pending: bool,
     theme: &AxiusflowTheme,
-) -> impl IntoElement + use<> {
+) -> impl IntoElement {
     let colors = theme.colors;
     div()
         .w(px(192.0))
-        .v_flex()
+        .flex()
+        .flex_col()
         .p_2()
         .gap_1()
         .text_color(gpui_color(colors.muted_foreground))
@@ -2741,6 +2812,7 @@ struct MarketWorkspaceState<'a> {
     chart_has_market_data: bool,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
+    side_panel_width: f32,
     chart_state: ChartState,
     chart_status_detail: String,
     theme: &'a AxiusflowTheme,
@@ -2754,6 +2826,7 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         chart_has_market_data,
         dom,
         side_panel,
+        side_panel_width,
         chart_state,
         chart_status_detail,
         theme,
@@ -2765,27 +2838,57 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         .bg(gpui_color(colors.background))
         .children(notice.map(|notice| chart_notice(notice, theme)));
     let content = if let Some(side_panel) = side_panel {
-        let side_panel_content = resizable_panel()
-            .size(px(SIDE_PANEL_INITIAL_WIDTH))
-            .size_range(px(SIDE_PANEL_MINIMUM_WIDTH)..px(SIDE_PANEL_MAXIMUM_WIDTH))
-            .flex_none()
+        let resize_app = app.clone();
+        let move_app = app.clone();
+        let release_app = app.clone();
+        let side_panel_content = div().w(px(side_panel_width)).flex_none().child(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .bg(gpui_color(colors.background))
+                .child(side_panel_header(side_panel, app, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .children((side_panel == SidePanel::Dom).then_some(dom)),
+                ),
+        );
+        div()
+            .id(("market_workspace", pane_id))
+            .size_full()
+            .flex()
+            .child(chart_surface)
             .child(
                 div()
-                    .size_full()
-                    .v_flex()
-                    .overflow_hidden()
-                    .bg(gpui_color(colors.background))
-                    .child(side_panel_header(side_panel, app, theme))
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .children((side_panel == SidePanel::Dom).then_some(dom)),
-                    ),
-            );
-        h_resizable(("market_workspace", pane_id))
-            .child(resizable_panel().child(chart_surface))
+                    .id(("side_panel_resize", pane_id))
+                    .h_full()
+                    .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
+                    .flex_none()
+                    .cursor_col_resize()
+                    .bg(gpui_color(colors.muted_border))
+                    .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                        resize_app.update(cx, |surface, _| {
+                            surface.begin_side_panel_resize(f32::from(event.position.x));
+                        });
+                        cx.stop_propagation();
+                    }),
+            )
             .child(side_panel_content)
+            .on_mouse_move(move |event, _, cx| {
+                move_app.update(cx, |surface, surface_cx| {
+                    surface.update_side_panel_resize(
+                        f32::from(event.position.x),
+                        event.pressed_button == Some(MouseButton::Left),
+                        surface_cx,
+                    );
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                release_app.update(cx, |surface, _| surface.end_side_panel_resize());
+            })
             .into_any_element()
     } else {
         chart_surface.into_any_element()
@@ -2796,7 +2899,8 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
 fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
     div()
         .relative()
-        .v_flex()
+        .flex()
+        .flex_col()
         .size_full()
         .flex_1()
         .min_h_0()
@@ -2927,6 +3031,7 @@ fn drawing_toolbar(
     terminal: Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
+    scroll: &ScrollHandle,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -2953,6 +3058,7 @@ fn drawing_toolbar(
                     app.select_drawing_tool(spec.tool, app_cx);
                 });
             }),
+            theme,
         )
     });
     div()
@@ -2961,7 +3067,8 @@ fn drawing_toolbar(
         .bottom_0()
         .left_0()
         .w(px(chart_chrome::CHART_CHROME_HEIGHT))
-        .v_flex()
+        .flex()
+        .flex_col()
         .items_center()
         .overflow_hidden()
         .border_r_1()
@@ -2969,15 +3076,25 @@ fn drawing_toolbar(
         .bg(gpui_color(colors.background))
         .child(
             div()
-                .v_flex()
-                .items_center()
-                .gap_1()
-                .py_2()
+                .relative()
                 .size_full()
-                .min_h(px(0.0))
-                .overflow_y_scrollbar()
-                .children(tools)
-                .child(drawing_toolbar_actions(terminal, app, state, theme)),
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_1()
+                        .py_2()
+                        .size_full()
+                        .min_h(px(0.0))
+                        .map(|body| tracked_overflow_y_scrollbar(body, scroll))
+                        .children(tools)
+                        .child(drawing_toolbar_actions(terminal, app, state, theme)),
+                )
+                .child(ThinScrollbar::new(
+                    scroll,
+                    gpui_color(colors.muted_foreground),
+                )),
         )
 }
 
@@ -2988,7 +3105,8 @@ fn drawing_toolbar_actions(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     div()
-        .v_flex()
+        .flex()
+        .flex_col()
         .items_center()
         .gap_1()
         .py_2()
@@ -3062,6 +3180,7 @@ fn drawing_toolbar_actions(
                 true,
                 move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
             ),
+            theme,
         ))
 }
 
@@ -3115,7 +3234,7 @@ fn drawing_action_control(
     let button = button_activation(button, spec.enabled, move |_, cx| {
         app.update(cx, spec.action);
     });
-    chrome_tooltip(spec.id, spec.tooltip, button)
+    chrome_tooltip(spec.id, spec.tooltip, button, theme)
 }
 
 fn drawing_toolbar_expander(
@@ -3150,6 +3269,7 @@ fn drawing_toolbar_expander(
                     terminal.update(cx, TerminalApp::toggle_drawing_toolbar);
                 },
             ),
+            theme,
         ))
 }
 
@@ -3224,6 +3344,7 @@ fn side_panel_header(
                     app.update(cx, WorkspaceSurface::close_side_panel);
                 },
             ),
+            theme,
         ))
 }
 
@@ -3236,7 +3357,8 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
     };
     let loading = notice.label == ChartState::Loading.label();
     let label = div()
-        .v_flex()
+        .flex()
+        .flex_col()
         .gap_1()
         .px_2()
         .py_1()
@@ -3253,7 +3375,11 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
                 .flex()
                 .items_center()
                 .gap_2()
-                .children(loading.then(|| Spinner::new().xsmall().color(gpui_color(tone))))
+                .children(loading.then(|| {
+                    Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
+                        .xsmall()
+                        .color(gpui_color(tone))
+                }))
                 .child(notice.label),
         )
         .children((!loading).then_some(notice.detail).flatten().map(|detail| {
@@ -3514,11 +3640,13 @@ fn workspace_window_drag_region(
                 terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
             });
         })
-        .on_double_click(|_, window, _| {
-            if current_caption_platform() == CaptionPlatform::MacOs {
-                window.titlebar_double_click();
-            } else {
-                window.zoom_window();
+        .on_click(|event, window, _| {
+            if event.click_count() > 1 {
+                if current_caption_platform() == CaptionPlatform::MacOs {
+                    window.titlebar_double_click();
+                } else {
+                    window.zoom_window();
+                }
             }
         })
         .when(
@@ -3602,9 +3730,10 @@ fn workspace_pane_controls(
     let pane_count = state.workspaces[state.active].panes.len();
     let button = |id: &'static str, icon: HugeIcon, tooltip: &'static str| {
         Button::new(id)
+            .theme(theme)
             .icon(header_icon(icon))
-            .tooltip(tooltip)
-            .accessibility_id(id)
+            .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
+            .aria_label(tooltip)
             .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
             .h(px(chart_chrome::CHART_CONTROL_SIZE))
             .w(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -3670,6 +3799,7 @@ fn engine_lifecycle_controls(
     let colors = theme.colors;
     let button = |id: &'static str, label: String| {
         Button::new(id)
+            .theme(theme)
             .label(label)
             .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
             .h(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -3695,7 +3825,7 @@ fn engine_lifecycle_controls(
             mode_terminal.update(cx, TerminalApp::cycle_lifetime_mode);
         },
     );
-    let mode = chrome_tooltip("engine_lifetime_mode", mode_tooltip, mode);
+    let mode = chrome_tooltip("engine_lifetime_mode", mode_tooltip, mode, theme);
     let autostart_terminal = terminal.clone();
     let autostart = button(
         "engine_autostart",
@@ -3713,6 +3843,7 @@ fn engine_lifecycle_controls(
         "engine_autostart",
         "Start the resident engine with this operating-system user session",
         autostart,
+        theme,
     );
     let permission_terminal = terminal.clone();
     let permission = button(
@@ -3731,6 +3862,7 @@ fn engine_lifecycle_controls(
         "markets_live_permission",
         "Explicitly permit selected provider sessions to remain live without a desktop",
         permission,
+        theme,
     );
     div()
         .h_full()
@@ -3739,12 +3871,17 @@ fn engine_lifecycle_controls(
         .items_center()
         .gap_1()
         .px_2()
-        .children([mode, autostart, permission])
+        .children([
+            mode.into_any_element(),
+            autostart.into_any_element(),
+            permission.into_any_element(),
+        ])
 }
 
+#[derive(Clone, Copy)]
 struct CaptionControlSpec {
     id: &'static str,
-    icon: IconName,
+    icon: HugeIcon,
     label: &'static str,
     command: CaptionCommand,
     tab_index: isize,
@@ -3766,7 +3903,6 @@ fn workspace_caption_control(
         close,
     } = spec;
     let colors = theme.colors;
-    let key_terminal = terminal.clone();
     let control = div()
         .id(id)
         .w(px(46.0))
@@ -3776,9 +3912,6 @@ fn workspace_caption_control(
         .items_center()
         .justify_center()
         .text_color(gpui_color(colors.foreground))
-        .role(Role::Button)
-        .aria_label(label)
-        .tab_index(tab_index)
         .hover(move |control| {
             if close {
                 control
@@ -3788,20 +3921,28 @@ fn workspace_caption_control(
                 control.bg(gpui_color(colors.accent))
             }
         })
-        .focus_visible(move |control| control.border_2().border_color(gpui_color(colors.primary)))
-        .on_key_down(move |event, window, cx| {
-            if caption_keyboard_activates(event.keystroke.key.as_str()) {
-                command.execute(&key_terminal, window, cx);
-                cx.stop_propagation();
-            }
-        })
-        .child(Icon::new(icon).small());
+        .child(header_icon(icon).small());
 
     match pointer_owner {
-        CaptionPointerOwner::Native => control.window_control_area(command.window_control_area()),
+        CaptionPointerOwner::Native => control
+            .occlude()
+            .window_control_area(command.window_control_area()),
         CaptionPointerOwner::Application => {
             let pointer_terminal = terminal.clone();
+            let key_terminal = terminal.clone();
             control
+                .role(Role::Button)
+                .aria_label(label)
+                .tab_index(tab_index)
+                .focus_visible(move |control| {
+                    control.border_2().border_color(gpui_color(colors.primary))
+                })
+                .on_key_down(move |event, window, cx| {
+                    if caption_keyboard_activates(event.keystroke.key.as_str()) {
+                        command.execute(&key_terminal, window, cx);
+                        cx.stop_propagation();
+                    }
+                })
                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -3811,7 +3952,7 @@ fn workspace_caption_control(
                     cx.stop_propagation();
                 })
         }
-        CaptionPointerOwner::System => control.tab_stop(false),
+        CaptionPointerOwner::System => control,
     }
 }
 
@@ -3829,7 +3970,7 @@ fn workspace_window_controls(
         terminal,
         CaptionControlSpec {
             id: "workspace_window_minimize",
-            icon: IconName::WindowMinimize,
+            icon: HugeIcon::WindowMinimize,
             label: "Minimize window",
             command: CaptionCommand::Minimize,
             tab_index: 0,
@@ -3843,9 +3984,9 @@ fn workspace_window_controls(
         CaptionControlSpec {
             id: "workspace_window_maximize",
             icon: if window.is_maximized() {
-                IconName::WindowRestore
+                HugeIcon::WindowRestore
             } else {
-                IconName::WindowMaximize
+                HugeIcon::WindowMaximize
             },
             label: if window.is_maximized() {
                 "Restore window"
@@ -3863,7 +4004,7 @@ fn workspace_window_controls(
         terminal,
         CaptionControlSpec {
             id: "workspace_window_close",
-            icon: IconName::WindowClose,
+            icon: HugeIcon::WindowClose,
             label: "Close window",
             command: CaptionCommand::Close,
             tab_index: 2,
@@ -3887,7 +4028,7 @@ fn header_controls(
     terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
-) -> impl IntoElement + use<> {
+) -> impl IntoElement {
     let dom_toggle = side_panel_toggle(
         app.clone(),
         &state.theme,
@@ -3909,6 +4050,7 @@ fn header_controls(
         .child(connection_status_indicator(
             connection_label,
             connection_color(&state.theme),
+            &state.theme,
         ))
         .child(instrument_selector(
             app.clone(),
@@ -3920,6 +4062,7 @@ fn header_controls(
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 provider: state.provider,
                 keyboard_selection: 0,
+                scroll: state.instrument_scroll,
             },
             &state.theme,
         ))
@@ -4007,8 +4150,9 @@ fn instrument_selector(
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
         .icon(header_icon(HugeIcon::ExchangeIcon01))
+        .loading_icon(header_icon(HugeIcon::Loader))
         .label(state.label.clone())
-        .dropdown_caret(true)
+        .caret(header_icon(HugeIcon::ChevronDown))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .border_1()
         .border_color(gpui_color(theme.colors.border))
@@ -4043,10 +4187,15 @@ fn instrument_selector(
                 });
             },
         ),
+        theme,
     )
 }
 
-fn connection_status_indicator(label: String, color: ThemeColor) -> impl IntoElement {
+fn connection_status_indicator(
+    label: String,
+    color: ThemeColor,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
     chrome_tooltip(
         "connection_status",
         label,
@@ -4056,6 +4205,7 @@ fn connection_status_indicator(label: String, color: ThemeColor) -> impl IntoEle
             .flex_none()
             .rounded_full()
             .bg(gpui_color(color)),
+        theme,
     )
 }
 
@@ -4089,6 +4239,7 @@ fn indicator_selector(
                 });
             },
         ),
+        theme,
     )
 }
 
@@ -4097,6 +4248,7 @@ fn indicator_dialog_content(
     input: &Entity<InputState>,
     message: Option<&str>,
     keyboard_selection: usize,
+    scroll: &ScrollHandle,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> impl IntoElement + use<> {
@@ -4145,7 +4297,8 @@ fn indicator_dialog_content(
                 })
                 .child(
                     div()
-                        .v_flex()
+                        .flex()
+                        .flex_col()
                         .gap_0p5()
                         .flex_1()
                         .child(div().text_sm().child(spec.label))
@@ -4193,11 +4346,11 @@ fn indicator_dialog_content(
             status_color,
             &colors,
         ))
-        .child(
-            chrome_menu_scroll_body()
-                .children(rows)
-                .overflow_y_scrollbar(),
-        )
+        .child(scrollable_menu_body(
+            chrome_menu_scroll_body().children(rows),
+            scroll,
+            colors.muted_foreground,
+        ))
         .child(indicator_dialog_footer(&colors))
 }
 
@@ -4286,6 +4439,7 @@ struct InstrumentSelectorState {
     enabled: bool,
     provider: TerminalProvider,
     keyboard_selection: usize,
+    scroll: ScrollHandle,
 }
 
 fn instrument_dialog_content(
@@ -4355,11 +4509,11 @@ fn instrument_dialog_content(
         });
     chrome_menu_surface(&colors)
         .child(header)
-        .child(
-            chrome_menu_scroll_body()
-                .children(rows)
-                .overflow_y_scrollbar(),
-        )
+        .child(scrollable_menu_body(
+            chrome_menu_scroll_body().children(rows),
+            &state.scroll,
+            colors.muted_foreground,
+        ))
         .child(instrument_dialog_footer(&colors, state.provider))
 }
 
@@ -4387,7 +4541,8 @@ const CHROME_MENU_HEIGHT: f32 = chart_chrome::CHART_CHROME_HEIGHT + 480.0 + 40.0
 
 fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
-        .v_flex()
+        .flex()
+        .flex_col()
         .w(px(CHROME_MENU_WIDTH))
         .h(px(CHROME_MENU_HEIGHT))
         .overflow_hidden()
@@ -4396,7 +4551,20 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
 }
 
 fn chrome_menu_scroll_body() -> Div {
-    div().v_flex().flex_1().min_h_0().gap_1().p_2()
+    div().flex().flex_col().flex_1().min_h_0().gap_1().p_2()
+}
+
+fn scrollable_menu_body(
+    body: Div,
+    scroll: &ScrollHandle,
+    color: ThemeColor,
+) -> impl IntoElement + use<> {
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .child(tracked_overflow_y_scrollbar(body, scroll))
+        .child(ThinScrollbar::new(scroll, gpui_color(color)))
 }
 
 fn chrome_menu_footer(colors: &axiusflow_design_system::ThemeColors) -> Div {
@@ -4443,6 +4611,7 @@ fn panel_toggle(
         state.id,
         state.tooltip,
         chrome_button_style(button, theme, state.selected, state.enabled),
+        theme,
     )
 }
 
@@ -4453,6 +4622,7 @@ fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl I
         axiusflow_design_system::ThemeMode::Dark => HugeIcon::MoonIcon02,
     };
     let button = Button::new("theme_toggle")
+        .tab_index(0)
         .icon(header_icon(icon))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .w(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -4464,6 +4634,7 @@ fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl I
         "theme_toggle",
         format!("Switch to {} theme", next.label()),
         chrome_button_style(button, theme, false, true),
+        theme,
     )
 }
 
@@ -4475,25 +4646,14 @@ fn chrome_tooltip(
     id: &'static str,
     label: impl Into<gpui::SharedString>,
     trigger: impl IntoElement + 'static,
-) -> HoverCard {
-    let label = label.into();
-    HoverCard::new((id, usize::MAX))
-        .trigger(trigger)
-        .open_delay(TOOLTIP_OPEN_DELAY)
-        .close_delay(TOOLTIP_CLOSE_DELAY)
-        .appearance(false)
-        .content(move |_, _, cx| {
-            div()
-                .px_2()
-                .py_1()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().popover)
-                .text_xs()
-                .text_color(cx.theme().popover_foreground)
-                .child(label.clone())
-        })
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    with_tooltip(
+        (id, usize::MAX),
+        trigger,
+        &TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY),
+    )
+    .into_any_element()
 }
 
 fn series_selector(
@@ -4507,7 +4667,8 @@ fn series_selector(
 ) -> impl IntoElement {
     let button = Button::new("series_selector")
         .label(label)
-        .dropdown_caret(true)
+        .loading_icon(header_icon(HugeIcon::Loader))
+        .caret(header_icon(HugeIcon::ChevronDown))
         .disabled(!enabled)
         .loading(pending)
         .when(enabled, Button::cursor_pointer)
@@ -4523,21 +4684,25 @@ fn series_selector(
             });
         },
     );
-    let trigger = div()
-        .flex_none()
-        .child(button)
-        .on_prepaint(move |bounds, _, cx| {
-            bounds_app.update(cx, |app, app_cx| {
-                if app.timeframe_trigger_bounds == Some(bounds) {
-                    return;
-                }
-                app.timeframe_trigger_bounds = Some(bounds);
-                if app.chrome_overlay == Some(ChromeOverlay::Timeframe) {
-                    app_cx.notify();
-                }
-            });
-        });
-    chrome_tooltip("series_selector", "Select chart timeframe", trigger)
+    let trigger = div().relative().flex_none().child(button).child(
+        canvas(
+            move |bounds, _, cx| {
+                bounds_app.update(cx, |app, app_cx| {
+                    if app.timeframe_trigger_bounds == Some(bounds) {
+                        return;
+                    }
+                    app.timeframe_trigger_bounds = Some(bounds);
+                    if app.chrome_overlay == Some(ChromeOverlay::Timeframe) {
+                        app_cx.notify();
+                    }
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .inset_0(),
+    );
+    chrome_tooltip("series_selector", "Select chart timeframe", trigger, theme)
 }
 
 fn chrome_button_style(
@@ -4548,6 +4713,7 @@ fn chrome_button_style(
 ) -> Button {
     let colors = theme.colors;
     button
+        .theme(theme)
         .selected(selected)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .border_0()
@@ -4580,20 +4746,12 @@ fn button_activation(
     enabled: bool,
     handler: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Button {
-    let handler = Rc::new(handler);
-    let mouse_handler = handler.clone();
-    button
-        .when(enabled, |button| {
-            button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                mouse_handler(window, cx);
-                cx.stop_propagation();
-            })
+    button.when(enabled, |button| {
+        button.on_click(move |_, window, cx| {
+            handler(window, cx);
+            cx.stop_propagation();
         })
-        .on_click(move |event, window, cx| {
-            if matches!(event, ClickEvent::Keyboard(_)) {
-                handler(window, cx);
-            }
-        })
+    })
 }
 
 type ConnectionColor = fn(&AxiusflowTheme) -> ThemeColor;
@@ -4641,83 +4799,6 @@ fn connection_presentation(
             theme.colors.warning
         }),
         FeedConnectionState::Stopped => ("Stopped".to_string(), |theme| theme.colors.negative),
-    }
-}
-
-fn sync_component_theme(theme: &AxiusflowTheme, window: Option<&mut Window>, cx: &mut App) {
-    let mode = match theme.mode {
-        axiusflow_design_system::ThemeMode::Light => ComponentThemeMode::Light,
-        axiusflow_design_system::ThemeMode::Dark => ComponentThemeMode::Dark,
-    };
-    ComponentTheme::change(mode, None, cx);
-
-    let colors = theme.colors;
-    let component = ComponentTheme::global_mut(cx);
-    component.font_family = "Inter".into();
-    component.radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-    component.radius_lg = component.radius;
-    component.tile_radius = component.radius;
-
-    component.background = gpui_color(colors.background);
-    component.foreground = gpui_color(colors.foreground);
-    component.border = gpui_color(colors.border);
-    component.input = gpui_color(colors.input);
-    component.ring = gpui_color(colors.ring);
-    component.muted = gpui_color(colors.muted);
-    component.muted_foreground = gpui_color(colors.muted_foreground);
-    component.accent = gpui_color(colors.accent);
-    component.accent_foreground = gpui_color(colors.foreground);
-    component.popover = gpui_color(colors.card);
-    component.popover_foreground = gpui_color(colors.card_foreground);
-
-    component.button = gpui_color(colors.background.with_alpha(0.0));
-    component.button_foreground = gpui_color(colors.muted_foreground);
-    component.button_hover = gpui_color(colors.accent);
-    component.button_active = gpui_color(colors.accent);
-    component.primary = gpui_color(colors.primary);
-    component.primary_foreground = gpui_color(colors.primary_foreground);
-    component.primary_hover = gpui_color(colors.primary_hover);
-    component.primary_active = gpui_color(colors.primary_hover);
-    component.button_primary = gpui_color(colors.primary);
-    component.button_primary_foreground = gpui_color(colors.primary_foreground);
-    component.button_primary_hover = gpui_color(colors.primary_hover);
-    component.button_primary_active = gpui_color(colors.primary_hover);
-    component.secondary = gpui_color(colors.muted);
-    component.secondary_foreground = gpui_color(colors.foreground);
-    component.secondary_hover = gpui_color(colors.accent);
-    component.secondary_active = gpui_color(colors.accent);
-    component.button_secondary = gpui_color(colors.muted);
-    component.button_secondary_foreground = gpui_color(colors.foreground);
-    component.button_secondary_hover = gpui_color(colors.accent);
-    component.button_secondary_active = gpui_color(colors.accent);
-
-    component.chart_1 = gpui_color(colors.primary);
-    component.chart_2 = gpui_color(colors.positive);
-    component.chart_3 = gpui_color(colors.negative);
-    component.chart_4 = gpui_color(colors.warning);
-    component.chart_5 = gpui_color(colors.muted_foreground);
-    component.chart_bullish = gpui_color(colors.positive);
-    component.chart_bearish = gpui_color(colors.negative);
-    component.danger = gpui_color(colors.destructive);
-    component.danger_foreground = gpui_color(colors.primary_foreground);
-    component.info = gpui_color(colors.primary);
-    component.success = gpui_color(colors.positive);
-    component.warning = gpui_color(colors.warning);
-
-    component.sidebar = gpui_color(colors.background);
-    component.sidebar_foreground = gpui_color(colors.foreground);
-    component.sidebar_border = gpui_color(colors.border);
-    component.table = gpui_color(colors.card);
-    component.table_head = gpui_color(colors.muted);
-    component.table_row_border = gpui_color(colors.border);
-    component.title_bar = gpui_color(colors.background);
-    component.title_bar_border = gpui_color(colors.border);
-    component.status_bar = gpui_color(colors.card);
-    component.status_bar_border = gpui_color(colors.border);
-    component.tokens = ThemeTokens::from(&component.colors);
-
-    if let Some(window) = window {
-        window.refresh();
     }
 }
 
@@ -4784,7 +4865,13 @@ fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     bounds.origin.y += offset;
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        ..TitleBar::window_options()
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(9.0), px(9.0))),
+        }),
+        app_owns_titlebar_drag: true,
+        ..Default::default()
     }
 }
 
@@ -4942,6 +5029,7 @@ struct TerminalApp {
     workspace_error: Option<String>,
     workspace_drag: Option<WorkspaceDragState>,
     window_move_pending: bool,
+    closing: bool,
 }
 
 fn workspace_switch(active: usize, next: usize, workspace_count: usize) -> Option<(usize, usize)> {
@@ -5245,6 +5333,7 @@ impl TerminalApp {
             workspace_error: None,
             workspace_drag: None,
             window_move_pending: false,
+            closing: false,
         }
     }
 
@@ -5790,7 +5879,7 @@ impl TerminalApp {
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.theme = self.theme.toggled();
-        sync_component_theme(&self.theme, Some(window), cx);
+        window.refresh();
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |workspace, workspace_cx| {
@@ -5862,12 +5951,30 @@ impl TerminalApp {
         }
     }
 
-    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+    fn claim_close(&mut self, cx: &mut impl gpui::AppContext) -> bool {
+        if !claim_once(&mut self.closing) {
+            return false;
+        }
         self.retire_workspaces(cx);
-        window.remove_window();
+        true
+    }
+
+    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.claim_close(cx) {
+            window.remove_window();
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key.as_str() == "tab" {
+            if event.keystroke.modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.workspace_drag.is_some() && event.keystroke.key.as_str() == "escape" {
             cx.stop_active_drag(window);
             self.end_workspace_drag(cx);
@@ -5885,6 +5992,12 @@ impl TerminalApp {
         self.window_active = window_active;
         if !window_active {
             self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
+            for workspace in &self.workspaces {
+                for pane in &workspace.panes {
+                    pane.surface
+                        .update(cx, |surface, _| surface.end_side_panel_resize());
+                }
+            }
             if self.workspace_drag.is_some() {
                 cx.stop_active_drag(window);
                 self.end_workspace_drag(cx);
@@ -6018,6 +6131,7 @@ fn active_header_state(
             .unwrap_or(FeedConnectionState::Disconnected),
         chart_state: workspace.chart_state,
         delayed: false,
+        instrument_scroll: workspace.scrolls.instrument.clone(),
     }
 }
 
@@ -6251,6 +6365,7 @@ fn workspace_pane_element(
         chart_has_market_data,
         dom: surface.dom.clone(),
         side_panel: surface.side_panel,
+        side_panel_width: surface.side_panel_width,
         chart_state: surface.chart_state,
         chart_status_detail: chart_status_detail(
             surface.chart_state,
@@ -6291,7 +6406,9 @@ fn workspace_market_area(
     cx: &App,
 ) -> impl IntoElement + use<> {
     let grid = workspace_pane_grid(terminal, workspace, theme, cx);
-    let drawing_state = active_surface.read(cx).drawing_toolbar_state(cx);
+    let surface = active_surface.read(cx);
+    let drawing_state = surface.drawing_toolbar_state(cx);
+    let drawing_scroll = surface.scrolls.drawing.clone();
     let grid = div()
         .h_full()
         .flex_1()
@@ -6314,6 +6431,7 @@ fn workspace_market_area(
                 terminal.clone(),
                 active_surface,
                 drawing_state,
+                &drawing_scroll,
                 theme,
             ))
         })
@@ -6363,7 +6481,8 @@ impl Render for TerminalApp {
         let fullscreen_focus = self.chrome_focus.clone();
         div()
             .relative()
-            .v_flex()
+            .flex()
+            .flex_col()
             .size_full()
             .track_focus(&self.chrome_focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -6457,6 +6576,7 @@ fn workspace_tab_close_button(
     let key_terminal = terminal.clone();
     div()
         .id(("close_workspace", tab_id))
+        .occlude()
         .size(px(20.0))
         .flex_none()
         .flex()
@@ -6530,6 +6650,7 @@ fn workspace_add_button(
     let key_terminal = terminal.clone();
     div()
         .id("add_workspace")
+        .occlude()
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -6586,6 +6707,7 @@ fn workspace_tab(
     let mouse_focus = workspace.focus.clone();
     div()
         .id(("workspace_tab", tab_id))
+        .occlude()
         .w(px(WORKSPACE_TAB_WIDTH))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .flex_none()
@@ -6729,6 +6851,7 @@ fn workspace_tab_strip(
                 "add_workspace",
                 "Create workspace",
                 workspace_add_button(add_terminal, add_enabled, &theme),
+                &theme,
             )
         }))
         .children(enabled.then(|| {
@@ -6745,6 +6868,7 @@ fn workspace_tab_strip(
                     .size(px(7.0))
                     .rounded_full()
                     .bg(gpui_color(colors.negative)),
+                &theme,
             )
         }))
 }
@@ -6755,7 +6879,7 @@ fn terminal_root(
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<Root> {
+) -> Entity<TerminalApp> {
     let surface = workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx);
     terminal_shell_root(
         TerminalShellInit {
@@ -6797,7 +6921,7 @@ fn terminal_shell_root(
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<Root> {
+) -> Entity<TerminalApp> {
     let terminal_lifecycle = lifecycle.clone();
     let terminal = cx.new(move |cx| {
         TerminalApp::new(
@@ -6812,16 +6936,18 @@ fn terminal_shell_root(
     });
     let closing_terminal = terminal.clone();
     window.on_window_should_close(cx, move |_, cx| {
-        closing_terminal.update(cx, |terminal, cx| terminal.retire_workspaces(cx));
+        closing_terminal.update(cx, |terminal, cx| {
+            terminal.claim_close(cx);
+        });
         true
     });
-    let root = cx.new(|cx| Root::new(terminal.clone(), window, cx));
+    let focus_terminal = terminal.clone();
     window.on_next_frame(move |window, cx| {
-        terminal.update(cx, |terminal, cx| {
+        focus_terminal.update(cx, |terminal, cx| {
             terminal.chrome_focus.focus(window, cx);
         });
     });
-    root
+    terminal
 }
 
 fn workspace_tabs_root(
@@ -6831,7 +6957,7 @@ fn workspace_tabs_root(
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<Root> {
+) -> Entity<TerminalApp> {
     let mut workspaces = Vec::with_capacity(restored.workspace_tabs.len());
     for tab in &restored.workspace_tabs {
         let mut panes = Vec::with_capacity(tab.panes.len());
@@ -7060,7 +7186,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     application()
-        .with_assets(assets::DesktopAssets)
+        .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             cx.text_system()
@@ -7068,7 +7194,6 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                     "../../../crates/ui/design_system/inter_400.ttf"
                 ))])
                 .expect("the bundled Inter Regular font is valid");
-            gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("f11", ToggleFullscreen, None),
                 KeyBinding::new("alt-enter", ToggleFullscreen, None),
@@ -7085,7 +7210,6 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                 KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
                 KeyBinding::new("ctrl-shift-w", ClosePane, None),
             ]);
-            sync_component_theme(&AxiusflowTheme::dark(), None, cx);
             let quit_lifecycle = lifecycle.clone();
             cx.on_app_quit(move |cx| {
                 let quit = quit_lifecycle.begin_quit(cx);
@@ -7146,20 +7270,20 @@ mod tests {
         CaptionPlatform, CaptionPointerOwner, CatalogCommandDomain, ChartNoticePlacement,
         ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
         ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-        RithmicSessionRetirement, SidePanel, TerminalProvider, WORKSPACE_TAB_GAP,
+        RithmicSessionRetirement, SidePanel, SidePanelResize, TerminalProvider, WORKSPACE_TAB_GAP,
         WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
         WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
         caption_pointer_owner, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
-        chrome_control_foreground, chrome_overlay_progress, connection_presentation,
+        chrome_control_foreground, chrome_overlay_progress, claim_once, connection_presentation,
         default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
         fullscreen_escape_command, gpui_color, instrument_selector_label, publication_chart_state,
         reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
-        rithmic_ready_action, series_selector_label, should_apply_rithmic_worker_stop,
-        should_finish_chrome_overlay_close, split_lifetime_mode, timeframe_overlay_left,
-        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
-        wrapped_workspace_index,
+        resized_side_panel_width, rithmic_ready_action, series_selector_label,
+        should_apply_rithmic_worker_stop, should_finish_chrome_overlay_close, split_lifetime_mode,
+        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -7458,6 +7582,24 @@ mod tests {
                 start_move: false,
             }
         );
+    }
+
+    #[test]
+    fn side_panel_resize_clamps_and_reuses_no_stale_pointer_state() {
+        let resize = SidePanelResize {
+            pointer_x: 500.0,
+            width: 320.0,
+        };
+        assert!((resized_side_panel_width(resize, 420.0) - 400.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, -500.0) - 640.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, 1_000.0) - 240.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn window_close_retirement_is_claimed_exactly_once() {
+        let mut closing = false;
+        assert!(claim_once(&mut closing));
+        assert!(!claim_once(&mut closing));
     }
 
     #[test]

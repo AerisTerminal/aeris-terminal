@@ -643,6 +643,32 @@ mod tests {
     }
 
     #[test]
+    fn workspace_uses_only_axiusflow_owned_gpui_controls() {
+        const RETIRED_COMPONENT_IDENTITIES: &[&str] = &[
+            concat!("gpui", "-component"),
+            concat!("gpui", "_component"),
+            concat!("long", "bridge"),
+        ];
+
+        let mut inspected = workspace_manifests();
+        inspected.push(repository_root().join("Cargo.lock"));
+        inspected.extend(production_rust_sources());
+
+        for path in inspected {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let normalized = contents.to_ascii_lowercase();
+            for retired in RETIRED_COMPONENT_IDENTITIES {
+                assert!(
+                    !normalized.contains(retired),
+                    "{} restores retired external GPUI component identity {retired}",
+                    relative_string(&path)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn market_core_manifests_exclude_ipc_and_runtime_dependencies() {
         assert_dependencies_are(
             "crates/application/Cargo.toml",

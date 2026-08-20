@@ -17,6 +17,7 @@ pub enum UiIcon {
     CancelIcon01,
     ChartLineDataIcon02,
     CheckmarkCircleIcon01,
+    ChevronDown,
     CursorIcon01,
     DeleteIcon02,
     ExchangeIcon01,
@@ -29,10 +30,15 @@ pub enum UiIcon {
     SplitStacked,
     SunIcon03,
     Text,
+    WindowClose,
+    WindowMaximize,
+    WindowMinimize,
+    WindowRestore,
+    Loader,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 29] = [
         Self::ActivityIcon01,
         Self::AddIcon01,
         Self::AiEraser,
@@ -44,6 +50,7 @@ impl UiIcon {
         Self::CancelIcon01,
         Self::ChartLineDataIcon02,
         Self::CheckmarkCircleIcon01,
+        Self::ChevronDown,
         Self::CursorIcon01,
         Self::DeleteIcon02,
         Self::ExchangeIcon01,
@@ -56,6 +63,11 @@ impl UiIcon {
         Self::SplitStacked,
         Self::SunIcon03,
         Self::Text,
+        Self::WindowClose,
+        Self::WindowMaximize,
+        Self::WindowMinimize,
+        Self::WindowRestore,
+        Self::Loader,
     ];
 
     #[must_use]
@@ -72,6 +84,7 @@ impl UiIcon {
             Self::CancelIcon01 => "cancel-01.svg",
             Self::ChartLineDataIcon02 => "chart-line-data-02.svg",
             Self::CheckmarkCircleIcon01 => "checkmark-circle-01.svg",
+            Self::ChevronDown => "chevron-down.svg",
             Self::CursorIcon01 => "cursor-01.svg",
             Self::DeleteIcon02 => "delete-02.svg",
             Self::ExchangeIcon01 => "exchange-01.svg",
@@ -84,6 +97,11 @@ impl UiIcon {
             Self::SplitStacked => "split-stacked.svg",
             Self::SunIcon03 => "sun-03.svg",
             Self::Text => "text.svg",
+            Self::WindowClose => "window-close.svg",
+            Self::WindowMaximize => "window-maximize.svg",
+            Self::WindowMinimize => "window-minimize.svg",
+            Self::WindowRestore => "window-restore.svg",
+            Self::Loader => "loader.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -151,29 +169,6 @@ impl AssetSource for AxiusflowAssets {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DesktopAssets;
-
-impl AssetSource for DesktopAssets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path.starts_with(DRAWING_ASSET_PREFIX) || path.starts_with(UI_ASSET_PREFIX) {
-            AxiusflowAssets.load(path)
-        } else {
-            gpui_component_assets::Assets.load(path)
-        }
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut assets = AxiusflowAssets.list(path)?;
-        for asset in gpui_component_assets::Assets.list(path)? {
-            if !assets.contains(&asset) {
-                assets.push(asset);
-            }
-        }
-        Ok(assets)
-    }
-}
-
 fn drawing_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(DRAWING_ASSET_PREFIX)? {
         "trend-line.svg" => include_bytes!("../assets/icons/drawing/trend-line.svg"),
@@ -207,6 +202,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "checkmark-circle-01.svg" => {
             include_bytes!("../assets/icons/ui/checkmark-circle-01.svg")
         }
+        "chevron-down.svg" => include_bytes!("../assets/icons/ui/chevron-down.svg"),
         "cursor-01.svg" => include_bytes!("../assets/icons/ui/cursor-01.svg"),
         "delete-02.svg" => include_bytes!("../assets/icons/ui/delete-02.svg"),
         "exchange-01.svg" => include_bytes!("../assets/icons/ui/exchange-01.svg"),
@@ -219,6 +215,11 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),
         "sun-03.svg" => include_bytes!("../assets/icons/ui/sun-03.svg"),
         "text.svg" => include_bytes!("../assets/icons/ui/text.svg"),
+        "window-close.svg" => include_bytes!("../assets/icons/ui/window-close.svg"),
+        "window-maximize.svg" => include_bytes!("../assets/icons/ui/window-maximize.svg"),
+        "window-minimize.svg" => include_bytes!("../assets/icons/ui/window-minimize.svg"),
+        "window-restore.svg" => include_bytes!("../assets/icons/ui/window-restore.svg"),
+        "loader.svg" => include_bytes!("../assets/icons/ui/loader.svg"),
         _ => return None,
     })
 }
@@ -307,17 +308,5 @@ mod tests {
             assert!(svg.contains("currentColor"));
             assert!(!svg.contains('#'));
         }
-    }
-
-    #[test]
-    fn desktop_source_composes_application_and_component_assets() {
-        let assets = DesktopAssets;
-        assert!(
-            assets
-                .load(DrawingIcon::TrendLine.path().as_ref())
-                .unwrap()
-                .is_some()
-        );
-        assert!(assets.load("icons/window-close.svg").unwrap().is_some());
     }
 }

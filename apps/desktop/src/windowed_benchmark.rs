@@ -25,7 +25,6 @@ use gpui::{
     App, Bounds, Context, Entity, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     size,
 };
-use gpui_component::input::{InputEvent, InputState};
 use gpui_platform::application;
 use serde::Serialize;
 use std::{
@@ -44,6 +43,7 @@ use std::{
     time::Instant,
 };
 
+use crate::native_ui::input::{InputEvent, InputState};
 use crate::readiness_conformance::ProcessMemoryProbe;
 use crate::{
     DesktopLifecycle, DesktopLifetimeMode, WorkspaceSurface, chart_pane_host,
@@ -940,7 +940,7 @@ fn benchmark_root(
     outcome: BenchmarkOutcome,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<gpui_component::Root> {
+) -> Entity<WindowedBenchmarkApp> {
     let BenchmarkSetup {
         memory,
         worker,
@@ -1021,12 +1021,11 @@ fn benchmark_root(
         final_composition_flush_succeeded: false,
     }));
     schedule_frame(driver, outcome, window, cx);
-    cx.new(|cx| gpui_component::Root::new(cx.new(|_| WindowedBenchmarkApp { chart }), window, cx))
+    cx.new(|_| WindowedBenchmarkApp { chart })
 }
 
 fn run_application(setup: BenchmarkSetup, outcome: BenchmarkOutcome) {
     application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
         let bounds = Bounds::centered(None, size(px(1_280.0), px(820.0)), cx);
         cx.open_window(
             WindowOptions {
