@@ -39,8 +39,8 @@ use gpui::{
     WindowOptions, actions, div, ease_out_quint, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, ElementExt, Icon, IconName, Root, Selectable, Sizable, StyledExt,
-    TitleBar,
+    ActiveTheme, Disableable, ElementExt, Icon, IconName, InteractiveElementExt, Root, Selectable,
+    Sizable, StyledExt, TitleBar,
     button::Button,
     hover_card::HoverCard,
     input::{Input, InputEvent, InputState},
@@ -3342,6 +3342,111 @@ fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCom
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptionPlatform {
+    Windows,
+    Linux,
+    MacOs,
+    Other,
+}
+
+const fn current_caption_platform() -> CaptionPlatform {
+    if cfg!(target_os = "windows") {
+        CaptionPlatform::Windows
+    } else if cfg!(target_os = "linux") {
+        CaptionPlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        CaptionPlatform::MacOs
+    } else {
+        CaptionPlatform::Other
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptionPointerOwner {
+    Native,
+    Application,
+    System,
+}
+
+const fn caption_pointer_owner(platform: CaptionPlatform) -> CaptionPointerOwner {
+    match platform {
+        CaptionPlatform::Windows => CaptionPointerOwner::Native,
+        CaptionPlatform::Linux | CaptionPlatform::Other => CaptionPointerOwner::Application,
+        CaptionPlatform::MacOs => CaptionPointerOwner::System,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptionCommand {
+    Minimize,
+    MaximizeOrRestore,
+    Close,
+}
+
+impl CaptionCommand {
+    const fn window_control_area(self) -> WindowControlArea {
+        match self {
+            Self::Minimize => WindowControlArea::Min,
+            Self::MaximizeOrRestore => WindowControlArea::Max,
+            Self::Close => WindowControlArea::Close,
+        }
+    }
+
+    fn execute(self, terminal: &Entity<TerminalApp>, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Minimize => window.minimize_window(),
+            Self::MaximizeOrRestore => window.zoom_window(),
+            Self::Close => {
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_window(&CloseWindow, window, terminal_cx);
+                });
+            }
+        }
+    }
+}
+
+fn caption_keyboard_activates(key: &str) -> bool {
+    matches!(key, "enter" | "space")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowMoveGestureEvent {
+    Press,
+    Move { left_pressed: bool },
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowMoveGestureTransition {
+    pending: bool,
+    start_move: bool,
+}
+
+const fn window_move_gesture_transition(
+    pending: bool,
+    event: WindowMoveGestureEvent,
+) -> WindowMoveGestureTransition {
+    match event {
+        WindowMoveGestureEvent::Press => WindowMoveGestureTransition {
+            pending: true,
+            start_move: false,
+        },
+        WindowMoveGestureEvent::Move { left_pressed: true } if pending => {
+            WindowMoveGestureTransition {
+                pending: false,
+                start_move: true,
+            }
+        }
+        WindowMoveGestureEvent::Move { .. } | WindowMoveGestureEvent::Cancel => {
+            WindowMoveGestureTransition {
+                pending: false,
+                start_move: false,
+            }
+        }
+    }
+}
+
 const fn workspace_title_bar_visible(is_fullscreen: bool) -> bool {
     !is_fullscreen
 }
@@ -3377,6 +3482,57 @@ struct WorkspaceTabBarState<'a> {
     theme: AxiusflowTheme,
 }
 
+fn workspace_window_drag_region(
+    region: Stateful<Div>,
+    terminal: &Entity<TerminalApp>,
+) -> Stateful<Div> {
+    if current_caption_platform() == CaptionPlatform::Windows {
+        return region.window_control_area(WindowControlArea::Drag);
+    }
+
+    let press_terminal = terminal.clone();
+    let move_terminal = terminal.clone();
+    let release_terminal = terminal.clone();
+    region
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            press_terminal.update(cx, |terminal, _| {
+                terminal.handle_window_move_gesture(WindowMoveGestureEvent::Press, window);
+            });
+        })
+        .on_mouse_move(move |event, window, cx| {
+            move_terminal.update(cx, |terminal, _| {
+                terminal.handle_window_move_gesture(
+                    WindowMoveGestureEvent::Move {
+                        left_pressed: event.pressed_button == Some(MouseButton::Left),
+                    },
+                    window,
+                );
+            });
+        })
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            release_terminal.update(cx, |terminal, _| {
+                terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
+            });
+        })
+        .on_double_click(|_, window, _| {
+            if current_caption_platform() == CaptionPlatform::MacOs {
+                window.titlebar_double_click();
+            } else {
+                window.zoom_window();
+            }
+        })
+        .when(
+            current_caption_platform() == CaptionPlatform::Linux,
+            |region| {
+                region.on_mouse_down(MouseButton::Right, |event, window, _| {
+                    if window.window_controls().window_menu {
+                        window.show_window_menu(event.position);
+                    }
+                })
+            },
+        )
+}
+
 fn workspace_title_bar(
     terminal: &Entity<TerminalApp>,
     state: &WorkspaceTabBarState<'_>,
@@ -3384,25 +3540,27 @@ fn workspace_title_bar(
 ) -> impl IntoElement + use<> {
     let tabs = workspace_tab_strip(terminal, state);
     let theme = state.theme;
-    let drag_region = || {
+    let drag_region = workspace_window_drag_region(
         div()
             .id("workspace_window_drag_region")
             .h_full()
             .min_w(px(12.0))
-            .flex_1()
-            .window_control_area(WindowControlArea::Drag)
-            .when(!cfg!(target_os = "windows"), |region| {
-                region
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_move();
-                    })
-                    .on_click(|event, window, _| {
-                        if event.click_count() > 1 {
-                            window.zoom_window();
-                        }
-                    })
-            })
-    };
+            .flex_1(),
+        terminal,
+    );
+    let brand_region = workspace_window_drag_region(
+        div()
+            .id("workspace_window_brand_region")
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .pl_4()
+            .pr_2()
+            .text_sm()
+            .child("Axiusflow"),
+        terminal,
+    );
     div()
         .w_full()
         .h(px(WORKSPACE_TITLE_BAR_HEIGHT))
@@ -3421,21 +3579,10 @@ fn workspace_title_bar(
                 .flex()
                 .items_center()
                 .overflow_x_hidden()
-                .child(
-                    div()
-                        .h_full()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .pl_4()
-                        .pr_2()
-                        .text_sm()
-                        .window_control_area(WindowControlArea::Drag)
-                        .child("Axiusflow"),
-                )
+                .child(brand_region)
                 .child(tabs)
                 .child(workspace_pane_controls(terminal, state, &theme))
-                .child(drag_region()),
+                .child(drag_region),
         )
         .child(engine_lifecycle_controls(
             terminal,
@@ -3595,16 +3742,32 @@ fn engine_lifecycle_controls(
         .children([mode, autostart, permission])
 }
 
-fn workspace_caption_control(
+struct CaptionControlSpec {
     id: &'static str,
     icon: IconName,
     label: &'static str,
-    area: WindowControlArea,
+    command: CaptionCommand,
+    tab_index: isize,
     close: bool,
+}
+
+fn workspace_caption_control(
+    terminal: &Entity<TerminalApp>,
+    spec: CaptionControlSpec,
+    pointer_owner: CaptionPointerOwner,
     theme: &AxiusflowTheme,
 ) -> Stateful<Div> {
+    let CaptionControlSpec {
+        id,
+        icon,
+        label,
+        command,
+        tab_index,
+        close,
+    } = spec;
     let colors = theme.colors;
-    div()
+    let key_terminal = terminal.clone();
+    let control = div()
         .id(id)
         .w(px(46.0))
         .h_full()
@@ -3613,10 +3776,9 @@ fn workspace_caption_control(
         .items_center()
         .justify_center()
         .text_color(gpui_color(colors.foreground))
-        .window_control_area(area)
         .role(Role::Button)
         .aria_label(label)
-        .tab_index(isize::MAX)
+        .tab_index(tab_index)
         .hover(move |control| {
             if close {
                 control
@@ -3627,7 +3789,30 @@ fn workspace_caption_control(
             }
         })
         .focus_visible(move |control| control.border_2().border_color(gpui_color(colors.primary)))
-        .child(Icon::new(icon).small())
+        .on_key_down(move |event, window, cx| {
+            if caption_keyboard_activates(event.keystroke.key.as_str()) {
+                command.execute(&key_terminal, window, cx);
+                cx.stop_propagation();
+            }
+        })
+        .child(Icon::new(icon).small());
+
+    match pointer_owner {
+        CaptionPointerOwner::Native => control.window_control_area(command.window_control_area()),
+        CaptionPointerOwner::Application => {
+            let pointer_terminal = terminal.clone();
+            control
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_click(move |_, window, cx| {
+                    command.execute(&pointer_terminal, window, cx);
+                    cx.stop_propagation();
+                })
+        }
+        CaptionPointerOwner::System => control.tab_stop(false),
+    }
 }
 
 fn workspace_window_controls(
@@ -3635,56 +3820,64 @@ fn workspace_window_controls(
     window: &Window,
     theme: &AxiusflowTheme,
 ) -> Div {
-    if cfg!(target_os = "macos") {
+    let pointer_owner = caption_pointer_owner(current_caption_platform());
+    if pointer_owner == CaptionPointerOwner::System {
         return div().h_full();
     }
     let supported = window.window_controls();
     let minimize = workspace_caption_control(
-        "workspace_window_minimize",
-        IconName::WindowMinimize,
-        "Minimize window",
-        WindowControlArea::Min,
-        false,
+        terminal,
+        CaptionControlSpec {
+            id: "workspace_window_minimize",
+            icon: IconName::WindowMinimize,
+            label: "Minimize window",
+            command: CaptionCommand::Minimize,
+            tab_index: 0,
+            close: false,
+        },
+        pointer_owner,
         theme,
-    )
-    .on_click(|_, window, _| window.minimize_window());
+    );
     let maximize = workspace_caption_control(
-        "workspace_window_maximize",
-        if window.is_maximized() {
-            IconName::WindowRestore
-        } else {
-            IconName::WindowMaximize
+        terminal,
+        CaptionControlSpec {
+            id: "workspace_window_maximize",
+            icon: if window.is_maximized() {
+                IconName::WindowRestore
+            } else {
+                IconName::WindowMaximize
+            },
+            label: if window.is_maximized() {
+                "Restore window"
+            } else {
+                "Maximize window"
+            },
+            command: CaptionCommand::MaximizeOrRestore,
+            tab_index: 1,
+            close: false,
         },
-        if window.is_maximized() {
-            "Restore window"
-        } else {
-            "Maximize window"
-        },
-        WindowControlArea::Max,
-        false,
+        pointer_owner,
         theme,
-    )
-    .on_click(|_, window, _| window.zoom_window());
-    let close_terminal = terminal.clone();
+    );
     let close = workspace_caption_control(
-        "workspace_window_close",
-        IconName::WindowClose,
-        "Close window",
-        WindowControlArea::Close,
-        true,
+        terminal,
+        CaptionControlSpec {
+            id: "workspace_window_close",
+            icon: IconName::WindowClose,
+            label: "Close window",
+            command: CaptionCommand::Close,
+            tab_index: 2,
+            close: true,
+        },
+        pointer_owner,
         theme,
-    )
-    .on_click(move |_, window, cx| {
-        close_terminal.update(cx, |terminal, cx| {
-            terminal.retire_workspaces(cx);
-            window.remove_window();
-        });
-    });
+    );
     div()
         .h_full()
         .flex_none()
         .flex()
         .items_center()
+        .tab_group()
         .children(supported.minimize.then_some(minimize))
         .children(supported.maximize.then_some(maximize))
         .child(close)
@@ -4591,8 +4784,7 @@ fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     bounds.origin.y += offset;
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitleBar::title_bar_options()),
-        ..Default::default()
+        ..TitleBar::window_options()
     }
 }
 
@@ -4749,6 +4941,7 @@ struct TerminalApp {
     persisted_active_workspace_id: u64,
     workspace_error: Option<String>,
     workspace_drag: Option<WorkspaceDragState>,
+    window_move_pending: bool,
 }
 
 fn workspace_switch(active: usize, next: usize, workspace_count: usize) -> Option<(usize, usize)> {
@@ -5051,6 +5244,7 @@ impl TerminalApp {
             persisted_active_workspace_id,
             workspace_error: None,
             workspace_drag: None,
+            window_move_pending: false,
         }
     }
 
@@ -5689,12 +5883,23 @@ impl TerminalApp {
         let window_active = window.is_window_active();
         let became_active = window_active && !self.window_active;
         self.window_active = window_active;
-        if !window_active && self.workspace_drag.is_some() {
-            cx.stop_active_drag(window);
-            self.end_workspace_drag(cx);
+        if !window_active {
+            self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
+            if self.workspace_drag.is_some() {
+                cx.stop_active_drag(window);
+                self.end_workspace_drag(cx);
+            }
         }
         if became_active {
             self.schedule_market_frame(window, cx);
+        }
+    }
+
+    fn handle_window_move_gesture(&mut self, event: WindowMoveGestureEvent, window: &mut Window) {
+        let transition = window_move_gesture_transition(self.window_move_pending, event);
+        self.window_move_pending = transition.pending;
+        if transition.start_move {
+            window.start_window_move();
         }
     }
 
@@ -6164,7 +6369,10 @@ impl Render for TerminalApp {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|terminal, _, _, cx| terminal.end_workspace_drag(cx)),
+                cx.listener(|terminal, _, window, cx| {
+                    terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
+                    terminal.end_workspace_drag(cx);
+                }),
             )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| {
@@ -6935,21 +7143,22 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogCommandDomain, ChartNoticePlacement, ChartNoticeTone, ChartState,
-        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand,
-        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        CaptionPlatform, CaptionPointerOwner, CatalogCommandDomain, ChartNoticePlacement,
+        ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
+        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
         RithmicSessionRetirement, SidePanel, TerminalProvider, WORKSPACE_TAB_GAP,
-        WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand, WorkspaceDragState,
-        active_workspace_after_close, bounded_status_detail, catalog_rejection_domain,
-        chart_status_detail, chart_surface_notice, chrome_control_foreground,
-        chrome_overlay_progress, connection_presentation, default_rithmic_contract_index,
-        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
-        instrument_selector_label, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, reorder_workspace_ids, rithmic_ready_action,
-        series_selector_label, should_apply_rithmic_worker_stop,
+        WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
+        WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+        active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
+        caption_pointer_owner, catalog_rejection_domain, chart_status_detail, chart_surface_notice,
+        chrome_control_foreground, chrome_overlay_progress, connection_presentation,
+        default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
+        fullscreen_escape_command, gpui_color, instrument_selector_label, publication_chart_state,
+        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
+        rithmic_ready_action, series_selector_label, should_apply_rithmic_worker_stop,
         should_finish_chrome_overlay_close, split_lifetime_mode, timeframe_overlay_left,
-        workspace_drag_destination, workspace_drag_translation, workspace_label,
-        workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
         wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
@@ -7181,6 +7390,74 @@ mod tests {
     fn fullscreen_hides_workspace_title_bar_and_native_controls() {
         assert!(!workspace_title_bar_visible(true));
         assert!(workspace_title_bar_visible(false));
+    }
+
+    #[test]
+    fn caption_pointer_ownership_is_exclusive_per_platform() {
+        assert_eq!(
+            caption_pointer_owner(CaptionPlatform::Windows),
+            CaptionPointerOwner::Native
+        );
+        assert_eq!(
+            caption_pointer_owner(CaptionPlatform::Linux),
+            CaptionPointerOwner::Application
+        );
+        assert_eq!(
+            caption_pointer_owner(CaptionPlatform::MacOs),
+            CaptionPointerOwner::System
+        );
+        assert_eq!(
+            caption_pointer_owner(CaptionPlatform::Other),
+            CaptionPointerOwner::Application
+        );
+    }
+
+    #[test]
+    fn caption_keyboard_activation_accepts_only_button_activation_keys() {
+        assert!(caption_keyboard_activates("enter"));
+        assert!(caption_keyboard_activates("space"));
+        assert!(!caption_keyboard_activates("escape"));
+        assert!(!caption_keyboard_activates("tab"));
+    }
+
+    #[test]
+    fn window_move_waits_for_a_pressed_pointer_move_and_cancels_cleanly() {
+        assert_eq!(
+            window_move_gesture_transition(false, WindowMoveGestureEvent::Press),
+            WindowMoveGestureTransition {
+                pending: true,
+                start_move: false,
+            }
+        );
+        assert_eq!(
+            window_move_gesture_transition(
+                true,
+                WindowMoveGestureEvent::Move { left_pressed: true },
+            ),
+            WindowMoveGestureTransition {
+                pending: false,
+                start_move: true,
+            }
+        );
+        assert_eq!(
+            window_move_gesture_transition(
+                true,
+                WindowMoveGestureEvent::Move {
+                    left_pressed: false,
+                },
+            ),
+            WindowMoveGestureTransition {
+                pending: false,
+                start_move: false,
+            }
+        );
+        assert_eq!(
+            window_move_gesture_transition(true, WindowMoveGestureEvent::Cancel),
+            WindowMoveGestureTransition {
+                pending: false,
+                start_move: false,
+            }
+        );
     }
 
     #[test]
