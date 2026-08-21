@@ -53,6 +53,7 @@ use native_ui::{
     input::{Input, InputEvent, InputState},
     loader::Loader,
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
+    toggle::Toggle,
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
@@ -138,10 +139,11 @@ const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
-const CHART_CONTEXT_MENU_WIDTH: f32 = 220.0;
+const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
@@ -185,6 +187,7 @@ impl DesktopLifetimeMode {
         }
     }
 
+    #[cfg(test)]
     const fn next(self, markets_live_permitted: bool) -> Self {
         match (self, markets_live_permitted) {
             (Self::ExitWithDesktop, _) => Self::KeepEngineWarm,
@@ -3806,8 +3809,6 @@ struct WorkspaceTabBarState<'a> {
     enabled: bool,
     error: Option<&'a str>,
     workspace_drag: Option<WorkspaceDragState>,
-    lifecycle: LifecyclePresentation,
-    lifecycle_error: Option<&'a str>,
     theme: AxiusflowTheme,
 }
 
@@ -3900,7 +3901,7 @@ fn workspace_title_bar(
         .items_center()
         .border_b_1()
         .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface))
+        .bg(gpui_color(theme.colors.surface_secondary))
         .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
         .child(
             div()
@@ -3914,23 +3915,20 @@ fn workspace_title_bar(
                 .child(tabs)
                 .child(drag_region),
         )
-        .child(engine_lifecycle_controls(
-            terminal,
-            state.lifecycle,
-            state.lifecycle_error,
-            &theme,
-        ))
         .child(workspace_window_controls(terminal, window, &theme))
 }
 
-fn clamp_chart_context_menu_origin(
+fn clamp_overlay_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
+    width: f32,
+    rows: f32,
+    separators: f32,
 ) -> gpui::Point<Pixels> {
-    let width = px(CHART_CONTEXT_MENU_WIDTH);
+    let width = px(width);
     let height = px(CHART_CONTEXT_MENU_VERTICAL_PADDING * 2.0
-        + CHART_CONTEXT_MENU_ROW_HEIGHT * 4.0
-        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT);
+        + CHART_CONTEXT_MENU_ROW_HEIGHT * rows
+        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators);
     point(
         origin
             .x
@@ -3943,6 +3941,50 @@ fn clamp_chart_context_menu_origin(
     )
 }
 
+fn clamp_chart_context_menu_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 5.0, 3.0)
+}
+
+fn menu_section_divider(colors: &axiusflow_design_system::ThemeColors) -> Div {
+    div()
+        .h(px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT))
+        .px_2()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .h_px()
+                .w_full()
+                .bg(gpui_color(colors.border_secondary)),
+        )
+}
+
+fn secondary_menu_panel(
+    id: &'static str,
+    origin: gpui::Point<Pixels>,
+    width: f32,
+    theme: &AxiusflowTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .absolute()
+        .left(origin.x)
+        .top(origin.y)
+        .w(px(width))
+        .occlude()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
+        .text_color(gpui_color(colors.text_primary))
+        .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+}
+
 fn chart_context_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: ChartContextMenu,
@@ -3952,7 +3994,6 @@ fn chart_context_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
     let can_split = can_create_pane && pane_count < MAXIMUM_PANES_PER_WORKSPACE;
     let dismiss = terminal.clone();
@@ -3970,92 +4011,126 @@ fn chart_context_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(
-            div()
-                .id("chart_context_menu")
-                .absolute()
-                .left(origin.x)
-                .top(origin.y)
-                .w(px(CHART_CONTEXT_MENU_WIDTH))
-                .occlude()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface_secondary))
-                .text_color(gpui_color(colors.text_primary))
-                .shadow_sm()
-                .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                .child(chart_context_menu_item(
-                    terminal,
-                    "chart_context_reset_view",
-                    "Reset view",
-                    chart_ready,
-                    theme,
-                    menu,
-                    ChartContextAction::Reset,
-                ))
-                .child(
-                    div()
-                        .h(px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .h_px()
-                                .w_full()
-                                .bg(gpui_color(colors.border_secondary)),
-                        ),
-                )
-                .child(chart_context_menu_item(
-                    terminal,
-                    "chart_context_split_horizontal",
-                    "Split side by side",
-                    can_split,
-                    theme,
-                    menu,
-                    ChartContextAction::Split(ChartSplitDirection::Horizontal),
-                ))
-                .child(chart_context_menu_item(
-                    terminal,
-                    "chart_context_split_vertical",
-                    "Split top and bottom",
-                    can_split,
-                    theme,
-                    menu,
-                    ChartContextAction::Split(ChartSplitDirection::Vertical),
-                ))
-                .child(chart_context_menu_item(
-                    terminal,
-                    "chart_context_close_pane",
-                    "Close chart",
-                    pane_count > 1,
-                    theme,
-                    menu,
-                    ChartContextAction::Close,
-                )),
-        )
+        .child(chart_context_menu_panel(
+            terminal,
+            menu,
+            pane_count,
+            chart_ready,
+            can_split,
+            origin,
+            theme,
+        ))
         .into_any_element()
+}
+
+fn chart_context_menu_panel(
+    terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
+    pane_count: usize,
+    chart_ready: bool,
+    can_split: bool,
+    origin: gpui::Point<Pixels>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    secondary_menu_panel(
+        "chart_context_menu",
+        origin,
+        CHART_CONTEXT_MENU_WIDTH,
+        theme,
+    )
+    .child(chart_context_menu_item(
+        terminal,
+        ChartContextMenuItem {
+            id: "chart_context_reset_view",
+            icon: HugeIcon::FitToScreen,
+            label: "Reset view",
+            enabled: chart_ready,
+            action: ChartContextAction::Reset,
+        },
+        theme,
+        menu,
+    ))
+    .child(menu_section_divider(&colors))
+    .child(chart_context_menu_item(
+        terminal,
+        ChartContextMenuItem {
+            id: "chart_context_split_horizontal",
+            icon: HugeIcon::SplitSideBySide,
+            label: "Split side by side",
+            enabled: can_split,
+            action: ChartContextAction::Split(ChartSplitDirection::Horizontal),
+        },
+        theme,
+        menu,
+    ))
+    .child(chart_context_menu_item(
+        terminal,
+        ChartContextMenuItem {
+            id: "chart_context_split_vertical",
+            icon: HugeIcon::SplitStacked,
+            label: "Split top and bottom",
+            enabled: can_split,
+            action: ChartContextAction::Split(ChartSplitDirection::Vertical),
+        },
+        theme,
+        menu,
+    ))
+    .child(menu_section_divider(&colors))
+    .child(chart_context_menu_item(
+        terminal,
+        ChartContextMenuItem {
+            id: "chart_context_close_pane",
+            icon: HugeIcon::CancelIcon01,
+            label: "Close chart",
+            enabled: pane_count > 1,
+            action: ChartContextAction::Close,
+        },
+        theme,
+        menu,
+    ))
+    .child(menu_section_divider(&colors))
+    .child(chart_context_menu_item(
+        terminal,
+        ChartContextMenuItem {
+            id: "chart_context_settings",
+            icon: HugeIcon::Settings01,
+            label: "Settings",
+            enabled: true,
+            action: ChartContextAction::Settings,
+        },
+        theme,
+        menu,
+    ))
 }
 
 fn chart_context_menu_item(
     terminal: &Entity<TerminalApp>,
-    id: &'static str,
-    label: &'static str,
-    enabled: bool,
+    item: ChartContextMenuItem,
     theme: &AxiusflowTheme,
     menu: ChartContextMenu,
-    action: ChartContextAction,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let action_terminal = terminal.clone();
+    let icon_color = gpui_color(if item.enabled {
+        colors.icon
+    } else {
+        colors.text_muted
+    });
+    let ChartContextMenuItem {
+        id,
+        icon,
+        label,
+        enabled,
+        action,
+    } = item;
     div()
         .id(id)
         .occlude()
         .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
         .flex()
         .items_center()
+        .gap_2()
         .px_3()
         .text_sm()
         .when(enabled, |row| {
@@ -4076,96 +4151,182 @@ fn chart_context_menu_item(
             }
             cx.stop_propagation();
         })
+        .child(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .child(label)
 }
 
-fn engine_lifecycle_controls(
+fn chart_settings_menu_layer(
     terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
     state: LifecyclePresentation,
     error: Option<&str>,
+    viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
-) -> Div {
+) -> AnyElement {
     let colors = theme.colors;
-    let button = |id: &'static str, label: String| {
-        Button::new(id)
-            .theme(theme)
-            .resting_fill(colors.input_fill)
-            .label(label)
-            .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-            .h(px(chart_chrome::CHART_CONTROL_SIZE))
-            .px_2()
-            .border_1()
-            .border_color(gpui_color(colors.input_border))
-            .bg(gpui_color(colors.input_fill))
-            .text_color(gpui_color(colors.text_primary))
-            .rounded(px(f32::from(
-                chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
-            )))
-            .disabled(state.pending)
-    };
-    let mode_terminal = terminal.clone();
-    let mode_tooltip = error.map_or_else(
-        || "Choose what happens to the resident engine when Axiusflow closes".to_string(),
-        ToString::to_string,
-    );
-    let mode = button_activation(
-        button("engine_lifetime_mode", state.mode.label().to_string()),
-        !state.pending,
-        move |_, cx| {
-            mode_terminal.update(cx, TerminalApp::cycle_lifetime_mode);
-        },
-    );
-    let mode = chrome_tooltip("engine_lifetime_mode", mode_tooltip, mode, theme);
-    let autostart_terminal = terminal.clone();
-    let autostart = button(
-        "engine_autostart",
-        if state.autostart_enabled {
-            "Login start on"
-        } else {
-            "Login start off"
-        }
-        .to_string(),
-    );
-    let autostart = button_activation(autostart, !state.pending, move |_, cx| {
-        autostart_terminal.update(cx, TerminalApp::toggle_engine_autostart);
-    });
-    let autostart = chrome_tooltip(
-        "engine_autostart",
-        "Start the resident engine with this operating-system user session",
-        autostart,
-        theme,
-    );
-    let permission_terminal = terminal.clone();
-    let permission = button(
-        "markets_live_permission",
-        if state.markets_live_permitted {
-            "Live retention on"
-        } else {
-            "Live retention off"
-        }
-        .to_string(),
-    );
-    let permission = button_activation(permission, !state.pending, move |_, cx| {
-        permission_terminal.update(cx, TerminalApp::toggle_markets_live_permission);
-    });
-    let permission = chrome_tooltip(
-        "markets_live_permission",
-        "Explicitly permit selected provider sessions to remain live without a desktop",
-        permission,
-        theme,
-    );
+    let origin = clamp_overlay_origin(menu.position, viewport, CHART_SETTINGS_MENU_WIDTH, 5.0, 2.0);
+    let dismiss = terminal.clone();
+    let pending = state.pending;
     div()
-        .h_full()
-        .flex_none()
+        .id("chart_settings_menu_scrim")
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .occlude()
+        .on_any_mouse_down(move |_, _, cx| {
+            dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_settings_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(
+            secondary_menu_panel(
+                "chart_settings_menu",
+                origin,
+                CHART_SETTINGS_MENU_WIDTH,
+                theme,
+            )
+            .child(settings_mode_row(
+                terminal,
+                "settings_exit_fully",
+                DesktopLifetimeMode::ExitWithDesktop,
+                state.mode,
+                !pending,
+                theme,
+            ))
+            .child(settings_mode_row(
+                terminal,
+                "settings_engine_warm",
+                DesktopLifetimeMode::KeepEngineWarm,
+                state.mode,
+                !pending,
+                theme,
+            ))
+            .child(settings_mode_row(
+                terminal,
+                "settings_markets_live",
+                DesktopLifetimeMode::KeepMarketsLive,
+                state.mode,
+                !pending && state.markets_live_permitted,
+                theme,
+            ))
+            .child(menu_section_divider(&colors))
+            .child(settings_toggle_row(
+                terminal,
+                "settings_login_start",
+                "Login start",
+                state.autostart_enabled,
+                !pending,
+                theme,
+                TerminalApp::toggle_engine_autostart,
+            ))
+            .child(menu_section_divider(&colors))
+            .child(settings_toggle_row(
+                terminal,
+                "settings_live_retention",
+                "Live retention",
+                state.markets_live_permitted,
+                !pending,
+                theme,
+                TerminalApp::toggle_markets_live_permission,
+            ))
+            .children(error.map(|error| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(gpui_color(colors.danger))
+                    .child(error.to_string())
+            })),
+        )
+        .into_any_element()
+}
+
+fn settings_mode_row(
+    terminal: &Entity<TerminalApp>,
+    id: &'static str,
+    mode: DesktopLifetimeMode,
+    current: DesktopLifetimeMode,
+    enabled: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let selected = current == mode;
+    let action_terminal = terminal.clone();
+    div()
+        .id(id)
+        .occlude()
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
         .flex()
         .items_center()
-        .gap_1()
-        .px_2()
-        .children([
-            mode.into_any_element(),
-            autostart.into_any_element(),
-            permission.into_any_element(),
-        ])
+        .justify_between()
+        .gap_2()
+        .px_3()
+        .text_sm()
+        .when(selected, |row| row.text_color(gpui_color(colors.primary)))
+        .when(enabled, |row| {
+            row.cursor_pointer()
+                .hover(|row| row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
+        })
+        .when(!enabled, |row| {
+            row.text_color(gpui_color(colors.text_muted))
+                .cursor_not_allowed()
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            if enabled {
+                action_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.set_lifetime_mode(mode, terminal_cx);
+                });
+            }
+            cx.stop_propagation();
+        })
+        .child(mode.label())
+        .children(selected.then(|| {
+            header_icon(HugeIcon::CheckmarkCircleIcon01)
+                .with_size(px(16.0))
+                .color(gpui_color(colors.primary))
+        }))
+}
+
+fn settings_toggle_row(
+    terminal: &Entity<TerminalApp>,
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    enabled: bool,
+    theme: &AxiusflowTheme,
+    toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let switch_terminal = terminal.clone();
+    div()
+        .id(id)
+        .occlude()
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_3()
+        .text_sm()
+        .when(!enabled, |row| {
+            row.text_color(gpui_color(colors.text_muted))
+        })
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .child(label)
+        .child(
+            Toggle::new(format!("{id}_switch"), theme)
+                .selected(selected)
+                .disabled(!enabled)
+                .aria_label(label)
+                .on_click(move |_, _, cx| {
+                    if enabled {
+                        switch_terminal.update(cx, toggle);
+                    }
+                }),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -4208,7 +4369,7 @@ fn workspace_caption_control(
                     .bg(gpui_color(colors.danger))
                     .text_color(gpui_color(colors.danger_foreground))
             } else {
-                control.bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                control.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
             }
         })
         .child(header_icon(icon).small());
@@ -5334,10 +5495,20 @@ struct WorkspaceDragState {
 }
 
 #[derive(Clone, Copy)]
+struct ChartContextMenuItem {
+    id: &'static str,
+    icon: HugeIcon,
+    label: &'static str,
+    enabled: bool,
+    action: ChartContextAction,
+}
+
+#[derive(Clone, Copy)]
 enum ChartContextAction {
     Reset,
     Split(ChartSplitDirection),
     Close,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -5365,13 +5536,13 @@ struct TerminalApp {
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
-    workspace_shell: WorkspaceShellKind,
     workspace_persistence: Option<WorkspaceLayoutPersistence>,
     persisted_layout: Vec<WorkspaceTabState>,
     persisted_active_workspace_id: u64,
     workspace_error: Option<String>,
     workspace_drag: Option<WorkspaceDragState>,
     chart_context_menu: Option<ChartContextMenu>,
+    chart_settings_menu: Option<ChartContextMenu>,
     window_move_pending: bool,
     closing: bool,
 }
@@ -5675,13 +5846,13 @@ impl TerminalApp {
             chrome_focus: cx.focus_handle().tab_stop(true),
             lifecycle,
             workspace_factory: init.workspace_factory,
-            workspace_shell: init.workspace_shell,
             workspace_persistence,
             persisted_layout,
             persisted_active_workspace_id,
             workspace_error: None,
             workspace_drag: None,
             chart_context_menu: None,
+            chart_settings_menu: None,
             window_move_pending: false,
             closing: false,
         }
@@ -5758,12 +5929,19 @@ impl TerminalApp {
 
     fn open_chart_context_menu(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        self.chart_settings_menu = None;
         self.chart_context_menu = Some(menu);
         cx.notify();
     }
 
     fn close_chart_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.chart_context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
+        if self.chart_settings_menu.take().is_some() {
             cx.notify();
         }
     }
@@ -5793,6 +5971,9 @@ impl TerminalApp {
             }
             ChartContextAction::Close => {
                 self.close_active_pane(&ClosePane, window, cx);
+            }
+            ChartContextAction::Settings => {
+                self.chart_settings_menu = Some(menu);
             }
         }
         cx.notify();
@@ -6099,9 +6280,6 @@ impl TerminalApp {
     }
 
     fn add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace_shell != WorkspaceShellKind::Tabs {
-            return;
-        }
         if self.workspaces.len() >= MAXIMUM_OPEN_WORKSPACES {
             self.workspace_error = Some(format!(
                 "Axiusflow supports at most {MAXIMUM_OPEN_WORKSPACES} open workspaces"
@@ -6310,14 +6488,22 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn cycle_lifetime_mode(&mut self, cx: &mut Context<Self>) {
+    fn set_lifetime_mode(&mut self, mode: DesktopLifetimeMode, cx: &mut Context<Self>) {
         let current = self.lifecycle.presentation();
-        let request = LifecyclePreferenceRequest {
-            mode: current.mode.next(current.markets_live_permitted),
-            autostart_enabled: current.autostart_enabled,
-            markets_live_permitted: current.markets_live_permitted,
-        };
-        self.request_lifecycle_preferences(request, cx);
+        if current.pending || current.mode == mode {
+            return;
+        }
+        if mode == DesktopLifetimeMode::KeepMarketsLive && !current.markets_live_permitted {
+            return;
+        }
+        self.request_lifecycle_preferences(
+            LifecyclePreferenceRequest {
+                mode,
+                autostart_enabled: current.autostart_enabled,
+                markets_live_permitted: current.markets_live_permitted,
+            },
+            cx,
+        );
     }
 
     fn toggle_engine_autostart(&mut self, cx: &mut Context<Self>) {
@@ -6395,8 +6581,11 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key.as_str() == "escape" && self.chart_context_menu.is_some() {
+        if event.keystroke.key.as_str() == "escape"
+            && (self.chart_context_menu.is_some() || self.chart_settings_menu.is_some())
+        {
             self.close_chart_context_menu(cx);
+            self.close_chart_settings_menu(cx);
             cx.stop_propagation();
             return;
         }
@@ -6567,17 +6756,14 @@ impl TerminalApp {
         fullscreen: bool,
     ) -> Option<impl IntoElement + use<>> {
         workspace_title_bar_visible(fullscreen).then(|| {
-            let lifecycle_error = self.lifecycle.preference_error();
             workspace_title_bar(
                 terminal,
                 &WorkspaceTabBarState {
                     workspaces: &self.workspaces,
                     active: self.active,
-                    enabled: self.workspace_shell == WorkspaceShellKind::Tabs,
+                    enabled: self.workspace_factory.is_some(),
                     error: self.workspace_error.as_deref(),
                     workspace_drag: self.workspace_drag,
-                    lifecycle: self.lifecycle.presentation(),
-                    lifecycle_error: lifecycle_error.as_deref(),
                     theme: self.theme,
                 },
                 window,
@@ -6897,6 +7083,38 @@ impl TerminalApp {
         })
         .detach();
     }
+
+    fn chart_surface_menus(
+        &self,
+        terminal: &Entity<Self>,
+        pane_count: usize,
+        chart_has_market_data: bool,
+        viewport: gpui::Size<Pixels>,
+    ) -> (Option<AnyElement>, Option<AnyElement>) {
+        let context_menu = self.chart_context_menu.map(|menu| {
+            chart_context_menu_layer(
+                terminal,
+                menu,
+                pane_count,
+                chart_has_market_data,
+                self.workspace_factory.is_some(),
+                viewport,
+                &self.theme,
+            )
+        });
+        let preference_error = self.lifecycle.preference_error();
+        let settings_menu = self.chart_settings_menu.map(|menu| {
+            chart_settings_menu_layer(
+                terminal,
+                menu,
+                self.lifecycle.presentation(),
+                preference_error.as_deref(),
+                viewport,
+                &self.theme,
+            )
+        });
+        (context_menu, settings_menu)
+    }
 }
 
 impl Render for TerminalApp {
@@ -6929,17 +7147,12 @@ impl Render for TerminalApp {
                 },
             cx,
         );
-        let context_menu = self.chart_context_menu.map(|menu| {
-            chart_context_menu_layer(
-                &terminal,
-                menu,
-                pane_count,
-                chart_has_market_data,
-                self.workspace_factory.is_some(),
-                window.viewport_size(),
-                &self.theme,
-            )
-        });
+        let (context_menu, settings_menu) = self.chart_surface_menus(
+            &terminal,
+            pane_count,
+            chart_has_market_data,
+            window.viewport_size(),
+        );
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
         let header = terminal_header(
             &terminal,
@@ -6992,6 +7205,7 @@ impl Render for TerminalApp {
             )
             .children(overlay)
             .children(context_menu)
+            .children(settings_menu)
     }
 }
 
@@ -7047,6 +7261,7 @@ fn workspace_tab_close_button(
     tab_id: u64,
     index: usize,
     label: &str,
+    selected: bool,
     theme: &AxiusflowTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
@@ -7060,7 +7275,11 @@ fn workspace_tab_close_button(
         .items_center()
         .justify_center()
         .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .text_color(gpui_color(colors.icon))
+        .text_color(gpui_color(if selected {
+            colors.primary_foreground
+        } else {
+            colors.icon
+        }))
         .cursor_pointer()
         .role(Role::Button)
         .aria_label(format!("Close {label}"))
@@ -7085,7 +7304,7 @@ fn workspace_tab_close_button(
                 cx.stop_propagation();
             }
         })
-        .child(header_icon(HugeIcon::CancelIcon01).size(px(12.0)))
+        .child(header_icon(HugeIcon::CancelIcon01).with_size(px(12.0)))
 }
 
 fn handle_workspace_tab_key(
@@ -7146,7 +7365,9 @@ fn workspace_add_button(
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .hover(move |button| {
+                    button.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                })
                 .focus_visible(move |button| {
                     button.border_2().border_color(gpui_color(colors.ring))
                 })
@@ -7161,7 +7382,7 @@ fn workspace_add_button(
                     }
                 })
         })
-        .child(header_icon(HugeIcon::AddIcon01).size(px(13.0)))
+        .child(header_icon(HugeIcon::AddIcon01).with_size(px(13.0)))
 }
 
 fn workspace_tab(
@@ -7198,18 +7419,18 @@ fn workspace_tab(
         )))
         .border_1()
         .border_color(gpui_color(if selected {
-            colors.border
+            colors.primary
         } else {
-            colors.surface
+            colors.surface_secondary
         }))
         .bg(gpui_color(if selected {
-            colors.active_bg.over(colors.surface)
+            colors.primary
         } else {
-            colors.surface
+            colors.surface_secondary
         }))
         .text_sm()
         .text_color(gpui_color(if selected {
-            colors.text_primary
+            colors.primary_foreground
         } else {
             colors.text_secondary
         }))
@@ -7223,9 +7444,11 @@ fn workspace_tab(
         .when_some(state.drag_translation, |tab, translation| {
             tab.relative().left(px(translation)).shadow_md()
         })
-        .hover(move |tab| {
-            tab.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                .text_color(gpui_color(colors.text_primary))
+        .when(!selected, |tab| {
+            tab.hover(move |tab| {
+                tab.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                    .text_color(gpui_color(colors.text_primary))
+            })
         })
         .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2())
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -7259,6 +7482,7 @@ fn workspace_tab(
             tab_id,
             index,
             &workspace.label,
+            selected,
             &theme,
         ))
         .into_any_element()

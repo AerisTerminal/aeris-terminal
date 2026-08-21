@@ -24,6 +24,7 @@ pub enum UiIcon {
     Lock,
     MoonIcon02,
     SearchIcon01,
+    Settings01,
     SidebarRightIcon01,
     SplitSideBySide,
     SplitStacked,
@@ -37,7 +38,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::AddIcon01,
         Self::AiEraser,
         Self::AiLock,
@@ -56,6 +57,7 @@ impl UiIcon {
         Self::Lock,
         Self::MoonIcon02,
         Self::SearchIcon01,
+        Self::Settings01,
         Self::SidebarRightIcon01,
         Self::SplitSideBySide,
         Self::SplitStacked,
@@ -89,6 +91,7 @@ impl UiIcon {
             Self::Lock => "lock.svg",
             Self::MoonIcon02 => "moon-02.svg",
             Self::SearchIcon01 => "search-01.svg",
+            Self::Settings01 => "settings-01.svg",
             Self::SidebarRightIcon01 => "sidebar-right-01.svg",
             Self::SplitSideBySide => "split-side-by-side.svg",
             Self::SplitStacked => "split-stacked.svg",
@@ -194,6 +197,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
         "moon-02.svg" => include_bytes!("../assets/icons/ui/moon-02.svg"),
         "search-01.svg" => include_bytes!("../assets/icons/ui/search-01.svg"),
+        "settings-01.svg" => include_bytes!("../assets/icons/ui/settings-01.svg"),
         "sidebar-right-01.svg" => include_bytes!("../assets/icons/ui/sidebar-right-01.svg"),
         "split-side-by-side.svg" => include_bytes!("../assets/icons/ui/split-side-by-side.svg"),
         "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),

@@ -802,12 +802,12 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 67,800 because the default Coinbase window now keeps a
-        // bounded pane-addition factory so right-click split can create another
-        // consumer without switching to `--workspace-tabs`.
+        // Raised from 67,900 because the chart-surface settings panel, binary
+        // switch, and restored session-local workspace tabs live in the
+        // client-owned shell without adding a persistence path to the default window.
         assert!(
-            line_count <= 67_900,
-            "platform Rust source upper bound is {line_count} lines, above the 67,900-line soft review threshold"
+            line_count <= 68_200,
+            "platform Rust source upper bound is {line_count} lines, above the 68,200-line soft review threshold"
         );
     }
 
