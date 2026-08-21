@@ -141,18 +141,27 @@ const fn checked_add_one(value: u64) -> Option<u64> {
     value.checked_add(1)
 }
 
-pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+pub(super) fn start() -> Result<
+    (
+        MarketWorkerStartup,
+        MarketDataWorker,
+        WorkspaceMarketFactory,
+    ),
+    String,
+> {
     let product = default_coinbase_product("BTC-USD");
-    let mut workers = start_group(vec![(DEFAULT_WORKSPACE_ID, product)])?;
-    workers
+    let (mut workers, factory) = start_group(vec![(DEFAULT_WORKSPACE_ID, product)])?;
+    let (startup, worker) = workers
         .pop()
-        .ok_or_else(|| "Coinbase engine worker group is empty".to_string())
+        .ok_or_else(|| "Coinbase engine worker group is empty".to_string())?;
+    Ok((startup, worker, factory))
 }
 
 pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let btc = default_coinbase_product("BTC-USD");
     let eth = default_coinbase_product("ETH-USD");
-    start_group(vec![(1, btc), (2, eth)])
+    let (workers, _factory) = start_group(vec![(1, btc), (2, eth)])?;
+    Ok(workers)
 }
 
 pub(super) fn start_workspace_tabs(
@@ -264,13 +273,25 @@ struct WorkerEndpoint {
 
 fn start_group(
     configurations: Vec<(u64, InstallProviderInstrument)>,
-) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
+) -> Result<
+    (
+        Vec<(MarketWorkerStartup, MarketDataWorker)>,
+        WorkspaceMarketFactory,
+    ),
+    String,
+> {
     let client_id = random_identity()?;
     let mut workers = Vec::with_capacity(configurations.len());
     let mut endpoints = Vec::with_capacity(configurations.len());
+    let mut maximum_workspace_id = 0;
+    let mut maximum_pane_id = 1;
+    let mut maximum_consumer_id = 0;
     for (workspace_id, product) in configurations {
         let consumer_id = random_identity()?;
         let pane_id = random_identity()?;
+        maximum_workspace_id = maximum_workspace_id.max(workspace_id);
+        maximum_pane_id = maximum_pane_id.max(pane_id);
+        maximum_consumer_id = maximum_consumer_id.max(consumer_id);
         let (worker, endpoint) = worker_endpoint(
             workspace_id,
             pane_id,
@@ -283,8 +304,17 @@ fn start_group(
         workers.push((worker.startup, worker.worker));
         endpoints.push(endpoint);
     }
-    spawn_group(client_id, endpoints, None)?;
-    Ok(workers)
+    let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
+    spawn_group(client_id, endpoints, Some(addition_rx))?;
+    Ok((
+        workers,
+        WorkspaceMarketFactory {
+            additions: addition_tx,
+            next_workspace_id: Arc::new(AtomicU64::new(maximum_workspace_id.saturating_add(1))),
+            next_pane_id: Arc::new(AtomicU64::new(maximum_pane_id.saturating_add(1))),
+            next_consumer_id: Arc::new(AtomicU64::new(maximum_consumer_id.saturating_add(1))),
+        },
+    ))
 }
 
 fn worker_endpoint(

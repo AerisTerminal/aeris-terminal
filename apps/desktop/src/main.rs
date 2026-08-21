@@ -3948,12 +3948,13 @@ fn chart_context_menu_layer(
     menu: ChartContextMenu,
     pane_count: usize,
     chart_ready: bool,
+    can_create_pane: bool,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
-    let can_split = pane_count < MAXIMUM_PANES_PER_WORKSPACE;
+    let can_split = can_create_pane && pane_count < MAXIMUM_PANES_PER_WORKSPACE;
     let dismiss = terminal.clone();
     div()
         .id("chart_context_menu_scrim")
@@ -3991,6 +3992,7 @@ fn chart_context_menu_layer(
                     "Reset view",
                     chart_ready,
                     theme,
+                    menu,
                     ChartContextAction::Reset,
                 ))
                 .child(
@@ -4012,6 +4014,7 @@ fn chart_context_menu_layer(
                     "Split side by side",
                     can_split,
                     theme,
+                    menu,
                     ChartContextAction::Split(ChartSplitDirection::Horizontal),
                 ))
                 .child(chart_context_menu_item(
@@ -4020,6 +4023,7 @@ fn chart_context_menu_layer(
                     "Split top and bottom",
                     can_split,
                     theme,
+                    menu,
                     ChartContextAction::Split(ChartSplitDirection::Vertical),
                 ))
                 .child(chart_context_menu_item(
@@ -4028,6 +4032,7 @@ fn chart_context_menu_layer(
                     "Close chart",
                     pane_count > 1,
                     theme,
+                    menu,
                     ChartContextAction::Close,
                 )),
         )
@@ -4040,12 +4045,14 @@ fn chart_context_menu_item(
     label: &'static str,
     enabled: bool,
     theme: &AxiusflowTheme,
+    menu: ChartContextMenu,
     action: ChartContextAction,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let action_terminal = terminal.clone();
     div()
         .id(id)
+        .occlude()
         .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
         .flex()
         .items_center()
@@ -4064,7 +4071,7 @@ fn chart_context_menu_item(
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             if enabled {
                 action_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.finish_chart_context_menu(action, window, terminal_cx);
+                    terminal.finish_chart_context_menu(menu, action, window, terminal_cx);
                 });
             }
             cx.stop_propagation();
@@ -5340,6 +5347,12 @@ struct ChartContextMenu {
     position: gpui::Point<Pixels>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceShellKind {
+    Window,
+    Tabs,
+}
+
 struct TerminalApp {
     workspaces: Vec<WorkspaceTab>,
     active: usize,
@@ -5352,6 +5365,7 @@ struct TerminalApp {
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    workspace_shell: WorkspaceShellKind,
     workspace_persistence: Option<WorkspaceLayoutPersistence>,
     persisted_layout: Vec<WorkspaceTabState>,
     persisted_active_workspace_id: u64,
@@ -5604,15 +5618,8 @@ fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) ->
 }
 
 impl TerminalApp {
-    fn new(
-        mut workspaces: Vec<WorkspaceTab>,
-        active_workspace_id: Option<u64>,
-        workspace_revision: u64,
-        layout_generation: u64,
-        lifecycle: DesktopLifecycle,
-        workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(init: TerminalShellInit, lifecycle: DesktopLifecycle, cx: &mut Context<Self>) -> Self {
+        let mut workspaces = init.workspaces;
         let market_frame_wake = UiWake::default();
         for (index, workspace) in workspaces.iter_mut().enumerate() {
             workspace.focus = workspace
@@ -5629,7 +5636,8 @@ impl TerminalApp {
                 cx.observe(&pane.surface, |_, _, cx| cx.notify()).detach();
             }
         }
-        let active = active_workspace_id
+        let active = init
+            .active_workspace_id
             .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
             .unwrap_or(0);
         for (index, workspace) in workspaces.iter().enumerate() {
@@ -5644,9 +5652,10 @@ impl TerminalApp {
                 });
             }
         }
-        let workspace_persistence = workspace_factory
-            .as_ref()
-            .map(|_| WorkspaceLayoutPersistence::new(workspace_revision, layout_generation))
+        let workspace_persistence = (init.workspace_shell == WorkspaceShellKind::Tabs)
+            .then(|| {
+                WorkspaceLayoutPersistence::new(init.workspace_revision, init.layout_generation)
+            })
             .transpose()
             .unwrap_or_else(|error| {
                 eprintln!("Axiusflow workspace persistence could not start: {error}");
@@ -5665,7 +5674,8 @@ impl TerminalApp {
             market_wake_listener_started: None,
             chrome_focus: cx.focus_handle().tab_stop(true),
             lifecycle,
-            workspace_factory,
+            workspace_factory: init.workspace_factory,
+            workspace_shell: init.workspace_shell,
             workspace_persistence,
             persisted_layout,
             persisted_active_workspace_id,
@@ -5760,13 +5770,12 @@ impl TerminalApp {
 
     fn finish_chart_context_menu(
         &mut self,
+        menu: ChartContextMenu,
         action: ChartContextAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.chart_context_menu.take() else {
-            return;
-        };
+        self.chart_context_menu = None;
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         match action {
             ChartContextAction::Reset => {
@@ -6090,6 +6099,9 @@ impl TerminalApp {
     }
 
     fn add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_shell != WorkspaceShellKind::Tabs {
+            return;
+        }
         if self.workspaces.len() >= MAXIMUM_OPEN_WORKSPACES {
             self.workspace_error = Some(format!(
                 "Axiusflow supports at most {MAXIMUM_OPEN_WORKSPACES} open workspaces"
@@ -6162,6 +6174,8 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let Some(factory) = self.workspace_factory.clone() else {
+            self.workspace_error = Some("This window cannot open another chart pane".to_string());
+            cx.notify();
             return;
         };
         let workspace = &self.workspaces[self.active];
@@ -6559,7 +6573,7 @@ impl TerminalApp {
                 &WorkspaceTabBarState {
                     workspaces: &self.workspaces,
                     active: self.active,
-                    enabled: self.workspace_factory.is_some(),
+                    enabled: self.workspace_shell == WorkspaceShellKind::Tabs,
                     error: self.workspace_error.as_deref(),
                     workspace_drag: self.workspace_drag,
                     lifecycle: self.lifecycle.presentation(),
@@ -6921,6 +6935,7 @@ impl Render for TerminalApp {
                 menu,
                 pane_count,
                 chart_has_market_data,
+                self.workspace_factory.is_some(),
                 window.viewport_size(),
                 &self.theme,
             )
@@ -7338,6 +7353,7 @@ fn workspace_tab_strip(
 fn terminal_root(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
+    workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     lifecycle: &DesktopLifecycle,
     window: &mut Window,
     cx: &mut App,
@@ -7362,7 +7378,8 @@ fn terminal_root(
             active_workspace_id: Some(1),
             workspace_revision: 0,
             layout_generation: 1,
-            workspace_factory: None,
+            workspace_factory,
+            workspace_shell: WorkspaceShellKind::Window,
         },
         lifecycle,
         window,
@@ -7376,6 +7393,7 @@ struct TerminalShellInit {
     workspace_revision: u64,
     layout_generation: u64,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    workspace_shell: WorkspaceShellKind,
 }
 
 fn terminal_shell_root(
@@ -7385,17 +7403,7 @@ fn terminal_shell_root(
     cx: &mut App,
 ) -> Entity<TerminalApp> {
     let terminal_lifecycle = lifecycle.clone();
-    let terminal = cx.new(move |cx| {
-        TerminalApp::new(
-            init.workspaces,
-            init.active_workspace_id,
-            init.workspace_revision,
-            init.layout_generation,
-            terminal_lifecycle,
-            init.workspace_factory,
-            cx,
-        )
-    });
+    let terminal = cx.new(move |cx| TerminalApp::new(init, terminal_lifecycle, cx));
     let closing_terminal = terminal.clone();
     window.on_window_should_close(cx, move |_, cx| {
         closing_terminal.update(cx, |terminal, cx| {
@@ -7474,6 +7482,7 @@ fn workspace_tabs_root(
             workspace_revision: restored.workspace_revision,
             layout_generation: restored.layout_generation,
             workspace_factory: Some(workspace_factory),
+            workspace_shell: WorkspaceShellKind::Tabs,
         },
         lifecycle,
         window,
@@ -7596,7 +7605,9 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         }
     } else {
         let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-        (vec![engine_market_worker::start()?], Vec::new(), lifecycle)
+        let (startup, worker, factory) = engine_market_worker::start()?;
+        workspace_factory = Some(factory);
+        (vec![(startup, worker)], Vec::new(), lifecycle)
     };
     Ok(Some(ConfiguredDesktop {
         market_workers,
@@ -7690,8 +7701,16 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                     {
                         let options = desktop_window_options(window_index, cx);
                         let window_lifecycle = lifecycle.clone();
+                        let window_factory = workspace_factory.clone();
                         cx.open_window(options, move |window, cx| {
-                            terminal_root(bootstrap, market_worker, &window_lifecycle, window, cx)
+                            terminal_root(
+                                bootstrap,
+                                market_worker,
+                                window_factory,
+                                &window_lifecycle,
+                                window,
+                                cx,
+                            )
                         })
                         .expect("the Axiusflow terminal window opens");
                     }

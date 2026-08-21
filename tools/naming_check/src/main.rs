@@ -802,12 +802,12 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 67,700 for the chart context menu: reset/split/close moved
-        // from header chrome onto a secondary-surface pane menu, and price-axis
-        // interaction disables Nucleus autoscale at the start of the scale grab.
+        // Raised from 67,800 because the default Coinbase window now keeps a
+        // bounded pane-addition factory so right-click split can create another
+        // consumer without switching to `--workspace-tabs`.
         assert!(
-            line_count <= 67_800,
-            "platform Rust source upper bound is {line_count} lines, above the 67,800-line soft review threshold"
+            line_count <= 67_900,
+            "platform Rust source upper bound is {line_count} lines, above the 67,900-line soft review threshold"
         );
     }
 
