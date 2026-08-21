@@ -3548,7 +3548,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
     }
     let tone = match notice.tone {
         ChartNoticeTone::Muted => colors.text_secondary,
-        ChartNoticeTone::Warning => colors.warning,
+        ChartNoticeTone::Warning => colors.bearish,
         ChartNoticeTone::Loss => colors.danger,
     };
     let label = div()
@@ -5049,24 +5049,24 @@ fn connection_presentation(
     if history_only {
         return match chart_state {
             ChartState::Ready => (format!("{provider} · Completed history"), |theme| {
-                theme.colors.positive
+                theme.colors.bullish
             }),
             ChartState::Error => (format!("{provider} · Data error"), |theme| {
                 theme.colors.danger
             }),
             ChartState::Loading | ChartState::Stale | ChartState::Recovering => {
                 (format!("{provider} · Loading history"), |theme| {
-                    theme.colors.warning
+                    theme.colors.bearish
                 })
             }
         };
     }
     if chart_state == ChartState::Stale {
-        return (format!("{provider} · Stale"), |theme| theme.colors.warning);
+        return (format!("{provider} · Stale"), |theme| theme.colors.bearish);
     }
     if chart_state == ChartState::Recovering {
         return (format!("{provider} · Reconnecting"), |theme| {
-            theme.colors.warning
+            theme.colors.bearish
         });
     }
     if chart_state == ChartState::Error && state == FeedConnectionState::Streaming {
@@ -5076,7 +5076,7 @@ fn connection_presentation(
     }
     if state == FeedConnectionState::Streaming && delayed {
         return (format!("{provider} · Delayed"), |theme| {
-            theme.colors.warning
+            theme.colors.bearish
         });
     }
     match state {
@@ -5088,10 +5088,10 @@ fn connection_presentation(
             theme.colors.primary
         }),
         FeedConnectionState::Streaming => {
-            (format!("{provider} · Live"), |theme| theme.colors.positive)
+            (format!("{provider} · Live"), |theme| theme.colors.bullish)
         }
         FeedConnectionState::Recovering => (format!("{provider} · Reconnecting"), |theme| {
-            theme.colors.warning
+            theme.colors.bearish
         }),
         FeedConnectionState::Stopped => ("Stopped".to_string(), |theme| theme.colors.danger),
     }

@@ -213,7 +213,7 @@ A release Windows lifecycle run measured cold process-to-authenticated-status re
 
 ### UI
 
-- `crates/ui/design_system`: Axiusflow shell assets and typed native light/dark semantic tokens.
+- `crates/ui/design_system`: Axiusflow shell assets and typed native light/dark tokens resolved from `platform.css`. Translucent `color-mix` and `oklch` sources stay in the CSS contract; native paint uses the matching sRGB values and composites hover/active over the resting fill.
 - `crates/ui/terminal_ui`: reusable terminal and DOM presentation components.
 - `crates/ui/chart_integration`: the boundary between Axiusflow models/GPUI and Nucleus Charts.
 

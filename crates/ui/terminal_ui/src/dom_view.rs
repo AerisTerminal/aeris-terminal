@@ -131,13 +131,13 @@ fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoEl
         .border_b_1()
         .border_color(gpui_color(colors.border.with_alpha(0.55)))
         .text_sm()
-        .child(quantity_cell(row.bid.as_ref(), colors.positive, true))
+        .child(quantity_cell(row.bid.as_ref(), colors.bullish, true))
         .child(
             div()
                 .w(px(PRICE_WIDTH))
                 .px_1()
                 .text_right()
-                .text_color(gpui_color(colors.positive))
+                .text_color(gpui_color(colors.bullish))
                 .child(
                     row.bid
                         .as_ref()
@@ -148,14 +148,14 @@ fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoEl
             div()
                 .w(px(PRICE_WIDTH))
                 .px_1()
-                .text_color(gpui_color(colors.danger))
+                .text_color(gpui_color(colors.bearish))
                 .child(
                     row.ask
                         .as_ref()
                         .map_or_else(String::new, |level| level.price_text.clone()),
                 ),
         )
-        .child(quantity_cell(row.ask.as_ref(), colors.danger, false))
+        .child(quantity_cell(row.ask.as_ref(), colors.bearish, false))
 }
 
 fn quantity_cell(
@@ -203,11 +203,11 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
         OrderBookState::Ready => None,
         OrderBookState::Stale => Some((
             format!("Depth stale · last sequence {watermark}"),
-            |theme| theme.colors.warning,
+            |theme| theme.colors.bearish,
         )),
         OrderBookState::Recovering(reason) => Some((
             format!("Depth recovering · {}", recovery_label(reason)),
-            |theme| theme.colors.warning,
+            |theme| theme.colors.bearish,
         )),
     }
 }

@@ -218,13 +218,8 @@ pub struct ThemeColors {
     pub danger: ThemeColor,
     pub danger_foreground: ThemeColor,
     pub ring: ThemeColor,
-    pub chart_1: ThemeColor,
-    pub chart_2: ThemeColor,
-    pub chart_3: ThemeColor,
-    pub chart_4: ThemeColor,
-    pub chart_5: ThemeColor,
-    pub positive: ThemeColor,
-    pub warning: ThemeColor,
+    pub bullish: ThemeColor,
+    pub bearish: ThemeColor,
 }
 
 /// A canonical logical length token.
@@ -297,79 +292,86 @@ impl AxiusflowTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 25] {
+    pub fn color_tokens(self) -> [ColorToken; 20] {
         let colors = self.colors;
         let dark = self.mode == ThemeMode::Dark;
         [
             ColorToken::new(
                 "surface",
-                mode_source(dark, "#ffffff", "#141414"),
+                mode_source(dark, "#fcfcfc", "#141414"),
                 colors.surface,
             ),
             ColorToken::new(
                 "surface-secondary",
-                mode_source(dark, "#fcfcfc", "#1b1b1b"),
+                mode_source(dark, "#f3f3f3", "#181818"),
                 colors.surface_secondary,
             ),
             ColorToken::new(
                 "border",
-                mode_source(dark, "#f5f5f5", "#1e1e1e"),
+                mode_source(dark, MIX_INK_8, MIX_PAPER_8),
                 colors.border,
             ),
+            ColorToken::new("border-secondary", "var(--border)", colors.border_secondary),
             ColorToken::new(
-                "border-secondary",
-                mode_source(dark, "#f3f3f3", "#242424"),
-                colors.border_secondary,
+                "input-fill",
+                mode_source(dark, "var(--surface)", "var(--surface-secondary)"),
+                colors.input_fill,
             ),
-            ColorToken::new("input-fill", "var(--surface-secondary)", colors.input_fill),
             ColorToken::new(
                 "input-border",
-                "var(--border-secondary)",
+                mode_source(dark, "var(--border)", "var(--border-secondary)"),
                 colors.input_border,
             ),
             ColorToken::new(
                 "text-primary",
-                mode_source(dark, "#404040", "#e3e3e3"),
+                mode_source(dark, "#141414", "#f0f0f0"),
                 colors.text_primary,
             ),
             ColorToken::new(
                 "text-secondary",
-                mode_source(dark, "#7a7a7a", "#a2a2a2"),
+                mode_source(dark, MIX_INK_74, MIX_PAPER_74),
                 colors.text_secondary,
             ),
             ColorToken::new(
                 "text-muted",
-                mode_source(dark, "#dedede", "#424242"),
+                mode_source(dark, MIX_INK_36, MIX_PAPER_36),
                 colors.text_muted,
             ),
             ColorToken::new(
                 "hover-bg",
-                mode_source(dark, "#efefef59", "#61616133"),
+                mode_source(dark, MIX_INK_4, MIX_PAPER_8),
                 colors.hover_bg,
             ),
             ColorToken::new(
                 "active-bg",
-                mode_source(dark, "#efefef73", "#61616142"),
+                mode_source(dark, MIX_INK_6, MIX_PAPER_14),
                 colors.active_bg,
             ),
-            ColorToken::new("icon", mode_source(dark, "#808080", "#a3a3a3"), colors.icon),
+            ColorToken::new(
+                "icon",
+                mode_source(dark, MIX_INK_50, MIX_PAPER_66),
+                colors.icon,
+            ),
             ColorToken::new(
                 "icon-active",
-                mode_source(dark, "#414141", "#e5e5e5"),
+                mode_source(dark, "#141414", "#f0f0f0"),
                 colors.icon_active,
             ),
             ColorToken::new("primary", "#3e63dd", colors.primary),
-            ColorToken::new("primary-foreground", "#eff6ff", colors.primary_foreground),
-            ColorToken::new("danger", "#fb3748", colors.danger),
+            ColorToken::new(
+                "primary-foreground",
+                "oklch(0.97 0.014 254.604)",
+                colors.primary_foreground,
+            ),
+            ColorToken::new("danger", "oklch(0.6471 0.2288 22.47)", colors.danger),
             ColorToken::new("danger-foreground", "#ffffff", colors.danger_foreground),
-            ColorToken::new("ring", mode_source(dark, "#a1a1a1", "#737373"), colors.ring),
-            ColorToken::new("chart-1", "#d4d4d4", colors.chart_1),
-            ColorToken::new("chart-2", "#7a7a7a", colors.chart_2),
-            ColorToken::new("chart-3", "#5f5f5f", colors.chart_3),
-            ColorToken::new("chart-4", "#494949", colors.chart_4),
-            ColorToken::new("chart-5", "#343434", colors.chart_5),
-            ColorToken::new("positive", "#089981", colors.positive),
-            ColorToken::new("warning", "#f59e0a", colors.warning),
+            ColorToken::new(
+                "ring",
+                mode_source(dark, MIX_INK_20, MIX_PAPER_15),
+                colors.ring,
+            ),
+            ColorToken::new("bullish", "#089981", colors.bullish),
+            ColorToken::new("bearish", "#f7525f", colors.bearish),
         ]
     }
 }
@@ -380,6 +382,20 @@ impl Default for AxiusflowTheme {
     }
 }
 
+const MIX_INK_4: &str = "color-mix(in srgb, #141414 4%, transparent)";
+const MIX_INK_6: &str = "color-mix(in srgb, #141414 6%, transparent)";
+const MIX_INK_8: &str = "color-mix(in srgb, #141414 8%, transparent)";
+const MIX_INK_20: &str = "color-mix(in srgb, #141414 20%, transparent)";
+const MIX_INK_36: &str = "color-mix(in srgb, #141414 36%, transparent)";
+const MIX_INK_50: &str = "color-mix(in srgb, #141414 50%, transparent)";
+const MIX_INK_74: &str = "color-mix(in srgb, #141414 74%, transparent)";
+const MIX_PAPER_8: &str = "color-mix(in srgb, #f0f0f0 8%, transparent)";
+const MIX_PAPER_14: &str = "color-mix(in srgb, #f0f0f0 14%, transparent)";
+const MIX_PAPER_15: &str = "color-mix(in srgb, #f0f0f0 15%, transparent)";
+const MIX_PAPER_36: &str = "color-mix(in srgb, #f0f0f0 36%, transparent)";
+const MIX_PAPER_66: &str = "color-mix(in srgb, #f0f0f0 66%, transparent)";
+const MIX_PAPER_74: &str = "color-mix(in srgb, #f0f0f0 74%, transparent)";
+
 const fn mode_source(
     dark: bool,
     light_source: &'static str,
@@ -388,68 +404,63 @@ const fn mode_source(
     if dark { dark_source } else { light_source }
 }
 
-fn light_colors() -> ThemeColors {
-    let surface = ThemeColor::from_rgb8(255, 255, 255);
-    let surface_secondary = ThemeColor::from_rgb8(252, 252, 252);
-    let border_secondary = ThemeColor::from_rgb8(243, 243, 243);
-    ThemeColors {
-        surface,
-        surface_secondary,
-        border: ThemeColor::from_rgb8(245, 245, 245),
-        border_secondary,
-        input_fill: surface_secondary,
-        input_border: border_secondary,
-        text_primary: ThemeColor::from_rgb8(64, 64, 64),
-        text_secondary: ThemeColor::from_rgb8(122, 122, 122),
-        text_muted: ThemeColor::from_rgb8(222, 222, 222),
-        hover_bg: ThemeColor::from_rgba8(239, 239, 239, 0x59),
-        active_bg: ThemeColor::from_rgba8(239, 239, 239, 0x73),
-        icon: ThemeColor::from_rgb8(128, 128, 128),
-        icon_active: ThemeColor::from_rgb8(65, 65, 65),
-        primary: ThemeColor::from_rgb8(62, 99, 221),
-        primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
-        danger: ThemeColor::from_rgb8(251, 55, 72),
-        danger_foreground: surface,
-        ring: ThemeColor::from_rgb8(161, 161, 161),
-        chart_1: ThemeColor::from_rgb8(212, 212, 212),
-        chart_2: ThemeColor::from_rgb8(122, 122, 122),
-        chart_3: ThemeColor::from_rgb8(95, 95, 95),
-        chart_4: ThemeColor::from_rgb8(73, 73, 73),
-        chart_5: ThemeColor::from_rgb8(52, 52, 52),
-        positive: ThemeColor::from_rgb8(8, 153, 129),
-        warning: ThemeColor::from_rgb8(245, 158, 10),
-    }
+fn mix_srgb(red: u8, green: u8, blue: u8, percent: f32) -> ThemeColor {
+    ThemeColor::from_rgb8(red, green, blue).with_alpha(percent / 100.0)
 }
 
-fn dark_colors() -> ThemeColors {
-    let surface_secondary = ThemeColor::from_rgb8(27, 27, 27);
-    let border_secondary = ThemeColor::from_rgb8(36, 36, 36);
+fn light_colors() -> ThemeColors {
+    let ink = ThemeColor::from_rgb8(20, 20, 20);
+    let surface = ThemeColor::from_rgb8(252, 252, 252);
+    let border = mix_srgb(20, 20, 20, 8.0);
     ThemeColors {
-        surface: ThemeColor::from_rgb8(20, 20, 20),
-        surface_secondary,
-        border: ThemeColor::from_rgb8(30, 30, 30),
-        border_secondary,
-        input_fill: surface_secondary,
-        input_border: border_secondary,
-        text_primary: ThemeColor::from_rgb8(227, 227, 227),
-        text_secondary: ThemeColor::from_rgb8(162, 162, 162),
-        text_muted: ThemeColor::from_rgb8(66, 66, 66),
-        hover_bg: ThemeColor::from_rgba8(97, 97, 97, 0x33),
-        active_bg: ThemeColor::from_rgba8(97, 97, 97, 0x42),
-        icon: ThemeColor::from_rgb8(163, 163, 163),
-        icon_active: ThemeColor::from_rgb8(229, 229, 229),
+        surface,
+        surface_secondary: ThemeColor::from_rgb8(243, 243, 243),
+        border,
+        border_secondary: border,
+        input_fill: surface,
+        input_border: border,
+        text_primary: ink,
+        text_secondary: mix_srgb(20, 20, 20, 74.0),
+        text_muted: mix_srgb(20, 20, 20, 36.0),
+        hover_bg: mix_srgb(20, 20, 20, 4.0),
+        active_bg: mix_srgb(20, 20, 20, 6.0),
+        icon: mix_srgb(20, 20, 20, 50.0),
+        icon_active: ink,
         primary: ThemeColor::from_rgb8(62, 99, 221),
         primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        ring: ThemeColor::from_rgb8(115, 115, 115),
-        chart_1: ThemeColor::from_rgb8(212, 212, 212),
-        chart_2: ThemeColor::from_rgb8(122, 122, 122),
-        chart_3: ThemeColor::from_rgb8(95, 95, 95),
-        chart_4: ThemeColor::from_rgb8(73, 73, 73),
-        chart_5: ThemeColor::from_rgb8(52, 52, 52),
-        positive: ThemeColor::from_rgb8(8, 153, 129),
-        warning: ThemeColor::from_rgb8(245, 158, 10),
+        ring: mix_srgb(20, 20, 20, 20.0),
+        bullish: ThemeColor::from_rgb8(8, 153, 129),
+        bearish: ThemeColor::from_rgb8(247, 82, 95),
+    }
+}
+
+fn dark_colors() -> ThemeColors {
+    let ink = ThemeColor::from_rgb8(240, 240, 240);
+    let surface_secondary = ThemeColor::from_rgb8(24, 24, 24);
+    let border = mix_srgb(240, 240, 240, 8.0);
+    ThemeColors {
+        surface: ThemeColor::from_rgb8(20, 20, 20),
+        surface_secondary,
+        border,
+        border_secondary: border,
+        input_fill: surface_secondary,
+        input_border: border,
+        text_primary: ink,
+        text_secondary: mix_srgb(240, 240, 240, 74.0),
+        text_muted: mix_srgb(240, 240, 240, 36.0),
+        hover_bg: mix_srgb(240, 240, 240, 8.0),
+        active_bg: mix_srgb(240, 240, 240, 14.0),
+        icon: mix_srgb(240, 240, 240, 66.0),
+        icon_active: ink,
+        primary: ThemeColor::from_rgb8(62, 99, 221),
+        primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
+        danger: ThemeColor::from_rgb8(251, 55, 72),
+        danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
+        ring: mix_srgb(240, 240, 240, 15.0),
+        bullish: ThemeColor::from_rgb8(8, 153, 129),
+        bearish: ThemeColor::from_rgb8(247, 82, 95),
     }
 }
 
@@ -506,22 +517,37 @@ mod tests {
         let light = AxiusflowTheme::light().colors;
         let dark = AxiusflowTheme::dark().colors;
 
-        assert_eq!(light.surface, ThemeColor::from_rgb8(255, 255, 255));
-        assert_eq!(light.input_fill, light.surface_secondary);
-        assert_eq!(light.input_border, light.border_secondary);
-        assert_eq!(light.danger_foreground, light.surface);
+        assert_eq!(light.surface, ThemeColor::from_rgb8(252, 252, 252));
+        assert_eq!(
+            light.surface_secondary,
+            ThemeColor::from_rgb8(243, 243, 243)
+        );
+        assert_eq!(light.input_fill, light.surface);
+        assert_eq!(light.input_border, light.border);
+        assert_eq!(light.border_secondary, light.border);
+        assert_eq!(
+            light.danger_foreground,
+            ThemeColor::from_rgb8(255, 255, 255)
+        );
         assert_eq!(dark.surface, ThemeColor::from_rgb8(20, 20, 20));
-        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(27, 27, 27));
+        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(24, 24, 24));
         assert_eq!(dark.input_fill, dark.surface_secondary);
-        assert_eq!(dark.input_border, dark.border_secondary);
-        assert_eq!(dark.border, ThemeColor::from_rgb8(30, 30, 30));
-        assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(36, 36, 36));
-        assert_eq!(light.positive, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(dark.input_border, dark.border);
+        assert_eq!(dark.border_secondary, dark.border);
+        assert_eq!(light.bullish, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, light.primary);
-        assert_eq!(dark.chart_1, light.chart_1);
-        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(239, 239, 239, 0x59));
-        assert_eq!(dark.active_bg, ThemeColor::from_rgba8(97, 97, 97, 0x42));
+        assert_eq!(dark.bullish, light.bullish);
+        assert_eq!(dark.bearish, light.bearish);
+        assert_eq!(
+            light.hover_bg,
+            ThemeColor::from_rgb8(20, 20, 20).with_alpha(0.04)
+        );
+        assert_eq!(
+            dark.active_bg,
+            ThemeColor::from_rgb8(240, 240, 240).with_alpha(0.14)
+        );
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
 
@@ -542,16 +568,21 @@ mod tests {
 
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
-        assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
+        assert_eq!(token_source(&light_tokens, "surface"), "#fcfcfc");
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
-        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#61616133");
         assert_eq!(
-            token_source(&light_tokens, "input-fill"),
-            "var(--surface-secondary)"
+            token_source(&dark_tokens, "hover-bg"),
+            "color-mix(in srgb, #f0f0f0 8%, transparent)"
         );
-        assert_eq!(token_source(&dark_tokens, "danger"), "#fb3748");
+        assert_eq!(token_source(&light_tokens, "input-fill"), "var(--surface)");
+        assert_eq!(
+            token_source(&dark_tokens, "danger"),
+            "oklch(0.6471 0.2288 22.47)"
+        );
         assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
+        assert_eq!(token_source(&light_tokens, "bullish"), "#089981");
+        assert_eq!(token_source(&dark_tokens, "bearish"), "#f7525f");
     }
 
     #[test]
@@ -591,7 +622,6 @@ mod tests {
         }
 
         for retired in [
-            "oklch(",
             "--background:",
             "--foreground:",
             "--card:",
@@ -616,6 +646,9 @@ mod tests {
             "--icon_",
             "--border_",
             "--chart_",
+            "--chart-1",
+            "--positive",
+            "--warning",
             "--profit",
             "--loss",
             "--radius_",
