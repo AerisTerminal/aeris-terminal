@@ -93,6 +93,37 @@ impl ThemeColor {
         }
     }
 
+    /// Composites this token over an opaque backdrop in sRGB and returns an
+    /// opaque result.
+    ///
+    /// CSS interaction tokens such as `--hover-bg` describe a translucent mix
+    /// over the resting fill. Painting them as a replacement fill lets the GPU
+    /// blend through HSL and shift the hue, so native hover/active states
+    /// resolve the mix here. Achromatic results keep identical channels so the
+    /// overlay cannot introduce a conversion tint.
+    #[must_use]
+    pub fn over(self, backdrop: ThemeColor) -> Self {
+        let alpha = self.alpha;
+        let mix = |top: f32, under: f32| top * alpha + under * (1.0 - alpha);
+        let red = mix(self.red, backdrop.red);
+        let green = mix(self.green, backdrop.green);
+        let blue = mix(self.blue, backdrop.blue);
+        let max = red.max(green.max(blue));
+        let min = red.min(green.min(blue));
+        let (red, green, blue) = if max - min < 0.005 {
+            let gray = (red + green + blue) / 3.0;
+            (gray, gray, gray)
+        } else {
+            (red, green, blue)
+        };
+        Self {
+            red,
+            green,
+            blue,
+            alpha: 1.0,
+        }
+    }
+
     /// Returns the red sRGB channel in the inclusive `0.0..=1.0` range.
     #[must_use]
     pub const fn red(self) -> f32 {
@@ -559,6 +590,21 @@ mod tests {
         assert!((dark.active_bg.alpha() - 0.26).abs() < f32::EPSILON);
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
+
+        for composited in [
+            light.hover_bg.over(light.surface),
+            light.active_bg.over(light.surface),
+            dark.hover_bg.over(dark.surface),
+            dark.active_bg.over(dark.surface),
+            light.hover_bg.over(light.input_fill),
+            light.active_bg.over(light.input_fill),
+        ] {
+            assert!((composited.alpha() - 1.0).abs() < f32::EPSILON);
+            assert!((composited.red() - composited.green()).abs() < f32::EPSILON);
+            assert!((composited.green() - composited.blue()).abs() < f32::EPSILON);
+        }
+        assert!((light.hover_bg.over(light.surface).red() - light.surface.red()).abs() > 0.01);
+        assert!((dark.hover_bg.over(dark.surface).red() - dark.surface.red()).abs() > 0.01);
 
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();

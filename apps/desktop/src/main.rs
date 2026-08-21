@@ -2948,17 +2948,17 @@ fn timeframe_overlay_content(
                         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                         .text_sm()
                         .when(selected == interval, |row| {
-                            row.bg(gpui_color(colors.active_bg))
+                            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
                                 .text_color(gpui_color(colors.text_primary))
                         })
                         .when(keyboard_selection == index, |row| {
-                            row.bg(gpui_color(colors.active_bg))
+                            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
                                 .text_color(gpui_color(colors.text_primary))
                         })
                         .when(!pending, |row| {
                             row.cursor_pointer()
                                 .hover(|row| {
-                                    row.bg(gpui_color(colors.hover_bg))
+                                    row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
                                         .text_color(gpui_color(colors.text_primary))
                                 })
                                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -4004,6 +4004,7 @@ fn engine_lifecycle_controls(
     let button = |id: &'static str, label: String| {
         Button::new(id)
             .theme(theme)
+            .resting_fill(colors.input_fill)
             .label(label)
             .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
             .h(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -4122,7 +4123,7 @@ fn workspace_caption_control(
                     .bg(gpui_color(colors.danger))
                     .text_color(gpui_color(colors.danger_foreground))
             } else {
-                control.bg(gpui_color(colors.hover_bg))
+                control.bg(gpui_color(colors.hover_bg.over(colors.surface)))
             }
         })
         .child(header_icon(icon).small());
@@ -4369,6 +4370,7 @@ fn instrument_selector(
         .bg(gpui_color(theme.colors.input_fill))
         .text_color(gpui_color(theme.colors.text_primary))
         .theme(theme)
+        .resting_fill(theme.colors.input_fill)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .px_3()
         .rounded(px(f32::from(
@@ -4489,11 +4491,11 @@ fn indicator_dialog_content(
                 )))
                 .cursor_pointer()
                 .when(keyboard_selection == index, |row| {
-                    row.bg(gpui_color(colors.active_bg))
+                    row.bg(gpui_color(colors.active_bg.over(colors.surface)))
                         .text_color(gpui_color(colors.text_primary))
                 })
                 .hover(|row| {
-                    row.bg(gpui_color(colors.hover_bg))
+                    row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
                         .text_color(gpui_color(colors.text_primary))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -4680,13 +4682,13 @@ fn instrument_dialog_content(
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .text_sm()
                 .when(state.keyboard_selection == index || checked, |row| {
-                    row.bg(gpui_color(colors.active_bg))
+                    row.bg(gpui_color(colors.active_bg.over(colors.surface)))
                         .text_color(gpui_color(colors.text_primary))
                 })
                 .when(!state.selection_pending, |row| {
                     row.cursor_pointer()
                         .hover(|row| {
-                            row.bg(gpui_color(colors.hover_bg))
+                            row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
                                 .text_color(gpui_color(colors.text_primary))
                         })
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -4937,7 +4939,9 @@ fn chrome_button_style(
         .text_color(gpui_color(chrome_control_foreground(
             &colors, selected, enabled,
         )))
-        .when(selected, |button| button.bg(gpui_color(colors.active_bg)))
+        .when(selected, |button| {
+            button.bg(gpui_color(colors.active_bg.over(colors.surface)))
+        })
 }
 
 fn chrome_control_foreground(
@@ -6969,7 +6973,7 @@ fn workspace_add_button(
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+                .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
                 .focus_visible(move |button| {
                     button.border_2().border_color(gpui_color(colors.ring))
                 })
@@ -7026,7 +7030,7 @@ fn workspace_tab(
             colors.surface
         }))
         .bg(gpui_color(if selected {
-            colors.active_bg
+            colors.active_bg.over(colors.surface)
         } else {
             colors.surface
         }))
@@ -7047,7 +7051,7 @@ fn workspace_tab(
             tab.relative().left(px(translation)).shadow_md()
         })
         .hover(move |tab| {
-            tab.bg(gpui_color(colors.hover_bg))
+            tab.bg(gpui_color(colors.hover_bg.over(colors.surface)))
                 .text_color(gpui_color(colors.text_primary))
         })
         .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2())

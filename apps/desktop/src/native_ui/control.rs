@@ -78,6 +78,7 @@ pub(crate) struct Control {
     loading_icon: Option<Icon>,
     children: Vec<AnyElement>,
     theme: Option<AxiusflowTheme>,
+    resting_fill: Option<ThemeColor>,
     tooltip: Option<TooltipSpec>,
     activation: Option<Activation>,
     focus_handle: Option<FocusHandle>,
@@ -103,6 +104,7 @@ impl Control {
             loading_icon: None,
             children: Vec::new(),
             theme: None,
+            resting_fill: None,
             tooltip: None,
             activation: None,
             focus_handle: None,
@@ -115,6 +117,13 @@ impl Control {
 
     pub(crate) fn theme(mut self, theme: &AxiusflowTheme) -> Self {
         self.theme = Some(*theme);
+        self
+    }
+
+    /// The opaque fill this control rests on; hover/selected states composite
+    /// the CSS alpha tokens over it instead of replacing it.
+    pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
+        self.resting_fill = Some(fill);
         self
     }
 
@@ -228,6 +237,17 @@ impl Control {
                 .map(|icon| icon.with_size(icon_size).into_any_element())
         }
     }
+
+    fn state_colors(&self) -> (Option<Hsla>, Option<Hsla>) {
+        let Some(theme) = self.theme else {
+            return (None, None);
+        };
+        let backdrop = self.resting_fill.unwrap_or(theme.colors.surface);
+        (
+            Some(theme_color(theme.colors.hover_bg.over(backdrop))),
+            Some(theme_color(theme.colors.active_bg.over(backdrop))),
+        )
+    }
 }
 
 impl Styled for Control {
@@ -261,8 +281,7 @@ impl RenderOnce for Control {
             || window.text_style().color,
             |theme| theme_color(theme.colors.ring),
         );
-        let hover_color = self.theme.map(|theme| theme_color(theme.colors.hover_bg));
-        let selected_color = self.theme.map(|theme| theme_color(theme.colors.active_bg));
+        let (hover_color, selected_color) = self.state_colors();
         let disabled_color = self.theme.map(|theme| theme_color(theme.colors.text_muted));
         // `with_size` is the control-size contract used by the desktop shell.
         // A custom-sized icon is painted at 75% of that square, preserving the
