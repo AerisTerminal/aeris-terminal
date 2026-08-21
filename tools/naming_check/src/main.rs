@@ -802,13 +802,12 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 67,600 for the CSS-composite hover/active painting change:
-        // ThemeColor::over resolves the alpha interaction tokens over their
-        // resting fill in sRGB so GPUI cannot re-tint them through HSL, and
-        // controls declare their resting fill explicitly.
+        // Raised from 67,700 for the chart context menu: reset/split/close moved
+        // from header chrome onto a secondary-surface pane menu, and price-axis
+        // interaction disables Nucleus autoscale at the start of the scale grab.
         assert!(
-            line_count <= 67_700,
-            "platform Rust source upper bound is {line_count} lines, above the 67,700-line soft review threshold"
+            line_count <= 67_800,
+            "platform Rust source upper bound is {line_count} lines, above the 67,800-line soft review threshold"
         );
     }
 

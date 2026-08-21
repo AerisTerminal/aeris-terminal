@@ -138,6 +138,10 @@ const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
+const CHART_CONTEXT_MENU_WIDTH: f32 = 220.0;
+const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
+const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
+const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
@@ -752,6 +756,7 @@ struct WorkspaceSurface {
     coinbase_pending_sequence: Option<u64>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
+    pending_chart_context_menu: Option<gpui::Point<Pixels>>,
     resource_class: ConsumerResourceClass,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
@@ -902,6 +907,10 @@ impl RithmicReconnectState {
 fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
+            if let Some(position) = chart.update(cx, |chart, _| chart.take_context_menu_request()) {
+                app.pending_chart_context_menu = Some(position);
+                cx.notify();
+            }
             if app.provider == TerminalProvider::Coinbase
                 && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
                 && app.last_persisted_viewport != Some(viewport)
@@ -982,7 +991,6 @@ fn rithmic_ready_action(
 
 struct HeaderState {
     theme: AxiusflowTheme,
-    pane_count: usize,
     provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
@@ -1176,7 +1184,6 @@ impl HeaderControls {
     const SERIES: u8 = 2;
     const DOM: u8 = 4;
     const FIT: u8 = 8;
-    const LATEST: u8 = 16;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -1195,7 +1202,7 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::FIT | Self::LATEST;
+            self.0 |= Self::FIT;
         }
         self
     }
@@ -1358,6 +1365,7 @@ impl WorkspaceSurface {
             coinbase_pending_sequence: None,
             restored_viewport: restored_coinbase.and_then(|restored| restored.1),
             last_persisted_viewport: None,
+            pending_chart_context_menu: None,
             resource_class: ConsumerResourceClass::Foreground,
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
@@ -1903,6 +1911,7 @@ impl WorkspaceSurface {
     fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
         let chart_theme = nucleus_chart_theme(self.theme.mode);
         self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(chart_theme)));
+        observe_chart(self.chart.as_ref(), cx);
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
@@ -2584,6 +2593,7 @@ impl WorkspaceSurface {
         let chart_theme = nucleus_chart_theme(self.theme.mode);
         self.chart =
             Some(cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme)));
+        observe_chart(self.chart.as_ref(), cx);
         self.worker_label = bootstrap.worker_label;
         self.subscription_id = bootstrap.subscription_id;
         self.replay_label = replay_label;
@@ -2697,15 +2707,6 @@ impl WorkspaceSurface {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 chart.reset_view();
-                chart_cx.notify();
-            });
-        }
-    }
-
-    fn scroll_chart_to_latest(&mut self, cx: &mut Context<Self>) {
-        if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, chart_cx| {
-                chart.scroll_to_latest();
                 chart_cx.notify();
             });
         }
@@ -3922,76 +3923,153 @@ fn workspace_title_bar(
         .child(workspace_window_controls(terminal, window, &theme))
 }
 
-fn workspace_pane_controls(
+fn clamp_chart_context_menu_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let width = px(CHART_CONTEXT_MENU_WIDTH);
+    let height = px(CHART_CONTEXT_MENU_VERTICAL_PADDING * 2.0
+        + CHART_CONTEXT_MENU_ROW_HEIGHT * 4.0
+        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT);
+    point(
+        origin
+            .x
+            .max(px(0.0))
+            .min((viewport.width - width).max(px(0.0))),
+        origin
+            .y
+            .max(px(0.0))
+            .min((viewport.height - height).max(px(0.0))),
+    )
+}
+
+fn chart_context_menu_layer(
     terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
     pane_count: usize,
+    chart_ready: bool,
+    viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
-) -> Div {
-    let button = |id: &'static str, icon: HugeIcon, tooltip: &'static str, enabled: bool| {
-        let button = Button::new(id)
-            .icon(header_icon(icon))
-            .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
-            .aria_label(tooltip)
-            .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-            .w(px(chart_chrome::CHART_CONTROL_SIZE))
-            .disabled(!enabled);
-        chrome_button_style(button, theme, false, enabled)
-    };
+) -> AnyElement {
+    let colors = theme.colors;
+    let origin = clamp_chart_context_menu_origin(menu.position, viewport);
     let can_split = pane_count < MAXIMUM_PANES_PER_WORKSPACE;
-    let can_close = pane_count > 1;
-    let horizontal_terminal = terminal.clone();
-    let vertical_terminal = terminal.clone();
-    let close_terminal = terminal.clone();
+    let dismiss = terminal.clone();
     div()
+        .id("chart_context_menu_scrim")
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .occlude()
+        .on_any_mouse_down(move |_, _, cx| {
+            dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_context_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .id("chart_context_menu")
+                .absolute()
+                .left(origin.x)
+                .top(origin.y)
+                .w(px(CHART_CONTEXT_MENU_WIDTH))
+                .occlude()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .border_1()
+                .border_color(gpui_color(colors.border_secondary))
+                .bg(gpui_color(colors.surface_secondary))
+                .text_color(gpui_color(colors.text_primary))
+                .shadow_sm()
+                .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
+                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .child(chart_context_menu_item(
+                    terminal,
+                    "chart_context_reset_view",
+                    "Reset view",
+                    chart_ready,
+                    theme,
+                    ChartContextAction::Reset,
+                ))
+                .child(
+                    div()
+                        .h(px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .h_px()
+                                .w_full()
+                                .bg(gpui_color(colors.border_secondary)),
+                        ),
+                )
+                .child(chart_context_menu_item(
+                    terminal,
+                    "chart_context_split_horizontal",
+                    "Split side by side",
+                    can_split,
+                    theme,
+                    ChartContextAction::Split(ChartSplitDirection::Horizontal),
+                ))
+                .child(chart_context_menu_item(
+                    terminal,
+                    "chart_context_split_vertical",
+                    "Split top and bottom",
+                    can_split,
+                    theme,
+                    ChartContextAction::Split(ChartSplitDirection::Vertical),
+                ))
+                .child(chart_context_menu_item(
+                    terminal,
+                    "chart_context_close_pane",
+                    "Close chart",
+                    pane_count > 1,
+                    theme,
+                    ChartContextAction::Close,
+                )),
+        )
+        .into_any_element()
+}
+
+fn chart_context_menu_item(
+    terminal: &Entity<TerminalApp>,
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    theme: &AxiusflowTheme,
+    action: ChartContextAction,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let action_terminal = terminal.clone();
+    div()
+        .id(id)
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
         .flex()
         .items_center()
-        .gap_1()
-        .child(button_activation(
-            button(
-                "split_pane_horizontal",
-                HugeIcon::SplitSideBySide,
-                "Split chart side by side",
-                can_split,
-            ),
-            can_split,
-            move |window, cx| {
-                horizontal_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.split_active_pane(
-                        ChartSplitDirection::Horizontal,
-                        window,
-                        terminal_cx,
-                    );
+        .px_3()
+        .text_sm()
+        .when(enabled, |row| {
+            row.cursor_pointer().hover(|row| {
+                row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                    .text_color(gpui_color(colors.text_primary))
+            })
+        })
+        .when(!enabled, |row| {
+            row.text_color(gpui_color(colors.text_muted))
+                .cursor_not_allowed()
+        })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            if enabled {
+                action_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.finish_chart_context_menu(action, window, terminal_cx);
                 });
-            },
-        ))
-        .child(button_activation(
-            button(
-                "split_pane_vertical",
-                HugeIcon::SplitStacked,
-                "Split chart top and bottom",
-                can_split,
-            ),
-            can_split,
-            move |window, cx| {
-                vertical_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.split_active_pane(ChartSplitDirection::Vertical, window, terminal_cx);
-                });
-            },
-        ))
-        .child(button_activation(
-            button(
-                "close_pane",
-                HugeIcon::CancelIcon01,
-                "Close chart pane",
-                can_close,
-            ),
-            can_close,
-            move |window, cx| {
-                close_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.close_active_pane(&ClosePane, window, terminal_cx);
-                });
-            },
-        ))
+            }
+            cx.stop_propagation();
+        })
+        .child(label)
 }
 
 fn engine_lifecycle_controls(
@@ -4280,24 +4358,6 @@ fn header_controls(
             state.pending.series,
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
-        ))
-        .child(workspace_pane_controls(
-            terminal,
-            state.pane_count,
-            &state.theme,
-        ))
-        .child(panel_toggle(
-            PanelToggleState {
-                id: "latest_chart",
-                label: "Latest",
-                icon: HugeIcon::ArrowRightDouble,
-                enabled: state.controls.enabled(HeaderControls::LATEST),
-                selected: false,
-                tooltip: "Return to the latest bar (End)",
-                toggle: WorkspaceSurface::scroll_chart_to_latest,
-            },
-            &state.theme,
-            app.clone(),
         ))
         .child(panel_toggle(
             PanelToggleState {
@@ -4819,6 +4879,8 @@ fn panel_toggle(
     let button = Button::new(state.id)
         .icon(header_icon(state.icon))
         .label(state.label)
+        .aria_label(state.tooltip)
+        .tooltip(TooltipSpec::new(state.tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .disabled(!state.enabled)
         .when(state.enabled, Button::cursor_pointer)
@@ -4826,12 +4888,7 @@ fn panel_toggle(
     let button = button_activation(button, state.enabled, move |_, cx| {
         app.update(cx, state.toggle);
     });
-    chrome_tooltip(
-        state.id,
-        state.tooltip,
-        chrome_button_style(button, theme, state.selected, state.enabled),
-        theme,
-    )
+    chrome_button_style(button, theme, state.selected, state.enabled)
 }
 
 fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -4840,21 +4897,19 @@ fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl I
         axiusflow_design_system::ThemeMode::Light => HugeIcon::SunIcon03,
         axiusflow_design_system::ThemeMode::Dark => HugeIcon::MoonIcon02,
     };
+    let tooltip = format!("Switch to {} theme", next.label());
     let button = Button::new("theme_toggle")
         .tab_index(0)
         .icon(header_icon(icon))
+        .aria_label(tooltip.clone())
+        .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .cursor_pointer();
     let button = button_activation(button, true, move |window, cx| {
         terminal.update(cx, |terminal, cx| terminal.toggle_theme(window, cx));
     });
-    chrome_tooltip(
-        "theme_toggle",
-        format!("Switch to {} theme", next.label()),
-        chrome_button_style(button, theme, false, true),
-        theme,
-    )
+    chrome_button_style(button, theme, false, true)
 }
 
 fn header_icon(name: HugeIcon) -> Icon {
@@ -5271,6 +5326,20 @@ struct WorkspaceDragState {
     strip_left: f32,
 }
 
+#[derive(Clone, Copy)]
+enum ChartContextAction {
+    Reset,
+    Split(ChartSplitDirection),
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChartContextMenu {
+    workspace_id: u64,
+    pane_id: u64,
+    position: gpui::Point<Pixels>,
+}
+
 struct TerminalApp {
     workspaces: Vec<WorkspaceTab>,
     active: usize,
@@ -5288,6 +5357,7 @@ struct TerminalApp {
     persisted_active_workspace_id: u64,
     workspace_error: Option<String>,
     workspace_drag: Option<WorkspaceDragState>,
+    chart_context_menu: Option<ChartContextMenu>,
     window_move_pending: bool,
     closing: bool,
 }
@@ -5601,6 +5671,7 @@ impl TerminalApp {
             persisted_active_workspace_id,
             workspace_error: None,
             workspace_drag: None,
+            chart_context_menu: None,
             window_move_pending: false,
             closing: false,
         }
@@ -5652,6 +5723,70 @@ impl TerminalApp {
             workspace.generation = workspace.generation.saturating_add(1);
             cx.notify();
         }
+    }
+
+    fn absorb_chart_context_menu_requests(&mut self, cx: &mut Context<Self>) {
+        let mut requested = None;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                let position = pane
+                    .surface
+                    .update(cx, |surface, _| surface.pending_chart_context_menu.take());
+                if let Some(position) = position {
+                    requested = Some(ChartContextMenu {
+                        workspace_id: workspace.id,
+                        pane_id: pane.id,
+                        position,
+                    });
+                }
+            }
+        }
+        if let Some(menu) = requested {
+            self.open_chart_context_menu(menu, cx);
+        }
+    }
+
+    fn open_chart_context_menu(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
+        self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        self.chart_context_menu = Some(menu);
+        cx.notify();
+    }
+
+    fn close_chart_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.chart_context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn finish_chart_context_menu(
+        &mut self,
+        action: ChartContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.chart_context_menu.take() else {
+            return;
+        };
+        self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        match action {
+            ChartContextAction::Reset => {
+                if let Some(workspace) = self
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == menu.workspace_id)
+                    && let Some(pane) = workspace.panes.iter().find(|pane| pane.id == menu.pane_id)
+                {
+                    pane.surface.update(cx, WorkspaceSurface::reset_chart_view);
+                }
+            }
+            ChartContextAction::Split(direction) => {
+                self.split_active_pane(direction, window, cx);
+            }
+            ChartContextAction::Close => {
+                self.close_active_pane(&ClosePane, window, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn resize_workspace_split(
@@ -6246,6 +6381,11 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key.as_str() == "escape" && self.chart_context_menu.is_some() {
+            self.close_chart_context_menu(cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.workspace_drag.is_some() && event.keystroke.key.as_str() == "escape" {
             cx.stop_active_drag(window);
             self.end_workspace_drag(cx);
@@ -6347,14 +6487,12 @@ impl TerminalApp {
 
 fn active_header_state(
     workspace: &WorkspaceSurface,
-    pane_count: usize,
     theme: &AxiusflowTheme,
     chart_has_market_data: bool,
     cx: &App,
 ) -> HeaderState {
     HeaderState {
         theme: *theme,
-        pane_count,
         provider: workspace.provider,
         instrument_label: terminal_instrument_label(workspace),
         series_label: if workspace.provider == TerminalProvider::Coinbase {
@@ -6651,6 +6789,7 @@ fn workspace_pane_element(
     let workspace_id = workspace.id;
     let pane_focus = pane.focus.clone();
     let select_terminal = terminal.clone();
+    let context_terminal = terminal.clone();
     div()
         .id(("workspace_pane", pane_id))
         .relative()
@@ -6664,6 +6803,19 @@ fn workspace_pane_element(
                 terminal.select_pane(workspace_id, pane_id, terminal_cx);
             });
             pane_focus.focus(window, cx);
+        })
+        .on_mouse_down(MouseButton::Right, move |event, _, cx| {
+            context_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.open_chart_context_menu(
+                    ChartContextMenu {
+                        workspace_id,
+                        pane_id,
+                        position: event.position,
+                    },
+                    terminal_cx,
+                );
+            });
+            cx.stop_propagation();
         })
         .child(content)
         .into_any_element()
@@ -6741,6 +6893,7 @@ impl Render for TerminalApp {
         }
         self.track_window_activation(window, cx);
         self.schedule_market_frame(window, cx);
+        self.absorb_chart_context_menu_requests(cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
@@ -6762,17 +6915,21 @@ impl Render for TerminalApp {
                 },
             cx,
         );
+        let context_menu = self.chart_context_menu.map(|menu| {
+            chart_context_menu_layer(
+                &terminal,
+                menu,
+                pane_count,
+                chart_has_market_data,
+                window.viewport_size(),
+                &self.theme,
+            )
+        });
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
         let header = terminal_header(
             &terminal,
             &active,
-            active_header_state(
-                workspace,
-                pane_count,
-                &self.theme,
-                chart_has_market_data,
-                cx,
-            ),
+            active_header_state(workspace, &self.theme, chart_has_market_data, cx),
         );
         let market = workspace_market_area(
             &terminal,
@@ -6819,6 +6976,7 @@ impl Render for TerminalApp {
                     .child(market),
             )
             .children(overlay)
+            .children(context_menu)
     }
 }
 
@@ -7574,15 +7732,16 @@ mod tests {
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
         caption_pointer_owner, catalog_rejection_message, chart_status_detail,
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress, claim_once,
-        connection_presentation, default_rithmic_contract_index, durable_workspace_viewport,
-        finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
-        nucleus_chart_theme, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, reorder_workspace_ids, resized_side_panel_width,
-        rithmic_ready_action, series_selector_label, should_finish_chrome_overlay_close,
-        split_lifetime_mode, symbol_input_action, symbol_submit_decision, timeframe_overlay_left,
-        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        clamp_chart_context_menu_origin, connection_presentation, default_rithmic_contract_index,
+        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+        instrument_selector_label, nucleus_chart_theme, publication_chart_state,
+        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
+        resized_side_panel_width, rithmic_ready_action, series_selector_label,
+        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
+        symbol_submit_decision, timeframe_overlay_left, window_move_gesture_transition,
+        workspace_drag_destination, workspace_drag_translation, workspace_label, workspace_series,
+        workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
+        wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -8460,7 +8619,6 @@ mod tests {
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
         assert!(controls.enabled(HeaderControls::FIT));
-        assert!(controls.enabled(HeaderControls::LATEST));
     }
 
     #[test]
@@ -8468,12 +8626,27 @@ mod tests {
         let retained_chart_controls =
             HeaderControls::from_state(true, false).with_chart_controls(true);
         assert!(retained_chart_controls.enabled(HeaderControls::FIT));
-        assert!(retained_chart_controls.enabled(HeaderControls::LATEST));
 
         let empty_chart_controls =
             HeaderControls::from_state(true, false).with_chart_controls(false);
         assert!(!empty_chart_controls.enabled(HeaderControls::FIT));
-        assert!(!empty_chart_controls.enabled(HeaderControls::LATEST));
+    }
+
+    #[test]
+    fn chart_context_menu_stays_inside_the_window() {
+        let overflow = clamp_chart_context_menu_origin(
+            point(px(2000.0), px(2000.0)),
+            size(px(800.0), px(600.0)),
+        );
+        assert!(overflow.x <= px(800.0));
+        assert!(overflow.y <= px(600.0));
+        assert_eq!(
+            clamp_chart_context_menu_origin(
+                point(px(-20.0), px(-20.0)),
+                size(px(800.0), px(600.0))
+            ),
+            point(px(0.0), px(0.0))
+        );
     }
 
     #[test]

@@ -13,8 +13,8 @@ use axiusflow_application::{
 };
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollWheelEvent, Window, canvas, div,
-    prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, Window,
+    canvas, div, prelude::*, px,
 };
 use nucleuscharts_engine::{
     ChartEngine, ChartFrame, ChartTheme, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
@@ -217,6 +217,7 @@ pub struct NucleusChartView {
     locked_drawings: HashSet<DrawingId>,
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
+    pending_context_menu: Option<Point<Pixels>>,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -264,6 +265,7 @@ impl NucleusChartView {
             locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
+            pending_context_menu: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -331,6 +333,7 @@ impl NucleusChartView {
             locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
+            pending_context_menu: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -372,18 +375,16 @@ impl NucleusChartView {
         Ok(())
     }
 
-    /// Restores the complete visible time range and automatic price scales.
+    /// Restores Nucleus's native default time scale and automatic price scales.
     pub fn reset_view(&mut self) {
-        self.engine.reset_time_scale();
-        self.engine.fit_content();
-        for pane in 0..self.engine.panes.len() {
-            self.engine
-                .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Left, true);
-            self.engine
-                .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Right, true);
-        }
+        self.engine.reset_view();
         self.invalidate_series_layout();
         self.fitted = true;
+    }
+
+    /// Takes a pending chart right-click request in window coordinates.
+    pub fn take_context_menu_request(&mut self) -> Option<Point<Pixels>> {
+        self.pending_context_menu.take()
     }
 
     /// Selects a Nucleus-owned theme without changing chart data or viewport.
@@ -1000,6 +1001,17 @@ impl NucleusChartView {
         selected.is_some()
     }
 
+    fn pointer_on_axis(&self, pane_x: f64, y: f64) -> bool {
+        y > self.engine.pane_h || pane_x < 0.0 || pane_x > self.engine.pane_w
+    }
+
+    fn begin_price_axis_scale(&mut self, pane: usize, target: PriceScaleTarget, y: f64) {
+        self.engine
+            .set_price_scale_auto_scale_for(pane, target, false);
+        self.engine.price_axis_start_scale(pane, target, y);
+        self.drag = Some(ChartDrag::PriceAxis { pane, target });
+    }
+
     fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize) {
         self.end_drag(pane_x, y);
         let pane = self.engine.pane_index_at_y(y);
@@ -1016,40 +1028,30 @@ impl NucleusChartView {
             self.update_crosshair(pane_x, y);
             return;
         }
-        self.drag = if let Some(index) = self.separator_at(y) {
+        if let Some(index) = self.separator_at(y) {
             self.engine.set_separator_hover(None);
-            Some(ChartDrag::PaneSeparator { index, last_y: y })
+            self.drag = Some(ChartDrag::PaneSeparator { index, last_y: y });
         } else if y > self.engine.pane_h {
             self.engine.time_axis_start_scale(pane_x);
-            Some(ChartDrag::TimeAxis)
+            self.drag = Some(ChartDrag::TimeAxis);
         } else if pane_x < 0.0
             && self
                 .engine
                 .price_axis_scalable(pane, PriceScaleTarget::Left)
         {
-            self.engine
-                .price_axis_start_scale(pane, PriceScaleTarget::Left, y);
-            Some(ChartDrag::PriceAxis {
-                pane,
-                target: PriceScaleTarget::Left,
-            })
+            self.begin_price_axis_scale(pane, PriceScaleTarget::Left, y);
         } else if pane_x > self.engine.pane_w
             && self
                 .engine
                 .price_axis_scalable(pane, PriceScaleTarget::Right)
         {
-            self.engine
-                .price_axis_start_scale(pane, PriceScaleTarget::Right, y);
-            Some(ChartDrag::PriceAxis {
-                pane,
-                target: PriceScaleTarget::Right,
-            })
+            self.begin_price_axis_scale(pane, PriceScaleTarget::Right, y);
         } else if pane_x >= 0.0 && y >= 0.0 && y <= self.engine.pane_h {
             self.engine.time_scale.start_scroll(pane_x);
-            Some(ChartDrag::Pane)
+            self.drag = Some(ChartDrag::Pane);
         } else {
-            None
-        };
+            self.drag = None;
+        }
         self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
@@ -1201,17 +1203,36 @@ impl NucleusChartView {
         let (pane_x, y) = self.local_position(event.position);
         if self.separator_at(y).is_some() {
             self.begin_drag(pane_x, y, event.click_count);
-        } else if self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
+        } else if !self.pointer_on_axis(pane_x, y)
+            && self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers))
+        {
             self.engine.set_selected_series(None);
             self.update_cursor(pane_x, y);
             self.update_crosshair(pane_x, y);
-        } else if self.drawing_tool == ChartDrawingTool::Cursor && self.select_series_at(pane_x, y)
+        } else if !self.pointer_on_axis(pane_x, y)
+            && self.drawing_tool == ChartDrawingTool::Cursor
+            && self.select_series_at(pane_x, y)
         {
             self.update_cursor(pane_x, y);
             self.update_crosshair(pane_x, y);
         } else {
             self.begin_drag(pane_x, y, event.click_count);
         }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(focus_handle) = &self.focus_handle {
+            window.focus(focus_handle, cx);
+        }
+        self.cancel_gesture();
+        self.pending_context_menu = Some(event.position);
         cx.stop_propagation();
         cx.notify();
     }
@@ -1413,6 +1434,7 @@ impl Render for NucleusChartView {
                 }
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_menu))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -1817,6 +1839,12 @@ mod tests {
         assert!(chart.drag.is_none());
 
         let right_axis_x = chart.engine.pane_w + 1.0;
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(true)
+        );
         chart.begin_drag(right_axis_x, 200.0, 1);
         assert!(matches!(
             chart.drag,
@@ -1825,9 +1853,27 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(false)
+        );
         chart.drag_to(right_axis_x, 240.0);
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(false)
+        );
         chart.end_drag(right_axis_x, 240.0);
         assert!(chart.drag.is_none());
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(false)
+        );
 
         chart.engine.time_scale.start_scroll(0.0);
         chart.engine.time_scale.scroll_to(80.0);
@@ -1840,7 +1886,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_view_fits_time_and_restores_automatic_price_scaling() {
+    fn reset_view_restores_native_time_defaults_and_automatic_price_scaling() {
         let mut chart = interactive_chart();
         chart.engine.time_scale.start_scroll(0.0);
         chart.engine.time_scale.scroll_to(80.0);
