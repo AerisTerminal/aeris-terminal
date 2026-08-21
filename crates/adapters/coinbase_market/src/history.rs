@@ -1,7 +1,4 @@
-use crate::{
-    CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS, FixedPointValue,
-    coinbase_instrument_id,
-};
+use crate::{CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS, FixedPointValue};
 use axiusflow_market_data::MarketBar;
 use axiusflow_provider_history::{
     Continuation, DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
@@ -246,21 +243,22 @@ impl<T> CoinbaseHistoryCapabilityAdapter<T> {
             DatasetCapability::unsupported("historical ticks are not implemented"),
             DatasetCapability::unsupported("historical depth is not implemented"),
         )?;
-        let products = [("BTC-USD", 2, 8), ("ETH-USD", 2, 8)]
-            .into_iter()
-            .map(|(product_id, price_scale, quantity_scale)| {
-                let instrument_id = coinbase_instrument_id(product_id)
-                    .map_err(|_| ProviderHistoryError::InvalidConfiguration("Coinbase product"))?;
-                Ok((
-                    instrument_id,
-                    ProductPrecision {
-                        product_id: product_id.to_string(),
-                        price_scale,
-                        quantity_scale,
-                    },
-                ))
-            })
-            .collect::<Result<HashMap<_, _>, ProviderHistoryError>>()?;
+        #[cfg(test)]
+        let products: HashMap<String, ProductPrecision> = {
+            let product_id = "BTC-USD";
+            let instrument_id = crate::coinbase_instrument_id(product_id)
+                .map_err(|_| ProviderHistoryError::InvalidConfiguration("Coinbase product"))?;
+            HashMap::from([(
+                instrument_id,
+                ProductPrecision {
+                    product_id: product_id.to_string(),
+                    price_scale: 2,
+                    quantity_scale: 8,
+                },
+            )])
+        };
+        #[cfg(not(test))]
+        let products: HashMap<String, ProductPrecision> = HashMap::new();
         Ok(Self {
             capabilities,
             transport,

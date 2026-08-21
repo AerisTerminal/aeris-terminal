@@ -126,6 +126,12 @@ impl CoverageSnapshot {
             .copied()
     }
 
+    /// Returns normalized provider-confirmed empty ranges for durable recovery.
+    #[must_use]
+    pub fn confirmed_empty_ranges(&self) -> &[HistoryRange] {
+        &self.confirmed_empty
+    }
+
     fn class_at(&self, range: HistoryRange) -> CoverageClass {
         if covers(&self.invalidated, range) {
             CoverageClass::Invalidated

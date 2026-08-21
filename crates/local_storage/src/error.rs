@@ -9,6 +9,7 @@ pub enum LocalStorageError {
     StoreAlreadyOpen,
     SegmentKeyMismatch,
     CatalogFull { maximum: usize },
+    CacheBudgetExceeded { required: u64, maximum: u64 },
     SegmentTooLarge { requested: usize, maximum: usize },
     SegmentAlreadyExists,
     AuthenticationFailed,
@@ -41,6 +42,10 @@ impl fmt::Display for LocalStorageError {
             Self::CatalogFull { maximum } => write!(
                 formatter,
                 "desktop history catalog reached its {maximum}-entry bound"
+            ),
+            Self::CacheBudgetExceeded { required, maximum } => write!(
+                formatter,
+                "protected history requires {required} physical bytes, exceeding the {maximum}-byte cache budget"
             ),
             Self::SegmentTooLarge { requested, maximum } => write!(
                 formatter,

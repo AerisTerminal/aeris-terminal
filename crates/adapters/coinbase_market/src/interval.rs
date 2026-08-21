@@ -74,6 +74,70 @@ impl CoinbaseInterval {
             Self::Week1 | Self::Month1 => None,
         }
     }
+
+    /// Returns the UTC bucket containing one provider timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when calendar arithmetic overflows.
+    pub fn bucket_start(self, timestamp: i64) -> Result<i64, String> {
+        bucket_start(timestamp, self)
+    }
+
+    /// Moves an aligned UTC bucket by an exact number of interval buckets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timestamp is unaligned or arithmetic overflows.
+    pub fn shift_bucket(self, timestamp: i64, buckets: i64) -> Result<i64, String> {
+        if self.bucket_start(timestamp)? != timestamp {
+            return Err("Coinbase bucket timestamp is not aligned".to_string());
+        }
+        if let Some(seconds) = self
+            .fixed_seconds()
+            .or((self == Self::Week1).then_some(604_800))
+        {
+            return buckets
+                .checked_mul(seconds)
+                .and_then(|shift| timestamp.checked_add(shift))
+                .ok_or_else(|| "Coinbase bucket timestamp overflowed".to_string());
+        }
+        let (year, month, _) = civil_from_days(timestamp.div_euclid(86_400));
+        let month_index = year
+            .checked_mul(12)
+            .and_then(|value| value.checked_add(i64::from(month) - 1))
+            .and_then(|value| value.checked_add(buckets))
+            .ok_or_else(|| "Coinbase month bucket overflowed".to_string())?;
+        Ok(days_from_civil(
+            month_index.div_euclid(12),
+            u32::try_from(month_index.rem_euclid(12) + 1)
+                .map_err(|_| "Coinbase month bucket overflowed".to_string())?,
+            1,
+        ) * 86_400)
+    }
+
+    /// Counts exact buckets in one aligned half-open UTC range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either bound is unaligned, the range is reversed,
+    /// or calendar arithmetic overflows.
+    pub fn buckets_between(self, start: i64, end: i64) -> Result<i64, String> {
+        if self.bucket_start(start)? != start || self.bucket_start(end)? != end || start > end {
+            return Err("Coinbase bucket range is not aligned".to_string());
+        }
+        if let Some(seconds) = self
+            .fixed_seconds()
+            .or((self == Self::Week1).then_some(604_800))
+        {
+            return Ok((end - start) / seconds);
+        }
+        let month_index = |timestamp: i64| {
+            let (year, month, _) = civil_from_days(timestamp.div_euclid(86_400));
+            year * 12 + i64::from(month) - 1
+        };
+        Ok(month_index(end) - month_index(start))
+    }
 }
 
 impl TryFrom<ChartInterval> for CoinbaseInterval {
@@ -140,6 +204,9 @@ pub fn aggregate_coinbase_bars(
         }
         for bar in &sorted[index..next] {
             bar.validate().map_err(|error| error.to_string())?;
+            if bar.exchange_timestamp_seconds.rem_euclid(60) != 0 {
+                return Err("Coinbase source bar timestamp is invalid".to_string());
+            }
         }
         diagnostics.duplicate_bars = diagnostics
             .duplicate_bars
@@ -187,7 +254,7 @@ pub fn aggregate_coinbase_bars(
 }
 
 fn bucket_start(timestamp: i64, interval: CoinbaseInterval) -> Result<i64, String> {
-    if timestamp < 0 || timestamp % 60 != 0 {
+    if timestamp < 0 {
         return Err("Coinbase source bar timestamp is invalid".to_string());
     }
     if let Some(seconds) = interval.fixed_seconds() {

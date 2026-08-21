@@ -17,6 +17,7 @@ struct ChartSeriesIdentity {
     bar_definition_version: u32,
     bar_interval_seconds: u32,
     bar_trades_per_bar: Option<u32>,
+    bar_calendar_months: Option<u32>,
     schema_version: u32,
 }
 
@@ -29,6 +30,7 @@ impl ChartSeriesIdentity {
             bar_definition_version: snapshot.bar_definition().version,
             bar_interval_seconds: snapshot.bar_definition().interval_seconds,
             bar_trades_per_bar: snapshot.bar_definition().trades_per_bar,
+            bar_calendar_months: snapshot.bar_definition().calendar_months,
             schema_version: snapshot.evidence().schema_version,
         }
     }
@@ -40,6 +42,7 @@ impl ChartSeriesIdentity {
             && self.bar_definition_version == snapshot.bar_definition().version
             && self.bar_interval_seconds == snapshot.bar_definition().interval_seconds
             && self.bar_trades_per_bar == snapshot.bar_definition().trades_per_bar
+            && self.bar_calendar_months == snapshot.bar_definition().calendar_months
             && self.schema_version == snapshot.evidence().schema_version
     }
 }

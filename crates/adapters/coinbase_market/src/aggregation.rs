@@ -18,7 +18,7 @@ const MAXIMUM_FIXED_INTERVAL_SECONDS: u32 = 86_400;
 const MAXIMUM_DECIMAL_SCALE: u8 = 18;
 
 /// Hard ceiling for retained completed bars in one product aggregator.
-pub const MAXIMUM_AGGREGATED_HISTORY_BARS: usize = 4_096;
+pub const MAXIMUM_AGGREGATED_HISTORY_BARS: usize = 32_768;
 
 #[derive(Clone, Copy)]
 struct InFlightBar {

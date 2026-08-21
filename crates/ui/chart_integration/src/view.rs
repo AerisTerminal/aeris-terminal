@@ -1291,7 +1291,10 @@ impl NucleusChartView {
     fn rebuild(&mut self, width: f32, height: f32, scale_factor: f32, window: &Window) {
         #[cfg(feature = "diagnostics")]
         let rebuild_started = Instant::now();
+        #[cfg(feature = "diagnostics")]
         let mutation = self.apply_pending_data();
+        #[cfg(not(feature = "diagnostics"))]
+        self.apply_pending_data();
         let dimensions = (width, height, scale_factor);
         let dimensions_changed = self.built_for != dimensions;
         let layout_recomputed = dimensions_changed || self.layout_dirty;
@@ -1516,6 +1519,52 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[test]
+    fn calendar_month_snapshot_reaches_nucleus_with_variable_month_spacing() {
+        let baseline = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 3 })
+            .expect("fixture snapshot");
+        let month_starts = [1_704_067_200_i64, 1_706_745_600, 1_709_251_200];
+        let bars = baseline
+            .bars()
+            .iter()
+            .zip(month_starts)
+            .map(|(item, timestamp)| {
+                let mut bar = *item.value();
+                bar.exchange_timestamp_seconds = timestamp;
+                bar.exchange_timestamp_unix_nanos = timestamp.saturating_mul(1_000_000_000);
+                bar
+            })
+            .collect();
+        let mut definition = baseline.bar_definition().clone();
+        definition.definition_id = "coinbase:fixture:calendar-months:1".to_string();
+        definition.interval_seconds = 0;
+        definition.trades_per_bar = None;
+        definition.calendar_months = Some(1);
+        let replay = ReplaySnapshot::try_new(
+            baseline.instrument().clone(),
+            baseline.provenance(),
+            definition,
+            bars,
+        )
+        .expect("calendar snapshot validates");
+
+        let chart = NucleusChartView::with_replay(&replay);
+        let installed_times = chart
+            .engine
+            .series_data(0)
+            .into_iter()
+            .map(|point| point.time)
+            .collect::<Vec<_>>();
+
+        assert!(chart.has_market_data());
+        assert_eq!(installed_times, month_starts);
+        assert_ne!(
+            month_starts[1] - month_starts[0],
+            month_starts[2] - month_starts[1]
+        );
     }
 
     #[test]

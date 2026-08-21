@@ -47,6 +47,12 @@ pub struct HistoryStore {
     catalog: Catalog,
 }
 
+enum ExistingPublication {
+    Absent,
+    Idempotent(SegmentReceipt),
+    ReplaceQuarantined(CatalogRecord),
+}
+
 impl HistoryStore {
     /// Opens or creates one private per-user history root and recovers orphaned files.
     ///
@@ -129,6 +135,75 @@ impl HistoryStore {
         self.publish_retained(&request, retention_until)
     }
 
+    /// Returns the additional physical bytes needed by a retained publication.
+    /// An exact active idempotent publication requires no reservation.
+    ///
+    /// # Errors
+    /// Returns the same validation, key-provenance, immutable-conflict, and
+    /// segment-size errors that publication can establish before file I/O.
+    pub fn publication_storage_requirement(
+        &self,
+        request: PublicationRequest<'_>,
+    ) -> Result<u64, LocalStorageError> {
+        request.identity.validate()?;
+        let retention_until = match request.retention {
+            RetentionPolicy::MemoryOnly => return Ok(0),
+            RetentionPolicy::UntilUnixSeconds(expiry) if expiry <= request.now_unix_seconds => {
+                return Ok(0);
+            }
+            RetentionPolicy::UntilUnixSeconds(expiry) => Some(expiry),
+            RetentionPolicy::UntilRevoked => None,
+        };
+        if request.payload.len() > MAXIMUM_SEGMENT_BYTES {
+            return Err(LocalStorageError::SegmentTooLarge {
+                requested: request.payload.len(),
+                maximum: MAXIMUM_SEGMENT_BYTES,
+            });
+        }
+        let request_key_verifier = segment_key_verifier(request.encryption_key)?;
+        if self
+            .catalog
+            .key_id_has_different_verifier(request.encryption_key.key_id(), &request_key_verifier)?
+        {
+            return Err(LocalStorageError::SegmentKeyMismatch);
+        }
+        let segment_id = identity_token(&self.catalog_key, request.identity)?;
+        if let Some(record) = self.catalog.find(&segment_id)?
+            && record
+                .retention_until
+                .is_none_or(|expiry| expiry > request.now_unix_seconds)
+        {
+            let key_matches = record.key_id == request.encryption_key.key_id()
+                && record.key_verifier == request_key_verifier;
+            let idempotent = !record.quarantined
+                && key_matches
+                && record.payload_bytes == u64::try_from(request.payload.len()).unwrap_or(u64::MAX)
+                && record.payload_checksum == checksum(request.payload)
+                && record.retention_until == retention_until
+                && record.recovery == request.recovery;
+            if idempotent {
+                return Ok(0);
+            }
+            if !record.quarantined
+                || record.recovery != RecoveryAction::ProviderRefetch
+                || request.recovery != RecoveryAction::ProviderRefetch
+                || !key_matches
+            {
+                return Err(LocalStorageError::SegmentAlreadyExists);
+            }
+        }
+        u64::try_from(
+            request
+                .payload
+                .len()
+                .saturating_add(SEGMENT_FILE_OVERHEAD_BYTES),
+        )
+        .map_err(|_| LocalStorageError::SegmentTooLarge {
+            requested: request.payload.len(),
+            maximum: MAXIMUM_SEGMENT_BYTES,
+        })
+    }
+
     /// Replaces a bounded copy-on-write active tail after the new encrypted
     /// generation is durably published. A crash can retain overlap, never lose
     /// the previously durable prefix.
@@ -171,58 +246,6 @@ impl HistoryStore {
             missing_recovery,
             MAXIMUM_SEGMENT_BYTES,
         )
-    }
-
-    /// Returns the newest unexpired active segment for one exact series revision.
-    ///
-    /// The caller supplies the plaintext scope and dimensions; the catalog still
-    /// stores and searches only keyed tokens.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid dimensions or catalog access failure.
-    pub fn latest_identity(
-        &self,
-        series: crate::HistorySeriesIdentity<'_>,
-        now_unix_seconds: i64,
-    ) -> Result<Option<crate::SegmentIdentity>, LocalStorageError> {
-        series.validate()?;
-        let scope = scope_tokens(&self.catalog_key, series.scope)?;
-        let instrument = instrument_token(&self.catalog_key, series.instrument_id)?;
-        let resolution = resolution_token(&self.catalog_key, series.resolution)?;
-        let range = self.catalog.latest_series_range(
-            SeriesTokens {
-                provider: &scope.provider,
-                account: &scope.account,
-                entitlement: &scope.entitlement,
-                instrument: &instrument,
-                resolution: &resolution,
-            },
-            SeriesDimensions {
-                data_kind: series.data_kind.code(),
-                source_revision: series.source_revision,
-                schema_revision: series.schema_revision,
-                calendar_revision: series.calendar_revision,
-                adjustment_revision: series.adjustment_revision,
-                correction_revision: series.correction_revision,
-            },
-            now_unix_seconds,
-        )?;
-        Ok(range.map(
-            |(range_start_unix_nanos, range_end_unix_nanos)| crate::SegmentIdentity {
-                scope: series.scope.clone(),
-                instrument_id: series.instrument_id.to_string(),
-                data_kind: series.data_kind,
-                resolution: series.resolution.to_string(),
-                range_start_unix_nanos,
-                range_end_unix_nanos,
-                source_revision: series.source_revision,
-                schema_revision: series.schema_revision,
-                calendar_revision: series.calendar_revision,
-                adjustment_revision: series.adjustment_revision,
-                correction_revision: series.correction_revision,
-            },
-        ))
     }
 
     /// Returns merged active retained coverage for one exact series revision.
@@ -397,9 +420,9 @@ impl HistoryStore {
 
     /// Supersedes unusable coverage evidence after a provider repair completes.
     ///
-    /// Invalidated markers are split around the repaired range. Overlapping
-    /// quarantined segments are removed entirely, leaving any unrepaired
-    /// portion missing and therefore eligible for a later fetch.
+    /// Confirmed-empty and invalidated markers are split around the repaired
+    /// range. Overlapping quarantined segments are removed entirely, leaving
+    /// any unrepaired portion missing and therefore eligible for a later fetch.
     ///
     /// # Errors
     /// Returns an error for invalid dimensions, catalog capacity, or cleanup failure.
@@ -557,15 +580,18 @@ impl HistoryStore {
             });
         }
         match self.read_record(identity, encryption_key, &record, maximum_payload_bytes)? {
-            HistoryRead::Hit(payload) => Ok(crate::AuthorizedHistoryRead::Hit {
-                payload,
-                access_policy: crate::SegmentAccessPolicy::new(
-                    record.key_id,
-                    record.key_verifier,
-                    record.retention_until,
-                    record.recovery,
-                ),
-            }),
+            HistoryRead::Hit(payload) => {
+                self.catalog.touch(&segment_id, now_unix_seconds)?;
+                Ok(crate::AuthorizedHistoryRead::Hit {
+                    payload,
+                    access_policy: crate::SegmentAccessPolicy::new(
+                        record.key_id,
+                        record.key_verifier,
+                        record.retention_until,
+                        record.recovery,
+                    ),
+                })
+            }
             HistoryRead::Unavailable { reason, recovery } => {
                 Ok(crate::AuthorizedHistoryRead::Unavailable { reason, recovery })
             }
@@ -704,44 +730,176 @@ impl HistoryStore {
         self.catalog.statistics()
     }
 
-    /// Enforces a payload quota by evicting only oldest derived acceleration
-    /// segments. Raw bars, ticks, and depth are never quota candidates.
+    /// Enforces the hard local cache budget across all retained data classes.
+    /// Least-recently-viewed unprotected segments are removed first.
+    ///
+    /// Protected identities are exact immutable segments. Each protected range
+    /// pairs exact series dimensions with a half-open range and protects every
+    /// active segment that overlaps it.
     ///
     /// # Errors
-    /// Returns an error when catalog or owned-file removal fails.
-    pub fn enforce_derived_quota(
+    /// Returns an error when catalog access or owned-segment deletion fails.
+    pub fn enforce_cache_budget(
         &mut self,
-        maximum_payload_bytes: u64,
+        maximum_stored_bytes: u64,
+        protected_identities: &[crate::SegmentIdentity],
+        protected_ranges: &[(crate::HistorySeriesIdentity<'_>, crate::RetainedRange)],
     ) -> Result<crate::QuotaEnforcementReport, LocalStorageError> {
-        let mut derived = self
-            .catalog
-            .active_records()?
-            .into_iter()
-            .filter(|record| record.data_kind == crate::DataKind::Derived.code())
-            .collect::<Vec<_>>();
-        derived.sort_by_key(|record| (record.created_at, record.file_name.clone()));
-        let mut retained = derived.iter().fold(0_u64, |total, record| {
-            total.saturating_add(record.payload_bytes)
+        self.reserve_cache_budget(
+            maximum_stored_bytes,
+            0,
+            protected_identities,
+            protected_ranges,
+        )
+    }
+
+    /// Reserves physical segment bytes before publication while enforcing the
+    /// hard cache ceiling. Unusable quarantine files and least-recently-viewed
+    /// unprotected segments are removed first.
+    ///
+    /// If the current store already exceeds the ceiling, enough protected data
+    /// is removed to restore the hard bound and the degradation is returned as
+    /// an explicit error. A new reservation never evicts protected data: it
+    /// fails before publication when the protected working set cannot coexist
+    /// with the requested bytes.
+    ///
+    /// # Errors
+    /// Returns an explicit budget error when protected data must be degraded or
+    /// cannot coexist with the reservation, or an error for invalid identities,
+    /// catalog access, or owned-segment deletion.
+    pub fn reserve_cache_budget(
+        &mut self,
+        maximum_stored_bytes: u64,
+        additional_stored_bytes: u64,
+        protected_identities: &[crate::SegmentIdentity],
+        protected_ranges: &[(crate::HistorySeriesIdentity<'_>, crate::RetainedRange)],
+    ) -> Result<crate::QuotaEnforcementReport, LocalStorageError> {
+        let protected = self.protected_segment_tokens(protected_identities, protected_ranges)?;
+        let mut records = self.catalog.all_records()?;
+        records.sort_by_key(|record| {
+            (
+                !record.quarantined,
+                record.last_viewed_at,
+                record.created_at,
+                record.file_name.clone(),
+            )
         });
-        let remove_count = derived
+        let record_bytes = records
             .iter()
-            .take_while(|record| {
-                if retained <= maximum_payload_bytes {
-                    return false;
+            .map(|record| self.record_stored_bytes(record))
+            .collect::<Result<Vec<u64>, LocalStorageError>>()?;
+        let is_protected = records
+            .iter()
+            .map(|record| !record.quarantined && protected.contains(&record.segment_id))
+            .collect::<Vec<_>>();
+        let mut retained = record_bytes
+            .iter()
+            .fold(0_u64, |total, bytes| total.saturating_add(*bytes));
+        let protected_bytes = record_bytes
+            .iter()
+            .zip(&is_protected)
+            .filter(|(_, protected)| **protected)
+            .fold(0_u64, |total, (bytes, _)| total.saturating_add(*bytes));
+        let required = protected_bytes.saturating_add(additional_stored_bytes);
+        let mut evicted_indices = BTreeSet::new();
+        let mut removed_bytes = 0_u64;
+        for protect_candidate in [false, true] {
+            for (index, bytes) in record_bytes.iter().enumerate() {
+                if retained <= maximum_stored_bytes {
+                    break;
                 }
-                retained = retained.saturating_sub(record.payload_bytes);
-                true
-            })
-            .count();
-        let removed_bytes = derived[..remove_count].iter().fold(0_u64, |total, record| {
-            total.saturating_add(record.payload_bytes)
-        });
-        self.remove_records(&derived[..remove_count])?;
+                if is_protected[index] != protect_candidate {
+                    continue;
+                }
+                retained = retained.saturating_sub(*bytes);
+                removed_bytes = removed_bytes.saturating_add(*bytes);
+                evicted_indices.insert(index);
+            }
+            if retained <= maximum_stored_bytes {
+                break;
+            }
+        }
+        let protection_degraded = evicted_indices.iter().any(|index| is_protected[*index]);
+        if protection_degraded {
+            let evicted = records
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, record)| evicted_indices.contains(&index).then_some(record))
+                .collect::<Vec<_>>();
+            self.remove_records(&evicted)?;
+            return Err(LocalStorageError::CacheBudgetExceeded {
+                required,
+                maximum: maximum_stored_bytes,
+            });
+        }
+
+        if required > maximum_stored_bytes {
+            let evicted = records
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, record)| evicted_indices.contains(&index).then_some(record))
+                .collect::<Vec<_>>();
+            self.remove_records(&evicted)?;
+            return Err(LocalStorageError::CacheBudgetExceeded {
+                required,
+                maximum: maximum_stored_bytes,
+            });
+        }
+        let reservation_target = maximum_stored_bytes.saturating_sub(additional_stored_bytes);
+        for (index, bytes) in record_bytes.iter().enumerate() {
+            if retained <= reservation_target {
+                break;
+            }
+            if evicted_indices.contains(&index) || is_protected[index] {
+                continue;
+            }
+            retained = retained.saturating_sub(*bytes);
+            removed_bytes = removed_bytes.saturating_add(*bytes);
+            evicted_indices.insert(index);
+        }
+        let evicted = records
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, record)| evicted_indices.contains(&index).then_some(record))
+            .collect::<Vec<_>>();
+        self.remove_records(&evicted)?;
         Ok(crate::QuotaEnforcementReport {
-            entries_removed: remove_count,
+            entries_removed: evicted.len(),
             payload_bytes_removed: removed_bytes,
             payload_bytes_retained: retained,
         })
+    }
+
+    fn protected_segment_tokens(
+        &self,
+        protected_identities: &[crate::SegmentIdentity],
+        protected_ranges: &[(crate::HistorySeriesIdentity<'_>, crate::RetainedRange)],
+    ) -> Result<BTreeSet<[u8; 32]>, LocalStorageError> {
+        let mut protected = BTreeSet::new();
+        for identity in protected_identities {
+            identity.validate()?;
+            protected.insert(identity_token(&self.catalog_key, identity)?);
+        }
+        for (series, range) in protected_ranges {
+            for identity in self.retained_identities_in_range(*series, *range, i64::MIN)? {
+                protected.insert(identity_token(&self.catalog_key, &identity)?);
+            }
+        }
+        Ok(protected)
+    }
+
+    fn record_stored_bytes(&self, record: &CatalogRecord) -> Result<u64, LocalStorageError> {
+        let path = if record.quarantined {
+            let Some(file_name) = &record.quarantine_file_name else {
+                return Ok(0);
+            };
+            self.quarantine_path(file_name)?
+        } else {
+            self.record_path(record)?
+        };
+        fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .map_err(Into::into)
     }
 
     fn publish_retained(
@@ -758,7 +916,13 @@ impl HistoryStore {
         {
             return Err(LocalStorageError::SegmentKeyMismatch);
         }
-        let replacement = self.replacement_record(request, &segment_id)?;
+        let replacement = match self.replacement_record(request, &segment_id, retention_until)? {
+            ExistingPublication::Idempotent(receipt) => {
+                return Ok(PublicationOutcome::Published(receipt));
+            }
+            ExistingPublication::ReplaceQuarantined(record) => Some(record),
+            ExistingPublication::Absent => None,
+        };
         if replacement.is_none() {
             let statistics = self.catalog.statistics()?;
             if statistics
@@ -892,19 +1056,36 @@ impl HistoryStore {
         &mut self,
         request: &PublicationRequest<'_>,
         segment_id: &[u8; 32],
-    ) -> Result<Option<CatalogRecord>, LocalStorageError> {
+        retention_until: Option<i64>,
+    ) -> Result<ExistingPublication, LocalStorageError> {
         let Some(record) = self.catalog.find(segment_id)? else {
-            return Ok(None);
+            return Ok(ExistingPublication::Absent);
         };
         if record
             .retention_until
             .is_some_and(|expiry| expiry <= request.now_unix_seconds)
         {
             self.remove_records(&[record])?;
-            return Ok(None);
+            return Ok(ExistingPublication::Absent);
         }
         let key_matches = record.key_id == request.encryption_key.key_id()
             && record.key_verifier == segment_key_verifier(request.encryption_key)?;
+        if !record.quarantined
+            && key_matches
+            && record.payload_bytes == u64::try_from(request.payload.len()).unwrap_or(u64::MAX)
+            && record.payload_checksum == checksum(request.payload)
+            && record.retention_until == retention_until
+            && record.recovery == request.recovery
+        {
+            let stored_bytes = fs::metadata(self.record_path(&record)?)?.len();
+            return Ok(ExistingPublication::Idempotent(SegmentReceipt {
+                segment_id: hex(segment_id),
+                file_name: record.file_name,
+                payload_bytes: record.payload_bytes,
+                stored_bytes,
+                storage_checksum: record.file_checksum,
+            }));
+        }
         if !record.quarantined
             || record.recovery != RecoveryAction::ProviderRefetch
             || request.recovery != RecoveryAction::ProviderRefetch
@@ -912,7 +1093,7 @@ impl HistoryStore {
         {
             return Err(LocalStorageError::SegmentAlreadyExists);
         }
-        Ok(Some(record))
+        Ok(ExistingPublication::ReplaceQuarantined(record))
     }
 
     fn read_record(

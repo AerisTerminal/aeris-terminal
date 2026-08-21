@@ -14,9 +14,11 @@ use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay, ReplaySnap
 use axiusflow_chart_integration::{ChartBridgeMetrics, NucleusChartView};
 use axiusflow_desktop::market_worker::{
     CoinbaseWorkerStartup, FixtureMarketWorker, MarketDataWorker, MarketWorkerCommand,
-    MarketWorkerSender, MarketWorkerStartup, market_worker_channel,
+    MarketWorkerSender, MarketWorkerStartup, ProviderCatalogEvent, market_worker_channel,
 };
-use axiusflow_engine_protocol::InstallProviderInstrument;
+use axiusflow_engine_protocol::{
+    InstallProviderInstrument, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+};
 use axiusflow_market_data::ChartInterval;
 use axiusflow_platform_runtime::{DisplayOutput, NativeDisplayProbe};
 #[cfg(target_os = "windows")]
@@ -56,6 +58,7 @@ const WARMUP_FRAMES: usize = 32;
 const MEASURED_FRAMES: usize = 256;
 const INTERACTION_SAMPLES: usize = 128;
 const INTERACTION_COMMAND_CAPACITY: usize = 4;
+const MAXIMUM_INTERACTION_WAIT_FRAMES: usize = 120;
 
 #[derive(Serialize)]
 struct DisplayOutputEvidence {
@@ -210,6 +213,8 @@ struct BenchmarkDriver {
     chart_snapshot_installation_nanos: Vec<u64>,
     frame_scheduling_nanos: Vec<u64>,
     interaction_iterations: usize,
+    interaction_phase: InteractionPhase,
+    interaction_wait_frames: usize,
     failure: Option<String>,
     #[cfg(target_os = "windows")]
     composition_probe: Option<WindowsCompositionProbe>,
@@ -224,6 +229,15 @@ struct BenchmarkDriver {
 enum Step {
     Continue,
     Finish,
+}
+
+#[derive(Clone, Copy)]
+enum InteractionPhase {
+    Change,
+    Search,
+    Selection,
+    History,
+    Timeframe,
 }
 
 type BenchmarkOutcome = Rc<RefCell<Option<Result<(), String>>>>;
@@ -320,7 +334,7 @@ impl BenchmarkDriver {
     fn step_after_replay(&mut self, window: &mut Window, cx: &mut App) -> Step {
         if self.snapshot_replacement_first_pixel_nanos.is_some() {
             if self.interaction_iterations >= INTERACTION_SAMPLES {
-                if let Err(error) = self.drain_interaction_commands() {
+                if let Err(error) = self.ensure_interaction_commands_drained() {
                     self.failure = Some(error);
                 }
                 return Step::Finish;
@@ -351,11 +365,55 @@ impl BenchmarkDriver {
     }
 
     fn sample_interactions(&mut self, cx: &mut App) -> Result<(), String> {
-        if self.interaction_iterations > 0 {
-            self.drain_interaction_commands()?;
+        match self.interaction_phase {
+            InteractionPhase::Change => self.start_interaction(cx),
+            InteractionPhase::Search => self.continue_catalog_search(cx),
+            InteractionPhase::Selection => self.continue_catalog_selection(cx),
+            InteractionPhase::History => self.continue_history_selection(cx),
+            InteractionPhase::Timeframe => self.continue_timeframe_selection(cx),
+        }
+    }
+
+    fn start_interaction(&mut self, cx: &mut App) -> Result<(), String> {
+        self.ensure_interaction_commands_drained()?;
+        self.symbol_input
+            .update(cx, |_, input_cx| input_cx.emit(InputEvent::Change));
+        self.advance_interaction(InteractionPhase::Search);
+        Ok(())
+    }
+
+    fn continue_catalog_search(&mut self, cx: &mut App) -> Result<(), String> {
+        let Some(command) = self.await_interaction_command("symbol change")? else {
+            return Ok(());
+        };
+        let MarketWorkerCommand::ProviderSearch(search) = command else {
+            return Err(
+                "windowed benchmark symbol change did not emit a Coinbase catalog search".into(),
+            );
+        };
+        if search.provider != "coinbase"
+            || !search.query.is_empty()
+            || search.maximum_results
+                != u32::try_from(crate::rithmic_shell::MAXIMUM_COINBASE_SYMBOL_RESULTS)
+                    .unwrap_or(u32::MAX)
+        {
+            return Err(
+                "windowed benchmark symbol change emitted an invalid Coinbase catalog search"
+                    .into(),
+            );
         }
         let instrument_index = usize::from(self.interaction_iterations.is_multiple_of(2));
-        self.terminal.update(cx, |terminal, _| {
+        self.terminal.update(cx, |terminal, terminal_cx| {
+            terminal.apply_catalog_event(
+                ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
+                    consumer_id: search.consumer_id,
+                    provider: search.provider,
+                    provider_generation: 1,
+                    search_generation: search.search_generation,
+                    instruments: benchmark_coinbase_catalog(),
+                }),
+                terminal_cx,
+            );
             terminal.chrome_selection = instrument_index;
         });
         self.symbol_input.update(cx, |_, input_cx| {
@@ -364,8 +422,50 @@ impl BenchmarkDriver {
                 shift: false,
             });
         });
-        self.symbol_input
-            .update(cx, |_, input_cx| input_cx.emit(InputEvent::Change));
+        self.advance_interaction(InteractionPhase::Selection);
+        Ok(())
+    }
+
+    fn continue_catalog_selection(&mut self, cx: &mut App) -> Result<(), String> {
+        let Some(command) = self.await_interaction_command("symbol submit")? else {
+            return Ok(());
+        };
+        let MarketWorkerCommand::ProviderSelect(selection) = command else {
+            return Err(
+                "windowed benchmark Enter did not emit a Coinbase catalog selection".into(),
+            );
+        };
+        if selection.provider != "coinbase" {
+            return Err("windowed benchmark Enter emitted a non-Coinbase catalog selection".into());
+        }
+        let base = selection.symbol.strip_suffix("-USD").ok_or_else(|| {
+            "windowed benchmark selected an unexpected Coinbase symbol".to_string()
+        })?;
+        let mut installed = benchmark_coinbase_product(base);
+        installed.selection_generation = selection.selection_generation;
+        self.terminal.update(cx, |terminal, terminal_cx| {
+            terminal.apply_catalog_event(
+                ProviderCatalogEvent::SelectionInstalled(installed),
+                terminal_cx,
+            );
+        });
+        self.advance_interaction(InteractionPhase::History);
+        Ok(())
+    }
+
+    fn continue_history_selection(&mut self, cx: &mut App) -> Result<(), String> {
+        let Some(command) = self.await_interaction_command("catalog installation")? else {
+            return Ok(());
+        };
+        let MarketWorkerCommand::CoinbaseSelect(first_selection) = command else {
+            return Err(
+                "windowed benchmark installed catalog selection did not start Coinbase history"
+                    .into(),
+            );
+        };
+        self.terminal.update(cx, |terminal, terminal_cx| {
+            terminal.apply_coinbase_switch_marker(first_selection.sequence, terminal_cx);
+        });
         let interval = if self.interaction_iterations.is_multiple_of(2) {
             ChartInterval::Minute5
         } else {
@@ -377,33 +477,66 @@ impl BenchmarkDriver {
         if !selected {
             return Err("windowed benchmark timeframe handler rejected fixture selection".into());
         }
-        self.interaction_iterations += 1;
+        self.advance_interaction(InteractionPhase::Timeframe);
         Ok(())
     }
 
-    fn drain_interaction_commands(&self) -> Result<(), String> {
-        let mut commands = 0;
-        loop {
-            match self.interaction_commands.try_recv() {
-                Ok(MarketWorkerCommand::CoinbaseSelect(_)) => commands += 1,
-                Ok(_) => {
-                    return Err(
-                        "windowed benchmark interaction emitted an unexpected worker command"
-                            .into(),
-                    );
+    fn continue_timeframe_selection(&mut self, cx: &mut App) -> Result<(), String> {
+        let Some(command) = self.await_interaction_command("timeframe selection")? else {
+            return Ok(());
+        };
+        let MarketWorkerCommand::CoinbaseSelect(second_selection) = command else {
+            return Err(
+                "windowed benchmark timeframe selection did not restart Coinbase history".into(),
+            );
+        };
+        self.terminal.update(cx, |terminal, terminal_cx| {
+            terminal.apply_coinbase_switch_marker(second_selection.sequence, terminal_cx);
+            // The disconnected sink has no history publisher; complete that fixture-only phase so
+            // the next interaction can issue a fresh catalog search.
+            terminal.symbol_selection_pending = false;
+        });
+        self.ensure_interaction_commands_drained()?;
+        self.interaction_iterations += 1;
+        self.advance_interaction(InteractionPhase::Change);
+        Ok(())
+    }
+
+    fn await_interaction_command(
+        &mut self,
+        stage: &str,
+    ) -> Result<Option<MarketWorkerCommand>, String> {
+        match self.interaction_commands.try_recv() {
+            Ok(command) => Ok(Some(command)),
+            Err(TryRecvError::Empty) => {
+                self.interaction_wait_frames = self.interaction_wait_frames.saturating_add(1);
+                if self.interaction_wait_frames > MAXIMUM_INTERACTION_WAIT_FRAMES {
+                    return Err(format!(
+                        "windowed benchmark iteration {} timed out after {stage}",
+                        self.interaction_iterations
+                    ));
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    return Err("windowed benchmark interaction command sink disconnected".into());
-                }
+                Ok(None)
+            }
+            Err(TryRecvError::Disconnected) => {
+                Err("windowed benchmark interaction command sink disconnected".to_string())
             }
         }
-        if commands != 2 {
-            return Err(format!(
-                "windowed benchmark expected symbol and timeframe commands, observed {commands}"
-            ));
+    }
+
+    fn advance_interaction(&mut self, phase: InteractionPhase) {
+        self.interaction_phase = phase;
+        self.interaction_wait_frames = 0;
+    }
+
+    fn ensure_interaction_commands_drained(&self) -> Result<(), String> {
+        match self.interaction_commands.try_recv() {
+            Err(TryRecvError::Empty) => Ok(()),
+            Err(TryRecvError::Disconnected) => {
+                Err("windowed benchmark interaction command sink disconnected".into())
+            }
+            Ok(_) => Err("windowed benchmark interaction emitted an extra worker command".into()),
         }
-        Ok(())
     }
 
     fn observe_chart_before_submission(&mut self, cx: &mut App) -> ChartBridgeMetrics {
@@ -934,6 +1067,20 @@ fn benchmark_coinbase_product(base: &str) -> InstallProviderInstrument {
     }
 }
 
+fn benchmark_coinbase_catalog() -> Vec<ProviderInstrumentSummary> {
+    ["BTC", "ETH"]
+        .into_iter()
+        .map(|base| ProviderInstrumentSummary {
+            symbol: format!("{base}-USD"),
+            exchange: "coinbase".to_string(),
+            name: Some(format!("{base}/USD")),
+            product_code: Some(base.to_string()),
+            instrument_type: Some("spot".to_string()),
+            expiration_date: None,
+        })
+        .collect()
+}
+
 fn benchmark_root(
     setup: BenchmarkSetup,
     outcome: BenchmarkOutcome,
@@ -966,6 +1113,18 @@ fn benchmark_root(
             Some(terminal_symbol_input),
             indicator_input,
         )
+    });
+    terminal.update(cx, |terminal, terminal_cx| {
+        terminal.apply_catalog_event(
+            ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
+                consumer_id: 0,
+                provider: "coinbase".to_string(),
+                provider_generation: 1,
+                search_generation: 1,
+                instruments: benchmark_coinbase_catalog(),
+            }),
+            terminal_cx,
+        );
     });
     subscribe_symbol_input(Some(symbol_input.clone()), &terminal, window, cx);
     #[cfg(target_os = "windows")]
@@ -1002,9 +1161,11 @@ fn benchmark_root(
         chart_queue_overflows: 0,
         chart_snapshot_installation_nanos: Vec::with_capacity(1),
         frame_scheduling_nanos: Vec::with_capacity(
-            WARMUP_FRAMES + MEASURED_FRAMES + INTERACTION_SAMPLES + 3,
+            WARMUP_FRAMES + MEASURED_FRAMES + INTERACTION_SAMPLES.saturating_mul(5) + 3,
         ),
         interaction_iterations: 0,
+        interaction_phase: InteractionPhase::Change,
+        interaction_wait_frames: 0,
         failure: None,
         #[cfg(target_os = "windows")]
         composition_probe,

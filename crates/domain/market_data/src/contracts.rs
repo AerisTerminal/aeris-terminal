@@ -268,7 +268,8 @@ impl BarPeriod {
         match self {
             Self::Tick { trades } if trades > 0 => Ok(()),
             Self::Time {
-                seconds: 60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200,
+                seconds:
+                    60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200 | 86_400,
             }
             | Self::Session { days: 1 | 3 }
             | Self::Week { weeks: 1 }
@@ -297,11 +298,11 @@ impl BarPeriod {
     ///
     /// # Errors
     ///
-    /// Returns an error unless seconds represent a supported intraday interval.
+    /// Returns an error unless seconds represent a supported fixed interval.
     pub fn time(seconds: u32) -> Result<Self, MarketDataValidationError> {
         if !matches!(
             seconds,
-            60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200
+            60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200 | 86_400
         ) {
             return Err(MarketDataValidationError::InvalidPeriod);
         }

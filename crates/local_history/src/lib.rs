@@ -7,6 +7,6 @@
 mod error;
 mod store;
 
-pub use axiusflow_local_storage::HistoryScope;
+pub use axiusflow_local_storage::{HistoryScope, RetainedRange};
 pub use error::LocalHistoryError;
 pub use store::{LocalHistoryStore, StoredHistory};

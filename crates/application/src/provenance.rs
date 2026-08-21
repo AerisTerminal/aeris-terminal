@@ -109,6 +109,7 @@ pub(crate) fn snapshot_checksum(
             bar_definition_version: bar_definition.version,
             bar_interval_seconds: bar_definition.interval_seconds,
             bar_trades_per_bar: bar_definition.trades_per_bar,
+            bar_calendar_months: bar_definition.calendar_months,
         },
         bars.iter().map(|item| {
             let bar = item.value();

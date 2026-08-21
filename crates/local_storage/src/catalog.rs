@@ -5,8 +5,7 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::{collections::BTreeSet, path::Path};
 
-const CATALOG_SCHEMA_VERSION: i64 = 2;
-const LEGACY_CATALOG_SCHEMA_VERSION: i64 = 1;
+const CATALOG_SCHEMA_VERSION: i64 = 3;
 const EXPECTED_SQLITE_VERSION: &str = "3.53.2";
 const ACTIVE_STATE: i64 = 0;
 const QUARANTINED_STATE: i64 = 1;
@@ -24,7 +23,6 @@ pub(crate) struct CatalogRecord {
     pub file_checksum: [u8; 32],
     pub payload_checksum: [u8; 32],
     pub payload_bytes: u64,
-    pub data_kind: u8,
     pub created_at: i64,
     pub key_id: String,
     pub key_verifier: [u8; 32],
@@ -32,6 +30,7 @@ pub(crate) struct CatalogRecord {
     pub recovery: RecoveryAction,
     pub quarantined: bool,
     pub quarantine_file_name: Option<String>,
+    pub last_viewed_at: i64,
 }
 
 pub(crate) struct NewCatalogRecord<'a> {
@@ -120,6 +119,7 @@ impl Catalog {
             ));
         }
         let connection = Connection::open(path)?;
+        reject_future_schema(&connection)?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
@@ -158,7 +158,8 @@ impl Catalog {
                  state INTEGER NOT NULL CHECK(state IN (0,1)),
                  quarantine_reason TEXT,
                  quarantine_file_name TEXT,
-                 created_at INTEGER NOT NULL
+                  created_at INTEGER NOT NULL,
+                  last_viewed_at INTEGER NOT NULL
              ) STRICT;
              CREATE INDEX IF NOT EXISTS history_segment_scope
                  ON history_segment(provider_token, account_token, entitlement_token, state);
@@ -219,7 +220,7 @@ impl Catalog {
             .query_row(
                 "SELECT segment_id, file_name, file_checksum, payload_checksum,
                         payload_bytes, key_id, key_verifier, retention_until, recovery_action,
-                        state, quarantine_file_name, data_kind, created_at
+                        state, quarantine_file_name, data_kind, created_at, last_viewed_at
                  FROM history_segment WHERE segment_id=?1",
                 [segment_id.as_slice()],
                 map_record,
@@ -246,10 +247,10 @@ impl Catalog {
                  correction_revision,
                  file_name, file_checksum, payload_checksum, payload_bytes, key_id, key_verifier,
                  retention_until, recovery_action, state, quarantine_reason,
-                 quarantine_file_name, created_at
+                  quarantine_file_name, created_at, last_viewed_at
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 0, NULL, NULL, ?23
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 0, NULL, NULL, ?23, ?23
              )",
             params![
                 record.segment_id.as_slice(),
@@ -295,7 +296,7 @@ impl Catalog {
                  file_name=?15, file_checksum=?16, payload_checksum=?17,
                  payload_bytes=?18, key_id=?19, key_verifier=?20,
                  retention_until=?21, recovery_action=?22, state=0,
-                 quarantine_reason=NULL, quarantine_file_name=NULL, created_at=?23
+                  quarantine_reason=NULL, quarantine_file_name=NULL, created_at=?23, last_viewed_at=?23
              WHERE segment_id=?1 AND state=1",
             params![
                 record.segment_id.as_slice(),
@@ -418,44 +419,6 @@ impl Catalog {
                 params![provider.as_slice(), account.as_slice(), entitlement.as_slice(), instrument.as_slice(), i64::try_from(current).map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?],
             ),
         }
-    }
-
-    pub fn latest_series_range(
-        &self,
-        tokens: SeriesTokens<'_>,
-        dimensions: SeriesDimensions,
-        now_unix_seconds: i64,
-    ) -> Result<Option<(i64, i64)>, LocalStorageError> {
-        self.connection
-            .query_row(
-                "SELECT range_start, range_end FROM history_segment
-                 WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
-                   AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
-                   AND source_revision=?7 AND schema_revision=?8
-                   AND calendar_revision=?9 AND adjustment_revision=?10
-                   AND correction_revision=?11 AND state=0
-                   AND (retention_until IS NULL OR retention_until>?12)
-                 ORDER BY range_end DESC, created_at DESC LIMIT 1",
-                params![
-                    tokens.provider.as_slice(),
-                    tokens.account.as_slice(),
-                    tokens.entitlement.as_slice(),
-                    tokens.instrument.as_slice(),
-                    dimensions.data_kind,
-                    tokens.resolution.as_slice(),
-                    dimensions.source_revision,
-                    dimensions.schema_revision,
-                    dimensions.calendar_revision,
-                    dimensions.adjustment_revision,
-                    i64::try_from(dimensions.correction_revision).map_err(|_| {
-                        LocalStorageError::InvalidIdentity("correction_revision")
-                    })?,
-                    now_unix_seconds,
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(Into::into)
     }
 
     pub fn active_series_ranges(
@@ -601,52 +564,66 @@ impl Catalog {
     ) -> Result<(), LocalStorageError> {
         let correction_revision = i64::try_from(dimensions.correction_revision)
             .map_err(|_| LocalStorageError::InvalidIdentity("correction_revision"))?;
-        let exists: bool = self.connection.query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM history_coverage_marker
-                 WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
-                   AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
-                   AND range_start=?7 AND range_end=?8 AND source_revision=?9
-                   AND schema_revision=?10 AND calendar_revision=?11
-                   AND adjustment_revision=?12 AND correction_revision=?13 AND class=?14
-             )",
-            params![
-                tokens.provider.as_slice(),
-                tokens.account.as_slice(),
-                tokens.entitlement.as_slice(),
-                tokens.instrument.as_slice(),
-                dimensions.data_kind,
-                tokens.resolution.as_slice(),
-                range.0,
-                range.1,
-                dimensions.source_revision,
-                dimensions.schema_revision,
-                dimensions.calendar_revision,
-                dimensions.adjustment_revision,
-                correction_revision,
-                class,
-            ],
-            |row| row.get(0),
+        let mut statement = self.connection.prepare(
+            "SELECT range_start, range_end, created_at FROM history_coverage_marker
+             WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+               AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+               AND source_revision=?7 AND schema_revision=?8 AND calendar_revision=?9
+               AND adjustment_revision=?10 AND correction_revision=?11 AND class=?12
+             ORDER BY range_start, range_end",
         )?;
-        if exists {
-            return Ok(());
+        let existing = statement
+            .query_map(
+                params![
+                    tokens.provider.as_slice(),
+                    tokens.account.as_slice(),
+                    tokens.entitlement.as_slice(),
+                    tokens.instrument.as_slice(),
+                    dimensions.data_kind,
+                    tokens.resolution.as_slice(),
+                    dimensions.source_revision,
+                    dimensions.schema_revision,
+                    dimensions.calendar_revision,
+                    dimensions.adjustment_revision,
+                    correction_revision,
+                    class,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+            .collect::<Result<Vec<(i64, i64, i64)>, _>>()?;
+        drop(statement);
+
+        let mut normalized = existing.clone();
+        normalized.push((range.0, range.1, created_at));
+        normalized.sort_unstable_by_key(|(start, end, _)| (*start, *end));
+        let mut merged: Vec<(i64, i64, i64)> = Vec::with_capacity(normalized.len());
+        for (start, end, marker_created_at) in normalized {
+            if let Some((_, previous_end, previous_created_at)) = merged.last_mut()
+                && start <= *previous_end
+            {
+                *previous_end = (*previous_end).max(end);
+                *previous_created_at = (*previous_created_at).min(marker_created_at);
+            } else {
+                merged.push((start, end, marker_created_at));
+            }
         }
-        if self
+        let resulting_count = self
             .total_count()?
             .saturating_add(self.coverage_marker_count()?)
-            >= self.maximum_entries
-        {
+            .saturating_sub(existing.len())
+            .saturating_add(merged.len());
+        if resulting_count > self.maximum_entries {
             return Err(LocalStorageError::CatalogFull {
                 maximum: self.maximum_entries,
             });
         }
-        self.connection.execute(
-            "INSERT INTO history_coverage_marker(
-                 provider_token, account_token, entitlement_token, instrument_token,
-                 data_kind, resolution_token, range_start, range_end, source_revision,
-                 schema_revision, calendar_revision, adjustment_revision,
-                 correction_revision, class, created_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM history_coverage_marker
+             WHERE provider_token=?1 AND account_token=?2 AND entitlement_token=?3
+               AND instrument_token=?4 AND data_kind=?5 AND resolution_token=?6
+               AND source_revision=?7 AND schema_revision=?8 AND calendar_revision=?9
+               AND adjustment_revision=?10 AND correction_revision=?11 AND class=?12",
             params![
                 tokens.provider.as_slice(),
                 tokens.account.as_slice(),
@@ -654,17 +631,25 @@ impl Catalog {
                 tokens.instrument.as_slice(),
                 dimensions.data_kind,
                 tokens.resolution.as_slice(),
-                range.0,
-                range.1,
                 dimensions.source_revision,
                 dimensions.schema_revision,
                 dimensions.calendar_revision,
                 dimensions.adjustment_revision,
                 correction_revision,
                 class,
-                created_at,
             ],
         )?;
+        for (start, end, marker_created_at) in merged {
+            insert_coverage_marker_in_transaction(
+                &transaction,
+                tokens,
+                dimensions,
+                (start, end),
+                class,
+                marker_created_at,
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -791,6 +776,14 @@ impl Catalog {
         self.query_records("state=0", params![])
     }
 
+    pub fn touch(&self, segment_id: &[u8; 32], now: i64) -> Result<(), LocalStorageError> {
+        self.connection.execute(
+            "UPDATE history_segment SET last_viewed_at=?2 WHERE segment_id=?1 AND state=0",
+            params![segment_id.as_slice(), now],
+        )?;
+        Ok(())
+    }
+
     pub fn all_records(&self) -> Result<Vec<CatalogRecord>, LocalStorageError> {
         self.query_records("1=1", params![])
     }
@@ -899,7 +892,7 @@ impl Catalog {
         let sql = format!(
             "SELECT segment_id, file_name, file_checksum, payload_checksum,
                     payload_bytes, key_id, key_verifier, retention_until, recovery_action,
-                    state, quarantine_file_name, data_kind, created_at
+                    state, quarantine_file_name, data_kind, created_at, last_viewed_at
              FROM history_segment WHERE {predicate}"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -907,6 +900,30 @@ impl Catalog {
             .query_map(parameters, map_record)?
             .collect::<Result<Vec<_>, _>>()?)
     }
+}
+
+fn reject_future_schema(connection: &Connection) -> Result<(), LocalStorageError> {
+    let metadata_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !metadata_exists {
+        return Ok(());
+    }
+    let version = connection
+        .query_row(
+            "SELECT schema_version FROM catalog_metadata WHERE singleton=1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if version.is_some_and(|version| version > CATALOG_SCHEMA_VERSION) {
+        return Err(LocalStorageError::InvalidConfiguration(
+            "unsupported future catalog schema version",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -1008,17 +1025,35 @@ fn initialize_metadata(
                 ],
             )?;
         }
+        Some((version, _, _)) if version > CATALOG_SCHEMA_VERSION => {
+            return Err(LocalStorageError::InvalidConfiguration(
+                "unsupported future catalog schema version",
+            ));
+        }
         Some((CATALOG_SCHEMA_VERSION, existing_key, existing_verifier))
             if existing_key == catalog_key_id && existing_verifier == *catalog_key_verifier => {}
-        Some((LEGACY_CATALOG_SCHEMA_VERSION, existing_key, existing_verifier))
-            if existing_key == catalog_key_id && existing_verifier == *catalog_key_verifier =>
+        Some((version, existing_key, existing_verifier))
+            if (1..CATALOG_SCHEMA_VERSION).contains(&version)
+                && existing_key == catalog_key_id
+                && existing_verifier == *catalog_key_verifier =>
         {
+            let has_last_viewed: i64 = connection.query_row(
+                "SELECT count(*) FROM pragma_table_info('history_segment') WHERE name='last_viewed_at'",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_last_viewed == 0 {
+                connection.execute(
+                    "ALTER TABLE history_segment ADD COLUMN last_viewed_at INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
             connection.execute(
                 "UPDATE catalog_metadata SET schema_version=?1 WHERE singleton=1",
                 [CATALOG_SCHEMA_VERSION],
             )?;
         }
-        Some((CATALOG_SCHEMA_VERSION, _, _)) => {
+        Some((version, _, _)) if version >= 1 => {
             return Err(LocalStorageError::CatalogKeyMismatch);
         }
         Some(_) => {
@@ -1049,8 +1084,8 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogRecord> {
         recovery: RecoveryAction::from_code(recovery).map_err(|_| conversion_error(8))?,
         quarantined: state == QUARANTINED_STATE,
         quarantine_file_name: row.get(10)?,
-        data_kind: row.get(11)?,
         created_at: row.get(12)?,
+        last_viewed_at: row.get(13)?,
     })
 }
 

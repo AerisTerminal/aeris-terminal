@@ -42,7 +42,7 @@ const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 32;
-const MODEL_CAPACITY: usize = 4_096;
+const MODEL_CAPACITY: usize = 32_768;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -142,11 +142,7 @@ const fn checked_add_one(value: u64) -> Option<u64> {
 }
 
 pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
-    let products = coinbase_products();
-    let product = products
-        .first()
-        .cloned()
-        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
+    let product = default_coinbase_product("BTC-USD");
     let mut workers = start_group(vec![(DEFAULT_WORKSPACE_ID, product)])?;
     workers
         .pop()
@@ -154,15 +150,8 @@ pub(super) fn start() -> Result<(MarketWorkerStartup, MarketDataWorker), String>
 }
 
 pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
-    let products = coinbase_products();
-    let btc = products
-        .first()
-        .cloned()
-        .ok_or_else(|| "Coinbase engine product catalog is empty".to_string())?;
-    let eth = products
-        .get(1)
-        .cloned()
-        .ok_or_else(|| "Coinbase engine ETH product is unavailable".to_string())?;
+    let btc = default_coinbase_product("BTC-USD");
+    let eth = default_coinbase_product("ETH-USD");
     start_group(vec![(1, btc), (2, eth)])
 }
 
@@ -241,11 +230,20 @@ fn pane_interval(series: Option<&SeriesKey>) -> Result<ChartInterval, String> {
     match SeriesCadence::try_from(series.cadence) {
         Ok(SeriesCadence::FixedSeconds) => match series.cadence_value {
             60 => Ok(ChartInterval::Minute1),
+            180 => Ok(ChartInterval::Minute3),
             300 => Ok(ChartInterval::Minute5),
+            1_800 => Ok(ChartInterval::Minute30),
             900 => Ok(ChartInterval::Minute15),
             3_600 => Ok(ChartInterval::Hour1),
+            7_200 => Ok(ChartInterval::Hour2),
+            14_400 => Ok(ChartInterval::Hour4),
+            28_800 => Ok(ChartInterval::Hour8),
+            43_200 => Ok(ChartInterval::Hour12),
+            86_400 => Ok(ChartInterval::Day1),
             _ => Err("workspace chart cadence is unsupported by Coinbase".to_string()),
         },
+        Ok(SeriesCadence::CalendarWeeks) if series.cadence_value == 1 => Ok(ChartInterval::Week1),
+        Ok(SeriesCadence::CalendarMonths) if series.cadence_value == 1 => Ok(ChartInterval::Month1),
         _ => Err("workspace chart cadence is unsupported by Coinbase".to_string()),
     }
 }
@@ -479,6 +477,7 @@ fn poll_endpoint(client: &mut EngineSupervisor, record: &mut EndpointRecord) -> 
     let poll = client.poll_market_event(endpoint.consumer_id)?;
     endpoint.last_market_poll = now;
     if poll.reconnected {
+        reset_application_model(&mut endpoint.model, &mut endpoint.publication);
         let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
             state: FeedConnectionState::Recovering,
             message: "Resident engine restarted; restoring chart demand".to_string(),
@@ -502,6 +501,7 @@ fn poll_endpoint(client: &mut EngineSupervisor, record: &mut EndpointRecord) -> 
         event,
         endpoint.consumer_id,
         endpoint.active_generation,
+        interval_supports_realtime(record.interval),
         &mut endpoint.model,
         &mut endpoint.publication,
         &endpoint.messages,
@@ -550,6 +550,7 @@ fn initialize_endpoint(
         message: "Connecting to the resident market engine".to_string(),
     });
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
+    client.install_provider_instrument(product.clone())?;
     match request_snapshot(
         client,
         endpoint.consumer_id,
@@ -566,9 +567,10 @@ fn initialize_endpoint(
                 publication,
             )?;
             endpoint.publication = Some(publication);
+            let (state, message) = snapshot_connection_state(interval);
             let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-                state: FeedConnectionState::Discovering,
-                message: "Historical bars are visible; Coinbase realtime is connecting".to_string(),
+                state,
+                message: message.to_string(),
             });
         }
         Err(error) => {
@@ -583,7 +585,8 @@ fn initialize_endpoint(
         search_generation: 1,
         provider: "coinbase".to_string(),
         query: String::new(),
-        maximum_results: 4_096,
+        maximum_results: u32::try_from(crate::rithmic_shell::MAXIMUM_COINBASE_SYMBOL_RESULTS)
+            .unwrap_or(u32::MAX),
     })?;
     Ok(())
 }
@@ -711,6 +714,7 @@ fn apply_polled_event(
     event: envelope::Payload,
     consumer_id: u64,
     active_generation: u64,
+    realtime: bool,
     model: &mut MarketBarClientModel,
     publication: &mut Option<MarketPublicationGeneration>,
     messages: &MarketWorkerSender,
@@ -748,7 +752,7 @@ fn apply_polled_event(
             }
         }
         envelope::Payload::ProviderState(state) => {
-            apply_provider_state(&state, messages)?;
+            apply_provider_state(&state, realtime, messages)?;
             Ok(PolledEventOutcome::Applied)
         }
         envelope::Payload::SeriesState(state) => {
@@ -759,6 +763,11 @@ fn apply_polled_event(
                 .map_err(|_| "engine returned an invalid realtime state".to_string())?
             {
                 SeriesLoadState::Live => {
+                    if !realtime {
+                        return Err(
+                            "engine marked a Coinbase calendar-history series live".to_string()
+                        );
+                    }
                     if publication.is_none() {
                         return Err(
                             "engine marked history live without a covering snapshot".to_string()
@@ -796,10 +805,14 @@ fn apply_polled_event(
 
 fn apply_provider_state(
     state: &ProviderState,
+    realtime: bool,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     if state.provider != "coinbase" {
         return Err("engine provider state identity mismatched".to_string());
+    }
+    if !realtime {
+        return Ok(());
     }
     let provider_state = ProviderConnectionState::try_from(state.state)
         .map_err(|_| "engine returned an invalid provider state".to_string())?;
@@ -840,10 +853,12 @@ fn request_snapshot(
     model: &mut MarketBarClientModel,
     messages: &MarketWorkerSender,
 ) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
+    let realtime = series_supports_realtime(&series);
     client.set_series_demand(consumer_id, generation, series)?;
     loop {
         let poll = client.poll_market_event(consumer_id)?;
         if poll.reconnected {
+            *model = empty_model();
             let _ = messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message: "Resident engine restarted; restoring chart demand".to_string(),
@@ -881,7 +896,7 @@ fn request_snapshot(
                 }
             }
             envelope::Payload::ProviderState(state) => {
-                apply_provider_state(&state, messages)?;
+                apply_provider_state(&state, realtime, messages)?;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
                 let (replay, generation) = apply_snapshot(model, &snapshot)?;
@@ -991,11 +1006,14 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .clone()
         .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
     if series.provider != "coinbase"
-        || SeriesCadence::try_from(series.cadence) != Ok(SeriesCadence::FixedSeconds)
-        || !coinbase_products().into_iter().any(|product| {
-            product.instrument_id == series.instrument_id
-                && product.entitlement_id == series.entitlement_id
-        })
+        || !matches!(
+            SeriesCadence::try_from(series.cadence),
+            Ok(SeriesCadence::FixedSeconds
+                | SeriesCadence::CalendarWeeks
+                | SeriesCadence::CalendarMonths)
+        )
+        || series.entitlement_id != "crypto_public_realtime"
+        || !series.instrument_id.starts_with("instrument:coinbase:")
     {
         return Err("engine Coinbase snapshot identity is invalid".to_string());
     }
@@ -1003,34 +1021,29 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .map_err(|_| "engine price scale is invalid".to_string())?;
     let quantity_scale = u8::try_from(snapshot.quantity_scale)
         .map_err(|_| "engine quantity scale is invalid".to_string())?;
-    let product = coinbase_products()
-        .into_iter()
-        .find(|product| product.instrument_id == series.instrument_id)
-        .ok_or_else(|| "engine snapshot instrument is unsupported".to_string())?;
-    if series.entitlement_id != product.entitlement_id {
-        return Err("engine Coinbase snapshot entitlement is invalid".to_string());
-    }
+    let (base, quote) = series
+        .instrument_id
+        .strip_prefix("instrument:coinbase:")
+        .and_then(|value| value.split_once(':'))
+        .filter(|(base, quote)| !base.is_empty() && !quote.is_empty() && !quote.contains(':'))
+        .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_revision),
         asset_class: AssetClass::CryptoAsset,
-        symbol: product.display_symbol,
+        symbol: format!(
+            "{}/{}",
+            base.to_ascii_uppercase(),
+            quote.to_ascii_uppercase()
+        ),
         venue_id: "COINBASE".to_string(),
-        trading_currency: "USD".to_string(),
+        trading_currency: quote.to_ascii_uppercase(),
         precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     };
-    let definition = BarDefinition {
-        definition_id: format!(
-            "{}:{}:{}s",
-            series.provider, series.instrument_id, series.cadence_value
-        ),
-        version: series.definition_revision,
-        interval_seconds: series.cadence_value,
-        trades_per_bar: None,
-    };
+    let definition = replay_bar_definition(&series)?;
     let received = now_unix_nanos();
     let bars = snapshot
         .bars
@@ -1136,59 +1149,129 @@ fn series_key(
     product: &InstallProviderInstrument,
     interval: ChartInterval,
 ) -> Result<SeriesKey, String> {
-    let supported_product = coinbase_products().into_iter().any(|supported| {
-        product.provider == supported.provider
-            && product.provider_symbol == supported.provider_symbol
-            && product.instrument_id == supported.instrument_id
-            && product.venue_id == supported.venue_id
-            && product.price_scale == supported.price_scale
-            && product.quantity_scale == supported.quantity_scale
-            && product.entitlement_id == supported.entitlement_id
-    });
-    if !supported_product
-        || !matches!(
-            interval,
-            ChartInterval::Minute1
-                | ChartInterval::Minute5
-                | ChartInterval::Minute15
-                | ChartInterval::Hour1
-        )
+    if product.provider != "coinbase"
+        || product.venue_id != "coinbase"
+        || product.entitlement_id != "crypto_public_realtime"
+        || product.price_scale > 18
+        || product.quantity_scale > 18
     {
-        return Err(
-            "this migration slice supports BTC-USD/ETH-USD at 1m, 5m, 15m, and 1h".to_string(),
-        );
+        return Err("Coinbase installed instrument identity is invalid".to_string());
     }
+    let (cadence, cadence_value) = match interval {
+        ChartInterval::Minute1 => (SeriesCadence::FixedSeconds, 60),
+        ChartInterval::Minute3 => (SeriesCadence::FixedSeconds, 180),
+        ChartInterval::Minute5 => (SeriesCadence::FixedSeconds, 300),
+        ChartInterval::Minute15 => (SeriesCadence::FixedSeconds, 900),
+        ChartInterval::Minute30 => (SeriesCadence::FixedSeconds, 1_800),
+        ChartInterval::Hour1 => (SeriesCadence::FixedSeconds, 3_600),
+        ChartInterval::Hour2 => (SeriesCadence::FixedSeconds, 7_200),
+        ChartInterval::Hour4 => (SeriesCadence::FixedSeconds, 14_400),
+        ChartInterval::Hour8 => (SeriesCadence::FixedSeconds, 28_800),
+        ChartInterval::Hour12 => (SeriesCadence::FixedSeconds, 43_200),
+        ChartInterval::Day1 => (SeriesCadence::FixedSeconds, 86_400),
+        ChartInterval::Week1 => (SeriesCadence::CalendarWeeks, 1),
+        ChartInterval::Month1 => (SeriesCadence::CalendarMonths, 1),
+        ChartInterval::Tick100 | ChartInterval::Day3 => {
+            return Err("Coinbase chart interval is unsupported".to_string());
+        }
+    };
     Ok(SeriesKey {
         provider: "coinbase".to_string(),
         instrument_id: product.instrument_id.clone(),
-        cadence_value: match interval {
-            ChartInterval::Minute1 => 60,
-            ChartInterval::Minute5 => 300,
-            ChartInterval::Minute15 => 900,
-            ChartInterval::Hour1 => 3_600,
-            _ => unreachable!("supported intervals were validated above"),
-        },
+        cadence_value,
         definition_revision: 1,
         entitlement_id: product.entitlement_id.clone(),
-        cadence: SeriesCadence::FixedSeconds as i32,
+        cadence: cadence as i32,
     })
 }
 
+fn replay_bar_definition(series: &SeriesKey) -> Result<BarDefinition, String> {
+    let (cadence_id, interval_seconds, calendar_months) =
+        match SeriesCadence::try_from(series.cadence) {
+            Ok(SeriesCadence::FixedSeconds) if series.cadence_value > 0 => (
+                format!("{}s", series.cadence_value),
+                series.cadence_value,
+                None,
+            ),
+            Ok(SeriesCadence::CalendarWeeks) if series.cadence_value > 0 => (
+                format!("calendar-weeks:{}", series.cadence_value),
+                series
+                    .cadence_value
+                    .checked_mul(7 * 24 * 60 * 60)
+                    .ok_or_else(|| "engine calendar-week cadence overflowed".to_string())?,
+                None,
+            ),
+            Ok(SeriesCadence::CalendarMonths) if series.cadence_value > 0 => (
+                format!("calendar-months:{}", series.cadence_value),
+                0,
+                Some(series.cadence_value),
+            ),
+            _ => return Err("engine Coinbase bar definition is invalid".to_string()),
+        };
+    Ok(BarDefinition {
+        definition_id: format!("{}:{}:{cadence_id}", series.provider, series.instrument_id),
+        version: series.definition_revision,
+        interval_seconds,
+        trades_per_bar: None,
+        calendar_months,
+    })
+}
+
+fn series_supports_realtime(series: &SeriesKey) -> bool {
+    SeriesCadence::try_from(series.cadence) == Ok(SeriesCadence::FixedSeconds)
+}
+
+const fn interval_supports_realtime(interval: ChartInterval) -> bool {
+    !matches!(interval, ChartInterval::Week1 | ChartInterval::Month1)
+}
+
+const fn snapshot_connection_state(interval: ChartInterval) -> (FeedConnectionState, &'static str) {
+    if interval_supports_realtime(interval) {
+        (
+            FeedConnectionState::Discovering,
+            "Historical bars are visible; Coinbase realtime is connecting",
+        )
+    } else {
+        (
+            FeedConnectionState::Disconnected,
+            "Completed Coinbase history; current calendar bucket is not live",
+        )
+    }
+}
+
+fn reset_application_model(
+    model: &mut MarketBarClientModel,
+    publication: &mut Option<MarketPublicationGeneration>,
+) {
+    *model = empty_model();
+    *publication = None;
+}
+
+fn default_coinbase_product(product_id: &str) -> InstallProviderInstrument {
+    let (base, quote) = product_id.split_once('-').unwrap_or(("BTC", "USD"));
+    InstallProviderInstrument {
+        provider: "coinbase".to_string(),
+        session_generation: 1,
+        selection_generation: 1,
+        instrument_id: format!(
+            "instrument:coinbase:{}:{}",
+            base.to_ascii_lowercase(),
+            quote.to_ascii_lowercase()
+        ),
+        provider_symbol: product_id.to_string(),
+        display_symbol: format!("{base}/{quote}"),
+        venue_id: "coinbase".to_string(),
+        price_scale: 2,
+        quantity_scale: 8,
+        entitlement_id: "crypto_public_realtime".to_string(),
+    }
+}
+
+#[cfg(test)]
 fn coinbase_products() -> Vec<InstallProviderInstrument> {
-    [("BTC", "btc"), ("ETH", "eth")]
+    ["BTC-USD", "ETH-USD"]
         .into_iter()
-        .map(|(base, canonical)| InstallProviderInstrument {
-            provider: "coinbase".to_string(),
-            session_generation: 1,
-            selection_generation: 1,
-            instrument_id: format!("instrument:coinbase:{canonical}:usd"),
-            provider_symbol: format!("{base}-USD"),
-            display_symbol: format!("{base}/USD"),
-            venue_id: "coinbase".to_string(),
-            price_scale: 2,
-            quantity_scale: 8,
-            entitlement_id: "crypto_public_realtime".to_string(),
-        })
+        .map(default_coinbase_product)
         .collect()
 }
 
@@ -1497,6 +1580,7 @@ mod tests {
                 envelope::Payload::SeriesSnapshot(snapshot),
                 1,
                 1,
+                true,
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1526,6 +1610,7 @@ mod tests {
                 envelope::Payload::SeriesUpdate(skipped_tail),
                 1,
                 1,
+                true,
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1553,6 +1638,7 @@ mod tests {
             }),
             1,
             7,
+            true,
             &mut model,
             &mut publication,
             &sender,
@@ -1574,6 +1660,7 @@ mod tests {
                 generation: 2,
                 detail: None,
             },
+            true,
             &sender,
         )
         .expect("provider state applies");
@@ -1589,20 +1676,210 @@ mod tests {
 
     #[test]
     fn phase_four_series_keys_cover_required_symbols_and_intervals() {
-        let products = coinbase_products();
-        assert_eq!(products.len(), 2);
+        let products = vec![
+            default_coinbase_product("BTC-USD"),
+            default_coinbase_product("SOL-USD"),
+        ];
         for product in &products {
             for (interval, seconds) in [
                 (ChartInterval::Minute1, 60),
+                (ChartInterval::Minute3, 180),
                 (ChartInterval::Minute5, 300),
                 (ChartInterval::Minute15, 900),
+                (ChartInterval::Minute30, 1_800),
                 (ChartInterval::Hour1, 3_600),
+                (ChartInterval::Hour2, 7_200),
+                (ChartInterval::Hour4, 14_400),
+                (ChartInterval::Hour8, 28_800),
+                (ChartInterval::Hour12, 43_200),
+                (ChartInterval::Day1, 86_400),
             ] {
                 let series = series_key(product, interval).expect("phase-four series validates");
                 assert_eq!(series.cadence_value, seconds);
                 assert_eq!(series.instrument_id, product.instrument_id);
             }
+            for (interval, cadence, value) in [
+                (ChartInterval::Week1, SeriesCadence::CalendarWeeks, 1),
+                (ChartInterval::Month1, SeriesCadence::CalendarMonths, 1),
+            ] {
+                let series = series_key(product, interval).expect("calendar series validates");
+                assert_eq!(series.cadence, cadence as i32);
+                assert_eq!(series.cadence_value, value);
+            }
         }
+    }
+
+    #[test]
+    fn calendar_month_replay_is_explicit_instead_of_approximated_as_thirty_days() {
+        let product = default_coinbase_product("BTC-USD");
+        let week = replay_bar_definition(
+            &series_key(&product, ChartInterval::Week1).expect("week series"),
+        )
+        .expect("week definition");
+        let month = replay_bar_definition(
+            &series_key(&product, ChartInterval::Month1).expect("month series"),
+        )
+        .expect("calendar month definition");
+
+        assert!(week.definition_id.ends_with("calendar-weeks:1"));
+        assert_eq!(week.interval_seconds, 7 * 24 * 60 * 60);
+        assert!(month.definition_id.ends_with("calendar-months:1"));
+        assert_eq!(month.interval_seconds, 0);
+        assert_eq!(month.trades_per_bar, None);
+        assert_eq!(month.calendar_months, Some(1));
+        assert!(month.validate().is_ok());
+    }
+
+    #[test]
+    fn calendar_history_state_never_claims_realtime_connection() {
+        for interval in [ChartInterval::Week1, ChartInterval::Month1] {
+            let (state, message) = snapshot_connection_state(interval);
+            assert_eq!(state, FeedConnectionState::Disconnected);
+            assert!(message.contains("Completed Coinbase history"));
+            assert!(message.contains("current calendar bucket is not live"));
+            assert!(!message.contains("is current"));
+        }
+
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        apply_provider_state(
+            &ProviderState {
+                provider: "coinbase".to_string(),
+                state: ProviderConnectionState::Connecting as i32,
+                generation: 1,
+                detail: None,
+            },
+            false,
+            &sender,
+        )
+        .expect("history-only provider state is ignored");
+        assert!(receiver.drain().0.is_empty());
+    }
+
+    #[test]
+    fn calendar_history_rejects_an_engine_live_claim() {
+        let product = default_coinbase_product("BTC-USD");
+        let series = series_key(&product, ChartInterval::Week1).expect("calendar series");
+        let snapshot = SeriesSnapshot {
+            consumer_id: 1,
+            generation: 7,
+            series: Some(series),
+            provider_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            bars: vec![IpcMarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 0,
+                exchange_timestamp_unix_nanos: 0,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 1,
+            }],
+            publication_generation: 1,
+            forming: false,
+        };
+        let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut model = empty_model();
+        let mut publication = None;
+        apply_polled_event(
+            envelope::Payload::SeriesSnapshot(snapshot),
+            1,
+            7,
+            false,
+            &mut model,
+            &mut publication,
+            &sender,
+        )
+        .expect("completed calendar snapshot applies");
+
+        assert_eq!(
+            apply_polled_event(
+                envelope::Payload::SeriesState(SeriesState {
+                    consumer_id: 1,
+                    generation: 7,
+                    state: SeriesLoadState::Live as i32,
+                    ..SeriesState::default()
+                }),
+                1,
+                7,
+                false,
+                &mut model,
+                &mut publication,
+                &sender,
+            ),
+            Err("engine marked a Coinbase calendar-history series live".to_string())
+        );
+    }
+
+    #[test]
+    fn replacement_engine_resets_application_generation_fence() {
+        let product = default_coinbase_product("BTC-USD");
+        let series = series_key(&product, ChartInterval::Minute1).expect("series");
+        let snapshot = |provider_generation, publication_generation, source_sequence| {
+            envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+                consumer_id: 1,
+                generation: 1,
+                series: Some(series.clone()),
+                provider_generation,
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: vec![IpcMarketBar {
+                    source_sequence,
+                    exchange_timestamp_seconds: i64::try_from(source_sequence).unwrap_or(i64::MAX),
+                    exchange_timestamp_unix_nanos: i64::try_from(source_sequence)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(1_000_000_000),
+                    open: 100,
+                    high: 110,
+                    low: 90,
+                    close: 105,
+                    volume: 7,
+                }],
+                publication_generation,
+                forming: false,
+            })
+        };
+        let (sender, _receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
+        let mut model = empty_model();
+        let mut publication = None;
+        assert_eq!(
+            apply_polled_event(
+                snapshot(9, 12, 12),
+                1,
+                1,
+                true,
+                &mut model,
+                &mut publication,
+                &sender,
+            ),
+            Ok(PolledEventOutcome::Applied)
+        );
+
+        reset_application_model(&mut model, &mut publication);
+
+        assert_eq!(
+            apply_polled_event(
+                snapshot(1, 1, 1),
+                1,
+                1,
+                true,
+                &mut model,
+                &mut publication,
+                &sender,
+            ),
+            Ok(PolledEventOutcome::Applied)
+        );
+        assert_eq!(
+            model
+                .current_generation()
+                .map(axiusflow_application::MarketGeneration::session_generation),
+            Some(1)
+        );
+        assert_eq!(
+            publication.map(MarketPublicationGeneration::publication_generation),
+            Some(1)
+        );
     }
 
     #[test]

@@ -312,7 +312,13 @@ impl EngineState {
         Ok(())
     }
 
-    fn record_market_event(&self, payload: &envelope::Payload) -> Result<(), String> {
+    fn record_polled_market_event(&self, payload: &envelope::Payload) -> Result<(), String> {
+        if let envelope::Payload::ProviderInstrumentSelection(selection) = payload {
+            if let Some(instrument) = selection.instrument.as_ref() {
+                self.record_installed_instrument(instrument);
+            }
+            return Ok(());
+        }
         let envelope::Payload::SeriesSnapshot(snapshot) = payload else {
             return Ok(());
         };
@@ -984,27 +990,18 @@ fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
         touch_hot_series(workspace);
         migrated = true;
     }
-    if repair_supported_coinbase_precision(workspace) {
-        migrated = true;
-    }
+    migrated |= repair_legacy_coinbase_precision(workspace);
     migrated
 }
 
-fn repair_supported_coinbase_precision(workspace: &mut WorkspaceState) -> bool {
+fn repair_legacy_coinbase_precision(workspace: &mut WorkspaceState) -> bool {
     let mut repaired = false;
     for series in &mut workspace.hot_series {
-        if series.provider == "coinbase"
-            && matches!(
-                series.instrument_id.as_str(),
-                "instrument:coinbase:btc:usd" | "instrument:coinbase:eth:usd"
-            )
-            && (series.price_scale != COINBASE_PRICE_SCALE
-                || series.quantity_scale != COINBASE_QUANTITY_SCALE)
-        {
-            series.price_scale = COINBASE_PRICE_SCALE;
-            series.quantity_scale = COINBASE_QUANTITY_SCALE;
-            repaired = true;
-        }
+        repaired |= repair_legacy_precision(
+            &series.instrument_id,
+            &mut series.price_scale,
+            &mut series.quantity_scale,
+        );
     }
     for instrument in workspace
         .workspace_tabs
@@ -1012,19 +1009,35 @@ fn repair_supported_coinbase_precision(workspace: &mut WorkspaceState) -> bool {
         .flat_map(|tab| &mut tab.panes)
         .filter_map(|pane| pane.instrument.as_mut())
     {
-        if instrument.provider == "coinbase"
-            && matches!(
-                instrument.instrument_id.as_str(),
-                "instrument:coinbase:btc:usd" | "instrument:coinbase:eth:usd"
-            )
-            && (instrument.price_scale != COINBASE_PRICE_SCALE
-                || instrument.quantity_scale != COINBASE_QUANTITY_SCALE)
-        {
-            instrument.price_scale = COINBASE_PRICE_SCALE;
-            instrument.quantity_scale = COINBASE_QUANTITY_SCALE;
-            repaired = true;
-        }
+        repaired |= repair_legacy_precision(
+            &instrument.instrument_id,
+            &mut instrument.price_scale,
+            &mut instrument.quantity_scale,
+        );
     }
+    repaired
+}
+
+fn repair_legacy_precision(
+    instrument_id: &str,
+    price_scale: &mut u32,
+    quantity_scale: &mut u32,
+) -> bool {
+    if !matches!(
+        instrument_id,
+        "instrument:coinbase:btc:usd" | "instrument:coinbase:eth:usd"
+    ) {
+        return false;
+    }
+    let repaired = *price_scale == 0 || *quantity_scale == 0;
+    *price_scale = match *price_scale {
+        0 => COINBASE_PRICE_SCALE,
+        value => value,
+    };
+    *quantity_scale = match *quantity_scale {
+        0 => COINBASE_QUANTITY_SCALE,
+        value => value,
+    };
     repaired
 }
 
@@ -2029,7 +2042,7 @@ fn dispatch_poll_market_event(
     };
     match market.poll_event(client_id, poll.consumer_id) {
         Ok(Some(event)) => {
-            if let Err(error) = state.record_market_event(&event) {
+            if let Err(error) = state.record_polled_market_event(&event) {
                 eprintln!("Axiusflow engine hot-set coverage update degraded: {error}");
             }
             connection.send(event)
@@ -2218,16 +2231,16 @@ mod tests {
 
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
     use axiusflow_engine_protocol::{
-        EngineLifetimeMode, EngineShutdownState, InstallProviderInstrument, ResourceMode,
-        SeriesCadence, SeriesKey, envelope,
+        EngineLifetimeMode, EngineShutdownState, InstallProviderInstrument,
+        ProviderInstrumentSelection, ResourceMode, SeriesCadence, SeriesKey, envelope,
     };
     use axiusflow_local_engine_client::EngineClient;
     use axiusflow_market_data::MarketBar;
 
     use super::{
-        EngineShutdown, EngineState, MarketService, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
-        bind_listener, default_workspace, serve_client_with_market,
-        serve_client_with_market_and_shutdown, sync_layout_hot_series,
+        COINBASE_PRICE_SCALE, COINBASE_QUANTITY_SCALE, EngineShutdown, EngineState, MarketService,
+        RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, bind_listener, default_workspace, migrate_workspace,
+        serve_client_with_market, serve_client_with_market_and_shutdown, sync_layout_hot_series,
     };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
@@ -2401,6 +2414,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn polled_catalog_selection_records_metadata_before_following_demand() {
+        let state = EngineState::default();
+        state.record_consumer(51, 1, 61);
+        let instrument = InstallProviderInstrument {
+            provider: "coinbase".to_string(),
+            session_generation: 1,
+            selection_generation: 7,
+            instrument_id: "instrument:coinbase:sol:usd".to_string(),
+            provider_symbol: "SOL-USD".to_string(),
+            display_symbol: "SOL/USD".to_string(),
+            venue_id: "coinbase".to_string(),
+            price_scale: 4,
+            quantity_scale: 6,
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+        };
+
+        state
+            .record_polled_market_event(&envelope::Payload::ProviderInstrumentSelection(
+                ProviderInstrumentSelection {
+                    consumer_id: 61,
+                    instrument: Some(instrument.clone()),
+                },
+            ))
+            .expect("catalog selection crosses the poll state boundary");
+        state
+            .record_series_demand(
+                61,
+                &SeriesKey {
+                    provider: instrument.provider,
+                    instrument_id: instrument.instrument_id,
+                    cadence_value: 60,
+                    definition_revision: 1,
+                    entitlement_id: instrument.entitlement_id,
+                    cadence: SeriesCadence::FixedSeconds as i32,
+                },
+            )
+            .expect("following demand uses selected catalog metadata");
+
+        let hot = state
+            .workspace()
+            .hot_series
+            .into_iter()
+            .find(|series| series.instrument_id == "instrument:coinbase:sol:usd")
+            .expect("selected series enters the hot set");
+        assert_eq!(hot.provider_symbol, "SOL-USD");
+        assert_eq!(hot.display_symbol, "SOL/USD");
+        assert_eq!(hot.price_scale, 4);
+        assert_eq!(hot.quantity_scale, 6);
+    }
+
+    #[test]
+    fn current_coinbase_precision_survives_workspace_restore() {
+        let mut workspace = default_workspace();
+        workspace.hot_series[0].price_scale = 4;
+        workspace.hot_series[0].quantity_scale = 6;
+        let instrument = workspace.workspace_tabs[0].panes[0]
+            .instrument
+            .as_mut()
+            .expect("default pane has an instrument");
+        instrument.price_scale = 4;
+        instrument.quantity_scale = 6;
+
+        assert!(!migrate_workspace(&mut workspace));
+        assert_eq!(workspace.hot_series[0].price_scale, 4);
+        assert_eq!(workspace.hot_series[0].quantity_scale, 6);
+        let instrument = workspace.workspace_tabs[0].panes[0]
+            .instrument
+            .as_ref()
+            .expect("restored pane keeps its instrument");
+        assert_eq!(instrument.price_scale, 4);
+        assert_eq!(instrument.quantity_scale, 6);
+    }
+
     fn measure_direct_demand(market: &MarketService, series: &SeriesKey) -> Percentiles {
         market.attach(1).expect("direct client attaches");
         market
@@ -2450,7 +2537,20 @@ mod tests {
         let server_market = market.clone();
         let server = thread::spawn(move || {
             let stream = listener.accept().expect("accept performance client");
-            serve_client_with_market(stream, &token, 1, &EngineState::default(), &server_market)
+            let state = EngineState::default();
+            state.record_installed_instrument(&InstallProviderInstrument {
+                provider: "coinbase".to_string(),
+                session_generation: 1,
+                selection_generation: 1,
+                instrument_id: ETH_INSTRUMENT.to_string(),
+                provider_symbol: "ETH-USD".to_string(),
+                display_symbol: "ETH/USD".to_string(),
+                venue_id: "coinbase".to_string(),
+                price_scale: COINBASE_PRICE_SCALE,
+                quantity_scale: COINBASE_QUANTITY_SCALE,
+                entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            });
+            serve_client_with_market(stream, &token, 1, &state, &server_market)
                 .expect("serve performance client");
         });
         let mut client = EngineClient::connect(&performance_socket_name, &token)

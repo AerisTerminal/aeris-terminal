@@ -31,6 +31,11 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
     assert_eq!(ResourceMode::try_from(4), Ok(ResourceMode::MarketsLive));
 }
 
+#[test]
+fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
+    assert_eq!(PROTOCOL_VERSION, 13);
+}
+
 fn workspace_payloads() -> Vec<envelope::Payload> {
     let tab = workspace_tab();
     vec![
@@ -501,6 +506,48 @@ fn oversized_frames_fail_closed() {
             .expect_err("oversized declaration fails")
             .fault_code(),
         EngineFaultCode::OversizedFrame
+    );
+}
+
+#[test]
+fn worst_case_working_window_snapshot_fits_one_bounded_frame() {
+    const SNAPSHOT_BARS: usize = 32_769;
+    let worst_case_bar = MarketBar {
+        source_sequence: u64::MAX,
+        exchange_timestamp_seconds: i64::MIN,
+        exchange_timestamp_unix_nanos: i64::MIN,
+        open: i64::MIN,
+        high: i64::MIN,
+        low: i64::MIN,
+        close: i64::MIN,
+        volume: i64::MIN,
+    };
+    let snapshot = wrap(envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+        consumer_id: u64::MAX,
+        generation: u64::MAX,
+        series: Some(SeriesKey {
+            provider: "coinbase".into(),
+            instrument_id: "instrument:coinbase:btc:usd".into(),
+            cadence_value: u32::MAX,
+            definition_revision: u32::MAX,
+            entitlement_id: "crypto_public_realtime".into(),
+            cadence: SeriesCadence::FixedSeconds as i32,
+        }),
+        provider_generation: u64::MAX,
+        price_scale: u32::MAX,
+        quantity_scale: u32::MAX,
+        bars: vec![worst_case_bar; SNAPSHOT_BARS],
+        publication_generation: u64::MAX,
+        forming: true,
+    }));
+
+    let encoded = encode_envelope(&snapshot).expect("maximum working snapshot fits");
+    assert!(encoded.len() > 1_048_576);
+    assert!(encoded.len() <= MAX_FRAME_BYTES + size_of::<u32>());
+    let mut decoder = EnvelopeDecoder::try_new().expect("decoder builds");
+    assert_eq!(
+        decoder.push(&encoded).expect("snapshot decodes"),
+        [snapshot]
     );
 }
 

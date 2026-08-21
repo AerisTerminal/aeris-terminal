@@ -557,15 +557,18 @@ fn bootstrap_from_snapshot(
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     };
-    let interval_seconds = match request.series.interval().aggregation() {
-        ChartAggregation::FixedSeconds(seconds) => seconds.get(),
-        ChartAggregation::Trades(_) | ChartAggregation::CalendarMonth => 0,
-    };
+    let (interval_seconds, trades_per_bar, calendar_months) =
+        match request.series.interval().aggregation() {
+            ChartAggregation::FixedSeconds(seconds) => (seconds.get(), None, None),
+            ChartAggregation::Trades(trades) => (0, Some(trades.get()), None),
+            ChartAggregation::CalendarMonth => (0, None, Some(1)),
+        };
     let definition = BarDefinition {
         definition_id: format!("rithmic:{}:unadjusted:v1", request.series.label()),
         version: 1,
         interval_seconds,
-        trades_per_bar: (request.series == RithmicSeries::Tick).then_some(100),
+        trades_per_bar,
+        calendar_months,
     };
     let received = unix_nanos_now()?;
     let bars = provenanced_engine_bars(request, snapshot, received);
@@ -932,7 +935,7 @@ mod tests {
 
     #[test]
     fn engine_snapshot_preserves_exact_time_and_provider_generation() {
-        let request = request(RithmicSeries::Tick);
+        let request = request(RithmicSeries::from(ChartInterval::Tick100));
         let series = engine_series_key(&request).expect("series key");
         let snapshot = SeriesSnapshot {
             consumer_id: 5,
@@ -973,7 +976,7 @@ mod tests {
 
     #[test]
     fn engine_live_update_projects_as_one_rithmic_tail() {
-        let request = request(RithmicSeries::Tick);
+        let request = request(RithmicSeries::from(ChartInterval::Tick100));
         let update = tail_from_update(
             &request,
             &SeriesUpdate {

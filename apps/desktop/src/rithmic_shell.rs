@@ -42,7 +42,8 @@ impl RithmicShellState {
 }
 
 pub(crate) const MAXIMUM_SYMBOL_QUERY_BYTES: usize = 64;
-pub(crate) const MAXIMUM_SYMBOL_RESULTS: usize = 64;
+pub(crate) const MAXIMUM_RITHMIC_SYMBOL_RESULTS: usize = 64;
+pub(crate) const MAXIMUM_COINBASE_SYMBOL_RESULTS: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicSymbolSearchRequest {
@@ -57,10 +58,14 @@ pub(crate) struct RithmicSymbolSelection {
     pub(crate) instrument: ProviderInstrumentSummary,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicSymbolBrowser {
+    maximum_results: usize,
+    allow_empty_query: bool,
     next_search_id: usize,
     pending_search_id: Option<NonZeroUsize>,
+    pending_search_query: Option<String>,
+    retained_search_query: Option<String>,
     completed_search_id: Option<NonZeroUsize>,
     results: Vec<ProviderInstrumentSummary>,
     selection_generation: usize,
@@ -68,21 +73,46 @@ pub(crate) struct RithmicSymbolBrowser {
     selected: Option<RithmicSymbolSelection>,
 }
 
+impl Default for RithmicSymbolBrowser {
+    fn default() -> Self {
+        Self {
+            maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,
+            allow_empty_query: false,
+            next_search_id: 0,
+            pending_search_id: None,
+            pending_search_query: None,
+            retained_search_query: None,
+            completed_search_id: None,
+            results: Vec::new(),
+            selection_generation: 0,
+            pending_selection: None,
+            selected: None,
+        }
+    }
+}
+
 impl RithmicSymbolBrowser {
+    pub(crate) fn coinbase_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
+        Self {
+            maximum_results: MAXIMUM_COINBASE_SYMBOL_RESULTS,
+            allow_empty_query: true,
+            next_search_id: request_id.get(),
+            pending_search_id: Some(request_id),
+            pending_search_query: Some(query.to_string()),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn begin_search(
         &mut self,
         query: &str,
     ) -> Result<RithmicSymbolSearchRequest, &'static str> {
         let query = query.trim();
-        if query.is_empty()
-            || query.len() > MAXIMUM_SYMBOL_QUERY_BYTES
-            || query.chars().any(char::is_control)
-        {
-            return Err("symbol search must be 1-64 printable bytes");
-        }
+        self.validate_query(query)?;
         self.next_search_id = self.next_search_id.saturating_add(1).max(1);
         let request_id = NonZeroUsize::new(self.next_search_id).unwrap_or(NonZeroUsize::MIN);
         self.pending_search_id = Some(request_id);
+        self.pending_search_query = Some(query.to_string());
         self.results.clear();
         Ok(RithmicSymbolSearchRequest {
             request_id,
@@ -95,19 +125,40 @@ impl RithmicSymbolBrowser {
         request_id: NonZeroUsize,
         results: Vec<ProviderInstrumentSummary>,
     ) -> bool {
-        let initial = request_id == NonZeroUsize::MIN && self.next_search_id == 0;
+        let initial = self.next_search_id == 0 && self.pending_search_id.is_none();
         if self
             .pending_search_id
             .is_none_or(|pending| pending != request_id)
             && !initial
-            || results.len() > MAXIMUM_SYMBOL_RESULTS
+            || results.len() > self.maximum_results
         {
             return false;
         }
+        self.next_search_id = self.next_search_id.max(request_id.get());
         self.pending_search_id = None;
+        self.pending_search_query = None;
         self.completed_search_id = Some(request_id);
         self.results = results;
         true
+    }
+
+    pub(crate) fn retain_latest_search(&mut self, query: &str) -> Result<bool, &'static str> {
+        let query = query.trim();
+        if let Err(error) = self.validate_query(query) {
+            self.retained_search_query = None;
+            return Err(error);
+        }
+        let already_dispatched = self.pending_search_query.as_deref() == Some(query);
+        self.retained_search_query = (!already_dispatched).then(|| query.to_string());
+        Ok(already_dispatched)
+    }
+
+    pub(crate) fn begin_retained_search(&mut self) -> Option<RithmicSymbolSearchRequest> {
+        if self.pending_search_id.is_some() {
+            return None;
+        }
+        let query = self.retained_search_query.take()?;
+        self.begin_search(&query).ok()
     }
 
     pub(crate) fn select(&mut self, index: usize) -> Option<RithmicSymbolSelection> {
@@ -121,6 +172,15 @@ impl RithmicSymbolBrowser {
         };
         self.pending_selection = Some(selection.clone());
         Some(selection)
+    }
+
+    pub(crate) fn consume_completed_search(&mut self, search_generation: NonZeroUsize) -> bool {
+        if self.completed_search_id != Some(search_generation) {
+            return false;
+        }
+        self.completed_search_id = None;
+        self.results.clear();
+        true
     }
 
     pub(crate) fn confirm_selection(&mut self, generation: NonZeroUsize) -> bool {
@@ -137,6 +197,7 @@ impl RithmicSymbolBrowser {
     pub(crate) fn reject_search(&mut self, generation: NonZeroUsize) -> bool {
         if self.pending_search_id == Some(generation) {
             self.pending_search_id = None;
+            self.pending_search_query = None;
             return true;
         }
         false
@@ -157,6 +218,14 @@ impl RithmicSymbolBrowser {
         &self.results
     }
 
+    pub(crate) const fn maximum_results(&self) -> usize {
+        self.maximum_results
+    }
+
+    pub(crate) const fn has_retained_search(&self) -> bool {
+        self.retained_search_query.is_some()
+    }
+
     pub(crate) const fn search_pending(&self) -> bool {
         self.pending_search_id.is_some()
     }
@@ -167,10 +236,26 @@ impl RithmicSymbolBrowser {
 
     pub(crate) fn invalidate_session(&mut self) {
         self.pending_search_id = None;
+        self.pending_search_query = None;
+        self.retained_search_query = None;
         self.completed_search_id = None;
         self.results.clear();
         self.pending_selection = None;
         self.selected = None;
+    }
+
+    fn validate_query(&self, query: &str) -> Result<(), &'static str> {
+        if (!self.allow_empty_query && query.is_empty())
+            || query.len() > MAXIMUM_SYMBOL_QUERY_BYTES
+            || query.chars().any(char::is_control)
+        {
+            return Err(if self.allow_empty_query {
+                "symbol search must be at most 64 printable bytes"
+            } else {
+                "symbol search must be 1-64 printable bytes"
+            });
+        }
+        Ok(())
     }
 }
 
@@ -235,6 +320,7 @@ mod tests {
     #[test]
     fn symbol_browser_bounds_queries_results_and_indexes() {
         let mut browser = RithmicSymbolBrowser::default();
+        assert_eq!(browser.maximum_results(), MAXIMUM_RITHMIC_SYMBOL_RESULTS);
         assert!(browser.begin_search("").is_err());
         assert!(
             browser
@@ -247,10 +333,23 @@ mod tests {
         assert!(browser.search_pending());
         assert!(!browser.apply_results(
             request.request_id,
-            vec![result("ES"); MAXIMUM_SYMBOL_RESULTS + 1],
+            vec![result("ES"); MAXIMUM_RITHMIC_SYMBOL_RESULTS + 1],
         ));
         assert!(browser.select(0).is_none());
         assert_eq!(browser.pending_search_id(), Some(request.request_id));
+    }
+
+    #[test]
+    fn coinbase_catalog_keeps_empty_query_and_dynamic_result_capacity() {
+        let mut browser =
+            RithmicSymbolBrowser::coinbase_catalog_awaiting_search(NonZeroUsize::MIN, "");
+        assert_eq!(browser.maximum_results(), MAXIMUM_COINBASE_SYMBOL_RESULTS);
+        assert!(browser.apply_results(
+            NonZeroUsize::MIN,
+            vec![result("BTC-USD"); MAXIMUM_COINBASE_SYMBOL_RESULTS],
+        ));
+        assert_eq!(browser.results().len(), MAXIMUM_COINBASE_SYMBOL_RESULTS);
+        assert!(browser.begin_search("").is_ok());
     }
 
     #[test]
@@ -304,5 +403,107 @@ mod tests {
 
         assert!(browser.reject_selection(replacement.generation));
         assert_eq!(browser.selected(), Some(&current));
+    }
+
+    #[test]
+    fn coinbase_startup_search_and_rapid_typing_dispatch_only_the_latest_query() {
+        let startup = NonZeroUsize::MIN;
+        let mut browser = RithmicSymbolBrowser::coinbase_catalog_awaiting_search(startup, "");
+        browser
+            .retain_latest_search("B")
+            .expect("first typed query validates");
+        browser
+            .retain_latest_search("BT")
+            .expect("replacement typed query validates");
+        browser
+            .retain_latest_search("BTC")
+            .expect("latest typed query validates");
+
+        assert!(browser.apply_results(startup, vec![result("BTC-USD")]));
+        let latest = browser
+            .begin_retained_search()
+            .expect("latest query eventually dispatches");
+        assert_eq!(latest.query, "BTC");
+        assert!(latest.request_id > startup);
+        assert!(browser.begin_retained_search().is_none());
+    }
+
+    #[test]
+    fn rithmic_rapid_typing_dispatches_only_the_latest_nonempty_query() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let active = browser.begin_search("E").expect("prefix validates");
+        assert!(!browser.retain_latest_search("ES").expect("query validates"));
+        assert!(
+            !browser
+                .retain_latest_search("ESM")
+                .expect("query validates")
+        );
+
+        assert!(browser.apply_results(active.request_id, vec![result("ESU6")]));
+        let latest = browser
+            .begin_retained_search()
+            .expect("latest Rithmic query eventually dispatches");
+        assert_eq!(latest.query, "ESM");
+        assert!(latest.request_id > active.request_id);
+    }
+
+    #[test]
+    fn enter_on_the_matching_pending_query_neither_duplicates_nor_retain_search() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let active = browser.begin_search("ES").expect("query validates");
+
+        assert!(
+            browser
+                .retain_latest_search(" ES ")
+                .expect("query validates")
+        );
+        assert!(browser.search_pending());
+        assert!(!browser.has_retained_search());
+        assert!(browser.results().is_empty());
+
+        assert!(browser.apply_results(active.request_id, vec![result("ESU6")]));
+        assert!(browser.begin_retained_search().is_none());
+        assert_eq!(browser.results()[0].symbol, "ESU6");
+    }
+
+    #[test]
+    fn invalid_latest_rithmic_query_cancels_an_older_retained_prefix() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let active = browser.begin_search("E").expect("prefix validates");
+        assert!(!browser.retain_latest_search("ES").expect("query validates"));
+        assert!(browser.retain_latest_search("").is_err());
+
+        assert!(browser.apply_results(active.request_id, vec![result("ESU6")]));
+        assert!(browser.begin_retained_search().is_none());
+    }
+
+    #[test]
+    fn retyping_active_query_cancels_an_obsolete_retained_query() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let active = browser.begin_search("BTC").expect("query validates");
+        browser
+            .retain_latest_search("ETH")
+            .expect("replacement validates");
+        browser
+            .retain_latest_search("BTC")
+            .expect("active query validates");
+
+        assert!(browser.apply_results(active.request_id, vec![result("BTC-USD")]));
+        assert!(browser.begin_retained_search().is_none());
+    }
+
+    #[test]
+    fn consuming_completed_search_prevents_reusing_selection_authorization() {
+        let mut browser =
+            RithmicSymbolBrowser::coinbase_catalog_awaiting_search(NonZeroUsize::MIN, "");
+        assert!(browser.apply_results(NonZeroUsize::MIN, vec![result("BTC-USD")]));
+        let selection = browser.select(0).expect("catalog result is selectable");
+        assert!(browser.confirm_selection(selection.generation));
+
+        assert!(browser.consume_completed_search(selection.search_generation));
+        assert!(browser.results().is_empty());
+        assert!(browser.select(0).is_none());
+        assert!(!browser.consume_completed_search(selection.search_generation));
+        assert_eq!(browser.selected(), Some(&selection));
     }
 }

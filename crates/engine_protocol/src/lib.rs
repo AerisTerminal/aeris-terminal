@@ -31,10 +31,10 @@ pub use messages::{
 pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
-/// Maximum prost payload accepted in one frame (1 MiB).
-pub const MAX_FRAME_BYTES: usize = 1_048_576;
+/// Maximum prost payload accepted in one frame (3 MiB).
+pub const MAX_FRAME_BYTES: usize = 3 * 1_048_576;
 
 /// Maximum partial-frame storage retained by the decoder between pushes.
 pub const MAX_BUFFERED_BYTES: usize = 2 * MAX_FRAME_BYTES;

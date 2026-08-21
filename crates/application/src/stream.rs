@@ -4,8 +4,8 @@ use core::fmt;
 use sha2::{Digest, Sha256};
 use std::error::Error;
 
-/// Maximum items accepted in one client snapshot.
-pub const MAX_STREAM_SNAPSHOT_ITEMS: usize = 2_048;
+/// Maximum completed working-window bars plus one forming bar accepted in one snapshot.
+pub const MAX_STREAM_SNAPSHOT_ITEMS: usize = 32_769;
 
 /// Canonical evidence retained with each displayed or replayed market value.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +82,7 @@ pub struct MarketSnapshotIdentityRef<'identity> {
     pub bar_definition_version: u32,
     pub bar_interval_seconds: u32,
     pub bar_trades_per_bar: Option<u32>,
+    pub bar_calendar_months: Option<u32>,
 }
 
 /// Borrowed canonical fields used by the shared snapshot checksum algorithm.
@@ -117,6 +118,10 @@ pub fn compute_market_snapshot_checksum<'value>(
     digest.update(identity.bar_definition_version.to_be_bytes());
     digest.update(identity.bar_interval_seconds.to_be_bytes());
     digest.update(identity.bar_trades_per_bar.unwrap_or(0).to_be_bytes());
+    if let Some(months) = identity.bar_calendar_months {
+        digest.update([1]);
+        digest.update(months.to_be_bytes());
+    }
     for value in values {
         digest.update(value.source_sequence.to_be_bytes());
         digest.update(value.exchange_timestamp_seconds.to_be_bytes());
@@ -484,7 +489,11 @@ mod tests {
         }
     }
 
-    fn checksum(session_generation: u64, publication_generation: u64) -> [u8; 32] {
+    fn checksum(
+        session_generation: u64,
+        publication_generation: u64,
+        calendar_months: Option<u32>,
+    ) -> [u8; 32] {
         let provenance = provenance(session_generation);
         compute_market_snapshot_checksum(
             &SnapshotEvidence {
@@ -500,8 +509,9 @@ mod tests {
                 instrument_revision: 1,
                 bar_definition_id: "one-minute",
                 bar_definition_version: 1,
-                bar_interval_seconds: 60,
+                bar_interval_seconds: if calendar_months.is_some() { 0 } else { 60 },
                 bar_trades_per_bar: None,
+                bar_calendar_months: calendar_months,
             },
             [MarketValueChecksumRef {
                 source_sequence: 1,
@@ -519,8 +529,25 @@ mod tests {
 
     #[test]
     fn checksum_is_deterministic_and_fences_session_and_publication_generations() {
-        assert_eq!(checksum(1, 1), checksum(1, 1));
-        assert_ne!(checksum(1, 1), checksum(2, 1));
-        assert_ne!(checksum(1, 1), checksum(1, 2));
+        assert_eq!(checksum(1, 1, None), checksum(1, 1, None));
+        assert_ne!(checksum(1, 1, None), checksum(2, 1, None));
+        assert_ne!(checksum(1, 1, None), checksum(1, 2, None));
+        assert_ne!(checksum(1, 1, None), checksum(1, 1, Some(1)));
+        assert_ne!(checksum(1, 1, Some(1)), checksum(1, 1, Some(2)));
+    }
+
+    #[test]
+    fn snapshot_bound_accepts_working_window_plus_forming_bar_only() {
+        let maximum = vec![(); MAX_STREAM_SNAPSHOT_ITEMS];
+        assert!(StreamSnapshot::try_new(1, MAX_STREAM_SNAPSHOT_ITEMS as u64, maximum).is_ok());
+
+        let oversized = vec![(); MAX_STREAM_SNAPSHOT_ITEMS + 1];
+        assert_eq!(
+            StreamSnapshot::try_new(1, (MAX_STREAM_SNAPSHOT_ITEMS + 1) as u64, oversized),
+            Err(StreamProtocolError::ItemLimitExceeded {
+                requested: MAX_STREAM_SNAPSHOT_ITEMS + 1,
+                maximum: MAX_STREAM_SNAPSHOT_ITEMS,
+            })
+        );
     }
 }

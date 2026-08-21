@@ -16,6 +16,7 @@ mod rithmic_shell;
 mod windowed_benchmark;
 
 use assets::UiIcon as HugeIcon;
+#[cfg(feature = "diagnostics")]
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, ChartSplitDirection,
@@ -576,11 +577,26 @@ actions!(
 
 static COINBASE_INTERVALS: &[ChartInterval] = &[
     ChartInterval::Minute1,
+    ChartInterval::Minute3,
     ChartInterval::Minute5,
     ChartInterval::Minute15,
+    ChartInterval::Minute30,
     ChartInterval::Hour1,
+    ChartInterval::Hour2,
+    ChartInterval::Hour4,
+    ChartInterval::Hour8,
+    ChartInterval::Hour12,
+    ChartInterval::Day1,
+    ChartInterval::Week1,
+    ChartInterval::Month1,
 ];
 const COINBASE_ENTITLEMENT_ID: &str = "crypto_public_realtime";
+const COINBASE_CALENDAR_HISTORY_STATUS: &str =
+    "Completed Coinbase history; current calendar bucket is not live";
+
+const fn coinbase_interval_is_history_only(interval: ChartInterval) -> bool {
+    matches!(interval, ChartInterval::Week1 | ChartInterval::Month1)
+}
 
 fn generation_status(
     worker_label: &str,
@@ -758,6 +774,13 @@ enum TerminalProvider {
     Rithmic,
 }
 
+const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
+    match provider {
+        TerminalProvider::Coinbase => "coinbase",
+        TerminalProvider::Rithmic => "rithmic",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum CoinbaseSwitchState {
     #[default]
@@ -900,6 +923,27 @@ enum InstrumentMenuSelection {
     Coinbase(usize),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SymbolSubmitDecision {
+    Select(usize),
+    Search,
+    None,
+}
+
+const fn symbol_submit_decision(
+    provider: TerminalProvider,
+    result_count: usize,
+    highlighted: usize,
+) -> SymbolSubmitDecision {
+    if highlighted < result_count {
+        return SymbolSubmitDecision::Select(highlighted);
+    }
+    match provider {
+        TerminalProvider::Rithmic => SymbolSubmitDecision::Search,
+        TerminalProvider::Coinbase => SymbolSubmitDecision::None,
+    }
+}
+
 #[derive(Clone)]
 struct InstrumentMenuEntry {
     symbol: String,
@@ -954,6 +998,7 @@ struct HeaderState {
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
+    history_only: bool,
     instrument_scroll: ScrollHandle,
 }
 
@@ -1193,18 +1238,29 @@ fn terminal_startup_state(
                 coinbase_product: None,
             }
         }
-        MarketWorkerStartup::Loading(startup) => TerminalStartupState {
-            chart: None,
-            chart_state: ChartState::Loading,
-            chart_state_message: "waiting for a covering market snapshot".to_string(),
-            replay_label: "waiting for a covering market snapshot".to_string(),
-            worker_label: startup.worker_label,
-            subscription_id: startup.subscription_id,
-            connection_state: Some(FeedConnectionState::Discovering),
-            connection_message: Some("Connecting to Coinbase public markets".to_string()),
-            provider: TerminalProvider::Coinbase,
-            coinbase_product: Some(startup.coinbase_product),
-        },
+        MarketWorkerStartup::Loading(startup) => {
+            let history_only = coinbase_interval_is_history_only(startup.coinbase_interval);
+            TerminalStartupState {
+                chart: None,
+                chart_state: ChartState::Loading,
+                chart_state_message: "waiting for a covering market snapshot".to_string(),
+                replay_label: "waiting for a covering market snapshot".to_string(),
+                worker_label: startup.worker_label,
+                subscription_id: startup.subscription_id,
+                connection_state: Some(if history_only {
+                    FeedConnectionState::Authenticating
+                } else {
+                    FeedConnectionState::Discovering
+                }),
+                connection_message: Some(if history_only {
+                    "Loading Coinbase history-only interval".to_string()
+                } else {
+                    "Connecting to Coinbase public markets".to_string()
+                }),
+                provider: TerminalProvider::Coinbase,
+                coinbase_product: Some(startup.coinbase_product),
+            }
+        }
     }
 }
 
@@ -1269,7 +1325,14 @@ impl WorkspaceSurface {
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
-            symbol_browser: rithmic_shell::RithmicSymbolBrowser::default(),
+            symbol_browser: if provider == TerminalProvider::Coinbase {
+                rithmic_shell::RithmicSymbolBrowser::coinbase_catalog_awaiting_search(
+                    std::num::NonZeroUsize::MIN,
+                    "",
+                )
+            } else {
+                rithmic_shell::RithmicSymbolBrowser::default()
+            },
             symbol_message: initial_symbol_message(provider),
             symbol_selection_pending: false,
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
@@ -1606,19 +1669,23 @@ impl WorkspaceSurface {
         self.live_evidence_publications = self.live_evidence_publications.saturating_add(1);
         match update {
             ReplayStreamUpdate::Snapshot(snapshot) => {
-                let interval_nanos = i64::from(snapshot.bar_definition().interval_seconds)
-                    .saturating_mul(1_000_000_000);
-                let interior_gaps = snapshot
-                    .bars()
-                    .windows(2)
-                    .filter(|pair| {
-                        pair[1]
-                            .provenance()
-                            .exchange_timestamp_unix_nanos
-                            .saturating_sub(pair[0].provenance().exchange_timestamp_unix_nanos)
-                            != interval_nanos
-                    })
-                    .count();
+                let interval_nanos = (snapshot.bar_definition().interval_seconds > 0).then(|| {
+                    i64::from(snapshot.bar_definition().interval_seconds)
+                        .saturating_mul(1_000_000_000)
+                });
+                let interior_gaps = interval_nanos.map(|interval_nanos| {
+                    snapshot
+                        .bars()
+                        .windows(2)
+                        .filter(|pair| {
+                            pair[1]
+                                .provenance()
+                                .exchange_timestamp_unix_nanos
+                                .saturating_sub(pair[0].provenance().exchange_timestamp_unix_nanos)
+                                != interval_nanos
+                        })
+                        .count()
+                });
                 let first_timestamp = snapshot
                     .bars()
                     .first()
@@ -1627,6 +1694,10 @@ impl WorkspaceSurface {
                     .bars()
                     .last()
                     .map_or(0, |bar| bar.provenance().exchange_timestamp_unix_nanos);
+                let interior_gaps =
+                    interior_gaps.map_or_else(|| "null".to_string(), |value| value.to_string());
+                let interval_nanos =
+                    interval_nanos.map_or_else(|| "null".to_string(), |value| value.to_string());
                 eprintln!(
                     "AXIUSFLOW_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos}}}",
                     snapshot.bars().len()
@@ -1701,15 +1772,26 @@ impl WorkspaceSurface {
         }
         if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
-            self.chart_state_message = "market snapshot is current".to_string();
+            self.chart_state_message = if self.provider == TerminalProvider::Coinbase
+                && coinbase_interval_is_history_only(self.coinbase_interval)
+            {
+                COINBASE_CALENDAR_HISTORY_STATUS.to_string()
+            } else {
+                "market snapshot is current".to_string()
+            };
             if self.provider == TerminalProvider::Coinbase {
                 self.symbol_selection_pending = false;
                 self.symbol_message = self.coinbase_product.as_ref().map_or_else(
                     || "Coinbase market ready".to_string(),
                     |product| format!("{} · Coinbase spot", product.provider_symbol),
                 );
-                self.connection_state = Some(FeedConnectionState::Streaming);
-                self.connection_message = Some("Coinbase market data is current".to_string());
+                if coinbase_interval_is_history_only(self.coinbase_interval) {
+                    self.connection_state = Some(FeedConnectionState::Disconnected);
+                    self.connection_message = Some(COINBASE_CALENDAR_HISTORY_STATUS.to_string());
+                } else {
+                    self.connection_state = Some(FeedConnectionState::Streaming);
+                    self.connection_message = Some("Coinbase market data is current".to_string());
+                }
             }
         } else {
             self.set_chart_state(
@@ -1779,7 +1861,13 @@ impl WorkspaceSurface {
                     MarketPublicationGeneration::from_generation(&bootstrap.generation),
                 );
                 self.chart_state = ChartState::Ready;
-                self.chart_state_message = "market snapshot is current".to_string();
+                self.chart_state_message = if self.provider == TerminalProvider::Coinbase
+                    && coinbase_interval_is_history_only(self.coinbase_interval)
+                {
+                    COINBASE_CALENDAR_HISTORY_STATUS.to_string()
+                } else {
+                    "market snapshot is current".to_string()
+                };
                 cx.notify();
             }
             Ok(false) => eprintln!("ignored stale fixture recovery response {request_id}"),
@@ -1954,6 +2042,17 @@ impl WorkspaceSurface {
             .is_some_and(|generation| self.symbol_browser.confirm_selection(generation))
     }
 
+    fn consume_catalog_search_authorization(&mut self) {
+        if let Some(search_generation) = self
+            .symbol_browser
+            .selected()
+            .map(|selection| selection.search_generation)
+        {
+            self.symbol_browser
+                .consume_completed_search(search_generation);
+        }
+    }
+
     fn apply_coinbase_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
         if self.provider != TerminalProvider::Coinbase
             || !self.coinbase_switch.is_pending()
@@ -2008,6 +2107,7 @@ impl WorkspaceSurface {
             self.set_chart_state(ChartState::Error, message, cx);
         }
         self.dispatch_recovery(cx);
+        self.dispatch_retained_symbol_search(cx);
 
         let status = self.chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
@@ -2073,7 +2173,7 @@ impl WorkspaceSurface {
         self.connection_message = Some(message);
         match ready_action {
             RithmicReadyAction::Reconnect(symbol) => {
-                if self.search_rithmic_query(&symbol, cx)
+                if self.search_symbol_query(&symbol, cx)
                     && let RithmicReconnectState::AwaitingSearch(target) = &self.rithmic_reconnect
                 {
                     self.rithmic_reconnect = RithmicReconnectState::SearchInFlight(target.clone());
@@ -2081,7 +2181,7 @@ impl WorkspaceSurface {
             }
             RithmicReadyAction::Autoload => {
                 self.rithmic_autoload_started = true;
-                let _ = self.search_rithmic_query("MNQ", cx);
+                let _ = self.search_symbol_query("MNQ", cx);
             }
             RithmicReadyAction::None => {}
         }
@@ -2102,8 +2202,28 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    fn search_rithmic_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
+    fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
         if self.symbol_browser.search_pending() || self.symbol_selection_pending {
+            match self.symbol_browser.retain_latest_search(query) {
+                Ok(already_dispatched) => {
+                    if !already_dispatched {
+                        self.symbol_message = format!(
+                            "Waiting to search the latest {} query",
+                            if self.provider == TerminalProvider::Coinbase {
+                                "Coinbase"
+                            } else {
+                                "Rithmic"
+                            }
+                        );
+                    }
+                    cx.notify();
+                    return already_dispatched;
+                }
+                Err(message) => {
+                    self.symbol_message = message.to_string();
+                    cx.notify();
+                }
+            }
             return false;
         }
         let request = match self.symbol_browser.begin_search(query) {
@@ -2114,19 +2234,35 @@ impl WorkspaceSurface {
                 return false;
             }
         };
+        self.dispatch_symbol_search(request, cx)
+    }
+
+    fn dispatch_symbol_search(
+        &mut self,
+        request: rithmic_shell::RithmicSymbolSearchRequest,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let provider = terminal_provider_id(self.provider);
+        let retained_query = request.query.clone();
+        let request_id = request.request_id;
         let search = SearchProviderInstruments {
             consumer_id: 0,
-            search_generation: u64::try_from(request.request_id.get()).unwrap_or(u64::MAX),
-            provider: "rithmic".to_string(),
+            search_generation: u64::try_from(request_id.get()).unwrap_or(u64::MAX),
+            provider: provider.to_string(),
             query: request.query,
-            maximum_results: u32::try_from(rithmic_shell::MAXIMUM_SYMBOL_RESULTS)
+            maximum_results: u32::try_from(self.symbol_browser.maximum_results())
                 .unwrap_or(u32::MAX),
         };
         let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
-            self.symbol_message = "Searching Rithmic Test symbols".to_string();
+            self.symbol_message = if provider == "coinbase" {
+                "Searching Coinbase spot markets".to_string()
+            } else {
+                "Searching Rithmic Test symbols".to_string()
+            };
             true
         } else {
-            self.symbol_browser.reject_search(request.request_id);
+            self.symbol_browser.reject_search(request_id);
+            let _ = self.symbol_browser.retain_latest_search(&retained_query);
             self.symbol_message = "Symbol search is busy; try again".to_string();
             false
         };
@@ -2134,29 +2270,40 @@ impl WorkspaceSurface {
         dispatched
     }
 
-    fn search_rithmic_input(&mut self, cx: &mut Context<Self>) {
+    fn dispatch_retained_symbol_search(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.symbol_selection_pending {
+            return false;
+        }
+        if let Some(request) = self.symbol_browser.begin_retained_search() {
+            return self.dispatch_symbol_search(request, cx);
+        }
+        false
+    }
+
+    fn search_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(input) = &self.symbol_input else {
-            return;
+            return false;
         };
         let query = input.read(cx).value().to_string();
-        self.search_rithmic_query(&query, cx);
+        self.search_symbol_query(&query, cx)
     }
 
     fn submit_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.provider != TerminalProvider::Coinbase {
-            self.search_rithmic_input(cx);
-            return true;
+        let entries = self.instrument_entries(cx);
+        match symbol_submit_decision(self.provider, entries.len(), self.chrome_selection) {
+            SymbolSubmitDecision::Select(index) => entries
+                .get(index)
+                .is_some_and(|entry| self.select_instrument(entry.selection, cx)),
+            SymbolSubmitDecision::Search => {
+                self.search_symbol_input(cx);
+                false
+            }
+            SymbolSubmitDecision::None => {
+                self.symbol_message = "No Coinbase spot markets match this search".to_string();
+                cx.notify();
+                false
+            }
         }
-        let Some(first) = self
-            .instrument_entries(cx)
-            .into_iter()
-            .nth(self.chrome_selection)
-        else {
-            self.symbol_message = "No Coinbase spot markets match this search".to_string();
-            cx.notify();
-            return false;
-        };
-        self.select_instrument(first.selection, cx)
     }
 
     fn begin_rithmic_reconnect(&mut self, cx: &mut Context<Self>) {
@@ -2236,15 +2383,10 @@ impl WorkspaceSurface {
     }
 
     fn apply_catalog_event(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
-        let coinbase = match &event {
-            ProviderCatalogEvent::SearchCompleted(result) => result.provider == "coinbase",
-            ProviderCatalogEvent::SelectionInstalled(instrument) => {
-                instrument.provider == "coinbase"
-            }
-            ProviderCatalogEvent::CommandRejected { rejection, .. } => {
-                rejection.provider == "coinbase"
-            }
-        };
+        if provider_catalog_event_provider(&event) != terminal_provider_id(self.provider) {
+            return;
+        }
+        let coinbase = self.provider == TerminalProvider::Coinbase;
         match event {
             ProviderCatalogEvent::SearchCompleted(result) => {
                 let Some(count) =
@@ -2257,6 +2399,11 @@ impl WorkspaceSurface {
                 } else {
                     format!("{count} matching symbols")
                 };
+                if self.symbol_browser.has_retained_search() {
+                    self.dispatch_retained_symbol_search(cx);
+                    cx.notify();
+                    return;
+                }
                 if !coinbase && self.rithmic_reconnect != RithmicReconnectState::Idle {
                     if let Some(index) = self.rithmic_reconnect.target().and_then(|target| {
                         reconnect_contract_index(self.symbol_browser.results(), target)
@@ -2276,11 +2423,13 @@ impl WorkspaceSurface {
                 {
                     self.select_rithmic_symbol(index, cx);
                 }
+                self.dispatch_retained_symbol_search(cx);
             }
             ProviderCatalogEvent::SelectionInstalled(instrument) if coinbase => {
                 if !self.confirm_catalog_selection(instrument.selection_generation) {
                     return;
                 }
+                self.consume_catalog_search_authorization();
                 let interval = self
                     .coinbase_pending_interval
                     .unwrap_or(self.coinbase_interval);
@@ -2321,11 +2470,13 @@ impl WorkspaceSurface {
                 }
                 let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
                     .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
-                self.symbol_message = catalog_rejection_message(reason, command).to_string();
+                self.symbol_message =
+                    catalog_rejection_message(reason, command, coinbase).to_string();
                 if !coinbase && let Some(target) = self.rithmic_reconnect.target().cloned() {
                     self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
                     self.retire_rithmic_session(cx);
                 }
+                self.dispatch_retained_symbol_search(cx);
             }
         }
         cx.notify();
@@ -3424,8 +3575,12 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
 fn catalog_rejection_message(
     reason: ProviderCatalogRejectionReason,
     command: ProviderCatalogCommand,
+    coinbase: bool,
 ) -> &'static str {
     match reason {
+        ProviderCatalogRejectionReason::SearchRejected if coinbase => {
+            "Coinbase rejected the market search"
+        }
         ProviderCatalogRejectionReason::SearchRejected => "Rithmic Test rejected the symbol search",
         ProviderCatalogRejectionReason::SupersededSearch => {
             "A newer symbol search replaced this one"
@@ -3433,8 +3588,19 @@ fn catalog_rejection_message(
         ProviderCatalogRejectionReason::InstrumentUnavailable => {
             "The selected symbol is no longer available"
         }
+        ProviderCatalogRejectionReason::SubscriptionRejected if coinbase => {
+            "Coinbase rejected the market subscription"
+        }
         ProviderCatalogRejectionReason::SubscriptionRejected => {
             "Rithmic Test rejected the market subscription"
+        }
+        ProviderCatalogRejectionReason::DispatchUnavailable
+            if coinbase && command == ProviderCatalogCommand::Search =>
+        {
+            "The Coinbase search could not be scheduled"
+        }
+        ProviderCatalogRejectionReason::DispatchUnavailable if coinbase => {
+            "The Coinbase selection could not be scheduled"
         }
         ProviderCatalogRejectionReason::DispatchUnavailable
             if command == ProviderCatalogCommand::Search =>
@@ -3444,7 +3610,18 @@ fn catalog_rejection_message(
         ProviderCatalogRejectionReason::DispatchUnavailable => {
             "The Rithmic selection could not be scheduled"
         }
+        ProviderCatalogRejectionReason::Unspecified if coinbase => {
+            "The Coinbase catalog request failed"
+        }
         ProviderCatalogRejectionReason::Unspecified => "The Rithmic catalog request failed",
+    }
+}
+
+fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
+    match event {
+        ProviderCatalogEvent::SearchCompleted(result) => &result.provider,
+        ProviderCatalogEvent::SelectionInstalled(instrument) => &instrument.provider,
+        ProviderCatalogEvent::CommandRejected { rejection, .. } => &rejection.provider,
     }
 }
 
@@ -4052,6 +4229,7 @@ fn header_controls(
         state.connection_state,
         state.chart_state,
         state.delayed,
+        state.history_only,
     );
     div()
         .h_full()
@@ -4777,11 +4955,27 @@ fn connection_presentation(
     state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
+    history_only: bool,
 ) -> (String, ConnectionColor) {
     let provider = match provider {
         TerminalProvider::Coinbase => "Coinbase",
         TerminalProvider::Rithmic => "Test",
     };
+    if history_only {
+        return match chart_state {
+            ChartState::Ready => (format!("{provider} · Completed history"), |theme| {
+                theme.colors.positive
+            }),
+            ChartState::Error => (format!("{provider} · Data error"), |theme| {
+                theme.colors.negative
+            }),
+            ChartState::Loading | ChartState::Stale | ChartState::Recovering => {
+                (format!("{provider} · Loading history"), |theme| {
+                    theme.colors.warning
+                })
+            }
+        };
+    }
     if chart_state == ChartState::Stale {
         return (format!("{provider} · Stale"), |theme| theme.colors.warning);
     }
@@ -4881,6 +5075,21 @@ fn symbol_input_for_startup(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SymbolInputAction {
+    Search,
+    Submit,
+    Ignore,
+}
+
+const fn symbol_input_action(event: &InputEvent) -> SymbolInputAction {
+    match event {
+        InputEvent::Change => SymbolInputAction::Search,
+        InputEvent::PressEnter { .. } => SymbolInputAction::Submit,
+        InputEvent::Focus | InputEvent::Blur => SymbolInputAction::Ignore,
+    }
+}
+
 fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     let mut bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
     let offset = if window_index == 0 { px(0.0) } else { px(48.0) };
@@ -4918,19 +5127,23 @@ fn subscribe_symbol_input(
                 InputEvent::PressEnter { .. } => Some(true),
                 InputEvent::Focus | InputEvent::Blur => None,
             };
-            let submitted = matches!(event, InputEvent::PressEnter { .. });
-            if submitted {
-                let selected = terminal.update(cx, WorkspaceSurface::submit_symbol_input);
-                if selected {
-                    terminal.update(cx, |app, app_cx| {
-                        app.close_chrome_overlay(window, app_cx);
+            match symbol_input_action(event) {
+                SymbolInputAction::Submit => {
+                    let selected = terminal.update(cx, WorkspaceSurface::submit_symbol_input);
+                    if selected {
+                        terminal.update(cx, |app, app_cx| {
+                            app.close_chrome_overlay(window, app_cx);
+                        });
+                    }
+                }
+                SymbolInputAction::Search => {
+                    terminal.update(cx, |app, cx| {
+                        app.chrome_selection = 0;
+                        app.search_symbol_input(cx);
+                        cx.notify();
                     });
                 }
-            } else {
-                terminal.update(cx, |app, cx| {
-                    app.chrome_selection = 0;
-                    cx.notify();
-                });
+                SymbolInputAction::Ignore => {}
             }
             #[cfg(feature = "diagnostics")]
             if let Some(submitted) = measured_submission {
@@ -5085,10 +5298,13 @@ fn workspace_label(index: usize) -> String {
 }
 
 fn workspace_series(interval: ChartInterval, instrument: &InstallProviderInstrument) -> SeriesKey {
-    let (cadence, cadence_value) = match interval.aggregation() {
-        ChartAggregation::Trades(value) => (SeriesCadence::Trades, value.get()),
-        ChartAggregation::FixedSeconds(value) => (SeriesCadence::FixedSeconds, value.get()),
-        ChartAggregation::CalendarMonth => (SeriesCadence::CalendarMonths, 1),
+    let (cadence, cadence_value) = match interval {
+        ChartInterval::Week1 => (SeriesCadence::CalendarWeeks, 1),
+        _ => match interval.aggregation() {
+            ChartAggregation::Trades(value) => (SeriesCadence::Trades, value.get()),
+            ChartAggregation::FixedSeconds(value) => (SeriesCadence::FixedSeconds, value.get()),
+            ChartAggregation::CalendarMonth => (SeriesCadence::CalendarMonths, 1),
+        },
     };
     SeriesKey {
         provider: instrument.provider.clone(),
@@ -6160,6 +6376,11 @@ fn active_header_state(
             .unwrap_or(FeedConnectionState::Disconnected),
         chart_state: workspace.chart_state,
         delayed: false,
+        history_only: workspace.provider == TerminalProvider::Coinbase
+            && matches!(
+                workspace.coinbase_interval,
+                ChartInterval::Week1 | ChartInterval::Month1
+            ),
         instrument_scroll: workspace.scrolls.instrument.clone(),
     }
 }
@@ -7320,22 +7541,25 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 #[cfg(test)]
 mod tests {
     use super::{
+        COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS,
         CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
-        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, ProviderCatalogCommand,
-        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-        RithmicSessionRetirement, SidePanel, SidePanelResize, TerminalProvider, WORKSPACE_TAB_GAP,
+        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, InputEvent,
+        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        RithmicSessionRetirement, SidePanel, SidePanelResize, SymbolInputAction,
+        SymbolSubmitDecision, TerminalProvider, WORKSPACE_TAB_GAP,
         WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
         WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
-        caption_pointer_owner, chart_status_detail, chart_surface_notice,
-        chrome_control_foreground, chrome_overlay_progress, claim_once, connection_presentation,
-        default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
-        fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
-        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
-        reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
-        series_selector_label, should_finish_chrome_overlay_close, split_lifetime_mode,
-        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_split_ratio, workspace_switch,
+        caption_pointer_owner, catalog_rejection_message, chart_status_detail,
+        chart_surface_notice, chrome_control_foreground, chrome_overlay_progress, claim_once,
+        connection_presentation, default_rithmic_contract_index, durable_workspace_viewport,
+        finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
+        nucleus_chart_theme, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index, reorder_workspace_ids, resized_side_panel_width,
+        rithmic_ready_action, series_selector_label, should_finish_chrome_overlay_close,
+        split_lifetime_mode, symbol_input_action, symbol_submit_decision, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
         workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
@@ -7343,7 +7567,8 @@ mod tests {
     use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
     use axiusflow_engine_protocol::{
-        EngineLifetimeMode, ProviderInstrumentSummary, ResourceMode, WorkspaceState,
+        EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejectionReason,
+        ProviderInstrumentSummary, ResourceMode, SeriesCadence, WorkspaceState,
     };
     use axiusflow_market_data::ChartInterval;
     use axiusflow_observability::FeedConnectionState;
@@ -7853,6 +8078,90 @@ mod tests {
     }
 
     #[test]
+    fn symbol_input_searches_only_on_change_events() {
+        assert_eq!(
+            symbol_input_action(&InputEvent::Change),
+            SymbolInputAction::Search
+        );
+        assert_eq!(
+            symbol_input_action(&InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            }),
+            SymbolInputAction::Submit
+        );
+        assert_eq!(
+            symbol_input_action(&InputEvent::Focus),
+            SymbolInputAction::Ignore
+        );
+        assert_eq!(
+            symbol_input_action(&InputEvent::Blur),
+            SymbolInputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn enter_closes_only_for_an_available_provider_selection() {
+        assert_eq!(
+            symbol_submit_decision(TerminalProvider::Rithmic, 3, 1),
+            SymbolSubmitDecision::Select(1)
+        );
+        assert_eq!(
+            symbol_submit_decision(TerminalProvider::Rithmic, 0, 0),
+            SymbolSubmitDecision::Search
+        );
+        assert_eq!(
+            symbol_submit_decision(TerminalProvider::Rithmic, 1, 2),
+            SymbolSubmitDecision::Search
+        );
+        assert_eq!(
+            symbol_submit_decision(TerminalProvider::Coinbase, 2, 0),
+            SymbolSubmitDecision::Select(0)
+        );
+        assert_eq!(
+            symbol_submit_decision(TerminalProvider::Coinbase, 0, 0),
+            SymbolSubmitDecision::None
+        );
+    }
+
+    #[test]
+    fn coinbase_catalog_rejections_never_name_rithmic() {
+        for reason in [
+            ProviderCatalogRejectionReason::SearchRejected,
+            ProviderCatalogRejectionReason::SupersededSearch,
+            ProviderCatalogRejectionReason::InstrumentUnavailable,
+            ProviderCatalogRejectionReason::SubscriptionRejected,
+            ProviderCatalogRejectionReason::DispatchUnavailable,
+            ProviderCatalogRejectionReason::Unspecified,
+        ] {
+            for command in [
+                ProviderCatalogCommand::Search,
+                ProviderCatalogCommand::Selection,
+            ] {
+                let message = catalog_rejection_message(reason, command, true);
+                assert!(!message.contains("Rithmic"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_calendar_series_keep_week_and_month_identity() {
+        let instrument = InstallProviderInstrument {
+            provider: "coinbase".to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            entitlement_id: COINBASE_ENTITLEMENT_ID.to_string(),
+            ..InstallProviderInstrument::default()
+        };
+        let week = workspace_series(ChartInterval::Week1, &instrument);
+        let month = workspace_series(ChartInterval::Month1, &instrument);
+        assert_eq!(week.cadence, SeriesCadence::CalendarWeeks as i32);
+        assert_eq!(month.cadence, SeriesCadence::CalendarMonths as i32);
+        assert_eq!(week.cadence_value, 1);
+        assert_eq!(month.cadence_value, 1);
+        assert!(COINBASE_INTERVALS.contains(&ChartInterval::Month1));
+    }
+
+    #[test]
     fn bridge_recovery_replaces_ready_after_deferred_gap_validation() {
         assert_eq!(
             reconciled_bridge_state(ChartState::Ready, true),
@@ -8054,6 +8363,7 @@ mod tests {
                 FeedConnectionState::Disconnected,
                 ChartState::Loading,
                 false,
+                false,
             )
             .0,
             "Offline"
@@ -8063,6 +8373,7 @@ mod tests {
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Recovering,
                 ChartState::Loading,
+                false,
                 false,
             )
             .0,
@@ -8074,6 +8385,7 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Ready,
                 false,
+                false,
             )
             .0,
             "Test · Live"
@@ -8083,6 +8395,7 @@ mod tests {
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Streaming,
                 ChartState::Stale,
+                false,
                 false,
             )
             .0,
@@ -8094,6 +8407,7 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Ready,
                 true,
+                false,
             )
             .0,
             "Test · Delayed"
@@ -8104,10 +8418,24 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Ready,
                 false,
+                false,
             )
             .0,
             "Coinbase · Live"
         );
+        assert_eq!(
+            connection_presentation(
+                TerminalProvider::Coinbase,
+                FeedConnectionState::Streaming,
+                ChartState::Ready,
+                false,
+                true,
+            )
+            .0,
+            "Coinbase · Completed history"
+        );
+        assert!(COINBASE_CALENDAR_HISTORY_STATUS.contains("current calendar bucket is not live"));
+        assert!(!COINBASE_CALENDAR_HISTORY_STATUS.contains("is current"));
         let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));

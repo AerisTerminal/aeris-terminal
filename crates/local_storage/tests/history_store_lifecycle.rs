@@ -136,6 +136,23 @@ fn overwrite_for_fault(path: &Path, bytes: &[u8]) {
     file.sync_all().expect("fault injection syncs");
 }
 
+fn physical_segment_bytes(root: &Path) -> u64 {
+    ["segments", "quarantine"]
+        .into_iter()
+        .flat_map(|directory| {
+            fs::read_dir(root.join(directory))
+                .expect("owned segment directory reads")
+                .map(|entry| entry.expect("owned segment entry reads"))
+        })
+        .map(|entry| {
+            entry
+                .metadata()
+                .expect("owned segment metadata reads")
+                .len()
+        })
+        .sum()
+}
+
 #[test]
 fn retained_coverage_merges_exact_series_segments_and_reports_gaps() {
     let root = TestRoot::create();
@@ -283,72 +300,281 @@ fn active_tail_replacement_commits_new_generation_before_retiring_old() {
 }
 
 #[test]
-fn quota_evicts_oldest_derived_segments_without_touching_raw_history() {
+fn duplicate_immutable_publication_is_idempotent_but_conflicting_data_is_rejected() {
     let root = TestRoot::create();
     let key = segment_key();
-    let quota_scope = scope("public", "rights-1");
-    let raw = identity(quota_scope.clone(), "btc-usd");
-    let mut first_derived = raw.clone();
-    first_derived.data_kind = DataKind::Derived;
-    first_derived.resolution = "ema-20-v1".to_string();
-    let mut second_derived = first_derived.clone();
-    second_derived.range_start_unix_nanos = first_derived.range_end_unix_nanos;
-    second_derived.range_end_unix_nanos += 60_000_000_000;
-    let mut store = HistoryStore::open(root.path(), catalog_key(), 32).expect("store opens");
-    publish(
+    let segment = identity(scope("public", "rights-1"), "btc-usd");
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    let first = receipt(publish(
         &mut store,
-        &raw,
+        &segment,
         &key,
-        b"raw-history",
+        b"immutable bars",
         RetentionPolicy::UntilRevoked,
         RecoveryAction::ProviderRefetch,
-    );
-    publish(
+    ));
+    let duplicate = receipt(publish(
         &mut store,
-        &first_derived,
+        &segment,
         &key,
-        b"old-checkpoint",
+        b"immutable bars",
         RetentionPolicy::UntilRevoked,
         RecoveryAction::ProviderRefetch,
+    ));
+    assert_eq!(duplicate, first);
+    assert_eq!(
+        fs::read_dir(root.path().join("segments"))
+            .expect("segments read")
+            .count(),
+        1
     );
-    store
-        .publish(PublicationRequest {
-            identity: &second_derived,
-            payload: b"new-checkpoint",
+    assert!(matches!(
+        store.publish(PublicationRequest {
+            identity: &segment,
+            payload: b"conflicting bars",
             encryption_key: &key,
             retention: RetentionPolicy::UntilRevoked,
             recovery: RecoveryAction::ProviderRefetch,
-            now_unix_seconds: 101,
-        })
-        .expect("new checkpoint publishes");
+            now_unix_seconds: 100,
+        }),
+        Err(LocalStorageError::SegmentAlreadyExists)
+    ));
+    assert_eq!(
+        store
+            .read(&segment, &key, 101, RecoveryAction::ProviderRefetch)
+            .expect("original segment remains"),
+        HistoryRead::Hit(b"immutable bars".to_vec())
+    );
+}
+
+#[test]
+fn cache_budget_uses_physical_bytes_and_last_viewed_lru() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-1");
+    let mut first = identity(series_scope, "btc-usd");
+    first.range_start_unix_nanos = 0;
+    first.range_end_unix_nanos = 10;
+    let mut second = first.clone();
+    second.range_start_unix_nanos = 10;
+    second.range_end_unix_nanos = 20;
+    let mut third = first.clone();
+    third.range_start_unix_nanos = 20;
+    third.range_end_unix_nanos = 30;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    let mut stored_bytes = 0;
+    for (segment, now) in [(&first, 100), (&second, 101), (&third, 102)] {
+        stored_bytes = receipt(
+            store
+                .publish(PublicationRequest {
+                    identity: segment,
+                    payload: b"same-size",
+                    encryption_key: &key,
+                    retention: RetentionPolicy::UntilRevoked,
+                    recovery: RecoveryAction::ProviderRefetch,
+                    now_unix_seconds: now,
+                })
+                .expect("segment publishes"),
+        )
+        .stored_bytes;
+    }
+    assert_eq!(
+        store
+            .read(&first, &key, 200, RecoveryAction::ProviderRefetch)
+            .expect("oldest segment is viewed"),
+        HistoryRead::Hit(b"same-size".to_vec())
+    );
     let report = store
-        .enforce_derived_quota(b"new-checkpoint".len() as u64)
-        .expect("quota enforcement succeeds");
+        .enforce_cache_budget(stored_bytes * 2, &[], &[])
+        .expect("cache budget enforces");
     assert_eq!(report.entries_removed, 1);
-    assert_eq!(
-        report.payload_bytes_retained,
-        b"new-checkpoint".len() as u64
-    );
-    assert_eq!(
-        store
-            .read(&raw, &key, 102, RecoveryAction::ProviderRefetch)
-            .expect("raw history remains"),
-        HistoryRead::Hit(b"raw-history".to_vec())
-    );
-    assert_eq!(
-        store
-            .read(&first_derived, &key, 102, RecoveryAction::ProviderRefetch)
-            .expect("old checkpoint is evicted"),
-        HistoryRead::Unavailable {
+    assert_eq!(report.payload_bytes_removed, stored_bytes);
+    assert_eq!(report.payload_bytes_retained, stored_bytes * 2);
+    assert!(matches!(
+        store.read(&second, &key, 201, RecoveryAction::ProviderRefetch),
+        Ok(HistoryRead::Unavailable {
             reason: AvailabilityReason::NotCached,
-            recovery: RecoveryAction::ProviderRefetch,
-        }
+            ..
+        })
+    ));
+    for retained in [&first, &third] {
+        assert!(matches!(
+            store.read(retained, &key, 201, RecoveryAction::ProviderRefetch),
+            Ok(HistoryRead::Hit(_))
+        ));
+    }
+}
+
+#[test]
+fn cache_budget_never_evicts_protected_identities_or_ranges() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-1");
+    let mut first = identity(series_scope.clone(), "btc-usd");
+    first.range_start_unix_nanos = 0;
+    first.range_end_unix_nanos = 10;
+    let mut second = first.clone();
+    second.range_start_unix_nanos = 10;
+    second.range_end_unix_nanos = 20;
+    let mut third = first.clone();
+    third.range_start_unix_nanos = 20;
+    third.range_end_unix_nanos = 30;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    let mut stored_bytes = 0;
+    for segment in [&first, &second, &third] {
+        stored_bytes = receipt(publish(
+            &mut store,
+            segment,
+            &key,
+            b"same-size",
+            RetentionPolicy::UntilRevoked,
+            RecoveryAction::ProviderRefetch,
+        ))
+        .stored_bytes;
+    }
+    let protected_range = RetainedRange {
+        start_unix_nanos: 10,
+        end_unix_nanos: 20,
+    };
+    let report = store
+        .enforce_cache_budget(
+            stored_bytes * 2,
+            std::slice::from_ref(&first),
+            &[(series_identity(&series_scope, "btc-usd"), protected_range)],
+        )
+        .expect("only unprotected data is evicted");
+    assert_eq!(report.entries_removed, 1);
+    for retained in [&first, &second] {
+        assert!(matches!(
+            store.read(retained, &key, 101, RecoveryAction::ProviderRefetch),
+            Ok(HistoryRead::Hit(_))
+        ));
+    }
+    assert!(matches!(
+        store.read(&third, &key, 101, RecoveryAction::ProviderRefetch),
+        Ok(HistoryRead::Unavailable {
+            reason: AvailabilityReason::NotCached,
+            ..
+        })
+    ));
+    assert!(matches!(
+        store.enforce_cache_budget(
+            stored_bytes * 2 - 1,
+            std::slice::from_ref(&first),
+            &[(series_identity(&series_scope, "btc-usd"), protected_range,)],
+        ),
+        Err(LocalStorageError::CacheBudgetExceeded { .. })
+    ));
+    assert_eq!(
+        store.statistics().expect("statistics read").active_entries,
+        1
     );
+    assert!(physical_segment_bytes(root.path()) < stored_bytes * 2);
+}
+
+#[test]
+fn cache_reservation_fails_before_eviction_when_protected_working_set_is_within_hard_budget() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-1");
+    let mut first = identity(series_scope.clone(), "btc-usd");
+    first.range_start_unix_nanos = 0;
+    first.range_end_unix_nanos = 10;
+    let mut second = first.clone();
+    second.range_start_unix_nanos = 10;
+    second.range_end_unix_nanos = 20;
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    let first_bytes = receipt(publish(
+        &mut store,
+        &first,
+        &key,
+        b"first",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    ))
+    .stored_bytes;
+    let second_bytes = receipt(publish(
+        &mut store,
+        &second,
+        &key,
+        b"second",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    ))
+    .stored_bytes;
+    let budget = first_bytes + second_bytes;
+
+    assert!(matches!(
+        store.reserve_cache_budget(
+            budget,
+            first_bytes,
+            &[first.clone(), second.clone()],
+            &[],
+        ),
+        Err(LocalStorageError::CacheBudgetExceeded {
+            required,
+            maximum
+        }) if required == budget + first_bytes && maximum == budget
+    ));
+    assert_eq!(
+        store.statistics().expect("statistics read").active_entries,
+        2
+    );
+    assert_eq!(physical_segment_bytes(root.path()), budget);
+}
+
+#[test]
+fn cache_budget_counts_and_removes_quarantine_bytes_before_readable_history() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let active = identity(scope("public", "rights-1"), "btc-usd");
+    let quarantined = identity(scope("public", "rights-1"), "eth-usd");
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 8).expect("store opens");
+    let active_bytes = receipt(publish(
+        &mut store,
+        &active,
+        &key,
+        b"readable",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    ))
+    .stored_bytes;
+    let quarantined_receipt = receipt(publish(
+        &mut store,
+        &quarantined,
+        &key,
+        b"will be quarantined",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    ));
+    overwrite_for_fault(
+        &root
+            .path()
+            .join("segments")
+            .join(quarantined_receipt.file_name),
+        b"damaged",
+    );
+    assert!(matches!(
+        store.read(&quarantined, &key, 101, RecoveryAction::ProviderRefetch),
+        Ok(HistoryRead::Unavailable {
+            reason: AvailabilityReason::Quarantined,
+            ..
+        })
+    ));
+
+    let report = store
+        .enforce_cache_budget(active_bytes, std::slice::from_ref(&active), &[])
+        .expect("quarantine is evicted within budget");
+    assert_eq!(report.entries_removed, 1);
+    let statistics = store.statistics().expect("statistics read");
+    assert_eq!(statistics.active_entries, 1);
+    assert_eq!(statistics.quarantined_entries, 0);
+    assert_eq!(physical_segment_bytes(root.path()), active_bytes);
     assert_eq!(
         store
-            .read(&second_derived, &key, 102, RecoveryAction::ProviderRefetch)
-            .expect("new checkpoint remains"),
-        HistoryRead::Hit(b"new-checkpoint".to_vec())
+            .read(&active, &key, 102, RecoveryAction::ProviderRefetch)
+            .expect("readable history remains"),
+        HistoryRead::Hit(b"readable".to_vec())
     );
 }
 
@@ -627,6 +853,99 @@ fn legacy_catalog_additively_migrates_to_durable_coverage_markers() {
             .coverage_entries,
         1
     );
+}
+
+#[test]
+fn adjacent_coverage_pages_coalesce_without_consuming_catalog_capacity() {
+    let root = TestRoot::create();
+    let key = segment_key();
+    let series_scope = scope("public", "rights-pages");
+    let series = series_identity(&series_scope, "btc-usd");
+    let mut store = HistoryStore::open(root.path(), catalog_key(), 2).expect("store opens");
+    for range in [(0, 10), (10, 20), (20, 30)] {
+        store
+            .record_confirmed_empty(
+                series,
+                RetainedRange {
+                    start_unix_nanos: range.0,
+                    end_unix_nanos: range.1,
+                },
+                100,
+            )
+            .expect("adjacent coverage page persists");
+    }
+    assert_eq!(
+        store
+            .statistics()
+            .expect("statistics read")
+            .coverage_entries,
+        1
+    );
+
+    let mut segment = identity(series_scope.clone(), "eth-usd");
+    segment.range_start_unix_nanos = 30;
+    segment.range_end_unix_nanos = 40;
+    publish(
+        &mut store,
+        &segment,
+        &key,
+        b"bars",
+        RetentionPolicy::UntilRevoked,
+        RecoveryAction::ProviderRefetch,
+    );
+    let snapshot = store
+        .series_coverage_snapshot(series, 101)
+        .expect("coalesced coverage reads");
+    assert_eq!(
+        snapshot.confirmed_empty_ranges(),
+        &[HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 30,
+        }]
+    );
+}
+
+#[test]
+fn future_catalog_schema_version_is_rejected_without_downgrade() {
+    let root = TestRoot::create();
+    let catalog_path = root.path().join("catalog.sqlite");
+    let connection = rusqlite::Connection::open(&catalog_path).expect("catalog opens directly");
+    connection
+        .execute_batch(
+            "CREATE TABLE catalog_metadata(
+                 singleton INTEGER PRIMARY KEY,
+                 schema_version INTEGER NOT NULL
+             );
+             INSERT INTO catalog_metadata(singleton, schema_version) VALUES(1, 999);",
+        )
+        .expect("future schema fixture installs");
+    drop(connection);
+
+    assert!(matches!(
+        HistoryStore::open(root.path(), catalog_key(), 4),
+        Err(LocalStorageError::InvalidConfiguration(
+            "unsupported future catalog schema version"
+        ))
+    ));
+    let connection = rusqlite::Connection::open(&catalog_path).expect("catalog reopens directly");
+    let version: i64 = connection
+        .query_row(
+            "SELECT schema_version FROM catalog_metadata WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("future version reads");
+    assert_eq!(version, 999);
+    let current_table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_schema WHERE type='table' AND name='history_segment'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .expect("schema inventory reads");
+    assert!(!current_table_exists);
 }
 
 #[cfg(windows)]

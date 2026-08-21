@@ -102,6 +102,7 @@ fn embedded_bar_definition() -> BarDefinition {
         interval_seconds: u32::try_from(EMBEDDED_REPLAY_INTERVAL_SECONDS)
             .expect("embedded interval fits u32"),
         trades_per_bar: None,
+        calendar_months: None,
     }
 }
 

@@ -6,7 +6,6 @@ pub(crate) struct RithmicSeries(ChartInterval);
 
 #[allow(non_upper_case_globals)]
 impl RithmicSeries {
-    pub(crate) const Tick: Self = Self(ChartInterval::Tick100);
     pub(crate) const Minute1: Self = Self(ChartInterval::Minute1);
 
     pub(crate) const fn label(self) -> &'static str {
