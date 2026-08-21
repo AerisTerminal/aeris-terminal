@@ -71,8 +71,8 @@ impl Render for ReadOnlyDomView {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .bg(gpui_color(colors.card))
-            .text_color(gpui_color(colors.foreground))
+            .bg(gpui_color(colors.surface))
+            .text_color(gpui_color(colors.text_primary))
             .border_l_1()
             .border_color(gpui_color(colors.border))
             .child(
@@ -84,7 +84,7 @@ impl Render for ReadOnlyDomView {
                     .border_b_1()
                     .border_color(gpui_color(colors.border))
                     .text_xs()
-                    .text_color(gpui_color(colors.muted_foreground))
+                    .text_color(gpui_color(colors.text_secondary))
                     .child(div().flex_1().px_2().text_right().child("BID SIZE"))
                     .child(div().w(px(PRICE_WIDTH)).text_center().child("PRICE"))
                     .child(div().flex_1().px_2().child("ASK SIZE")),
@@ -109,7 +109,7 @@ impl Render for ReadOnlyDomView {
                             .items_center()
                             .justify_center()
                             .text_sm()
-                            .text_color(gpui_color(colors.muted_foreground))
+                            .text_color(gpui_color(colors.text_secondary))
                             .child(if state.is_none() {
                                 "Depth unavailable"
                             } else {
@@ -148,14 +148,14 @@ fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoEl
             div()
                 .w(px(PRICE_WIDTH))
                 .px_1()
-                .text_color(gpui_color(colors.negative))
+                .text_color(gpui_color(colors.danger))
                 .child(
                     row.ask
                         .as_ref()
                         .map_or_else(String::new, |level| level.price_text.clone()),
                 ),
         )
-        .child(quantity_cell(row.ask.as_ref(), colors.negative, false))
+        .child(quantity_cell(row.ask.as_ref(), colors.danger, false))
 }
 
 fn quantity_cell(

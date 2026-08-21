@@ -261,11 +261,9 @@ impl RenderOnce for Control {
             || window.text_style().color,
             |theme| theme_color(theme.colors.ring),
         );
-        let hover_color = self.theme.map(|theme| theme_color(theme.colors.accent));
-        let selected_color = self.theme.map(|theme| theme_color(theme.colors.accent));
-        let disabled_color = self
-            .theme
-            .map(|theme| theme_color(theme.colors.disabled_foreground));
+        let hover_color = self.theme.map(|theme| theme_color(theme.colors.hover_bg));
+        let selected_color = self.theme.map(|theme| theme_color(theme.colors.active_bg));
+        let disabled_color = self.theme.map(|theme| theme_color(theme.colors.text_muted));
         // `with_size` is the control-size contract used by the desktop shell.
         // A custom-sized icon is painted at 75% of that square, preserving the
         // established 32 px control / 24 px glyph geometry.

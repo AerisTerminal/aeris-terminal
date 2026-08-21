@@ -12,63 +12,100 @@
 
   --font-sans: "Inter", sans-serif;
 
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.321093 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.321093 0 0);
+  /* Surfaces */
+  --surface: #ffffff;
+  --surface-secondary: #fcfcfc;
 
-  --primary: oklch(0.54375 0.191015 267.005);
+  /* Borders */
+  --border: #f5f5f5;
+  --border-secondary: #f3f3f3;
+  --input-fill: var(--surface-secondary);
+  --input-border: var(--border-secondary);
+
+  /* Text */
+  --text-primary: #404040;
+  --text-secondary: #7a7a7a;
+  --text-muted: #dedede;
+
+  /* Interaction states */
+  --hover-bg: rgb(239 239 239 / 35%);
+  --active-bg: rgb(239 239 239 / 45%);
+
+  /* Icons */
+  --icon: #808080;
+  --icon-active: #414141;
+
+  /* Actions */
+  --primary: #3e63dd;
   --primary-foreground: oklch(0.97 0.014 254.604);
-  --primary-hover: oklch(0.483663 0.190265 267.018);
+  --danger: oklch(0.6471 0.2288 22.47);
+  --danger-foreground: #ffffff;
 
-  --muted: oklch(0.991063 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --disabled-foreground: oklch(0.74 0 0);
-  --accent: oklch(0.97 0 0);
-
-  --border: #f3f3f3;
-  --muted-border: #f5f5f5;
-  --input: oklch(0.991063 0 0);
+  /* Focus */
   --ring: oklch(0.708 0 0);
-  --overlay: oklch(0 0 0 / 50%);
 
+  /* Radius */
+  --radius-default: 6px;
+  --radius-small: 4px;
+  --radius-large: 999px;
+
+  /* Data */
+  --chart-1: #d4d4d4;
+  --chart-2: #7a7a7a;
+  --chart-3: #5f5f5f;
+  --chart-4: #494949;
+  --chart-5: #343434;
+
+  /* Market status */
   --positive: #089981;
-  --negative: #f7525f;
-  --destructive: var(--negative);
   --warning: oklch(0.768578 0.164801 70.108);
-
-  --radius-sm: 4px;
-  --radius-df: 6px;
-  --radius-lg: 999px;
 }
 
 .dark,
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --background: #070a0f;
-  --foreground: oklch(0.985 0 0);
-  --card: #070a0f;
-  --card-foreground: oklch(0.985 0 0);
+  /* Surfaces */
+  --surface: #141414;
+  --surface-secondary: #1b1b1b;
 
-  --primary: oklch(0.54375 0.191015 267.005);
+  /* Borders */
+  --border: #1e1e1e;
+  --border-secondary: #242424;
+  --input-fill: var(--surface-secondary);
+  --input-border: var(--border-secondary);
+
+  /* Text */
+  --text-primary: #e3e3e3;
+  --text-secondary: #a2a2a2;
+  --text-muted: #424242;
+
+  /* Interaction states */
+  --hover-bg: rgb(97 97 97 / 20%);
+  --active-bg: rgb(97 97 97 / 26%);
+
+  /* Icons */
+  --icon: #a3a3a3;
+  --icon-active: #e5e5e5;
+
+  /* Actions */
+  --primary: #3e63dd;
   --primary-foreground: oklch(0.97 0.014 254.604);
-  --primary-hover: oklch(0.603683 0.191341 267.047);
+  --danger: oklch(0.6471 0.2288 22.47);
+  --danger-foreground: #ffffff;
 
-  --muted: #0c1115;
-  --muted-foreground: #9da3aa;
-  --disabled-foreground: oklch(0.52 0 0);
-  --accent: #222224;
-
-  --border: #16191f;
-  --muted-border: #131519;
-  --input: #0c1115;
+  /* Focus */
   --ring: oklch(0.556 0 0);
-  --overlay: oklch(0 0 0 / 50%);
 
+  /* Data */
+  --chart-1: #d4d4d4;
+  --chart-2: #7a7a7a;
+  --chart-3: #5f5f5f;
+  --chart-4: #494949;
+  --chart-5: #343434;
+
+  /* Market status */
   --positive: #089981;
-  --negative: #f7525f;
-  --destructive: var(--negative);
   --warning: oklch(0.768578 0.164801 70.108);
 }
 
@@ -80,8 +117,8 @@
 
 html,
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--surface);
+  color: var(--text-primary);
   font-family: var(--font-sans);
   font-synthesis: none;
   font-variant-ligatures: common-ligatures;
@@ -113,7 +150,7 @@ button,
 .button-primary,
 .button-outline,
 .button-ghost {
-  border-radius: var(--radius-df);
+  border-radius: var(--radius-default);
   transition: background-color 150ms ease, color 150ms ease;
 }
 
@@ -124,35 +161,42 @@ button,
 }
 
 .button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
-  background: var(--primary-hover);
+  background: color-mix(in srgb, var(--primary) 85%, black);
 }
 
 .button-outline {
-  border: 1px solid var(--muted-border);
-  background: var(--muted);
-  color: var(--foreground);
+  border: 1px solid var(--border-secondary);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
 }
 
-.button-outline:hover:not(:disabled):not([aria-disabled="true"]),
+.button-outline:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--hover-bg);
+}
+
 .button-outline[aria-expanded="true"] {
-  background: var(--accent);
+  background: var(--active-bg);
 }
 
 .button-ghost {
   border: 1px solid transparent;
   background: transparent;
-  color: var(--muted-foreground);
+  color: var(--text-secondary);
 }
 
-.button-ghost:hover:not(:disabled):not([aria-disabled="true"]),
+.button-ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
 .button-ghost[aria-expanded="true"] {
-  background: var(--accent);
-  color: var(--foreground);
+  background: var(--active-bg);
+  color: var(--text-primary);
 }
 
 button:disabled,
 [role="button"][aria-disabled="true"] {
-  color: var(--disabled-foreground);
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
@@ -164,15 +208,15 @@ button:disabled,
 input,
 select,
 textarea {
-  border: 1px solid var(--muted-border);
-  border-radius: var(--radius-df);
-  background: var(--input);
-  color: var(--foreground);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-default);
+  background: var(--input-fill);
+  color: var(--text-primary);
 }
 
 input::placeholder,
 textarea::placeholder {
-  color: var(--muted-foreground);
+  color: var(--text-secondary);
 }
 
 input:focus-visible,
@@ -183,7 +227,7 @@ textarea:focus-visible {
 }
 
 * {
-  scrollbar-color: var(--muted-foreground) var(--card);
+  scrollbar-color: var(--text-secondary) var(--surface);
   scrollbar-width: thin;
 }
 
@@ -193,13 +237,13 @@ textarea:focus-visible {
 }
 
 *::-webkit-scrollbar-track {
-  background: var(--card);
+  background: var(--surface);
 }
 
 *::-webkit-scrollbar-thumb {
-  border: 2px solid var(--card);
-  border-radius: var(--radius-lg);
-  background: var(--muted-foreground);
+  border: 2px solid var(--surface);
+  border-radius: var(--radius-large);
+  background: var(--text-secondary);
 }
 
 @media (prefers-reduced-motion: reduce) {

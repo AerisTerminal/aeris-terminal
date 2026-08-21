@@ -62,9 +62,9 @@ impl Render for TooltipView {
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .border_1()
                 .border_color(theme_color(colors.border))
-                .bg(theme_color(colors.card))
+                .bg(theme_color(colors.surface))
                 .text_xs()
-                .text_color(theme_color(colors.card_foreground))
+                .text_color(theme_color(colors.text_primary))
                 .child(self.label.clone()),
         )
     }
