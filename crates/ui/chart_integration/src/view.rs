@@ -1489,8 +1489,8 @@ mod tests {
 
     fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
         let (surface, foreground, border, crosshair, label_background) = match theme {
-            ChartTheme::Light => ("#ffffff", "#333333", "#f3f3f3", "#333333", "#333333"),
-            ChartTheme::Dark => ("#070a0f", "#fafafa", "#16191f", "#16191f", "#0c1115"),
+            ChartTheme::Light => ("#fcfcfc", "#141414", "#e9e9e9", "#141414", "#141414"),
+            ChartTheme::Dark => ("#141414", "#f0f0f0", "#262626", "#262626", "#181818"),
         };
         let options = chart.engine.options.get();
         assert_eq!(options.layout.background.color, surface);

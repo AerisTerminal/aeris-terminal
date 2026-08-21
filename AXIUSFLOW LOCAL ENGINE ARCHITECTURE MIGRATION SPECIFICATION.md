@@ -2618,7 +2618,7 @@ It does not request provider data directly.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-20): Axiusflow consumes `nucleuscharts_engine`, `nucleuscharts_render`, and `nucleuscharts_render_gpui` only through pinned Git dependencies in `crates/ui/chart_integration`. All three resolve from `https://github.com/NucleusCharts/financial-charts.git` at commit `90c3b453417e23790b64f3cef17c7b4fc27b65f9`; no engine, provider, storage, protocol, application, desktop, or terminal-UI crate imports Nucleus Charts directly. Nucleus Charts remains a separate repository and receives already validated chart data, viewport commands, and rendering interaction through the bridge. Repository conformance makes this dependency boundary and the retired chart dependency identity executable.
+Evidence (2026-08-20): Axiusflow consumes `nucleuscharts_engine`, `nucleuscharts_render`, and `nucleuscharts_render_gpui` only through pinned Git dependencies in `crates/ui/chart_integration`. All three resolve from `https://github.com/NucleusCharts/financial-charts.git` at commit `1c94a25b90a2b67dd4b95048f0416a636feada86`; no engine, provider, storage, protocol, application, desktop, or terminal-UI crate imports Nucleus Charts directly. Nucleus Charts remains a separate repository and receives already validated chart data, viewport commands, and rendering interaction through the bridge. Repository conformance makes this dependency boundary and the retired chart dependency identity executable.
 
 Do not migrate provider/backend responsibilities into Nucleus Charts.
 

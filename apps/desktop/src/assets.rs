@@ -23,6 +23,7 @@ pub enum UiIcon {
     FitToScreen,
     Lock,
     MoonIcon02,
+    Reload,
     SearchIcon01,
     Settings01,
     SidebarRightIcon01,
@@ -38,7 +39,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::AddIcon01,
         Self::AiEraser,
         Self::AiLock,
@@ -56,6 +57,7 @@ impl UiIcon {
         Self::FitToScreen,
         Self::Lock,
         Self::MoonIcon02,
+        Self::Reload,
         Self::SearchIcon01,
         Self::Settings01,
         Self::SidebarRightIcon01,
@@ -90,6 +92,7 @@ impl UiIcon {
             Self::FitToScreen => "fit-to-screen.svg",
             Self::Lock => "lock.svg",
             Self::MoonIcon02 => "moon-02.svg",
+            Self::Reload => "reload.svg",
             Self::SearchIcon01 => "search-01.svg",
             Self::Settings01 => "settings-01.svg",
             Self::SidebarRightIcon01 => "sidebar-right-01.svg",
@@ -196,6 +199,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "fit-to-screen.svg" => include_bytes!("../assets/icons/ui/fit-to-screen.svg"),
         "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
         "moon-02.svg" => include_bytes!("../assets/icons/ui/moon-02.svg"),
+        "reload.svg" => include_bytes!("../assets/icons/ui/reload.svg"),
         "search-01.svg" => include_bytes!("../assets/icons/ui/search-01.svg"),
         "settings-01.svg" => include_bytes!("../assets/icons/ui/settings-01.svg"),
         "sidebar-right-01.svg" => include_bytes!("../assets/icons/ui/sidebar-right-01.svg"),

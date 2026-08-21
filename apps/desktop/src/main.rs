@@ -4043,7 +4043,7 @@ fn chart_context_menu_panel(
         terminal,
         ChartContextMenuItem {
             id: "chart_context_reset_view",
-            icon: HugeIcon::FitToScreen,
+            icon: HugeIcon::Reload,
             label: "Reset view",
             enabled: chart_ready,
             action: ChartContextAction::Reset,
@@ -4595,10 +4595,10 @@ fn instrument_selector(
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .border_1()
         .border_color(gpui_color(theme.colors.input_border))
-        .bg(gpui_color(theme.colors.input_fill))
+        .bg(gpui_color(theme.colors.surface))
         .text_color(gpui_color(theme.colors.text_primary))
         .theme(theme)
-        .resting_fill(theme.colors.input_fill)
+        .resting_fill(theme.colors.surface)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .px_3()
         .rounded(px(f32::from(
@@ -5156,6 +5156,7 @@ fn chrome_button_style(
     let colors = theme.colors;
     button
         .theme(theme)
+        .resting_fill(colors.surface)
         .selected(selected)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .border_0()
@@ -7261,7 +7262,6 @@ fn workspace_tab_close_button(
     tab_id: u64,
     index: usize,
     label: &str,
-    selected: bool,
     theme: &AxiusflowTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
@@ -7275,11 +7275,7 @@ fn workspace_tab_close_button(
         .items_center()
         .justify_center()
         .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .text_color(gpui_color(if selected {
-            colors.primary_foreground
-        } else {
-            colors.icon
-        }))
+        .text_color(gpui_color(colors.icon))
         .cursor_pointer()
         .role(Role::Button)
         .aria_label(format!("Close {label}"))
@@ -7419,18 +7415,18 @@ fn workspace_tab(
         )))
         .border_1()
         .border_color(gpui_color(if selected {
-            colors.primary
+            colors.border
         } else {
             colors.surface_secondary
         }))
         .bg(gpui_color(if selected {
-            colors.primary
+            colors.active_bg.over(colors.surface_secondary)
         } else {
             colors.surface_secondary
         }))
         .text_sm()
         .text_color(gpui_color(if selected {
-            colors.primary_foreground
+            colors.text_primary
         } else {
             colors.text_secondary
         }))
@@ -7482,7 +7478,6 @@ fn workspace_tab(
             tab_id,
             index,
             &workspace.label,
-            selected,
             &theme,
         ))
         .into_any_element()
