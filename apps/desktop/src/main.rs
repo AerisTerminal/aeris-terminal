@@ -44,7 +44,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode, Render, Role,
     ScrollHandle, Stateful, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowControlArea, WindowOptions, actions, canvas, div, ease_out_quint, point, prelude::*, px,
-    relative, rgb, size,
+    relative, size,
 };
 use gpui_platform::application;
 use native_ui::{
@@ -2880,6 +2880,7 @@ fn chrome_overlay_layer(
                     .border_1()
                     .border_color(gpui_color(theme.colors.border))
                     .bg(gpui_color(theme.colors.surface))
+                    .overflow_hidden()
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(panel)
@@ -3523,12 +3524,32 @@ fn side_panel_header(
 
 fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    if notice.label == ChartState::Loading.label() {
+        let spinner = Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
+            .with_size(if notice.placement == ChartNoticePlacement::Center {
+                px(40.0)
+            } else {
+                px(28.0)
+            })
+            .color(gpui_color(colors.icon));
+        let overlay = div()
+            .id("chart_loading_status")
+            .absolute()
+            .role(Role::Status)
+            .aria_label(notice.label)
+            .child(spinner);
+        return if notice.placement == ChartNoticePlacement::Center {
+            overlay.inset_0().flex().items_center().justify_center()
+        } else {
+            overlay.top_3().left_3()
+        }
+        .into_any_element();
+    }
     let tone = match notice.tone {
         ChartNoticeTone::Muted => colors.text_secondary,
         ChartNoticeTone::Warning => colors.warning,
         ChartNoticeTone::Loss => colors.danger,
     };
-    let loading = notice.label == ChartState::Loading.label();
     let label = div()
         .flex()
         .flex_col()
@@ -3543,19 +3564,8 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
         .bg(gpui_color(colors.surface.with_alpha(0.94)))
         .text_xs()
         .text_color(gpui_color(tone))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .children(loading.then(|| {
-                    Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
-                        .xsmall()
-                        .color(gpui_color(tone))
-                }))
-                .child(notice.label),
-        )
-        .children((!loading).then_some(notice.detail).flatten().map(|detail| {
+        .child(notice.label)
+        .children(notice.detail.map(|detail| {
             div()
                 .text_color(gpui_color(colors.text_secondary))
                 .child(detail)
@@ -3567,8 +3577,14 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
             .flex()
             .items_center()
             .justify_center()
-            .child(label),
-        ChartNoticePlacement::TopLeft => div().absolute().top_2().left_2().child(label),
+            .child(label)
+            .into_any_element(),
+        ChartNoticePlacement::TopLeft => div()
+            .absolute()
+            .top_2()
+            .left_2()
+            .child(label)
+            .into_any_element(),
     }
 }
 
@@ -4123,7 +4139,7 @@ fn workspace_caption_control(
                 .aria_label(label)
                 .tab_index(tab_index)
                 .focus_visible(move |control| {
-                    control.border_2().border_color(gpui_color(colors.primary))
+                    control.border_2().border_color(gpui_color(colors.ring))
                 })
                 .on_key_down(move |event, window, cx| {
                     if caption_keyboard_activates(event.keystroke.key.as_str()) {
@@ -4352,6 +4368,7 @@ fn instrument_selector(
         .border_color(gpui_color(theme.colors.input_border))
         .bg(gpui_color(theme.colors.input_fill))
         .text_color(gpui_color(theme.colors.text_primary))
+        .theme(theme)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .px_3()
         .rounded(px(f32::from(
@@ -4745,7 +4762,7 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
 }
 
 fn chrome_menu_scroll_body() -> Div {
-    div().flex().flex_col().flex_1().min_h_0().gap_1().p_2()
+    div().flex().flex_col().gap_1().p_2()
 }
 
 fn scrollable_menu_body(
@@ -4755,9 +4772,15 @@ fn scrollable_menu_body(
 ) -> impl IntoElement + use<> {
     div()
         .relative()
+        .flex()
         .flex_1()
         .min_h_0()
-        .child(tracked_overflow_y_scrollbar(body, scroll))
+        .overflow_hidden()
+        .child(
+            tracked_overflow_y_scrollbar(body, scroll)
+                .size_full()
+                .min_h_0(),
+        )
         .child(ThinScrollbar::new(scroll, gpui_color(color)))
 }
 
@@ -5016,9 +5039,8 @@ const fn nucleus_chart_theme(mode: ThemeMode) -> NucleusChartTheme {
 }
 
 fn gpui_color(color: ThemeColor) -> Hsla {
-    let mut resolved: Hsla = rgb(color.rgb_u32()).into();
-    resolved.a = color.alpha();
-    resolved
+    let (h, s, l, a) = color.hsla_components();
+    Hsla { h, s, l, a }
 }
 
 #[cfg(feature = "diagnostics")]
@@ -6871,7 +6893,7 @@ fn workspace_tab_close_button(
                 .bg(gpui_color(colors.danger))
                 .text_color(gpui_color(colors.danger_foreground))
         })
-        .focus_visible(move |close| close.border_2().border_color(gpui_color(colors.primary)))
+        .focus_visible(move |close| close.border_2().border_color(gpui_color(colors.ring)))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             terminal.update(cx, |terminal, cx| {
                 terminal.close_workspace(tab_id, window, cx);
@@ -6949,7 +6971,7 @@ fn workspace_add_button(
                 .cursor_pointer()
                 .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
                 .focus_visible(move |button| {
-                    button.border_2().border_color(gpui_color(colors.primary))
+                    button.border_2().border_color(gpui_color(colors.ring))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
@@ -7028,7 +7050,7 @@ fn workspace_tab(
             tab.bg(gpui_color(colors.hover_bg))
                 .text_color(gpui_color(colors.text_primary))
         })
-        .focus_visible(move |tab| tab.border_color(gpui_color(colors.primary)).border_2())
+        .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2())
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             mouse_focus.focus(window, cx);
             select_terminal.update(cx, |terminal, cx| {

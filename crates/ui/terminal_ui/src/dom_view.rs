@@ -1,7 +1,7 @@
 use crate::{DomColumnLevel, DomFrame, DomRow};
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
 use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
-use gpui::{Context, Hsla, IntoElement, Render, Window, div, prelude::*, px, rgb};
+use gpui::{Context, Hsla, IntoElement, Render, Window, div, prelude::*, px};
 
 const HEADER_HEIGHT: f32 = 26.0;
 const ROW_HEIGHT: f32 = 24.0;
@@ -222,9 +222,8 @@ const fn recovery_label(reason: OrderBookRecoveryReason) -> &'static str {
 }
 
 fn gpui_color(color: ThemeColor) -> Hsla {
-    let mut resolved: Hsla = rgb(color.rgb_u32()).into();
-    resolved.a = color.alpha();
-    resolved
+    let (h, s, l, a) = color.hsla_components();
+    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

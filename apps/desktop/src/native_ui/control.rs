@@ -4,7 +4,7 @@ use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
     Interactivity, IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
-    StyleRefinement, Styled, Window, div, prelude::*, px, rgb,
+    StyleRefinement, Styled, Window, div, prelude::*, px,
 };
 
 use super::{icon::Icon, loader::Loader, tooltip::TooltipSpec};
@@ -347,9 +347,8 @@ impl RenderOnce for Control {
 }
 
 fn theme_color(color: ThemeColor) -> Hsla {
-    let mut resolved: Hsla = rgb(color.rgb_u32()).into();
-    resolved.a = color.alpha();
-    resolved
+    let (h, s, l, a) = color.hsla_components();
+    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

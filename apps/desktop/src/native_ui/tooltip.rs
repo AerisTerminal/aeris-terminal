@@ -3,7 +3,7 @@ use std::time::Duration;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor};
 use gpui::{
     AnyView, App, Context, ElementId, Hsla, IntoElement, Render, SharedString, Window, div,
-    prelude::*, px, rgb,
+    prelude::*, px,
 };
 
 /// Data needed to build a native GPUI tooltip without process-global theme
@@ -87,9 +87,8 @@ pub(crate) fn with_tooltip(
 }
 
 fn theme_color(color: ThemeColor) -> Hsla {
-    let mut resolved: Hsla = rgb(color.rgb_u32()).into();
-    resolved.a = color.alpha();
-    resolved
+    let (h, s, l, a) = color.hsla_components();
+    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

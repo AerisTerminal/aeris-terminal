@@ -124,6 +124,35 @@ impl ThemeColor {
             | (u32::from(channel_to_u8(self.green)) << 8)
             | u32::from(channel_to_u8(self.blue))
     }
+
+    /// Returns HSLA components in GPUI's `0.0..=1.0` ranges.
+    /// Near-gray tokens keep zero saturation so translucent hover cannot tint.
+    #[must_use]
+    pub fn hsla_components(self) -> (f32, f32, f32, f32) {
+        let (red, green, blue) = (self.red, self.green, self.blue);
+        let max = red.max(green.max(blue));
+        let min = red.min(green.min(blue));
+        let lightness = f32::midpoint(max, min);
+        let delta = max - min;
+        if delta < 0.02 {
+            return (0.0, 0.0, lightness, self.alpha);
+        }
+        let saturation = if lightness <= 0.0 || lightness >= 1.0 {
+            0.0
+        } else if lightness < 0.5 {
+            delta / (2.0 * lightness)
+        } else {
+            delta / (2.0 - 2.0 * lightness)
+        };
+        let hue = if (max - red).abs() <= f32::EPSILON {
+            ((green - blue) / delta).rem_euclid(6.0) / 6.0
+        } else if (max - green).abs() <= f32::EPSILON {
+            ((blue - red) / delta + 2.0) / 6.0
+        } else {
+            ((red - green) / delta + 4.0) / 6.0
+        };
+        (hue, saturation, lightness, self.alpha)
+    }
 }
 
 fn linear_to_srgb(channel: f32) -> f32 {
@@ -528,6 +557,8 @@ mod tests {
         assert_eq!(dark.chart_1, light.chart_1);
         assert!((light.hover_bg.alpha() - 0.35).abs() < f32::EPSILON);
         assert!((dark.active_bg.alpha() - 0.26).abs() < f32::EPSILON);
+        let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
+        assert!(hover_saturation.abs() < f32::EPSILON);
 
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();

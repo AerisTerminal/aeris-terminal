@@ -2,12 +2,12 @@ use std::{sync::Arc, time::Duration};
 
 use gpui::{
     Animation, AnimationExt as _, App, ElementId, Hsla, IntoElement, Pixels, RenderOnce,
-    SharedString, Window, div, ease_in_out, prelude::*,
+    SharedString, Window, div, prelude::*,
 };
 
 use super::icon::Icon;
 
-/// A looping loader whose SVG is owned by Axiusflow's asset bundle.
+/// A looping activity spinner whose SVG is owned by Axiusflow's asset bundle.
 #[derive(IntoElement)]
 pub(crate) struct Loader {
     id: ElementId,
@@ -23,8 +23,8 @@ impl Loader {
             id: id.into(),
             icon,
             color: None,
-            size: gpui::px(14.0),
-            period: Duration::from_millis(800),
+            size: gpui::px(16.0),
+            period: Duration::from_millis(700),
         }
     }
 
@@ -42,10 +42,6 @@ impl Loader {
         self
     }
 
-    pub(crate) fn xsmall(self) -> Self {
-        self.with_size(gpui::px(12.0))
-    }
-
     fn animation_id(&self) -> ElementId {
         ElementId::NamedChild(Arc::new(self.id.clone()), "rotation".into())
     }
@@ -60,9 +56,7 @@ impl RenderOnce for Loader {
                 .when_some(self.color, Icon::color)
                 .with_animation(
                     animation_id,
-                    Animation::new(self.period)
-                        .repeat()
-                        .with_easing(ease_in_out),
+                    Animation::new(self.period).repeat(),
                     Icon::rotate,
                 ),
         )
