@@ -802,12 +802,12 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 67,900 because the chart-surface settings panel, binary
-        // switch, and restored session-local workspace tabs live in the
-        // client-owned shell without adding a persistence path to the default window.
+        // Raised from 68,200 because canvas-wide drawing/indicator removal, the
+        // drawing-rail collapse pin, and engine-owned price-axis unlock plus
+        // manual pane pan live in the client-owned chart surface.
         assert!(
-            line_count <= 68_200,
-            "platform Rust source upper bound is {line_count} lines, above the 68,200-line soft review threshold"
+            line_count <= 68_400,
+            "platform Rust source upper bound is {line_count} lines, above the 68,400-line soft review threshold"
         );
     }
 

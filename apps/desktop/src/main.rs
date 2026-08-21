@@ -1186,7 +1186,7 @@ impl HeaderControls {
     const INSTRUMENT: u8 = 1;
     const SERIES: u8 = 2;
     const DOM: u8 = 4;
-    const FIT: u8 = 8;
+    const INDICATOR: u8 = 8;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -1205,7 +1205,7 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::FIT;
+            self.0 |= Self::INDICATOR;
         }
         self
     }
@@ -2771,6 +2771,17 @@ impl WorkspaceSurface {
         }
     }
 
+    fn clear_indicators(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.clear_indicators() {
+                    chart_cx.notify();
+                }
+            });
+            cx.notify();
+        }
+    }
+
     fn add_indicator(&mut self, indicator: ChartIndicator, cx: &mut Context<Self>) -> bool {
         let Some(chart) = self.chart.clone() else {
             self.indicator_message = Some("Chart data is not available yet".to_string());
@@ -3255,7 +3266,9 @@ fn drawing_toolbar(
         .child(
             div()
                 .relative()
-                .size_full()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.0))
                 .child(
                     div()
                         .flex()
@@ -3267,17 +3280,17 @@ fn drawing_toolbar(
                         .min_h(px(0.0))
                         .map(|body| tracked_overflow_y_scrollbar(body, scroll))
                         .children(tools)
-                        .child(drawing_toolbar_actions(terminal, app, state, theme)),
+                        .child(drawing_toolbar_actions(app, state, theme)),
                 )
                 .child(ThinScrollbar::new(
                     scroll,
                     gpui_color(colors.text_secondary),
                 )),
         )
+        .child(drawing_toolbar_collapse(terminal, theme))
 }
 
 fn drawing_toolbar_actions(
-    terminal: Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
     theme: &AxiusflowTheme,
@@ -3343,6 +3356,21 @@ fn drawing_toolbar_actions(
             app.clone(),
             theme,
         ))
+}
+
+fn drawing_toolbar_collapse(
+    terminal: Entity<TerminalApp>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .py_2()
+        .w_full()
+        .border_t_1()
+        .border_color(gpui_color(theme.colors.border))
         .child(chrome_tooltip(
             "drawing_toolbar_collapse",
             "Collapse drawing toolbar",
@@ -3945,7 +3973,7 @@ fn clamp_chart_context_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 5.0, 3.0)
+    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 7.0, 4.0)
 }
 
 fn menu_section_divider(colors: &axiusflow_design_system::ThemeColors) -> Div {
@@ -3988,14 +4016,11 @@ fn secondary_menu_panel(
 fn chart_context_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: ChartContextMenu,
-    pane_count: usize,
-    chart_ready: bool,
-    can_create_pane: bool,
+    state: ChartContextMenuState,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
-    let can_split = can_create_pane && pane_count < MAXIMUM_PANES_PER_WORKSPACE;
     let dismiss = terminal.clone();
     div()
         .id("chart_context_menu_scrim")
@@ -4012,13 +4037,7 @@ fn chart_context_menu_layer(
             cx.stop_propagation();
         })
         .child(chart_context_menu_panel(
-            terminal,
-            menu,
-            pane_count,
-            chart_ready,
-            can_split,
-            origin,
-            theme,
+            terminal, menu, state, origin, theme,
         ))
         .into_any_element()
 }
@@ -4026,72 +4045,70 @@ fn chart_context_menu_layer(
 fn chart_context_menu_panel(
     terminal: &Entity<TerminalApp>,
     menu: ChartContextMenu,
-    pane_count: usize,
-    chart_ready: bool,
-    can_split: bool,
+    state: ChartContextMenuState,
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    secondary_menu_panel(
+    let mut panel = secondary_menu_panel(
         "chart_context_menu",
         origin,
         CHART_CONTEXT_MENU_WIDTH,
         theme,
-    )
-    .child(chart_context_menu_item(
-        terminal,
+    );
+    for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
+        if matches!(index, 1 | 3 | 5 | 6) {
+            panel = panel.child(menu_section_divider(&colors));
+        }
+        panel = panel.child(chart_context_menu_item(terminal, item, theme, menu));
+    }
+    panel
+}
+
+fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 7] {
+    [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
             icon: HugeIcon::Reload,
             label: "Reset view",
-            enabled: chart_ready,
+            enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::Reset,
         },
-        theme,
-        menu,
-    ))
-    .child(menu_section_divider(&colors))
-    .child(chart_context_menu_item(
-        terminal,
+        ChartContextMenuItem {
+            id: "chart_context_remove_drawings",
+            icon: HugeIcon::AiEraser,
+            label: "Remove drawings",
+            enabled: state.enabled(ChartContextMenuState::DRAWINGS),
+            action: ChartContextAction::ClearDrawings,
+        },
+        ChartContextMenuItem {
+            id: "chart_context_remove_indicators",
+            icon: HugeIcon::ChartLineDataIcon02,
+            label: "Remove indicators",
+            enabled: state.enabled(ChartContextMenuState::INDICATORS),
+            action: ChartContextAction::ClearIndicators,
+        },
         ChartContextMenuItem {
             id: "chart_context_split_horizontal",
             icon: HugeIcon::SplitSideBySide,
             label: "Split side by side",
-            enabled: can_split,
+            enabled: state.enabled(ChartContextMenuState::SPLIT),
             action: ChartContextAction::Split(ChartSplitDirection::Horizontal),
         },
-        theme,
-        menu,
-    ))
-    .child(chart_context_menu_item(
-        terminal,
         ChartContextMenuItem {
             id: "chart_context_split_vertical",
             icon: HugeIcon::SplitStacked,
             label: "Split top and bottom",
-            enabled: can_split,
+            enabled: state.enabled(ChartContextMenuState::SPLIT),
             action: ChartContextAction::Split(ChartSplitDirection::Vertical),
         },
-        theme,
-        menu,
-    ))
-    .child(menu_section_divider(&colors))
-    .child(chart_context_menu_item(
-        terminal,
         ChartContextMenuItem {
             id: "chart_context_close_pane",
             icon: HugeIcon::CancelIcon01,
             label: "Close chart",
-            enabled: pane_count > 1,
+            enabled: state.pane_count > 1,
             action: ChartContextAction::Close,
         },
-        theme,
-        menu,
-    ))
-    .child(menu_section_divider(&colors))
-    .child(chart_context_menu_item(
-        terminal,
         ChartContextMenuItem {
             id: "chart_context_settings",
             icon: HugeIcon::Settings01,
@@ -4099,9 +4116,7 @@ fn chart_context_menu_panel(
             enabled: true,
             action: ChartContextAction::Settings,
         },
-        theme,
-        menu,
-    ))
+    ]
 }
 
 fn chart_context_menu_item(
@@ -4527,24 +4542,11 @@ fn header_controls(
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
         ))
-        .child(panel_toggle(
-            PanelToggleState {
-                id: "fit_chart",
-                label: "Fit",
-                icon: HugeIcon::FitToScreen,
-                enabled: state.controls.enabled(HeaderControls::FIT),
-                selected: false,
-                tooltip: "Fit chart and reset price scales (Home)",
-                toggle: WorkspaceSurface::reset_chart_view,
-            },
-            &state.theme,
-            app.clone(),
-        ))
         .child(indicator_selector(
             app.clone(),
             state.indicator_input,
             state.indicator_message,
-            state.controls.enabled(HeaderControls::FIT),
+            state.controls.enabled(HeaderControls::INDICATOR),
             &state.theme,
         ))
         .child(dom_toggle)
@@ -5496,6 +5498,23 @@ struct WorkspaceDragState {
 }
 
 #[derive(Clone, Copy)]
+struct ChartContextMenuState {
+    pane_count: usize,
+    flags: u8,
+}
+
+impl ChartContextMenuState {
+    const READY: u8 = 1;
+    const SPLIT: u8 = 2;
+    const DRAWINGS: u8 = 4;
+    const INDICATORS: u8 = 8;
+
+    const fn enabled(self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+#[derive(Clone, Copy)]
 struct ChartContextMenuItem {
     id: &'static str,
     icon: HugeIcon,
@@ -5507,6 +5526,8 @@ struct ChartContextMenuItem {
 #[derive(Clone, Copy)]
 enum ChartContextAction {
     Reset,
+    ClearDrawings,
+    ClearIndicators,
     Split(ChartSplitDirection),
     Close,
     Settings,
@@ -5958,14 +5979,13 @@ impl TerminalApp {
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         match action {
             ChartContextAction::Reset => {
-                if let Some(workspace) = self
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.id == menu.workspace_id)
-                    && let Some(pane) = workspace.panes.iter().find(|pane| pane.id == menu.pane_id)
-                {
-                    pane.surface.update(cx, WorkspaceSurface::reset_chart_view);
-                }
+                self.update_context_menu_pane(menu, WorkspaceSurface::reset_chart_view, cx);
+            }
+            ChartContextAction::ClearDrawings => {
+                self.update_context_menu_pane(menu, WorkspaceSurface::clear_drawings, cx);
+            }
+            ChartContextAction::ClearIndicators => {
+                self.update_context_menu_pane(menu, WorkspaceSurface::clear_indicators, cx);
             }
             ChartContextAction::Split(direction) => {
                 self.split_active_pane(direction, window, cx);
@@ -5978,6 +5998,34 @@ impl TerminalApp {
             }
         }
         cx.notify();
+    }
+
+    fn update_context_menu_pane(
+        &self,
+        menu: ChartContextMenu,
+        update: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            && let Some(pane) = workspace.panes.iter().find(|pane| pane.id == menu.pane_id)
+        {
+            pane.surface.update(cx, update);
+        }
+    }
+
+    fn context_menu_chart_objects(&self, menu: ChartContextMenu, cx: &App) -> (bool, bool) {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .and_then(|pane| pane.surface.read(cx).chart.as_ref())
+            .map_or((false, false), |chart| {
+                let chart = chart.read(cx);
+                (chart.drawing_count() > 0, chart.has_indicators())
+            })
     }
 
     fn resize_workspace_split(
@@ -7091,14 +7139,27 @@ impl TerminalApp {
         pane_count: usize,
         chart_has_market_data: bool,
         viewport: gpui::Size<Pixels>,
+        cx: &App,
     ) -> (Option<AnyElement>, Option<AnyElement>) {
         let context_menu = self.chart_context_menu.map(|menu| {
+            let (has_drawings, has_indicators) = self.context_menu_chart_objects(menu, cx);
+            let mut flags = 0;
+            if chart_has_market_data {
+                flags |= ChartContextMenuState::READY;
+            }
+            if self.workspace_factory.is_some() && pane_count < MAXIMUM_PANES_PER_WORKSPACE {
+                flags |= ChartContextMenuState::SPLIT;
+            }
+            if has_drawings {
+                flags |= ChartContextMenuState::DRAWINGS;
+            }
+            if has_indicators {
+                flags |= ChartContextMenuState::INDICATORS;
+            }
             chart_context_menu_layer(
                 terminal,
                 menu,
-                pane_count,
-                chart_has_market_data,
-                self.workspace_factory.is_some(),
+                ChartContextMenuState { pane_count, flags },
                 viewport,
                 &self.theme,
             )
@@ -7153,6 +7214,7 @@ impl Render for TerminalApp {
             pane_count,
             chart_has_market_data,
             window.viewport_size(),
+            cx,
         );
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
         let header = terminal_header(
@@ -8856,18 +8918,18 @@ mod tests {
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
-        assert!(controls.enabled(HeaderControls::FIT));
+        assert!(controls.enabled(HeaderControls::INDICATOR));
     }
 
     #[test]
     fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
         let retained_chart_controls =
             HeaderControls::from_state(true, false).with_chart_controls(true);
-        assert!(retained_chart_controls.enabled(HeaderControls::FIT));
+        assert!(retained_chart_controls.enabled(HeaderControls::INDICATOR));
 
         let empty_chart_controls =
             HeaderControls::from_state(true, false).with_chart_controls(false);
-        assert!(!empty_chart_controls.enabled(HeaderControls::FIT));
+        assert!(!empty_chart_controls.enabled(HeaderControls::INDICATOR));
     }
 
     #[test]

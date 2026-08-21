@@ -161,7 +161,9 @@ pub struct DrawingsLockSummary {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ChartDrag {
-    Pane,
+    Pane {
+        price_pan: Option<(usize, PriceScaleTarget)>,
+    },
     TimeAxis,
     PriceAxis {
         pane: usize,
@@ -624,6 +626,47 @@ impl NucleusChartView {
         true
     }
 
+    /// Returns whether any native indicator or the reusable volume series is currently shown.
+    #[must_use]
+    pub fn has_indicators(&self) -> bool {
+        self.engine.series_entries().iter().any(|series| {
+            !series.removed && series.id != 0 && (series.id != self.volume_series || series.visible)
+        })
+    }
+
+    /// Removes every native indicator and hides the reusable volume series.
+    ///
+    /// The product-owned price series is left in place. Volume stays allocated so the catalog can
+    /// show it again without rebuilding live weights.
+    pub fn clear_indicators(&mut self) -> bool {
+        if !self.has_indicators() {
+            return false;
+        }
+        if self
+            .engine
+            .selected_series()
+            .is_some_and(|series| series != 0)
+        {
+            self.engine.set_selected_series(None);
+        }
+        let ids: Vec<u32> = self
+            .engine
+            .series_entries()
+            .iter()
+            .filter(|series| !series.removed && series.id != 0)
+            .map(|series| series.id)
+            .collect();
+        for id in ids {
+            if id == self.volume_series {
+                self.engine.set_series_visible(id, false);
+            } else {
+                let _ = self.engine.remove_series(id);
+            }
+        }
+        self.invalidate_series_layout();
+        true
+    }
+
     /// Removes every committed drawing.
     pub fn clear_drawings(&mut self) {
         self.cancel_drawing_gesture();
@@ -976,12 +1019,12 @@ impl NucleusChartView {
             CursorStyle::PointingHand
         } else {
             match self.drag {
-                Some(ChartDrag::Pane) => CursorStyle::ClosedHand,
+                Some(ChartDrag::Pane { .. }) => CursorStyle::ClosedHand,
                 Some(ChartDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
                 Some(ChartDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
                 Some(ChartDrag::PaneSeparator { .. }) => CursorStyle::ResizeRow,
                 None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
-                None if pane_x < 0.0 || pane_x > self.engine.pane_w => CursorStyle::ResizeUpDown,
+                None if self.price_axis_at(pane_x, y).is_some() => CursorStyle::ResizeUpDown,
                 None => CursorStyle::Crosshair,
             }
         };
@@ -1002,7 +1045,26 @@ impl NucleusChartView {
     }
 
     fn pointer_on_axis(&self, pane_x: f64, y: f64) -> bool {
-        y > self.engine.pane_h || pane_x < 0.0 || pane_x > self.engine.pane_w
+        y > self.engine.pane_h || self.price_axis_at(pane_x, y).is_some()
+    }
+
+    fn price_axis_at(&self, pane_x: f64, y: f64) -> Option<(usize, PriceScaleTarget)> {
+        if y > self.engine.pane_h {
+            return None;
+        }
+        let pane = self.engine.pane_index_at_y(y);
+        self.engine
+            .price_axis_target_at(pane, pane_x)
+            .map(|target| (pane, target))
+    }
+
+    fn unlocked_price_pan_target(&self, pane: usize) -> Option<PriceScaleTarget> {
+        [PriceScaleTarget::Right, PriceScaleTarget::Left]
+            .into_iter()
+            .find(|&target| {
+                self.engine.price_scale_auto_scale_for(pane, target) == Some(false)
+                    && self.engine.price_axis_scalable(pane, target)
+            })
     }
 
     fn begin_price_axis_scale(&mut self, pane: usize, target: PriceScaleTarget, y: f64) {
@@ -1018,12 +1080,8 @@ impl NucleusChartView {
         if click_count >= 2 {
             if y > self.engine.pane_h {
                 self.engine.reset_time_scale();
-            } else if pane_x < 0.0 {
-                self.engine
-                    .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Left, true);
-            } else if pane_x > self.engine.pane_w {
-                self.engine
-                    .set_price_scale_auto_scale_for(pane, PriceScaleTarget::Right, true);
+            } else if self.price_axis_at(pane_x, y).is_some() {
+                self.engine.reset_price_scales();
             }
             self.update_crosshair(pane_x, y);
             return;
@@ -1034,21 +1092,24 @@ impl NucleusChartView {
         } else if y > self.engine.pane_h {
             self.engine.time_axis_start_scale(pane_x);
             self.drag = Some(ChartDrag::TimeAxis);
-        } else if pane_x < 0.0
-            && self
-                .engine
-                .price_axis_scalable(pane, PriceScaleTarget::Left)
-        {
-            self.begin_price_axis_scale(pane, PriceScaleTarget::Left, y);
-        } else if pane_x > self.engine.pane_w
-            && self
-                .engine
-                .price_axis_scalable(pane, PriceScaleTarget::Right)
-        {
-            self.begin_price_axis_scale(pane, PriceScaleTarget::Right, y);
+        } else if let Some((pane, target)) = self.price_axis_at(pane_x, y) {
+            if self.engine.price_axis_scalable(pane, target) {
+                self.begin_price_axis_scale(pane, target, y);
+            } else {
+                self.drag = None;
+            }
         } else if pane_x >= 0.0 && y >= 0.0 && y <= self.engine.pane_h {
             self.engine.time_scale.start_scroll(pane_x);
-            self.drag = Some(ChartDrag::Pane);
+            let price_pan = self
+                .engine
+                .begin_price_pan_at(pane, pane_x, y)
+                .or_else(|| {
+                    let target = self.unlocked_price_pan_target(pane)?;
+                    self.engine.price_axis_start_scroll(pane, target, y);
+                    Some(target)
+                })
+                .map(|target| (pane, target));
+            self.drag = Some(ChartDrag::Pane { price_pan });
         } else {
             self.drag = None;
         }
@@ -1058,7 +1119,12 @@ impl NucleusChartView {
 
     fn drag_to(&mut self, pane_x: f64, y: f64) {
         match self.drag {
-            Some(ChartDrag::Pane) => self.engine.time_scale.scroll_to(pane_x),
+            Some(ChartDrag::Pane { price_pan }) => {
+                self.engine.time_scale.scroll_to(pane_x);
+                if let Some((pane, target)) = price_pan {
+                    self.engine.price_axis_scroll_to(pane, target, y);
+                }
+            }
             Some(ChartDrag::TimeAxis) => self.engine.time_axis_scale_to(pane_x),
             Some(ChartDrag::PriceAxis { pane, target }) => {
                 self.engine.price_axis_scale_to(pane, target, y);
@@ -1081,7 +1147,12 @@ impl NucleusChartView {
 
     fn end_drag(&mut self, pane_x: f64, y: f64) {
         match self.drag.take() {
-            Some(ChartDrag::Pane) => self.engine.time_scale.end_scroll(),
+            Some(ChartDrag::Pane { price_pan }) => {
+                self.engine.time_scale.end_scroll();
+                if let Some((pane, target)) = price_pan {
+                    self.engine.price_axis_end_scroll(pane, target);
+                }
+            }
             Some(ChartDrag::TimeAxis) => self.engine.time_axis_end_scale(),
             Some(ChartDrag::PriceAxis { pane, target }) => {
                 self.engine.price_axis_end_scale(pane, target);
@@ -1095,13 +1166,8 @@ impl NucleusChartView {
     fn apply_wheel(&mut self, pane_x: f64, y: f64, normalized_x: f64, normalized_y: f64) {
         if normalized_y != 0.0 {
             let zoom = nucleuscharts_engine::wheel_zoom_scale(normalized_y);
-            let pane = self.engine.pane_index_at_y(y);
-            if pane_x < 0.0 {
-                self.engine
-                    .price_axis_wheel_zoom(pane, PriceScaleTarget::Left, y, zoom);
-            } else if pane_x > self.engine.pane_w {
-                self.engine
-                    .price_axis_wheel_zoom(pane, PriceScaleTarget::Right, y, zoom);
+            if let Some((pane, target)) = self.price_axis_at(pane_x, y) {
+                self.engine.price_axis_wheel_zoom(pane, target, y, zoom);
             } else {
                 self.engine.time_scale.zoom(pane_x, zoom);
             }
@@ -1134,20 +1200,20 @@ impl NucleusChartView {
     }
 
     fn move_pointer(&mut self, pane_x: f64, y: f64, dragging: bool, modifiers: DrawingModifiers) {
-        if self.drawing_pointer_move(pane_x, y, dragging, modifiers) {
-            self.update_crosshair(pane_x, y);
-            return;
-        }
         if self.drag.is_some() {
             if dragging {
                 self.drag_to(pane_x, y);
             } else {
                 self.end_drag(pane_x, y);
             }
-        } else {
-            self.update_cursor(pane_x, y);
-            self.update_crosshair(pane_x, y);
+            return;
         }
+        if self.drawing_pointer_move(pane_x, y, dragging, modifiers) {
+            self.update_crosshair(pane_x, y);
+            return;
+        }
+        self.update_cursor(pane_x, y);
+        self.update_crosshair(pane_x, y);
     }
 
     fn apply_key(&mut self, key: &str, accelerated: bool) -> bool {
@@ -1818,7 +1884,7 @@ mod tests {
     fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
         let mut chart = interactive_chart();
         chart.begin_drag(300.0, 200.0, 1);
-        assert_eq!(chart.drag, Some(ChartDrag::Pane));
+        assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
         assert_eq!(chart.engine.crosshair, Some((300.0, 200.0)));
         let offset = chart.engine.right_offset();
         chart.drag_to(340.0, 200.0);
@@ -1868,6 +1934,31 @@ mod tests {
         );
         chart.end_drag(right_axis_x, 240.0);
         assert!(chart.drag.is_none());
+        assert_eq!(
+            chart
+                .engine
+                .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+            Some(false)
+        );
+
+        let locked_range = chart
+            .engine
+            .price_scale_visible_range_for(0, PriceScaleTarget::Right);
+        chart.begin_drag(300.0, 200.0, 1);
+        assert!(matches!(
+            chart.drag,
+            Some(ChartDrag::Pane {
+                price_pan: Some((_, PriceScaleTarget::Right))
+            })
+        ));
+        chart.drag_to(300.0, 260.0);
+        chart.end_drag(300.0, 260.0);
+        assert_ne!(
+            chart
+                .engine
+                .price_scale_visible_range_for(0, PriceScaleTarget::Right),
+            locked_range
+        );
         assert_eq!(
             chart
                 .engine
@@ -2012,6 +2103,40 @@ mod tests {
                     .all(|series| series.id != output || series.removed)
             );
         }
+    }
+
+    #[test]
+    fn clear_indicators_removes_every_native_output_and_hides_volume() {
+        let mut chart = interactive_chart();
+        assert!(!chart.has_indicators());
+        let volume = chart
+            .add_indicator(ChartIndicator::Volume)
+            .expect("volume is shown")[0];
+        let macd = chart
+            .add_indicator(ChartIndicator::Macd)
+            .expect("MACD is created");
+        assert!(chart.has_indicators());
+
+        assert!(chart.clear_indicators());
+        assert!(!chart.has_indicators());
+        assert!(!series_entry(&chart, volume).visible);
+        for output in macd {
+            assert!(
+                chart
+                    .engine
+                    .series_entries()
+                    .iter()
+                    .all(|series| series.id != output || series.removed)
+            );
+        }
+        assert!(!chart.clear_indicators());
+        assert_eq!(
+            chart
+                .add_indicator(ChartIndicator::Volume)
+                .expect("volume can be shown again"),
+            vec![volume]
+        );
+        assert!(chart.has_indicators());
     }
 
     #[test]
@@ -2230,7 +2355,7 @@ mod tests {
 
         chart.begin_drag(300.0, 200.0, 1);
 
-        assert_eq!(chart.drag, Some(ChartDrag::Pane));
+        assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
     }
 
     #[test]
@@ -2269,7 +2394,7 @@ mod tests {
     fn native_pointer_state_ends_a_drag_when_mouse_up_was_lost() {
         let mut chart = interactive_chart();
         chart.begin_drag(300.0, 200.0, 1);
-        assert_eq!(chart.drag, Some(ChartDrag::Pane));
+        assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
 
         chart.move_pointer(340.0, 200.0, false, DrawingModifiers::default());
 
