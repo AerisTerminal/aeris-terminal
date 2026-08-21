@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use std::fmt;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
@@ -856,6 +857,13 @@ impl NucleusChartView {
         self.axis_prims.clear();
     }
 
+    fn pin_host_clock(&mut self) {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return;
+        };
+        self.engine.set_now_seconds(now.as_secs_f64());
+    }
+
     fn invalidate_series_layout(&mut self) {
         self.invalidate_series_frame();
         self.layout_dirty = true;
@@ -1382,10 +1390,15 @@ impl NucleusChartView {
         let mutation = self.apply_pending_data();
         #[cfg(not(feature = "diagnostics"))]
         self.apply_pending_data();
+        self.pin_host_clock();
         let dimensions = (width, height, scale_factor);
         let dimensions_changed = self.built_for != dimensions;
         let layout_recomputed = dimensions_changed || self.layout_dirty;
-        if !layout_recomputed && !self.frame.panes.is_empty() {
+        if !layout_recomputed
+            && !self.engine.frame_requires_layout()
+            && !self.engine.frame_requires_axis()
+            && !self.frame.panes.is_empty()
+        {
             return;
         }
 
@@ -1792,6 +1805,46 @@ mod tests {
         assert!(series.wick_down_color.is_none());
         assert!(series.border_up_color.is_none());
         assert!(series.border_down_color.is_none());
+    }
+
+    #[test]
+    fn last_value_cluster_uses_instrument_title_and_host_clock() {
+        let mut chart = interactive_chart();
+        let series = series_entry(&chart, 0);
+        assert_eq!(series.title, "AXF");
+        assert!(series.title_visible);
+        assert!(series.countdown_visible);
+        assert!(series.last_value_visible);
+
+        let last_time = chart
+            .engine
+            .series_data(0)
+            .last()
+            .expect("replay has bars")
+            .time
+            .to_f64()
+            .expect("bar time fits f64");
+        let measure = |text: &str| f64::from(u32::try_from(text.len()).unwrap_or(u32::MAX)) * 7.0;
+        let _ = chart.engine.build_axis_frame(80.0, measure);
+        assert!(!chart.engine.frame_requires_axis());
+        chart.pin_host_clock();
+        assert!(chart.engine.frame_requires_axis());
+        chart.engine.set_now_seconds(last_time + 10.0);
+        let texts: Vec<String> = chart
+            .engine
+            .build_axis_frame(80.0, measure)
+            .labels
+            .into_iter()
+            .map(|label| label.text)
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == "AXF"),
+            "title chip missing from last-value cluster: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text == "00:50"),
+            "countdown missing from last-value cluster: {texts:?}"
+        );
     }
 
     #[test]

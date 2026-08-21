@@ -127,7 +127,25 @@ pub(crate) fn install_replay_with_deltas(
         return;
     }
     engine.series[0].kind = SeriesKind::Candlestick;
+    apply_price_series_chrome(engine, replay.instrument().symbol.as_str());
     let _ = engine.set_series_data(volume_series, &times, &volume, &volume, &volume, &volume);
+}
+
+fn apply_price_series_chrome(engine: &mut ChartEngine, title: &str) {
+    let Some(series) = engine
+        .series
+        .iter_mut()
+        .find(|series| series.id == 0 && !series.removed)
+    else {
+        debug_assert!(false, "product-owned price series identity must resolve");
+        return;
+    };
+    if series.title != title {
+        series.title = title.to_string();
+    }
+    series.title_visible = true;
+    series.countdown_visible = true;
+    series.last_value_visible = true;
 }
 
 fn volume_row(volume: i64, time: f64) -> (f64, [f64; 4]) {
