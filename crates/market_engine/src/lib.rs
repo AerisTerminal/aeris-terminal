@@ -602,7 +602,10 @@ impl MarketEngine {
     /// Replaces a canonical series with one validated covering image.
     ///
     /// Unlike ordinary history installation this permits an interior timestamp
-    /// repair and keeps consumer publication generations monotonic.
+    /// repair and keeps consumer publication generations monotonic. With
+    /// `publish` set to false the image installs silently, so a background
+    /// working-window fill reaches consumers through one later
+    /// [`MarketEngine::publish_series_snapshot`] step instead of per page.
     ///
     /// # Errors
     /// Returns an error for stale provider generation, precision, canonical
@@ -614,6 +617,7 @@ impl MarketEngine {
         price_scale: u8,
         quantity_scale: u8,
         bars: Vec<MarketBar>,
+        publish: bool,
     ) -> Result<Vec<ConsumerPublication>, EngineError> {
         self.providers
             .verify_generation(&series.provider_id, provider_generation)?;
@@ -627,7 +631,26 @@ impl MarketEngine {
             quantity_scale,
             &bars,
         )?;
-        self.publish_snapshot(series, &snapshot)
+        if publish {
+            self.publish_snapshot(series, &snapshot)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Publishes the current covering snapshot of one installed series to every
+    /// matching consumer; a series without installed history publishes nothing.
+    ///
+    /// # Errors
+    /// Returns an error for publication-manager capacity failure.
+    pub fn publish_series_snapshot(
+        &mut self,
+        series: &BarSeriesKey,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        match self.series.get(series) {
+            Some(snapshot) => self.publish_snapshot(series, &snapshot),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Installs validated local history before a provider session is available.
@@ -1398,7 +1421,7 @@ mod tests {
         let mut repaired = bars(3);
         repaired[2].close = 107;
         engine
-            .replace_covering_history(provider_generation(1), &btc, 2, 8, repaired)
+            .replace_covering_history(provider_generation(1), &btc, 2, 8, repaired, true)
             .expect("covering repair installs");
 
         let snapshot = engine

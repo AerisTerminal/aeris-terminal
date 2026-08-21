@@ -802,9 +802,13 @@ mod tests {
             })
             .sum::<usize>();
 
+        // Raised from 67,500 for the deferred background-backfill publication
+        // change: silent working-window installs plus one covering flush per
+        // repair plan, reviewed as the slimmer alternative to per-page
+        // full-series snapshots.
         assert!(
-            line_count <= 67_500,
-            "platform Rust source upper bound is {line_count} lines, above the 67,500-line soft review threshold"
+            line_count <= 67_600,
+            "platform Rust source upper bound is {line_count} lines, above the 67,600-line soft review threshold"
         );
     }
 

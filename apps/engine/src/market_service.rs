@@ -1868,6 +1868,7 @@ fn run_coordinator(
         viewport_history_ranges: BTreeMap::new(),
         active_viewports: BTreeMap::new(),
         viewport_history_local_inflight: BTreeSet::new(),
+        deferred_publications: BTreeSet::new(),
         pending_empty_repairs: BTreeMap::new(),
         empty_repair_retry_at: Instant::now(),
         local_history_deadlines: BTreeMap::new(),
@@ -1973,6 +1974,7 @@ struct Coordinator<'a> {
     viewport_history_ranges: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
     active_viewports: BTreeMap<ConsumerId, ActiveViewport>,
     viewport_history_local_inflight: BTreeSet<(BarSeriesKey, ProviderGeneration, HistoryRange)>,
+    deferred_publications: BTreeSet<BarSeriesKey>,
     pending_empty_repairs: BTreeMap<BarSeriesKey, HistoryRange>,
     empty_repair_retry_at: Instant,
     local_history_deadlines: BTreeMap<(BarSeriesKey, ProviderGeneration), Instant>,
@@ -3253,6 +3255,7 @@ impl Coordinator<'_> {
                     price_scale,
                     quantity_scale,
                     bars.clone(),
+                    true,
                 )
             {
                 if let Ok(ranges) = coinbase_bar_coverage_ranges(series, &bars) {
@@ -3745,6 +3748,7 @@ impl Coordinator<'_> {
             .map_err(|error| error.to_string())?;
         let Some(missing) = plan.repair_ranges().first().copied() else {
             self.viewport_history_ranges.remove(&key);
+            self.flush_deferred_publication(series);
             return Ok(());
         };
         let page = coinbase_history_page_range(series, missing)?;
@@ -4005,17 +4009,24 @@ impl Coordinator<'_> {
             }
             return;
         };
-        let persisted_bars = if series.provider_id == "coinbase" && repair {
+        let persisted_bars = if replace_covering {
             provider_bars
         } else {
             snapshot.bars.clone()
         };
+        let publish = !replace_covering || self.coinbase_repair_publishes(series, kind, range);
+        if publish {
+            self.deferred_publications.remove(series);
+        } else {
+            self.deferred_publications.insert(series.clone());
+        }
         let Some(bars) = self.install_completed_history(
             series,
             generation,
             snapshot,
             replace_covering,
             persisted_bars,
+            publish,
         ) else {
             if repair {
                 self.viewport_backfill_failed(
@@ -4049,12 +4060,12 @@ impl Coordinator<'_> {
             self.viewport_history_ranges
                 .insert((series.clone(), generation), range);
         }
-        let schedule = if seam_repair.is_some() {
+        let continuation = if seam_repair.is_some() {
             self.schedule_coinbase_history(series, generation, HistoryRequestKind::SeamRepair)
         } else {
             self.schedule_coinbase_history(series, generation, HistoryRequestKind::ViewportBackfill)
         };
-        if let Err(error) = schedule {
+        if let Err(error) = continuation {
             self.viewport_history_ranges
                 .remove(&(series.clone(), generation));
             self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
@@ -4070,6 +4081,53 @@ impl Coordinator<'_> {
             record_covered_range(&mut self.history_coverage, series, range);
         }
         Ok(())
+    }
+
+    /// Reports whether one Coinbase covering repair is consumer-visible. Seam
+    /// repairs sit at the live edge; interior pages publish only while a
+    /// consumer viewport actually overlaps the fetched range, so background
+    /// working-window fills stay off the IPC path until their plan resolves.
+    fn coinbase_repair_publishes(
+        &self,
+        series: &BarSeriesKey,
+        kind: HistoryRequestKind,
+        page: Option<HistoryRange>,
+    ) -> bool {
+        if kind == HistoryRequestKind::SeamRepair {
+            return true;
+        }
+        let Some(page) = page else {
+            return false;
+        };
+        self.active_viewports.values().any(|viewport| {
+            viewport.series == *series
+                && viewport.range.start_unix_nanos < page.end_unix_nanos
+                && page.start_unix_nanos < viewport.range.end_unix_nanos
+        })
+    }
+
+    fn flush_deferred_publication(&mut self, series: &BarSeriesKey) {
+        if !self.deferred_publications.remove(series) {
+            return;
+        }
+        match self.engine.publish_series_snapshot(series) {
+            Ok(publications) => {
+                for publication in publications {
+                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                        publish_state(
+                            events,
+                            &publication,
+                            SeriesLoadState::Ready,
+                            PersistenceState::Pending,
+                            None,
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("Axiusflow engine deferred history publication failed: {error}");
+            }
+        }
     }
 
     fn viewport_backfill_failed(
@@ -4103,6 +4161,7 @@ impl Coordinator<'_> {
             }
             return;
         }
+        self.flush_deferred_publication(series);
         self.broadcast_series_resolution_for(
             series,
             SeriesLoadState::Partial,
@@ -4140,6 +4199,7 @@ impl Coordinator<'_> {
         snapshot: HistorySnapshot,
         replace_covering: bool,
         persisted_bars: Vec<MarketBar>,
+        publish: bool,
     ) -> Option<Vec<MarketBar>> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
@@ -4152,6 +4212,7 @@ impl Coordinator<'_> {
                 price_scale,
                 quantity_scale,
                 bars.clone(),
+                publish,
             )
         } else {
             self.engine.install_history(
@@ -5258,7 +5319,8 @@ impl Coordinator<'_> {
                         }
                     }),
             };
-            if published.is_err() {
+            if let Err(error) = published {
+                eprintln!("Axiusflow engine Coinbase live publication failed: {error}");
                 self.realtime_interrupted(
                     FailureStage::Publication,
                     "Coinbase live publication failed",
@@ -5326,10 +5388,11 @@ impl Coordinator<'_> {
                         }
                     }),
             };
-            if published.is_err() {
+            if let Err(error) = published {
                 if let Some(live) = self.rithmic_live.get_mut(&series) {
                     live.history_ready = false;
                 }
+                eprintln!("Axiusflow engine Rithmic live publication failed: {error}");
                 self.broadcast_provider_for(
                     "rithmic",
                     ProviderConnectionState::Recovering,
@@ -5568,6 +5631,8 @@ impl Coordinator<'_> {
         for key in obsolete_viewports {
             self.viewport_history_ranges.remove(&key);
         }
+        self.deferred_publications
+            .retain(|series| self.engine.has_subscription(series));
     }
 
     fn release_unused_live_market_data(&mut self) {
@@ -7059,6 +7124,7 @@ mod tests {
             viewport_history_ranges: BTreeMap::new(),
             active_viewports: BTreeMap::new(),
             viewport_history_local_inflight: BTreeSet::new(),
+            deferred_publications: BTreeSet::new(),
             pending_empty_repairs: BTreeMap::new(),
             empty_repair_retry_at: Instant::now(),
             local_history_deadlines: BTreeMap::new(),
@@ -8973,6 +9039,280 @@ mod tests {
                 <= i64::try_from(HISTORY_BARS_PER_SERIES).expect("history bound fits") * interval
         );
         assert!(request.maximum_bars <= 350);
+    }
+    /// One consumer demanding BTC-USD 1m with a shorter-than-prefetch initial
+    /// window installed, so the working-window backfill stays disarmed.
+    #[allow(clippy::type_complexity)]
+    fn disarmed_backfill_fixture<'a>(
+        history: &'a SyncSender<HistoryRequest>,
+        storage: &'a SyncSender<StorageRequest>,
+        realtime: &'a SyncSender<RealtimeControl>,
+        realtime_stop: &'a Arc<AtomicBool>,
+        storage_rx: &mpsc::Receiver<StorageRequest>,
+    ) -> (
+        Coordinator<'a>,
+        ConsumerId,
+        GenerationId,
+        ProviderGeneration,
+        BarSeriesKey,
+        i64,
+        fn(Vec<MarketBar>) -> HistorySnapshot,
+    ) {
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = GenerationId(id(1).expect("generation"));
+        let series = internal_series(&btc()).expect("series");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(consumer_id, generation, &series)
+            .expect("demand installs");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            history,
+            storage,
+            realtime,
+            realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let provider_generation = coordinator
+            .provider_generation_for_series(&series)
+            .expect("provider generation");
+        let interval = 60_000_000_000_i64;
+        let end_minute = current_unix_nanos().expect("clock") / interval;
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            Some(
+                recent_coinbase_history_range(
+                    &series,
+                    coordinator.resource_policy.history_prefetch_bars.max(1),
+                )
+                .expect("initial range"),
+            ),
+            HistoryRequestKind::Initial,
+            Ok(backfill_snapshot(sequential_history(
+                1,
+                200,
+                end_minute - 200,
+            ))),
+        );
+        assert!(coordinator.events[&consumer_id].snapshot.is_some());
+        coordinator
+            .events
+            .get_mut(&consumer_id)
+            .expect("events")
+            .snapshot = None;
+        let _ = storage_rx.try_recv().expect("initial history persists");
+        (
+            coordinator,
+            consumer_id,
+            generation,
+            provider_generation,
+            series,
+            end_minute,
+            backfill_snapshot,
+        )
+    }
+
+    fn backfill_snapshot(bars: Vec<MarketBar>) -> HistorySnapshot {
+        HistorySnapshot {
+            price_scale: 2,
+            quantity_scale: 8,
+            bars,
+            handoff_boundary_unix_nanos: None,
+            confirmed_empty: false,
+        }
+    }
+
+    #[test]
+    fn visible_viewport_pages_publish_and_background_pages_defer() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let (
+            mut coordinator,
+            consumer_id,
+            generation,
+            provider_generation,
+            series,
+            end_minute,
+            snapshot,
+        ) = disarmed_backfill_fixture(
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            &storage_rx,
+        );
+        let interval = 60_000_000_000_i64;
+        let visible = Viewport::try_new(
+            (end_minute - 2_000) * interval,
+            (end_minute - 1_900) * interval,
+        )
+        .expect("visible viewport");
+        coordinator
+            .request_viewport_history(consumer_id, generation, visible)
+            .expect("viewport demand queues");
+        let StorageRequest::ReadRange(_, _, local_range) =
+            storage_rx.try_recv().expect("local range read")
+        else {
+            panic!("viewport reads local coverage first");
+        };
+        coordinator.viewport_history_local_completed(
+            &series,
+            provider_generation,
+            local_range,
+            Err("fixture cache miss".to_string()),
+        );
+        let page = history_rx
+            .recv()
+            .expect("visible viewport schedules provider repair")
+            .range
+            .expect("provider page is explicit");
+        let minutes = usize::try_from((page.end_unix_nanos - page.start_unix_nanos) / interval)
+            .expect("page width fits");
+        let start_minute = page.start_unix_nanos / interval;
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            Some(page),
+            HistoryRequestKind::ViewportBackfill,
+            Ok(snapshot(sequential_history(1, minutes, start_minute))),
+        );
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot)) if snapshot.bars.len() == 200 + minutes
+        ));
+
+        coordinator
+            .events
+            .get_mut(&consumer_id)
+            .expect("events")
+            .snapshot = None;
+        let _ = storage_rx.try_recv().expect("visible page persists");
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            Some(HistoryRange {
+                start_unix_nanos: (end_minute - 5_000) * interval,
+                end_unix_nanos: (end_minute - 4_800) * interval,
+            }),
+            HistoryRequestKind::ViewportBackfill,
+            Ok(snapshot(sequential_history(1, 200, end_minute - 5_000))),
+        );
+        assert!(
+            coordinator.events[&consumer_id].snapshot.is_none(),
+            "a disjoint background page defers its snapshot"
+        );
+        assert_eq!(
+            coordinator
+                .engine
+                .series_snapshot(&series)
+                .expect("background page installs")
+                .bars
+                .len(),
+            400 + minutes
+        );
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Persist(_, _, ref bars, _, _, _)) if bars.len() == 200
+        ));
+    }
+
+    #[test]
+    fn resolving_the_demanded_repair_range_flushes_one_accumulated_covering_snapshot() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(true));
+        let (mut coordinator, consumer_id, generation, provider_generation, series, end_minute, _) =
+            disarmed_backfill_fixture(
+                &history_tx,
+                &storage_tx,
+                &realtime_tx,
+                &realtime_stop,
+                &storage_rx,
+            );
+        let interval = 60_000_000_000_i64;
+        // Install one background page silently while no plan is pending.
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            Some(HistoryRange {
+                start_unix_nanos: (end_minute - 5_000) * interval,
+                end_unix_nanos: (end_minute - 4_800) * interval,
+            }),
+            HistoryRequestKind::ViewportBackfill,
+            Ok(backfill_snapshot(sequential_history(
+                1,
+                200,
+                end_minute - 5_000,
+            ))),
+        );
+        assert_eq!(
+            coordinator
+                .engine
+                .series_snapshot(&series)
+                .expect("background page installs")
+                .bars
+                .len(),
+            400
+        );
+        let _ = storage_rx.try_recv().expect("background page persists");
+
+        // Demanding the same region and failing its repair resolves the plan
+        // and must flush one covering snapshot carrying the silent install.
+        let resolution = Viewport::try_new(
+            (end_minute - 5_100) * interval,
+            (end_minute - 4_900) * interval,
+        )
+        .expect("resolution viewport");
+        coordinator
+            .request_viewport_history(consumer_id, generation, resolution)
+            .expect("resolution demand queues");
+        let StorageRequest::ReadRange(_, _, resolution_range) =
+            storage_rx.try_recv().expect("resolution reads coverage")
+        else {
+            panic!("resolution reads local coverage first");
+        };
+        coordinator.viewport_history_local_completed(
+            &series,
+            provider_generation,
+            resolution_range,
+            Err("fixture cache miss".to_string()),
+        );
+        coordinator
+            .events
+            .get_mut(&consumer_id)
+            .expect("events")
+            .demand_error = None;
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            coordinator
+                .viewport_history_ranges
+                .get(&(series.clone(), provider_generation))
+                .copied(),
+            HistoryRequestKind::ViewportBackfill,
+            Err("fixture backfill superseded".to_string()),
+        );
+        assert!(matches!(
+            coordinator.events[&consumer_id].snapshot,
+            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+                if snapshot.bars.len() == 400
+        ));
+        assert!(coordinator.deferred_publications.is_empty());
     }
 
     #[test]
