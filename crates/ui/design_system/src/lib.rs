@@ -1,4 +1,4 @@
-//! Typed native mapping of the Axiusflow `brand.css` contract.
+//! Typed native mapping of the Axiusflow `platform.css` contract.
 //!
 //! Token source expressions and resolved sRGB values share one registry. The
 //! checked CSS manifest uses generated custom-property names, while painting
@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn native_palettes_match_the_brand_contract() {
+    fn native_palettes_match_the_platform_contract() {
         let light = AxiusflowTheme::light().colors;
         let dark = AxiusflowTheme::dark().colors;
 
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn css_manifest_contains_every_rust_color_token_and_mode_value() {
-        let css = include_str!("../brand.css");
+        let css = include_str!("../platform.css");
 
         for theme in [AxiusflowTheme::light(), AxiusflowTheme::dark()] {
             for token in theme.color_tokens() {
@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn css_manifest_carries_the_portable_interaction_contract() {
-        let css = include_str!("../brand.css");
+        let css = include_str!("../platform.css");
         for required in [
             "--font-sans: \"Inter\", sans-serif;",
             "font-synthesis: none;",
