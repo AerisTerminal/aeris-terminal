@@ -1102,6 +1102,7 @@ fn benchmark_root(
     let chart = cx.new(move |_| NucleusChartView::with_replay(&snapshot));
     let symbol_input = cx.new(|cx| InputState::new(window, cx));
     let indicator_input = cx.new(|cx| InputState::new(window, cx));
+    let timeframe_input = cx.new(|cx| InputState::new(window, cx));
     let terminal_symbol_input = symbol_input.clone();
     let terminal = cx.new(move |cx| {
         WorkspaceSurface::new(
@@ -1112,6 +1113,7 @@ fn benchmark_root(
                 .expect("benchmark lifecycle client starts"),
             Some(terminal_symbol_input),
             indicator_input,
+            timeframe_input,
             chart_chrome::ChartChromePreferences::default(),
         )
     });

@@ -749,12 +749,12 @@ struct WorkspaceSurface {
     rithmic_reconnect: RithmicReconnectState,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
+    timeframe_input: Entity<InputState>,
     indicator_message: Option<String>,
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
     timeframe_trigger_bounds: Option<Bounds<Pixels>>,
-    timeframe_query: String,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
@@ -815,6 +815,7 @@ enum ChromeOverlay {
     Instrument,
     Indicator,
     Timeframe,
+    QuickTimeframe,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1291,6 +1292,7 @@ fn initial_symbol_message(provider: TerminalProvider) -> String {
 }
 
 impl WorkspaceSurface {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cx: &mut Context<Self>,
         startup: MarketWorkerStartup,
@@ -1298,6 +1300,7 @@ impl WorkspaceSurface {
         lifecycle: DesktopLifecycle,
         symbol_input: Option<Entity<InputState>>,
         indicator_input: Entity<InputState>,
+        timeframe_input: Entity<InputState>,
         chart_chrome: chart_chrome::ChartChromePreferences,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
@@ -1368,12 +1371,12 @@ impl WorkspaceSurface {
             rithmic_reconnect: RithmicReconnectState::Idle,
             symbol_input,
             indicator_input,
+            timeframe_input,
             indicator_message: None,
             chrome_overlay: None,
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
             timeframe_trigger_bounds: None,
-            timeframe_query: String::new(),
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
             provider,
@@ -1427,25 +1430,48 @@ impl WorkspaceSurface {
         }
     }
 
-    fn timeframe_menu_intervals(&self) -> Vec<ChartInterval> {
+    fn quick_timeframe_matches(&self, cx: &App) -> Vec<ChartInterval> {
+        let query = self.timeframe_input.read(cx).value();
         self.available_intervals()
             .iter()
             .copied()
-            .filter(|interval| interval.matches_typeahead(&self.timeframe_query))
+            .filter(|interval| interval.matches_typeahead(query.as_ref()))
             .collect()
     }
 
-    fn sync_timeframe_typeahead_selection(&mut self) {
-        let intervals = self.timeframe_menu_intervals();
-        self.chrome_selection = intervals
+    fn sync_timeframe_menu_selection(&mut self) {
+        self.chrome_selection = self
+            .available_intervals()
             .iter()
             .position(|interval| *interval == self.selected_interval())
+            .unwrap_or(0);
+    }
+
+    fn sync_quick_timeframe_selection(&mut self, cx: &App) {
+        let query = self.timeframe_input.read(cx).value();
+        let intervals = self.quick_timeframe_matches(cx);
+        self.chrome_selection = intervals
+            .iter()
+            .position(|interval| interval.label() == query.as_ref())
             .or_else(|| {
                 intervals
                     .iter()
-                    .position(|interval| interval.label() == self.timeframe_query)
+                    .position(|interval| *interval == self.selected_interval())
             })
             .unwrap_or(0);
+    }
+
+    fn apply_highlighted_interval(
+        &mut self,
+        intervals: &[ChartInterval],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(interval) = intervals.get(self.chrome_selection).copied()
+            && self.select_interval(interval, cx)
+        {
+            self.close_chrome_overlay(window, cx);
+        }
     }
 
     fn selected_interval(&self) -> ChartInterval {
@@ -1598,12 +1624,18 @@ impl WorkspaceSurface {
         self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
         self.chrome_overlay_phase = ChromeOverlayPhase::Opening;
         self.chrome_overlay = Some(overlay);
-        if overlay != ChromeOverlay::Timeframe {
-            self.timeframe_query.clear();
+        if overlay != ChromeOverlay::QuickTimeframe {
+            self.timeframe_input.update(cx, |input, input_cx| {
+                input.set_value("", window, input_cx);
+            });
         }
         self.chrome_selection = match overlay {
             ChromeOverlay::Timeframe => {
-                self.sync_timeframe_typeahead_selection();
+                self.sync_timeframe_menu_selection();
+                self.chrome_selection
+            }
+            ChromeOverlay::QuickTimeframe => {
+                self.sync_quick_timeframe_selection(cx);
                 self.chrome_selection
             }
             ChromeOverlay::Instrument | ChromeOverlay::Indicator => 0,
@@ -1618,6 +1650,10 @@ impl WorkspaceSurface {
                 self.indicator_input
                     .update(cx, |input, input_cx| input.focus(window, input_cx));
             }
+            ChromeOverlay::QuickTimeframe => {
+                self.timeframe_input
+                    .update(cx, |input, input_cx| input.focus(window, input_cx));
+            }
             ChromeOverlay::Timeframe => self.chrome_focus.focus(window, cx),
         }
         cx.notify();
@@ -1628,12 +1664,19 @@ impl WorkspaceSurface {
         {
             return;
         }
-        if self.chrome_overlay == Some(ChromeOverlay::Indicator) {
-            self.indicator_input.update(cx, |input, input_cx| {
-                input.set_value("", window, input_cx);
-            });
+        match self.chrome_overlay {
+            Some(ChromeOverlay::Indicator) => {
+                self.indicator_input.update(cx, |input, input_cx| {
+                    input.set_value("", window, input_cx);
+                });
+            }
+            Some(ChromeOverlay::QuickTimeframe) => {
+                self.timeframe_input.update(cx, |input, input_cx| {
+                    input.set_value("", window, input_cx);
+                });
+            }
+            Some(ChromeOverlay::Instrument | ChromeOverlay::Timeframe) | None => {}
         }
-        self.timeframe_query.clear();
         self.chrome_focus.focus(window, cx);
         if cx.reduce_motion() {
             self.chrome_overlay = None;
@@ -1696,22 +1739,23 @@ impl WorkspaceSurface {
                         self.indicator_input.read(cx).value().as_ref(),
                     )
                     .len(),
-                    Some(ChromeOverlay::Timeframe) => self.timeframe_menu_intervals().len(),
+                    Some(ChromeOverlay::Timeframe) => self.available_intervals().len(),
+                    Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
                     None => 0,
                 };
                 self.chrome_selection = (self.chrome_selection + 1).min(count.saturating_sub(1));
                 cx.notify();
             }
-            "enter" if self.chrome_overlay == Some(ChromeOverlay::Timeframe) => {
-                if let Some(interval) = self
-                    .timeframe_menu_intervals()
-                    .get(self.chrome_selection)
-                    .copied()
-                    && self.select_interval(interval, cx)
-                {
-                    self.close_chrome_overlay(window, cx);
+            "enter" => match self.chrome_overlay {
+                Some(ChromeOverlay::Timeframe) => {
+                    self.apply_highlighted_interval(self.available_intervals(), window, cx);
                 }
-            }
+                Some(ChromeOverlay::QuickTimeframe) => {
+                    let intervals = self.quick_timeframe_matches(cx);
+                    self.apply_highlighted_interval(&intervals, window, cx);
+                }
+                Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator) | None => return false,
+            },
             _ => return false,
         }
         true
@@ -1732,11 +1776,6 @@ impl WorkspaceSurface {
         if self.drawing_toolbar_state(cx).active_tool == ChartDrawingTool::Text {
             return false;
         }
-        if event.keystroke.key.as_str() == "backspace"
-            && self.chrome_overlay == Some(ChromeOverlay::Timeframe)
-        {
-            return self.pop_timeframe_typeahead(window, cx);
-        }
         let Some(typed) = chrome_typeahead_char(event) else {
             return false;
         };
@@ -1745,49 +1784,26 @@ impl WorkspaceSurface {
         }
         match self.chrome_overlay {
             None if typed.is_ascii_digit() => {
-                self.begin_timeframe_typeahead(typed, window, cx);
+                self.begin_quick_timeframe(typed, window, cx);
                 true
             }
             None if typed.is_ascii_alphabetic() => self.begin_symbol_typeahead(typed, window, cx),
-            Some(ChromeOverlay::Timeframe) => self.push_timeframe_typeahead(typed, cx),
-            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator) | None => false,
+            Some(
+                ChromeOverlay::Instrument
+                | ChromeOverlay::Indicator
+                | ChromeOverlay::Timeframe
+                | ChromeOverlay::QuickTimeframe,
+            )
+            | None => false,
         }
     }
 
-    fn begin_timeframe_typeahead(
-        &mut self,
-        typed: char,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.timeframe_query.clear();
-        self.timeframe_query.push(typed);
-        self.open_chrome_overlay(ChromeOverlay::Timeframe, window, cx);
-    }
-
-    fn push_timeframe_typeahead(&mut self, typed: char, cx: &mut Context<Self>) -> bool {
-        if !is_timeframe_typeahead_char(typed)
-            || self.timeframe_query.len() >= TIMEFRAME_TYPEAHEAD_LIMIT
-        {
-            return false;
-        }
-        self.timeframe_query.push(typed);
-        self.sync_timeframe_typeahead_selection();
-        cx.notify();
-        true
-    }
-
-    fn pop_timeframe_typeahead(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.timeframe_query.pop().is_none() {
-            return false;
-        }
-        if self.timeframe_query.is_empty() {
-            self.close_chrome_overlay(window, cx);
-            return true;
-        }
-        self.sync_timeframe_typeahead_selection();
-        cx.notify();
-        true
+    fn begin_quick_timeframe(&mut self, typed: char, window: &mut Window, cx: &mut Context<Self>) {
+        self.timeframe_input.update(cx, |input, input_cx| {
+            input.set_value(typed.to_string(), window, input_cx);
+            input.focus(window, input_cx);
+        });
+        self.open_chrome_overlay(ChromeOverlay::QuickTimeframe, window, cx);
     }
 
     fn begin_symbol_typeahead(
@@ -2997,11 +3013,16 @@ fn chrome_overlay_layer(
     cx: &App,
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
-    let timeframe = overlay == ChromeOverlay::Timeframe;
+    let interval_popup = matches!(
+        overlay,
+        ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe
+    );
     let timeframe_left = timeframe_overlay_left(app_state.timeframe_trigger_bounds);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
+    let pending =
+        app_state.series_browser.pending().is_some() || app_state.coinbase_switch.is_pending();
     let panel = match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
@@ -3030,11 +3051,20 @@ fn chrome_overlay_layer(
         .into_any_element(),
         ChromeOverlay::Timeframe => timeframe_overlay_content(
             app,
-            &app_state.timeframe_menu_intervals(),
+            app_state.available_intervals(),
             app_state.selected_interval(),
             app_state.chrome_selection,
-            app_state.series_browser.pending().is_some() || app_state.coinbase_switch.is_pending(),
-            app_state.timeframe_query.as_str(),
+            pending,
+            theme,
+        )
+        .into_any_element(),
+        ChromeOverlay::QuickTimeframe => quick_timeframe_overlay_content(
+            app,
+            &app_state.timeframe_input,
+            &app_state.quick_timeframe_matches(cx),
+            app_state.selected_interval(),
+            app_state.chrome_selection,
+            pending,
             theme,
         )
         .into_any_element(),
@@ -3053,8 +3083,10 @@ fn chrome_overlay_layer(
             .track_focus(&overlay_focus)
             .flex()
             .items_start()
-            .when(timeframe, |scrim| scrim.justify_start().pl(timeframe_left))
-            .when(!timeframe, |scrim| scrim.justify_center().pt_2())
+            .when(interval_popup, |scrim| {
+                scrim.justify_start().pl(timeframe_left)
+            })
+            .when(!interval_popup, |scrim| scrim.justify_center().pt_2())
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
                     app.close_chrome_overlay(window, app_cx);
@@ -3062,7 +3094,12 @@ fn chrome_overlay_layer(
                 cx.stop_propagation();
             })
             .child(chrome_overlay_panel(
-                panel, theme, timeframe, closing, generation, phase,
+                panel,
+                theme,
+                interval_popup,
+                closing,
+                generation,
+                phase,
             ))
             .into_any_element(),
     )
@@ -3071,7 +3108,7 @@ fn chrome_overlay_layer(
 fn chrome_overlay_panel(
     content: AnyElement,
     theme: &AxiusflowTheme,
-    timeframe: bool,
+    interval_popup: bool,
     closing: bool,
     generation: u64,
     phase: ChromeOverlayPhase,
@@ -3083,18 +3120,20 @@ fn chrome_overlay_panel(
         .flex_none()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
-        .border_color(gpui_color(if timeframe {
+        .border_color(gpui_color(if interval_popup {
             colors.border_secondary
         } else {
             colors.border
         }))
-        .bg(gpui_color(if timeframe {
+        .bg(gpui_color(if interval_popup {
             colors.surface_secondary
         } else {
             colors.surface
         }))
-        .when(timeframe, |panel| panel.max_h_full().overflow_y_scroll())
-        .when(!timeframe, gpui::Styled::overflow_hidden)
+        .when(interval_popup, |panel| {
+            panel.max_h_full().overflow_y_scroll()
+        })
+        .when(!interval_popup, gpui::Styled::overflow_hidden)
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(content)
@@ -3131,7 +3170,6 @@ fn timeframe_overlay_content(
     selected: ChartInterval,
     keyboard_selection: usize,
     pending: bool,
-    query: &str,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -3141,30 +3179,6 @@ fn timeframe_overlay_content(
         .flex_col()
         .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
         .text_color(gpui_color(colors.text_primary));
-    if !query.is_empty() {
-        panel = panel.child(
-            div()
-                .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-                .px_3()
-                .flex()
-                .items_center()
-                .text_sm()
-                .child(query.to_string()),
-        );
-        if intervals.is_empty() {
-            return panel.child(
-                div()
-                    .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .text_sm()
-                    .text_color(gpui_color(colors.text_muted))
-                    .child("No matching interval"),
-            );
-        }
-        panel = panel.child(menu_section_divider(&colors));
-    }
     let mut last_group = None;
     for (index, interval) in intervals.iter().copied().enumerate() {
         let group = timeframe_interval_group(interval);
@@ -3175,6 +3189,64 @@ fn timeframe_overlay_content(
             panel = panel.child(menu_section_header(group, &colors));
             last_group = Some(group);
         }
+        panel = panel.child(timeframe_overlay_row(
+            app,
+            interval,
+            index,
+            selected == interval,
+            keyboard_selection == index,
+            pending,
+            theme,
+        ));
+    }
+    panel
+}
+
+fn quick_timeframe_overlay_content(
+    app: &Entity<WorkspaceSurface>,
+    input: &Entity<InputState>,
+    intervals: &[ChartInterval],
+    selected: ChartInterval,
+    keyboard_selection: usize,
+    pending: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let mut panel = div()
+        .w(px(TIMEFRAME_MENU_WIDTH))
+        .flex()
+        .flex_col()
+        .pt(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
+        .pb(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
+        .text_color(gpui_color(colors.text_primary))
+        .child(
+            div()
+                .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+                .px_2()
+                .flex()
+                .items_center()
+                .child(
+                    Input::new(input)
+                        .appearance(true)
+                        .bordered(true)
+                        .focus_bordered(true)
+                        .flex_1(),
+                ),
+        );
+    if intervals.is_empty() {
+        return panel.child(
+            div()
+                .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+                .px_3()
+                .flex()
+                .items_center()
+                .text_sm()
+                .text_color(gpui_color(colors.text_muted))
+                .child("No matching interval"),
+        );
+    }
+    panel = panel.child(menu_section_divider(&colors));
+    for (index, interval) in intervals.iter().copied().enumerate() {
         panel = panel.child(timeframe_overlay_row(
             app,
             interval,
@@ -3235,14 +3307,6 @@ fn chrome_typeahead_char_from(key: &str, key_char: Option<&str>, shift: bool) ->
     } else {
         Some(ch)
     }
-}
-
-const fn is_timeframe_typeahead_char(typed: char) -> bool {
-    typed.is_ascii_digit()
-        || matches!(
-            typed,
-            'm' | 'M' | 'h' | 'H' | 'd' | 'D' | 'w' | 'W' | 't' | 'T'
-        )
 }
 
 fn timeframe_overlay_row(
@@ -5813,7 +5877,6 @@ fn series_selector(
         enabled && !pending,
         move |window, cx| {
             open_app.update(cx, |app, app_cx| {
-                app.timeframe_query.clear();
                 app.open_chrome_overlay(ChromeOverlay::Timeframe, window, app_cx);
             });
         },
@@ -5826,7 +5889,10 @@ fn series_selector(
                         return;
                     }
                     app.timeframe_trigger_bounds = Some(bounds);
-                    if app.chrome_overlay == Some(ChromeOverlay::Timeframe) {
+                    if matches!(
+                        app.chrome_overlay,
+                        Some(ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe)
+                    ) {
                         app_cx.notify();
                     }
                 });
@@ -6133,6 +6199,55 @@ fn subscribe_indicator_input(
         .detach();
 }
 
+fn subscribe_timeframe_input(
+    input: &Entity<InputState>,
+    terminal: &Entity<WorkspaceSurface>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let terminal = terminal.clone();
+    let input = input.clone();
+    window
+        .subscribe(
+            &input.clone(),
+            cx,
+            move |_, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    terminal.update(cx, |app, app_cx| {
+                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe) {
+                            return;
+                        }
+                        let intervals = app.quick_timeframe_matches(app_cx);
+                        app.apply_highlighted_interval(&intervals, window, app_cx);
+                    });
+                }
+                InputEvent::Change => {
+                    terminal.update(cx, |app, app_cx| {
+                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe) {
+                            return;
+                        }
+                        let query = input.read(app_cx).value();
+                        if query.is_empty() {
+                            app.close_chrome_overlay(window, app_cx);
+                            return;
+                        }
+                        if query.len() > TIMEFRAME_TYPEAHEAD_LIMIT {
+                            let truncated: String =
+                                query.chars().take(TIMEFRAME_TYPEAHEAD_LIMIT).collect();
+                            input.update(app_cx, |input, input_cx| {
+                                input.set_value(truncated, window, input_cx);
+                            });
+                        }
+                        app.sync_quick_timeframe_selection(app_cx);
+                        app_cx.notify();
+                    });
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            },
+        )
+        .detach();
+}
+
 fn workspace_surface_entity(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
@@ -6146,6 +6261,8 @@ fn workspace_surface_entity(
     let indicator_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
     let indicator_search_input = indicator_input.clone();
+    let timeframe_input = cx.new(|cx| InputState::new(window, cx).placeholder("1m, 5, 1H, 1D"));
+    let timeframe_search_input = timeframe_input.clone();
     let workspace_lifecycle = lifecycle.clone();
     let workspace = cx.new(move |cx| {
         WorkspaceSurface::new(
@@ -6155,12 +6272,14 @@ fn workspace_surface_entity(
             workspace_lifecycle,
             symbol_input,
             indicator_input,
+            timeframe_input,
             chart_chrome,
         )
     });
     lifecycle.register_terminal(&workspace);
     subscribe_symbol_input(search_input, &workspace, window, cx);
     subscribe_indicator_input(&indicator_search_input, &workspace, window, cx);
+    subscribe_timeframe_input(&timeframe_search_input, &workspace, window, cx);
     workspace
 }
 
@@ -9098,6 +9217,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [ChartInterval::Month1]
         );
+        assert!(ChartInterval::Minute1.matches_typeahead("1"));
+        assert!(ChartInterval::Hour1.matches_typeahead("1"));
+        assert!(!ChartInterval::Minute1.matches_typeahead("1M"));
     }
 
     #[test]

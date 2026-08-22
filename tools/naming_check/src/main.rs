@@ -802,11 +802,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 69,700 because chart chrome type-ahead now opens the
-        // existing timeframe and instrument menus from typed digits and letters.
+        // Raised from 69,900 because digit shortcuts now open a dedicated
+        // interval input popup instead of the grouped header timeframe menu.
         assert!(
-            line_count <= 69_900,
-            "platform Rust source upper bound is {line_count} lines, above the 69,900-line soft review threshold"
+            line_count <= 70_100,
+            "platform Rust source upper bound is {line_count} lines, above the 70,100-line soft review threshold"
         );
     }
 
