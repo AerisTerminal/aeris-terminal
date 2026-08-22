@@ -3102,7 +3102,9 @@ fn chrome_overlay_layer(
             .flex()
             .items_start()
             .when(compact_menu, |scrim| scrim.justify_start().pl(menu_left))
-            .when(!compact_menu, |scrim| scrim.justify_center().pt_2())
+            .when(!compact_menu, |scrim| {
+                scrim.justify_center().pt_2().px(px(CHROME_MENU_SIDE_INSET))
+            })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
                     app.close_chrome_overlay(window, app_cx);
@@ -3207,7 +3209,6 @@ fn chrome_overlay_panel(
     div()
         .id("chrome_overlay_panel")
         .relative()
-        .flex_none()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
         .border_color(gpui_color(if interval_popup {
@@ -3221,10 +3222,10 @@ fn chrome_overlay_panel(
             colors.surface
         }))
         .when(interval_popup, |panel| {
-            panel.max_h_full().overflow_y_scroll()
+            panel.flex_none().max_h_full().overflow_y_scroll()
         })
         .when(!interval_popup, |panel| {
-            panel.max_h_full().overflow_hidden()
+            panel.w_full().min_w_0().max_h_full().overflow_hidden()
         })
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -5906,7 +5907,7 @@ fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTh
     chrome_menu_search_header(input, &theme.colors).into_any_element()
 }
 
-const CHROME_MENU_WIDTH: f32 = 900.0;
+const CHROME_MENU_SIDE_INSET: f32 = 32.0;
 const CHROME_MENU_SEARCH_HEIGHT: f32 = 52.0;
 const CHROME_MENU_LIST_HEIGHT: f32 = 600.0;
 const CHROME_MENU_FOOTER_HEIGHT: f32 = 44.0;
@@ -5922,7 +5923,7 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .flex()
         .flex_col()
-        .w(px(CHROME_MENU_WIDTH))
+        .w_full()
         .h(px(CHROME_MENU_HEIGHT))
         .max_h_full()
         .overflow_hidden()
