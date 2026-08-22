@@ -4381,7 +4381,6 @@ fn clamp_price_axis_flyout_origin(
 fn menu_section_divider(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .h(px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT))
-        .px_2()
         .flex()
         .items_center()
         .child(
