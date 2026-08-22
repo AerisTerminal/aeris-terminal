@@ -802,11 +802,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 69,900 because digit shortcuts now open a dedicated
-        // interval input popup instead of the grouped header timeframe menu.
+        // Raised from 70,100 because the header now owns a Nucleus chart-type
+        // menu that survives covering snapshots and persists as chrome default.
         assert!(
-            line_count <= 70_100,
-            "platform Rust source upper bound is {line_count} lines, above the 70,100-line soft review threshold"
+            line_count <= 70_400,
+            "platform Rust source upper bound is {line_count} lines, above the 70,400-line soft review threshold"
         );
     }
 

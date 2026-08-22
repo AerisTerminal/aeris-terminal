@@ -126,7 +126,6 @@ pub(crate) fn install_replay_with_deltas(
     {
         return;
     }
-    engine.series[0].kind = SeriesKind::Candlestick;
     apply_price_series_chrome(engine, replay.instrument().symbol.as_str());
     let _ = engine.set_series_data(volume_series, &times, &volume, &volume, &volume, &volume);
 }

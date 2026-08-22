@@ -20,7 +20,7 @@ use assets::UiIcon as HugeIcon;
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator,
-    ChartSplitDirection, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView,
+    ChartSplitDirection, ChartType, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView,
     NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
@@ -755,6 +755,7 @@ struct WorkspaceSurface {
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
     timeframe_trigger_bounds: Option<Bounds<Pixels>>,
+    chart_type_trigger_bounds: Option<Bounds<Pixels>>,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
@@ -816,6 +817,7 @@ enum ChromeOverlay {
     Indicator,
     Timeframe,
     QuickTimeframe,
+    ChartType,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1006,6 +1008,7 @@ struct HeaderState {
     provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
+    chart_type_label: String,
     instruments: Vec<InstrumentMenuEntry>,
     selected_series: Option<rithmic_history::RithmicSeries>,
     symbol_input: Option<Entity<InputState>>,
@@ -1196,6 +1199,7 @@ impl HeaderControls {
     const SERIES: u8 = 2;
     const DOM: u8 = 4;
     const INDICATOR: u8 = 8;
+    const CHART_TYPE: u8 = 16;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -1214,7 +1218,7 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::INDICATOR;
+            self.0 |= Self::INDICATOR | Self::CHART_TYPE;
         }
         self
     }
@@ -1328,6 +1332,7 @@ impl WorkspaceSurface {
                     chart_chrome.indicator_name_labels_visible,
                     chart_chrome.indicator_value_labels_visible,
                 );
+                chart.set_chart_type(chart_chrome.chart_type);
             });
         }
         let bridge_label = chart.as_ref().map_or_else(
@@ -1377,6 +1382,7 @@ impl WorkspaceSurface {
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
             timeframe_trigger_bounds: None,
+            chart_type_trigger_bounds: None,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
             provider,
@@ -1445,6 +1451,21 @@ impl WorkspaceSurface {
             .iter()
             .position(|interval| *interval == self.selected_interval())
             .unwrap_or(0);
+    }
+
+    fn sync_chart_type_menu_selection(&mut self, cx: &App) {
+        let selected = self.chart_type(cx);
+        self.chrome_selection = ChartType::ALL
+            .iter()
+            .position(|chart_type| *chart_type == selected)
+            .unwrap_or(0);
+    }
+
+    fn apply_highlighted_chart_type(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chart_type) = ChartType::ALL.get(self.chrome_selection).copied() {
+            self.set_chart_type(chart_type, cx);
+            self.close_chrome_overlay(window, cx);
+        }
     }
 
     fn sync_quick_timeframe_selection(&mut self, cx: &App) {
@@ -1634,6 +1655,10 @@ impl WorkspaceSurface {
                 self.sync_timeframe_menu_selection();
                 self.chrome_selection
             }
+            ChromeOverlay::ChartType => {
+                self.sync_chart_type_menu_selection(cx);
+                self.chrome_selection
+            }
             ChromeOverlay::QuickTimeframe => {
                 self.sync_quick_timeframe_selection(cx);
                 self.chrome_selection
@@ -1654,7 +1679,9 @@ impl WorkspaceSurface {
                 self.timeframe_input
                     .update(cx, |input, input_cx| input.focus(window, input_cx));
             }
-            ChromeOverlay::Timeframe => self.chrome_focus.focus(window, cx),
+            ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {
+                self.chrome_focus.focus(window, cx);
+            }
         }
         cx.notify();
     }
@@ -1675,7 +1702,10 @@ impl WorkspaceSurface {
                     input.set_value("", window, input_cx);
                 });
             }
-            Some(ChromeOverlay::Instrument | ChromeOverlay::Timeframe) | None => {}
+            Some(
+                ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType,
+            )
+            | None => {}
         }
         self.chrome_focus.focus(window, cx);
         if cx.reduce_motion() {
@@ -1740,6 +1770,7 @@ impl WorkspaceSurface {
                     )
                     .len(),
                     Some(ChromeOverlay::Timeframe) => self.available_intervals().len(),
+                    Some(ChromeOverlay::ChartType) => ChartType::ALL.len(),
                     Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
                     None => 0,
                 };
@@ -1750,6 +1781,7 @@ impl WorkspaceSurface {
                 Some(ChromeOverlay::Timeframe) => {
                     self.apply_highlighted_interval(self.available_intervals(), window, cx);
                 }
+                Some(ChromeOverlay::ChartType) => self.apply_highlighted_chart_type(window, cx),
                 Some(ChromeOverlay::QuickTimeframe) => {
                     let intervals = self.quick_timeframe_matches(cx);
                     self.apply_highlighted_interval(&intervals, window, cx);
@@ -1792,7 +1824,8 @@ impl WorkspaceSurface {
                 ChromeOverlay::Instrument
                 | ChromeOverlay::Indicator
                 | ChromeOverlay::Timeframe
-                | ChromeOverlay::QuickTimeframe,
+                | ChromeOverlay::QuickTimeframe
+                | ChromeOverlay::ChartType,
             )
             | None => false,
         }
@@ -1898,7 +1931,7 @@ impl WorkspaceSurface {
                 let chart_theme = nucleus_chart_theme(self.theme.mode);
                 let chart = cx
                     .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
-                self.apply_indicator_labels_to_chart(&chart, cx);
+                self.apply_chart_chrome_to_chart(&chart, cx);
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
@@ -2069,7 +2102,7 @@ impl WorkspaceSurface {
         let chart_theme = nucleus_chart_theme(self.theme.mode);
         self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(chart_theme)));
         if let Some(chart) = &self.chart {
-            self.apply_indicator_labels_to_chart(chart, cx);
+            self.apply_chart_chrome_to_chart(chart, cx);
         }
         observe_chart(self.chart.as_ref(), cx);
     }
@@ -2387,7 +2420,7 @@ impl WorkspaceSurface {
         }
     }
 
-    fn apply_indicator_labels_to_chart(
+    fn apply_chart_chrome_to_chart(
         &self,
         chart: &Entity<NucleusChartView>,
         cx: &mut Context<Self>,
@@ -2397,7 +2430,35 @@ impl WorkspaceSurface {
                 self.chart_chrome.indicator_name_labels_visible,
                 self.chart_chrome.indicator_value_labels_visible,
             );
+            chart.set_chart_type(self.chart_chrome.chart_type);
         });
+    }
+
+    fn chart_type(&self, cx: &App) -> ChartType {
+        self.chart
+            .as_ref()
+            .map_or(self.chart_chrome.chart_type, |chart| {
+                chart.read(cx).chart_type()
+            })
+    }
+
+    fn set_chart_type(&mut self, chart_type: ChartType, cx: &mut Context<Self>) {
+        self.chart_chrome.chart_type = chart_type;
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.set_chart_type(chart_type);
+                chart_cx.notify();
+            });
+        }
+        let preferences = self.chart_chrome;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = chart_chrome::save_chart_chrome_preferences(preferences) {
+                    eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                }
+            })
+            .detach();
+        cx.notify();
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
@@ -2782,7 +2843,7 @@ impl WorkspaceSurface {
         let chart_theme = nucleus_chart_theme(self.theme.mode);
         let chart =
             cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
-        self.apply_indicator_labels_to_chart(&chart, cx);
+        self.apply_chart_chrome_to_chart(&chart, cx);
         self.chart = Some(chart);
         observe_chart(self.chart.as_ref(), cx);
         self.worker_label = bootstrap.worker_label;
@@ -3013,17 +3074,69 @@ fn chrome_overlay_layer(
     cx: &App,
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
-    let interval_popup = matches!(
+    let compact_menu = matches!(
         overlay,
-        ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe
+        ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe | ChromeOverlay::ChartType
     );
-    let timeframe_left = timeframe_overlay_left(app_state.timeframe_trigger_bounds);
+    let menu_left = compact_menu_left(overlay, app_state);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
+    let panel = chrome_overlay_content(app_state, app, overlay, theme, cx);
+    let close_app = app.clone();
+    let overlay_focus = app_state.chrome_focus.clone();
+    Some(
+        div()
+            .id("chrome_overlay_scrim")
+            .absolute()
+            .top(px(chrome_height))
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .occlude()
+            .track_focus(&overlay_focus)
+            .flex()
+            .items_start()
+            .when(compact_menu, |scrim| scrim.justify_start().pl(menu_left))
+            .when(!compact_menu, |scrim| scrim.justify_center().pt_2())
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                close_app.update(cx, |app, app_cx| {
+                    app.close_chrome_overlay(window, app_cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(chrome_overlay_panel(
+                panel,
+                theme,
+                compact_menu,
+                closing,
+                generation,
+                phase,
+            ))
+            .into_any_element(),
+    )
+}
+
+fn compact_menu_left(overlay: ChromeOverlay, app_state: &WorkspaceSurface) -> Pixels {
+    match overlay {
+        ChromeOverlay::ChartType => timeframe_overlay_left(app_state.chart_type_trigger_bounds),
+        ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe => {
+            timeframe_overlay_left(app_state.timeframe_trigger_bounds)
+        }
+        ChromeOverlay::Instrument | ChromeOverlay::Indicator => px(0.0),
+    }
+}
+
+fn chrome_overlay_content(
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
+    overlay: ChromeOverlay,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> AnyElement {
     let pending =
         app_state.series_browser.pending().is_some() || app_state.coinbase_switch.is_pending();
-    let panel = match overlay {
+    match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
             &InstrumentSelectorState {
@@ -3068,41 +3181,14 @@ fn chrome_overlay_layer(
             theme,
         )
         .into_any_element(),
-    };
-    let close_app = app.clone();
-    let overlay_focus = app_state.chrome_focus.clone();
-    Some(
-        div()
-            .id("chrome_overlay_scrim")
-            .absolute()
-            .top(px(chrome_height))
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .occlude()
-            .track_focus(&overlay_focus)
-            .flex()
-            .items_start()
-            .when(interval_popup, |scrim| {
-                scrim.justify_start().pl(timeframe_left)
-            })
-            .when(!interval_popup, |scrim| scrim.justify_center().pt_2())
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                close_app.update(cx, |app, app_cx| {
-                    app.close_chrome_overlay(window, app_cx);
-                });
-                cx.stop_propagation();
-            })
-            .child(chrome_overlay_panel(
-                panel,
-                theme,
-                interval_popup,
-                closing,
-                generation,
-                phase,
-            ))
-            .into_any_element(),
-    )
+        ChromeOverlay::ChartType => chart_type_overlay_content(
+            app,
+            app_state.chart_type(cx),
+            app_state.chrome_selection,
+            theme,
+        )
+        .into_any_element(),
+    }
 }
 
 fn chrome_overlay_panel(
@@ -3196,6 +3282,32 @@ fn timeframe_overlay_content(
             selected == interval,
             keyboard_selection == index,
             pending,
+            theme,
+        ));
+    }
+    panel
+}
+
+fn chart_type_overlay_content(
+    app: &Entity<WorkspaceSurface>,
+    selected: ChartType,
+    keyboard_selection: usize,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let mut panel = div()
+        .w(px(TIMEFRAME_MENU_WIDTH))
+        .flex()
+        .flex_col()
+        .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
+        .text_color(gpui_color(colors.text_primary));
+    for (index, chart_type) in ChartType::ALL.into_iter().enumerate() {
+        panel = panel.child(chart_type_overlay_row(
+            app,
+            chart_type,
+            index,
+            selected == chart_type,
+            keyboard_selection == index,
             theme,
         ));
     }
@@ -3350,6 +3462,48 @@ fn timeframe_overlay_row(
                 .cursor_not_allowed()
         })
         .child(div().flex_1().child(interval.label()))
+        .when(selected, |row| {
+            row.child(
+                header_icon(HugeIcon::CheckmarkCircleIcon01)
+                    .with_size(px(16.0))
+                    .color(gpui_color(colors.icon)),
+            )
+        })
+}
+
+fn chart_type_overlay_row(
+    app: &Entity<WorkspaceSurface>,
+    chart_type: ChartType,
+    index: usize,
+    selected: bool,
+    keyboard: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let row_app = app.clone();
+    div()
+        .id(("chart_type_overlay_row", index))
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .px_3()
+        .text_sm()
+        .when(keyboard, |row| {
+            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+        })
+        .cursor_pointer()
+        .hover(|row| {
+            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                .text_color(gpui_color(colors.text_primary))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            row_app.update(cx, |app, app_cx| {
+                app.set_chart_type(chart_type, app_cx);
+                app.close_chrome_overlay(window, app_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(div().flex_1().child(chart_type.label()))
         .when(selected, |row| {
             row.child(
                 header_icon(HugeIcon::CheckmarkCircleIcon01)
@@ -5294,6 +5448,12 @@ fn header_controls(
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
         ))
+        .child(chart_type_selector(
+            app.clone(),
+            state.chart_type_label,
+            state.controls.enabled(HeaderControls::CHART_TYPE),
+            &state.theme,
+        ))
         .child(indicator_selector(
             app.clone(),
             state.indicator_input,
@@ -5902,6 +6062,50 @@ fn series_selector(
         .inset_0(),
     );
     chrome_tooltip("series_selector", "Select chart timeframe", trigger, theme)
+}
+
+fn chart_type_selector(
+    app: Entity<WorkspaceSurface>,
+    label: String,
+    enabled: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let button = Button::new("chart_type_selector")
+        .label(label)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .disabled(!enabled)
+        .when(enabled, Button::cursor_pointer)
+        .when(!enabled, Button::cursor_not_allowed);
+    let open_app = app.clone();
+    let bounds_app = app;
+    let button = button_activation(
+        chrome_button_style(button, theme, false, enabled),
+        enabled,
+        move |window, cx| {
+            open_app.update(cx, |app, app_cx| {
+                app.open_chrome_overlay(ChromeOverlay::ChartType, window, app_cx);
+            });
+        },
+    );
+    let trigger = div().relative().flex_none().child(button).child(
+        canvas(
+            move |bounds, _, cx| {
+                bounds_app.update(cx, |app, app_cx| {
+                    if app.chart_type_trigger_bounds == Some(bounds) {
+                        return;
+                    }
+                    app.chart_type_trigger_bounds = Some(bounds);
+                    if app.chrome_overlay == Some(ChromeOverlay::ChartType) {
+                        app_cx.notify();
+                    }
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .inset_0(),
+    );
+    chrome_tooltip("chart_type_selector", "Select chart type", trigger, theme)
 }
 
 fn chrome_button_style(
@@ -6723,6 +6927,12 @@ impl TerminalApp {
         workspace.panes[workspace.active_pane].surface.clone()
     }
 
+    fn chart_chrome_for_new_surface(&self, cx: &App) -> chart_chrome::ChartChromePreferences {
+        let mut preferences = self.chart_chrome;
+        preferences.chart_type = self.active_surface().read(cx).chart_type(cx);
+        preferences
+    }
+
     fn set_workspace_resource_class(
         &self,
         workspace_index: usize,
@@ -6956,6 +7166,7 @@ impl TerminalApp {
             );
         self.chart_chrome.indicator_name_labels_visible = names;
         self.chart_chrome.indicator_value_labels_visible = values;
+        self.chart_chrome.chart_type = self.active_surface().read(cx).chart_type(cx);
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
@@ -7310,7 +7521,7 @@ impl TerminalApp {
             pane.startup,
             pane.worker,
             &self.lifecycle,
-            self.chart_chrome,
+            self.chart_chrome_for_new_surface(cx),
             window,
             cx,
         );
@@ -7387,7 +7598,7 @@ impl TerminalApp {
             pane.startup,
             pane.worker,
             &self.lifecycle,
-            self.chart_chrome,
+            self.chart_chrome_for_new_surface(cx),
             window,
             cx,
         );
@@ -7725,6 +7936,7 @@ fn active_header_state(
                     .map(|request| request.series),
             )
         },
+        chart_type_label: workspace.chart_type(cx).label().to_string(),
         instruments: workspace.instrument_entries(cx),
         selected_series: workspace
             .series_browser
@@ -9984,6 +10196,7 @@ mod tests {
         assert!(controls.enabled(HeaderControls::SERIES));
         assert!(controls.enabled(HeaderControls::DOM));
         assert!(controls.enabled(HeaderControls::INDICATOR));
+        assert!(controls.enabled(HeaderControls::CHART_TYPE));
     }
 
     #[test]
@@ -9991,10 +10204,12 @@ mod tests {
         let retained_chart_controls =
             HeaderControls::from_state(true, false).with_chart_controls(true);
         assert!(retained_chart_controls.enabled(HeaderControls::INDICATOR));
+        assert!(retained_chart_controls.enabled(HeaderControls::CHART_TYPE));
 
         let empty_chart_controls =
             HeaderControls::from_state(true, false).with_chart_controls(false);
         assert!(!empty_chart_controls.enabled(HeaderControls::INDICATOR));
+        assert!(!empty_chart_controls.enabled(HeaderControls::CHART_TYPE));
     }
 
     #[test]

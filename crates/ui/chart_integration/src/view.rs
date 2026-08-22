@@ -122,6 +122,70 @@ impl fmt::Display for ChartIndicatorError {
 
 impl std::error::Error for ChartIndicatorError {}
 
+/// Product-owned price-series presentation forwarded to Nucleus `SeriesKind`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChartType {
+    #[default]
+    Candles,
+    Bars,
+    Line,
+    Area,
+    Baseline,
+}
+
+impl ChartType {
+    /// Built-in OHLC chart types Nucleus can render from the product price series.
+    pub const ALL: [Self; 5] = [
+        Self::Candles,
+        Self::Bars,
+        Self::Line,
+        Self::Area,
+        Self::Baseline,
+    ];
+
+    /// Returns the header and menu label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Candles => "Candles",
+            Self::Bars => "Bars",
+            Self::Line => "Line",
+            Self::Area => "Area",
+            Self::Baseline => "Baseline",
+        }
+    }
+
+    /// Returns the durable preference identifier.
+    #[must_use]
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::Candles => "candles",
+            Self::Bars => "bars",
+            Self::Line => "line",
+            Self::Area => "area",
+            Self::Baseline => "baseline",
+        }
+    }
+
+    /// Parses a stored identifier, ignoring unknown values.
+    #[must_use]
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|chart_type| chart_type.identifier() == value.trim())
+    }
+
+    const fn series_kind(self) -> nucleuscharts_engine::SeriesKind {
+        match self {
+            Self::Candles => nucleuscharts_engine::SeriesKind::Candlestick,
+            Self::Bars => nucleuscharts_engine::SeriesKind::Bar,
+            Self::Line => nucleuscharts_engine::SeriesKind::Line,
+            Self::Area => nucleuscharts_engine::SeriesKind::Area,
+            Self::Baseline => nucleuscharts_engine::SeriesKind::Baseline,
+        }
+    }
+}
+
 /// Distinguishes a pane-canvas right-click from a price-axis right-click.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartContextKind {
@@ -338,6 +402,7 @@ pub struct NucleusChartView {
     pending_context_menu: Option<ChartContextRequest>,
     instrument_price_precision: u8,
     price_precision_override: Option<u8>,
+    chart_type: ChartType,
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     #[cfg(feature = "diagnostics")]
@@ -390,6 +455,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             instrument_price_precision: 2,
             price_precision_override: None,
+            chart_type: ChartType::Candles,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
@@ -462,6 +528,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             instrument_price_precision: replay.instrument().precision.price_scale(),
             price_precision_override: None,
+            chart_type: ChartType::Candles,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
@@ -494,6 +561,7 @@ impl NucleusChartView {
             )?);
         }
         install_replay(&mut self.engine, self.volume_series, replay);
+        self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
@@ -1007,6 +1075,7 @@ impl NucleusChartView {
             return Ok(false);
         }
         install_replay(&mut self.engine, self.volume_series, replay);
+        self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
@@ -1070,6 +1139,7 @@ impl NucleusChartView {
                     &update,
                 );
                 if mutation == SeriesMutation::Snapshot {
+                    self.apply_price_series_kind();
                     self.apply_selected_price_format();
                 }
                 if mutation == SeriesMutation::TailReplace {
@@ -1169,6 +1239,24 @@ impl NucleusChartView {
         for id in self.indicator_series_ids() {
             let _ = self.engine.series_apply_options_json(id, &json);
         }
+    }
+
+    /// Host-owned price-series chart type forwarded to Nucleus.
+    #[must_use]
+    pub const fn chart_type(&self) -> ChartType {
+        self.chart_type
+    }
+
+    /// Applies a built-in Nucleus price-series kind without changing market data.
+    pub fn set_chart_type(&mut self, chart_type: ChartType) {
+        self.chart_type = chart_type;
+        self.apply_price_series_kind();
+    }
+
+    fn apply_price_series_kind(&mut self) {
+        self.engine
+            .convert_series_kind(0, self.chart_type.series_kind());
+        self.invalidate_series_layout();
     }
 
     /// Host-owned indicator name-chip chrome for every native indicator on this chart.
@@ -2067,6 +2155,32 @@ mod tests {
             replay.stream().last_sequence().checked_add(1)
         );
         assert!(chart.latest_market_provenance().is_some());
+    }
+
+    #[test]
+    fn host_chart_type_survives_snapshot_install() {
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+            .expect("embedded replay validates");
+        let mut chart = NucleusChartView::empty();
+        assert_eq!(chart.chart_type(), ChartType::Candles);
+        chart.set_chart_type(ChartType::Line);
+        assert_eq!(chart.chart_type(), ChartType::Line);
+        assert_eq!(
+            series_entry(&chart, 0).kind,
+            nucleuscharts_engine::SeriesKind::Line
+        );
+
+        chart.load_replay(&replay).expect("first snapshot installs");
+        assert_eq!(chart.chart_type(), ChartType::Line);
+        assert_eq!(
+            series_entry(&chart, 0).kind,
+            nucleuscharts_engine::SeriesKind::Line
+        );
+        assert_eq!(
+            series_entry(&chart, chart.volume_series).kind,
+            nucleuscharts_engine::SeriesKind::Histogram
+        );
     }
 
     #[test]
