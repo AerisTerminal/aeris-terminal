@@ -1328,9 +1328,10 @@ impl WorkspaceSurface {
         } = terminal_startup_state(startup, cx);
         if let Some(chart) = &chart {
             chart.update(cx, |chart, _| {
-                chart.apply_indicator_label_preferences(
+                chart.apply_indicator_chrome_preferences(
                     chart_chrome.indicator_name_labels_visible,
                     chart_chrome.indicator_value_labels_visible,
+                    chart_chrome.indicator_price_lines_visible,
                 );
                 chart.set_chart_type(chart_chrome.chart_type);
             });
@@ -2404,17 +2405,19 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    fn apply_indicator_label_preferences(
+    fn apply_indicator_chrome_preferences(
         &mut self,
         names: bool,
         values: bool,
+        price_lines: bool,
         cx: &mut Context<Self>,
     ) {
         self.chart_chrome.indicator_name_labels_visible = names;
         self.chart_chrome.indicator_value_labels_visible = values;
+        self.chart_chrome.indicator_price_lines_visible = price_lines;
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                chart.apply_indicator_label_preferences(names, values);
+                chart.apply_indicator_chrome_preferences(names, values, price_lines);
                 chart_cx.notify();
             });
         }
@@ -2426,9 +2429,10 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         chart.update(cx, |chart, _| {
-            chart.apply_indicator_label_preferences(
+            chart.apply_indicator_chrome_preferences(
                 self.chart_chrome.indicator_name_labels_visible,
                 self.chart_chrome.indicator_value_labels_visible,
+                self.chart_chrome.indicator_price_lines_visible,
             );
             chart.set_chart_type(self.chart_chrome.chart_type);
         });
@@ -4902,6 +4906,11 @@ fn price_axis_flyout_rows(
                 state.enabled(PriceAxisMenuState::BID_ASK),
                 PriceAxisMenuAction::ToggleBidAsk,
             ),
+            PriceAxisMenuRow::toggle(
+                "Indicators and financials price lines",
+                state.enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES),
+                PriceAxisMenuAction::ToggleIndicatorPriceLines,
+            ),
         ],
         PriceAxisMenuFlyout::ScaleMode => vec![
             PriceAxisMenuRow::toggle("Normal", state.mode == 0, PriceAxisMenuAction::SetMode(0)),
@@ -7119,8 +7128,9 @@ impl TerminalApp {
             action,
             PriceAxisMenuAction::ToggleIndicatorNameLabels
                 | PriceAxisMenuAction::ToggleIndicatorValueLabels
+                | PriceAxisMenuAction::ToggleIndicatorPriceLines
         ) {
-            self.broadcast_indicator_labels(menu, cx);
+            self.broadcast_indicator_chrome(menu, cx);
         }
         if let PriceAxisMenuAction::SetLeft(next_left) = action
             && let Some(open) = &mut self.chart_context_menu
@@ -7144,8 +7154,8 @@ impl TerminalApp {
         }
     }
 
-    fn broadcast_indicator_labels(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
-        let (names, values) = self
+    fn broadcast_indicator_chrome(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
+        let (names, values, price_lines) = self
             .workspaces
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
@@ -7155,22 +7165,30 @@ impl TerminalApp {
                 (
                     self.chart_chrome.indicator_name_labels_visible,
                     self.chart_chrome.indicator_value_labels_visible,
+                    self.chart_chrome.indicator_price_lines_visible,
                 ),
                 |chart| {
                     let chart = chart.read(cx);
                     (
                         chart.indicator_name_labels_visible(),
                         chart.indicator_value_labels_visible(),
+                        chart.indicator_price_lines_visible(),
                     )
                 },
             );
         self.chart_chrome.indicator_name_labels_visible = names;
         self.chart_chrome.indicator_value_labels_visible = values;
+        self.chart_chrome.indicator_price_lines_visible = price_lines;
         self.chart_chrome.chart_type = self.active_surface().read(cx).chart_type(cx);
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
-                    surface.apply_indicator_label_preferences(names, values, surface_cx);
+                    surface.apply_indicator_chrome_preferences(
+                        names,
+                        values,
+                        price_lines,
+                        surface_cx,
+                    );
                 });
             }
         }
@@ -8330,6 +8348,7 @@ impl TerminalApp {
                             | PriceAxisMenuState::COUNTDOWN
                             | PriceAxisMenuState::INDICATOR_NAMES
                             | PriceAxisMenuState::INDICATOR_VALUES
+                            | PriceAxisMenuState::INDICATOR_PRICE_LINES
                             | PriceAxisMenuState::AUTO_SCALE
                             | PriceAxisMenuState::ALIGN_LABELS,
                         mode: 0,
@@ -10246,6 +10265,7 @@ mod tests {
                 | PriceAxisMenuState::COUNTDOWN
                 | PriceAxisMenuState::INDICATOR_NAMES
                 | PriceAxisMenuState::INDICATOR_VALUES
+                | PriceAxisMenuState::INDICATOR_PRICE_LINES
                 | PriceAxisMenuState::AUTO_SCALE
                 | PriceAxisMenuState::ALIGN_LABELS,
             mode: 0,
@@ -10306,6 +10326,7 @@ mod tests {
                 "Pre/post/night market price line",
                 "High and low price lines",
                 "Bid and ask lines",
+                "Indicators and financials price lines",
             ]
         );
         assert!(lines.iter().all(|row| {

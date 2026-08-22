@@ -207,6 +207,7 @@ pub fn filter_indicator_specs(query: &str) -> Vec<&'static IndicatorSpec> {
 pub struct ChartChromePreferences {
     pub indicator_name_labels_visible: bool,
     pub indicator_value_labels_visible: bool,
+    pub indicator_price_lines_visible: bool,
     pub chart_type: ChartType,
 }
 
@@ -215,6 +216,7 @@ impl Default for ChartChromePreferences {
         Self {
             indicator_name_labels_visible: true,
             indicator_value_labels_visible: true,
+            indicator_price_lines_visible: true,
             chart_type: ChartType::Candles,
         }
     }
@@ -244,6 +246,8 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             if !values_from_split_key {
                 preferences.indicator_value_labels_visible = visible;
             }
+        } else if let Some(value) = line.strip_prefix("indicator_price_lines=") {
+            preferences.indicator_price_lines_visible = parse_chrome_flag(value);
         } else if let Some(value) = line.strip_prefix("chart_type=")
             && let Some(chart_type) = ChartType::from_identifier(value)
         {
@@ -256,9 +260,10 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
 #[must_use]
 pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nchart_type={}\n",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\n",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
+        u8::from(preferences.indicator_price_lines_visible),
         preferences.chart_type.identifier()
     )
 }
@@ -438,25 +443,29 @@ mod tests {
         let defaults = parse_chart_chrome_preferences("");
         assert!(defaults.indicator_name_labels_visible);
         assert!(defaults.indicator_value_labels_visible);
+        assert!(defaults.indicator_price_lines_visible);
         assert_eq!(defaults.chart_type, ChartType::Candles);
         let legacy = parse_chart_chrome_preferences("indicator_labels=0\n");
         assert!(!legacy.indicator_name_labels_visible);
         assert!(!legacy.indicator_value_labels_visible);
+        assert!(legacy.indicator_price_lines_visible);
         assert_eq!(legacy.chart_type, ChartType::Candles);
         let mixed = parse_chart_chrome_preferences(
-            "indicator_labels=0\nindicator_name_labels=1\nindicator_value_labels=0\nchart_type=line\n",
+            "indicator_labels=0\nindicator_name_labels=1\nindicator_value_labels=0\nindicator_price_lines=0\nchart_type=line\n",
         );
         assert!(mixed.indicator_name_labels_visible);
         assert!(!mixed.indicator_value_labels_visible);
+        assert!(!mixed.indicator_price_lines_visible);
         assert_eq!(mixed.chart_type, ChartType::Line);
         let hidden = ChartChromePreferences {
             indicator_name_labels_visible: false,
             indicator_value_labels_visible: true,
+            indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nchart_type=bars\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\n"
         );
         let path = std::env::temp_dir().join(format!(
             "axiusflow-chart-chrome-{}-{}",

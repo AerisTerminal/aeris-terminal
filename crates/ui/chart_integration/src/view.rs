@@ -220,6 +220,7 @@ impl PriceAxisMenuState {
     pub const INVERT_SCALE: u16 = 128;
     pub const BID_ASK: u16 = 256;
     pub const ALIGN_LABELS: u16 = 512;
+    pub const INDICATOR_PRICE_LINES: u16 = 1024;
 
     #[must_use]
     pub const fn enabled(self, flag: u16) -> bool {
@@ -236,6 +237,7 @@ pub enum PriceAxisMenuAction {
     ToggleCountdown,
     ToggleIndicatorNameLabels,
     ToggleIndicatorValueLabels,
+    ToggleIndicatorPriceLines,
     ToggleBidAsk,
     ToggleAlignLabels,
     ToggleAutoScale,
@@ -405,6 +407,7 @@ pub struct NucleusChartView {
     chart_type: ChartType,
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
+    indicator_price_lines: IndicatorLabels,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -458,6 +461,7 @@ impl NucleusChartView {
             chart_type: ChartType::Candles,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
+            indicator_price_lines: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -531,6 +535,7 @@ impl NucleusChartView {
             chart_type: ChartType::Candles,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
+            indicator_price_lines: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -593,11 +598,11 @@ impl NucleusChartView {
     #[must_use]
     pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
         let target = price_axis_target(left);
-        let (_, price_line, last_value, title, countdown, bid_ask) =
+        let (_, _, last_value, title, countdown, bid_ask) =
             self.primary_series_on_scale(pane, target)?;
         let options = self.engine.price_scale_options_json(pane, target)?;
         let mut flags = 0;
-        if price_line {
+        if self.product_price_line_visible() {
             flags |= PriceAxisMenuState::PRICE_LINE;
         }
         if last_value {
@@ -614,6 +619,9 @@ impl NucleusChartView {
         }
         if self.indicator_value_labels.visible() {
             flags |= PriceAxisMenuState::INDICATOR_VALUES;
+        }
+        if self.indicator_price_lines.visible() {
+            flags |= PriceAxisMenuState::INDICATOR_PRICE_LINES;
         }
         if self.engine.price_scale_auto_scale_for(pane, target)? {
             flags |= PriceAxisMenuState::AUTO_SCALE;
@@ -648,7 +656,7 @@ impl NucleusChartView {
         };
         let applied = match action {
             PriceAxisMenuAction::TogglePriceLine => {
-                self.toggle_series_flag(primary_id, "price_line_visible")
+                self.toggle_series_flag(0, "price_line_visible")
             }
             PriceAxisMenuAction::ToggleLastValue => {
                 self.toggle_series_flag(primary_id, "last_value_visible")
@@ -661,6 +669,7 @@ impl NucleusChartView {
             }
             PriceAxisMenuAction::ToggleIndicatorNameLabels => self.toggle_indicator_name_labels(),
             PriceAxisMenuAction::ToggleIndicatorValueLabels => self.toggle_indicator_value_labels(),
+            PriceAxisMenuAction::ToggleIndicatorPriceLines => self.toggle_indicator_price_lines(),
             PriceAxisMenuAction::ToggleBidAsk => {
                 self.toggle_series_flag(primary_id, "bid_ask_visible")
             }
@@ -776,7 +785,7 @@ impl NucleusChartView {
             }
             return Err(ChartIndicatorError::CreationRejected(indicator));
         }
-        self.apply_indicator_label_options();
+        self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
         Ok(ids)
     }
@@ -1232,10 +1241,20 @@ impl NucleusChartView {
             .collect()
     }
 
-    fn apply_indicator_label_options(&mut self) {
+    fn product_price_line_visible(&self) -> bool {
+        self.engine
+            .series_entries()
+            .iter()
+            .any(|series| series.id == 0 && !series.removed && series.price_line_visible)
+    }
+
+    fn apply_indicator_chrome_options(&mut self) {
         let names = self.indicator_name_labels.visible();
         let values = self.indicator_value_labels.visible();
-        let json = format!(r#"{{"last_value_visible":{values},"title_visible":{names}}}"#);
+        let price_lines = self.indicator_price_lines.visible();
+        let json = format!(
+            r#"{{"last_value_visible":{values},"title_visible":{names},"price_line_visible":{price_lines}}}"#
+        );
         for id in self.indicator_series_ids() {
             let _ = self.engine.series_apply_options_json(id, &json);
         }
@@ -1271,26 +1290,49 @@ impl NucleusChartView {
         self.indicator_value_labels.visible()
     }
 
-    /// Applies indicator name and value label preferences to current and later indicators.
-    pub fn apply_indicator_label_preferences(&mut self, names: bool, values: bool) {
+    /// Host-owned last-value line chrome for every native indicator plot on this chart.
+    #[must_use]
+    pub const fn indicator_price_lines_visible(&self) -> bool {
+        self.indicator_price_lines.visible()
+    }
+
+    /// Applies indicator name, value, and price-line preferences to current and later indicators.
+    pub fn apply_indicator_chrome_preferences(
+        &mut self,
+        names: bool,
+        values: bool,
+        price_lines: bool,
+    ) {
         self.indicator_name_labels = IndicatorLabels::from_visible(names);
         self.indicator_value_labels = IndicatorLabels::from_visible(values);
-        self.apply_indicator_label_options();
+        self.indicator_price_lines = IndicatorLabels::from_visible(price_lines);
+        self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
     }
 
     fn toggle_indicator_name_labels(&mut self) -> bool {
-        self.apply_indicator_label_preferences(
+        self.apply_indicator_chrome_preferences(
             !self.indicator_name_labels.visible(),
             self.indicator_value_labels.visible(),
+            self.indicator_price_lines.visible(),
         );
         true
     }
 
     fn toggle_indicator_value_labels(&mut self) -> bool {
-        self.apply_indicator_label_preferences(
+        self.apply_indicator_chrome_preferences(
             self.indicator_name_labels.visible(),
             !self.indicator_value_labels.visible(),
+            self.indicator_price_lines.visible(),
+        );
+        true
+    }
+
+    fn toggle_indicator_price_lines(&mut self) -> bool {
+        self.apply_indicator_chrome_preferences(
+            self.indicator_name_labels.visible(),
+            self.indicator_value_labels.visible(),
+            !self.indicator_price_lines.visible(),
         );
         true
     }
@@ -2428,6 +2470,7 @@ mod tests {
         assert_eq!(state.precision, None);
         assert!(state.enabled(PriceAxisMenuState::INDICATOR_NAMES));
         assert!(state.enabled(PriceAxisMenuState::INDICATOR_VALUES));
+        assert!(state.enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES));
         assert!(state.enabled(PriceAxisMenuState::ALIGN_LABELS));
         assert!(!state.enabled(PriceAxisMenuState::BID_ASK));
 
@@ -2513,6 +2556,10 @@ mod tests {
             let series = series_entry(&chart, id);
             assert!(!series.last_value_visible, "labels stayed on {id}");
             assert!(!series.title_visible, "title stayed on {id}");
+            assert!(
+                series.price_line_visible,
+                "price line followed labels on {id}"
+            );
         }
 
         assert!(chart.apply_price_axis_menu_action(
@@ -2534,6 +2581,96 @@ mod tests {
             let series = series_entry(&chart, id);
             assert!(series.last_value_visible);
             assert!(series.title_visible);
+        }
+    }
+
+    #[test]
+    fn indicator_price_line_preference_applies_to_every_plot() {
+        let mut chart = interactive_chart();
+        let ema_fast = chart
+            .add_indicator(ChartIndicator::Ema)
+            .expect("ema is available");
+        let ema_slow = chart
+            .add_indicator(ChartIndicator::Ema)
+            .expect("second ema is available");
+        let macd = chart
+            .add_indicator(ChartIndicator::Macd)
+            .expect("macd is available");
+        assert_eq!(ema_fast.len(), 1);
+        assert_eq!(ema_slow.len(), 1);
+        assert_eq!(macd.len(), 3);
+        let macd_pane = series_entry(&chart, macd[0]).pane_index;
+        assert_ne!(macd_pane, 0);
+        let indicator_ids: Vec<u32> = ema_fast
+            .iter()
+            .chain(ema_slow.iter())
+            .chain(macd.iter())
+            .copied()
+            .collect();
+        for id in &indicator_ids {
+            assert!(
+                series_entry(&chart, *id).price_line_visible,
+                "price line missing on {id}"
+            );
+        }
+
+        assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::TogglePriceLine));
+        assert!(!series_entry(&chart, 0).price_line_visible);
+        for id in &indicator_ids {
+            assert!(
+                series_entry(&chart, *id).price_line_visible,
+                "overlay or oscillator plot {id} followed the symbol price line"
+            );
+        }
+
+        assert!(chart.apply_price_axis_menu_action(
+            macd_pane,
+            false,
+            PriceAxisMenuAction::TogglePriceLine
+        ));
+        assert!(series_entry(&chart, 0).price_line_visible);
+        for id in &macd {
+            assert!(
+                series_entry(&chart, *id).price_line_visible,
+                "macd plot {id} followed the symbol price line"
+            );
+        }
+
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorPriceLines
+        ));
+        assert!(!chart.indicator_price_lines_visible());
+        assert!(
+            !chart
+                .price_axis_menu_state(0, false)
+                .unwrap()
+                .enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES)
+        );
+        assert!(series_entry(&chart, 0).price_line_visible);
+        for id in &indicator_ids {
+            assert!(
+                !series_entry(&chart, *id).price_line_visible,
+                "indicator plot {id} kept its price line"
+            );
+        }
+
+        let sma = chart
+            .add_indicator(ChartIndicator::Sma)
+            .expect("sma is available");
+        assert!(!series_entry(&chart, sma[0]).price_line_visible);
+
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorPriceLines
+        ));
+        for id in indicator_ids.iter().chain(sma.iter()).copied() {
+            assert!(
+                series_entry(&chart, id).price_line_visible,
+                "indicator plot {id} stayed hidden"
+            );
         }
     }
 
