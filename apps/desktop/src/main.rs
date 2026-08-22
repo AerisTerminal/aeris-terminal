@@ -145,6 +145,7 @@ const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 const PRICE_AXIS_MENU_HEADER_HEIGHT: f32 = 22.0;
+const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
@@ -2888,44 +2889,64 @@ fn chrome_overlay_layer(
                 });
                 cx.stop_propagation();
             })
-            .child(
-                div()
-                    .id("chrome_overlay_panel")
-                    .relative()
-                    .flex_none()
-                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                    .border_1()
-                    .border_color(gpui_color(theme.colors.border))
-                    .bg(gpui_color(theme.colors.surface))
-                    .overflow_hidden()
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(panel)
-                    .children(closing.then(|| {
-                        div()
-                            .id("chrome_overlay_closing_blocker")
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .bottom_0()
-                            .left_0()
-                            .occlude()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    }))
-                    .with_animation(
-                        ("chrome_overlay_transition", generation),
-                        Animation::new(CHROME_OVERLAY_TRANSITION_DURATION)
-                            .with_easing(ease_out_quint()),
-                        move |panel, delta| {
-                            let progress = chrome_overlay_progress(phase, delta);
-                            panel
-                                .opacity(progress)
-                                .mt(px(-CHROME_OVERLAY_TRANSITION_OFFSET * (1.0 - progress)))
-                        },
-                    ),
-            )
+            .child(chrome_overlay_panel(
+                panel, theme, timeframe, closing, generation, phase,
+            ))
             .into_any_element(),
     )
+}
+
+fn chrome_overlay_panel(
+    content: AnyElement,
+    theme: &AxiusflowTheme,
+    timeframe: bool,
+    closing: bool,
+    generation: u64,
+    phase: ChromeOverlayPhase,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    div()
+        .id("chrome_overlay_panel")
+        .relative()
+        .flex_none()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(if timeframe {
+            colors.border_secondary
+        } else {
+            colors.border
+        }))
+        .bg(gpui_color(if timeframe {
+            colors.surface_secondary
+        } else {
+            colors.surface
+        }))
+        .when(timeframe, |panel| panel.max_h_full().overflow_y_scroll())
+        .when(!timeframe, gpui::Styled::overflow_hidden)
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(content)
+        .children(closing.then(|| {
+            div()
+                .id("chrome_overlay_closing_blocker")
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        }))
+        .with_animation(
+            ("chrome_overlay_transition", generation),
+            Animation::new(CHROME_OVERLAY_TRANSITION_DURATION).with_easing(ease_out_quint()),
+            move |panel, delta| {
+                let progress = chrome_overlay_progress(phase, delta);
+                panel
+                    .opacity(progress)
+                    .mt(px(-CHROME_OVERLAY_TRANSITION_OFFSET * (1.0 - progress)))
+            },
+        )
 }
 
 fn timeframe_overlay_left(trigger_bounds: Option<Bounds<Pixels>>) -> Pixels {
@@ -2941,59 +2962,101 @@ fn timeframe_overlay_content(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    div()
-        .w(px(192.0))
+    let mut panel = div()
+        .w(px(TIMEFRAME_MENU_WIDTH))
         .flex()
         .flex_col()
-        .p_2()
-        .gap_1()
-        .text_color(gpui_color(colors.text_secondary))
-        .children(
-            intervals
-                .iter()
-                .copied()
-                .enumerate()
-                .map(move |(index, interval)| {
-                    let row_app = app.clone();
-                    div()
-                        .id(("timeframe_overlay_row", index))
-                        .h(px(40.0))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_3()
-                        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                        .text_sm()
-                        .when(selected == interval, |row| {
-                            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                                .text_color(gpui_color(colors.text_primary))
-                        })
-                        .when(keyboard_selection == index, |row| {
-                            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                                .text_color(gpui_color(colors.text_primary))
-                        })
-                        .when(!pending, |row| {
-                            row.cursor_pointer()
-                                .hover(|row| {
-                                    row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                                        .text_color(gpui_color(colors.text_primary))
-                                })
-                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                    row_app.update(cx, |app, app_cx| {
-                                        if app.select_interval(interval, app_cx) {
-                                            app.close_chrome_overlay(window, app_cx);
-                                        }
-                                    });
-                                    cx.stop_propagation();
-                                })
-                        })
-                        .child(interval.label())
-                        .children(
-                            (selected == interval)
-                                .then(|| header_icon(HugeIcon::CheckmarkCircleIcon01)),
-                        )
-                }),
-        )
+        .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
+        .text_color(gpui_color(colors.text_primary));
+    let mut last_group = None;
+    for (index, interval) in intervals.iter().copied().enumerate() {
+        let group = timeframe_interval_group(interval);
+        if last_group != Some(group) {
+            if last_group.is_some() {
+                panel = panel.child(menu_section_divider(&colors));
+            }
+            panel = panel.child(menu_section_header(group, &colors));
+            last_group = Some(group);
+        }
+        panel = panel.child(timeframe_overlay_row(
+            app,
+            interval,
+            index,
+            selected == interval,
+            keyboard_selection == index,
+            pending,
+            theme,
+        ));
+    }
+    panel
+}
+
+const fn timeframe_interval_group(interval: ChartInterval) -> &'static str {
+    match interval {
+        ChartInterval::Tick100 => "TICKS",
+        ChartInterval::Minute1
+        | ChartInterval::Minute3
+        | ChartInterval::Minute5
+        | ChartInterval::Minute15
+        | ChartInterval::Minute30 => "MINUTES",
+        ChartInterval::Hour1
+        | ChartInterval::Hour2
+        | ChartInterval::Hour4
+        | ChartInterval::Hour8
+        | ChartInterval::Hour12 => "HOURS",
+        ChartInterval::Day1 | ChartInterval::Day3 => "DAYS",
+        ChartInterval::Week1 | ChartInterval::Month1 => "CALENDAR",
+    }
+}
+
+fn timeframe_overlay_row(
+    app: &Entity<WorkspaceSurface>,
+    interval: ChartInterval,
+    index: usize,
+    selected: bool,
+    keyboard: bool,
+    pending: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let row_app = app.clone();
+    div()
+        .id(("timeframe_overlay_row", index))
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .px_3()
+        .text_sm()
+        .when(keyboard, |row| {
+            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+        })
+        .when(!pending, |row| {
+            row.cursor_pointer()
+                .hover(|row| {
+                    row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                        .text_color(gpui_color(colors.text_primary))
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    row_app.update(cx, |app, app_cx| {
+                        if app.select_interval(interval, app_cx) {
+                            app.close_chrome_overlay(window, app_cx);
+                        }
+                    });
+                    cx.stop_propagation();
+                })
+        })
+        .when(pending, |row| {
+            row.text_color(gpui_color(colors.text_muted))
+                .cursor_not_allowed()
+        })
+        .child(div().flex_1().child(interval.label()))
+        .when(selected, |row| {
+            row.child(
+                header_icon(HugeIcon::CheckmarkCircleIcon01)
+                    .with_size(px(16.0))
+                    .color(gpui_color(colors.icon)),
+            )
+        })
 }
 
 struct MarketWorkspaceState<'a> {
@@ -4236,7 +4299,7 @@ fn price_axis_menu_panel(
         if index > 0 {
             panel = panel.child(menu_section_divider(&colors));
         }
-        panel = panel.child(price_axis_menu_header(header, &colors));
+        panel = panel.child(menu_section_header(header, &colors));
         for row in rows {
             panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
         }
@@ -4244,10 +4307,7 @@ fn price_axis_menu_panel(
     panel
 }
 
-fn price_axis_menu_header(
-    label: &'static str,
-    colors: &axiusflow_design_system::ThemeColors,
-) -> Div {
+fn menu_section_header(label: &'static str, colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .h(px(PRICE_AXIS_MENU_HEADER_HEIGHT))
         .px_3()
@@ -8373,10 +8433,10 @@ mod tests {
         publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
         reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
         series_selector_label, should_finish_chrome_overlay_close, split_lifetime_mode,
-        symbol_input_action, symbol_submit_decision, timeframe_overlay_left,
-        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        symbol_input_action, symbol_submit_decision, timeframe_interval_group,
+        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
+        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -8489,6 +8549,33 @@ mod tests {
         let trigger = Bounds::new(point(px(214.0), px(52.0)), size(px(64.0), px(32.0)));
         assert_eq!(timeframe_overlay_left(Some(trigger)), px(214.0));
         assert_eq!(timeframe_overlay_left(None), px(0.0));
+    }
+
+    #[test]
+    fn timeframe_menu_groups_every_catalog_interval() {
+        let groups: Vec<&'static str> = ChartInterval::ALL
+            .into_iter()
+            .map(timeframe_interval_group)
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                "TICKS", "MINUTES", "MINUTES", "MINUTES", "MINUTES", "MINUTES", "HOURS", "HOURS",
+                "HOURS", "HOURS", "HOURS", "DAYS", "DAYS", "CALENDAR", "CALENDAR",
+            ]
+        );
+        let coinbase_groups: Vec<&'static str> = COINBASE_INTERVALS
+            .iter()
+            .copied()
+            .map(timeframe_interval_group)
+            .collect();
+        assert_eq!(
+            coinbase_groups,
+            [
+                "MINUTES", "MINUTES", "MINUTES", "MINUTES", "MINUTES", "HOURS", "HOURS", "HOURS",
+                "HOURS", "HOURS", "DAYS", "CALENDAR", "CALENDAR",
+            ]
+        );
     }
 
     #[test]
