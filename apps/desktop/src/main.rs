@@ -19,8 +19,9 @@ use assets::UiIcon as HugeIcon;
 #[cfg(feature = "diagnostics")]
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
-    ChartBridgeMetrics, ChartDrawingTool, ChartIndicator, ChartSplitDirection,
-    ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView, NucleusWorkspace,
+    ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator,
+    ChartSplitDirection, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView,
+    NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
@@ -143,6 +144,7 @@ const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+const PRICE_AXIS_MENU_HEADER_HEIGHT: f32 = 22.0;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
@@ -759,7 +761,7 @@ struct WorkspaceSurface {
     coinbase_pending_sequence: Option<u64>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
-    pending_chart_context_menu: Option<gpui::Point<Pixels>>,
+    pending_chart_context_menu: Option<ChartContextRequest>,
     resource_class: ConsumerResourceClass,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
@@ -910,8 +912,8 @@ impl RithmicReconnectState {
 fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
-            if let Some(position) = chart.update(cx, |chart, _| chart.take_context_menu_request()) {
-                app.pending_chart_context_menu = Some(position);
+            if let Some(request) = chart.update(cx, |chart, _| chart.take_context_menu_request()) {
+                app.pending_chart_context_menu = Some(request);
                 cx.notify();
             }
             if app.provider == TerminalProvider::Coinbase
@@ -3976,6 +3978,24 @@ fn clamp_chart_context_menu_origin(
     clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 7.0, 4.0)
 }
 
+fn clamp_price_axis_menu_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let width = px(CHART_CONTEXT_MENU_WIDTH);
+    let height = viewport.height * 0.9;
+    point(
+        origin
+            .x
+            .max(px(0.0))
+            .min((viewport.width - width).max(px(0.0))),
+        origin
+            .y
+            .max(px(0.0))
+            .min((viewport.height - height).max(px(0.0))),
+    )
+}
+
 fn menu_section_divider(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .h(px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT))
@@ -4168,6 +4188,254 @@ fn chart_context_menu_item(
         })
         .child(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .child(label)
+}
+
+fn price_axis_menu_layer(
+    terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
+    state: PriceAxisMenuState,
+    viewport: gpui::Size<Pixels>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    let origin = clamp_price_axis_menu_origin(menu.position, viewport);
+    let dismiss = terminal.clone();
+    div()
+        .id("price_axis_menu_scrim")
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .occlude()
+        .on_any_mouse_down(move |_, _, cx| {
+            dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_context_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(price_axis_menu_panel(
+            terminal, menu, state, origin, viewport, theme,
+        ))
+        .into_any_element()
+}
+
+fn price_axis_menu_panel(
+    terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
+    state: PriceAxisMenuState,
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let mut panel =
+        secondary_menu_panel("price_axis_menu", origin, CHART_CONTEXT_MENU_WIDTH, theme)
+            .max_h(viewport.height * 0.9)
+            .overflow_y_scroll();
+    for (index, (header, rows)) in price_axis_menu_sections(state).into_iter().enumerate() {
+        if index > 0 {
+            panel = panel.child(menu_section_divider(&colors));
+        }
+        panel = panel.child(price_axis_menu_header(header, &colors));
+        for row in rows {
+            panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
+        }
+    }
+    panel
+}
+
+fn price_axis_menu_header(
+    label: &'static str,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> Div {
+    div()
+        .h(px(PRICE_AXIS_MENU_HEADER_HEIGHT))
+        .px_3()
+        .flex()
+        .items_end()
+        .pb_1()
+        .text_xs()
+        .text_color(gpui_color(colors.text_secondary))
+        .child(label)
+}
+
+fn price_axis_menu_sections(
+    state: PriceAxisMenuState,
+) -> [(&'static str, Vec<PriceAxisMenuRow>); 5] {
+    [
+        (
+            "LABELS",
+            vec![
+                PriceAxisMenuRow::toggle(
+                    "Price line",
+                    state.enabled(PriceAxisMenuState::PRICE_LINE),
+                    PriceAxisMenuAction::TogglePriceLine,
+                ),
+                PriceAxisMenuRow::toggle(
+                    "Last value",
+                    state.enabled(PriceAxisMenuState::LAST_VALUE),
+                    PriceAxisMenuAction::ToggleLastValue,
+                ),
+                PriceAxisMenuRow::toggle(
+                    "Symbol title",
+                    state.enabled(PriceAxisMenuState::TITLE),
+                    PriceAxisMenuAction::ToggleTitle,
+                ),
+                PriceAxisMenuRow::toggle(
+                    "Countdown",
+                    state.enabled(PriceAxisMenuState::COUNTDOWN),
+                    PriceAxisMenuAction::ToggleCountdown,
+                ),
+                PriceAxisMenuRow::toggle(
+                    "Indicator labels",
+                    state.enabled(PriceAxisMenuState::INDICATOR_LABELS),
+                    PriceAxisMenuAction::ToggleIndicatorLabels,
+                ),
+            ],
+        ),
+        (
+            "SCALE",
+            vec![
+                PriceAxisMenuRow::toggle(
+                    "Auto scale",
+                    state.enabled(PriceAxisMenuState::AUTO_SCALE),
+                    PriceAxisMenuAction::ToggleAutoScale,
+                ),
+                PriceAxisMenuRow::toggle(
+                    "Invert scale",
+                    state.enabled(PriceAxisMenuState::INVERT_SCALE),
+                    PriceAxisMenuAction::ToggleInvertScale,
+                ),
+            ],
+        ),
+        (
+            "SCALE MODE",
+            vec![
+                PriceAxisMenuRow::choice(
+                    "Normal",
+                    state.mode == 0,
+                    PriceAxisMenuAction::SetMode(0),
+                ),
+                PriceAxisMenuRow::choice(
+                    "Logarithmic",
+                    state.mode == 1,
+                    PriceAxisMenuAction::SetMode(1),
+                ),
+                PriceAxisMenuRow::choice(
+                    "Percentage",
+                    state.mode == 2,
+                    PriceAxisMenuAction::SetMode(2),
+                ),
+                PriceAxisMenuRow::choice(
+                    "Indexed to 100",
+                    state.mode == 3,
+                    PriceAxisMenuAction::SetMode(3),
+                ),
+            ],
+        ),
+        (
+            "Y-AXIS",
+            vec![
+                PriceAxisMenuRow::choice("Right", !state.left, PriceAxisMenuAction::SetLeft(false)),
+                PriceAxisMenuRow::choice("Left", state.left, PriceAxisMenuAction::SetLeft(true)),
+            ],
+        ),
+        (
+            "PRECISION",
+            std::iter::once(PriceAxisMenuRow::choice(
+                "Auto",
+                state.precision.is_none(),
+                PriceAxisMenuAction::SetPrecision(None),
+            ))
+            .chain([0_u8, 1, 2, 3, 4, 5, 6, 8].into_iter().map(|digits| {
+                PriceAxisMenuRow::choice(
+                    price_axis_precision_label(digits),
+                    state.precision == Some(digits),
+                    PriceAxisMenuAction::SetPrecision(Some(digits)),
+                )
+            }))
+            .collect(),
+        ),
+    ]
+}
+
+const fn price_axis_precision_label(digits: u8) -> &'static str {
+    match digits {
+        0 => "0 decimals",
+        1 => "1 decimal",
+        2 => "2 decimals",
+        3 => "3 decimals",
+        4 => "4 decimals",
+        5 => "5 decimals",
+        6 => "6 decimals",
+        _ => "8 decimals",
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PriceAxisMenuRow {
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    action: PriceAxisMenuAction,
+}
+
+impl PriceAxisMenuRow {
+    const fn toggle(label: &'static str, checked: bool, action: PriceAxisMenuAction) -> Self {
+        Self {
+            id: label,
+            label,
+            checked,
+            action,
+        }
+    }
+
+    const fn choice(label: &'static str, checked: bool, action: PriceAxisMenuAction) -> Self {
+        Self::toggle(label, checked, action)
+    }
+}
+
+fn price_axis_menu_item(
+    terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
+    row: PriceAxisMenuRow,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let action_terminal = terminal.clone();
+    let PriceAxisMenuRow {
+        id,
+        label,
+        checked,
+        action,
+    } = row;
+    div()
+        .id(id)
+        .occlude()
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .px_3()
+        .text_sm()
+        .cursor_pointer()
+        .hover(|row| {
+            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                .text_color(gpui_color(colors.text_primary))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            action_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.apply_price_axis_menu(menu, action, terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(div().flex_1().child(label))
+        .when(checked, |row| {
+            row.child(
+                header_icon(HugeIcon::CheckmarkCircleIcon01)
+                    .with_size(px(16.0))
+                    .color(gpui_color(colors.icon)),
+            )
+        })
 }
 
 fn chart_settings_menu_layer(
@@ -5538,6 +5806,7 @@ struct ChartContextMenu {
     workspace_id: u64,
     pane_id: u64,
     position: gpui::Point<Pixels>,
+    kind: ChartContextKind,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5932,14 +6201,15 @@ impl TerminalApp {
         let mut requested = None;
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
-                let position = pane
+                let request = pane
                     .surface
                     .update(cx, |surface, _| surface.pending_chart_context_menu.take());
-                if let Some(position) = position {
+                if let Some(request) = request {
                     requested = Some(ChartContextMenu {
                         workspace_id: workspace.id,
                         pane_id: pane.id,
-                        position,
+                        position: request.position,
+                        kind: request.kind,
                     });
                 }
             }
@@ -6003,7 +6273,7 @@ impl TerminalApp {
     fn update_context_menu_pane(
         &self,
         menu: ChartContextMenu,
-        update: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+        update: impl FnOnce(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         cx: &mut Context<Self>,
     ) {
         if let Some(workspace) = self
@@ -6026,6 +6296,54 @@ impl TerminalApp {
                 let chart = chart.read(cx);
                 (chart.drawing_count() > 0, chart.has_indicators())
             })
+    }
+
+    fn context_menu_price_axis_state(
+        &self,
+        menu: ChartContextMenu,
+        pane: usize,
+        left: bool,
+        cx: &App,
+    ) -> Option<PriceAxisMenuState> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .and_then(|pane| pane.surface.read(cx).chart.as_ref())
+            .and_then(|chart| chart.read(cx).price_axis_menu_state(pane, left))
+    }
+
+    fn apply_price_axis_menu(
+        &mut self,
+        menu: ChartContextMenu,
+        action: PriceAxisMenuAction,
+        cx: &mut Context<Self>,
+    ) {
+        let ChartContextKind::PriceAxis { pane, left } = menu.kind else {
+            return;
+        };
+        self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        self.update_context_menu_pane(
+            menu,
+            |surface, surface_cx| {
+                if let Some(chart) = &surface.chart {
+                    chart.update(surface_cx, |chart, chart_cx| {
+                        chart.apply_price_axis_menu_action(pane, left, action);
+                        chart_cx.notify();
+                    });
+                }
+            },
+            cx,
+        );
+        if let PriceAxisMenuAction::SetLeft(next_left) = action
+            && let Some(open) = &mut self.chart_context_menu
+            && let ChartContextKind::PriceAxis {
+                left: open_left, ..
+            } = &mut open.kind
+        {
+            *open_left = next_left;
+        }
+        cx.notify();
     }
 
     fn resize_workspace_split(
@@ -7060,6 +7378,7 @@ fn workspace_pane_element(
                         workspace_id,
                         pane_id,
                         position: event.position,
+                        kind: ChartContextKind::Pane,
                     },
                     terminal_cx,
                 );
@@ -7142,6 +7461,22 @@ impl TerminalApp {
         cx: &App,
     ) -> (Option<AnyElement>, Option<AnyElement>) {
         let context_menu = self.chart_context_menu.map(|menu| {
+            if let ChartContextKind::PriceAxis { pane, left } = menu.kind {
+                let state = self
+                    .context_menu_price_axis_state(menu, pane, left, cx)
+                    .unwrap_or(PriceAxisMenuState {
+                        flags: PriceAxisMenuState::PRICE_LINE
+                            | PriceAxisMenuState::LAST_VALUE
+                            | PriceAxisMenuState::TITLE
+                            | PriceAxisMenuState::COUNTDOWN
+                            | PriceAxisMenuState::INDICATOR_LABELS
+                            | PriceAxisMenuState::AUTO_SCALE,
+                        mode: 0,
+                        left,
+                        precision: None,
+                    });
+                return price_axis_menu_layer(terminal, menu, state, viewport, &self.theme);
+            }
             let (has_drawings, has_indicators) = self.context_menu_chart_objects(menu, cx);
             let mut flags = 0;
             if chart_has_market_data {
@@ -8032,16 +8367,16 @@ mod tests {
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
         caption_pointer_owner, catalog_rejection_message, chart_status_detail,
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress, claim_once,
-        clamp_chart_context_menu_origin, connection_presentation, default_rithmic_contract_index,
-        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
-        instrument_selector_label, nucleus_chart_theme, publication_chart_state,
-        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
-        resized_side_panel_width, rithmic_ready_action, series_selector_label,
-        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
-        symbol_submit_decision, timeframe_overlay_left, window_move_gesture_transition,
-        workspace_drag_destination, workspace_drag_translation, workspace_label, workspace_series,
-        workspace_split_ratio, workspace_switch, workspace_title_bar_visible,
-        wrapped_workspace_index,
+        clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
+        default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
+        fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
+        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
+        reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
+        series_selector_label, should_finish_chrome_overlay_close, split_lifetime_mode,
+        symbol_input_action, symbol_submit_decision, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -8947,6 +9282,14 @@ mod tests {
             ),
             point(px(0.0), px(0.0))
         );
+    }
+
+    #[test]
+    fn price_axis_menu_stays_inside_the_window() {
+        let overflow =
+            clamp_price_axis_menu_origin(point(px(2000.0), px(2000.0)), size(px(800.0), px(600.0)));
+        assert!(overflow.x <= px(800.0));
+        assert!(overflow.y <= px(600.0));
     }
 
     #[test]

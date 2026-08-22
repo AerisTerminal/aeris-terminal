@@ -122,6 +122,83 @@ impl fmt::Display for ChartIndicatorError {
 
 impl std::error::Error for ChartIndicatorError {}
 
+/// Distinguishes a pane-canvas right-click from a price-axis right-click.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartContextKind {
+    Pane,
+    PriceAxis { pane: usize, left: bool },
+}
+
+/// A chart-surface right-click waiting for the shell to present a menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChartContextRequest {
+    pub position: Point<Pixels>,
+    pub kind: ChartContextKind,
+}
+
+/// Nucleus-owned price-axis chrome the Y-axis menu presents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PriceAxisMenuState {
+    pub flags: u16,
+    pub mode: u8,
+    pub left: bool,
+    pub precision: Option<u8>,
+}
+
+impl PriceAxisMenuState {
+    pub const PRICE_LINE: u16 = 1;
+    pub const LAST_VALUE: u16 = 2;
+    pub const TITLE: u16 = 4;
+    pub const COUNTDOWN: u16 = 8;
+    pub const INDICATOR_LABELS: u16 = 16;
+    pub const AUTO_SCALE: u16 = 32;
+    pub const INVERT_SCALE: u16 = 64;
+
+    #[must_use]
+    pub const fn enabled(self, flag: u16) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+/// A user command from the Y-axis menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PriceAxisMenuAction {
+    TogglePriceLine,
+    ToggleLastValue,
+    ToggleTitle,
+    ToggleCountdown,
+    ToggleIndicatorLabels,
+    ToggleAutoScale,
+    ToggleInvertScale,
+    SetMode(u8),
+    SetLeft(bool),
+    SetPrecision(Option<u8>),
+}
+
+const PRICE_AXIS_PRECISION_CHOICES: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 8];
+
+fn price_axis_target(left: bool) -> PriceScaleTarget {
+    if left {
+        PriceScaleTarget::Left
+    } else {
+        PriceScaleTarget::Right
+    }
+}
+
+fn price_format_min_move(precision: u8) -> f64 {
+    10_f64.powi(-i32::from(precision.min(18)))
+}
+
+fn json_u8(json: &str, key: &str) -> Option<u8> {
+    let needle = format!("\"{key}\":");
+    let rest = json.split_once(&needle)?.1.trim_start();
+    rest.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 /// A drawing tool exposed by the native chart surface.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ChartDrawingTool {
@@ -220,7 +297,9 @@ pub struct NucleusChartView {
     locked_drawings: HashSet<DrawingId>,
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
-    pending_context_menu: Option<Point<Pixels>>,
+    pending_context_menu: Option<ChartContextRequest>,
+    instrument_price_precision: u8,
+    price_precision_override: Option<u8>,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -269,6 +348,8 @@ impl NucleusChartView {
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
+            instrument_price_precision: 2,
+            price_precision_override: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -318,7 +399,7 @@ impl NucleusChartView {
         debug_assert!(volume_retention_applied);
         let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay).ok();
         debug_assert!(data_bridge.is_some());
-        Self {
+        let mut chart = Self {
             engine,
             renderer: GpuiChartRenderer::new(),
             data_bridge,
@@ -337,6 +418,8 @@ impl NucleusChartView {
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
+            instrument_price_precision: replay.instrument().precision.price_scale(),
+            price_precision_override: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -345,7 +428,9 @@ impl NucleusChartView {
             live_evidence_rebuilds: 0,
             #[cfg(feature = "diagnostics")]
             live_evidence_mouse_downs: 0,
-        }
+        };
+        chart.apply_selected_price_format();
+        chart
     }
 
     /// Replaces Nucleus's authoritative series data with one validated snapshot.
@@ -367,6 +452,8 @@ impl NucleusChartView {
         install_replay(&mut self.engine, self.volume_series, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
+        self.instrument_price_precision = replay.instrument().precision.price_scale();
+        self.apply_selected_price_format();
         self.invalidate_series_layout();
         self.fitted = false;
         #[cfg(feature = "diagnostics")]
@@ -386,8 +473,97 @@ impl NucleusChartView {
     }
 
     /// Takes a pending chart right-click request in window coordinates.
-    pub fn take_context_menu_request(&mut self) -> Option<Point<Pixels>> {
+    pub fn take_context_menu_request(&mut self) -> Option<ChartContextRequest> {
         self.pending_context_menu.take()
+    }
+
+    /// Reads Nucleus-owned Y-axis chrome for the hit-tested price scale.
+    #[must_use]
+    pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
+        let target = price_axis_target(left);
+        let (primary_id, price_line, last_value, title, countdown) =
+            self.primary_series_on_scale(pane, target)?;
+        let options = self.engine.price_scale_options_json(pane, target)?;
+        let mut flags = 0;
+        if price_line {
+            flags |= PriceAxisMenuState::PRICE_LINE;
+        }
+        if last_value {
+            flags |= PriceAxisMenuState::LAST_VALUE;
+        }
+        if title {
+            flags |= PriceAxisMenuState::TITLE;
+        }
+        if countdown {
+            flags |= PriceAxisMenuState::COUNTDOWN;
+        }
+        if self.indicator_labels_visible(pane, primary_id) {
+            flags |= PriceAxisMenuState::INDICATOR_LABELS;
+        }
+        if self.engine.price_scale_auto_scale_for(pane, target)? {
+            flags |= PriceAxisMenuState::AUTO_SCALE;
+        }
+        if self.engine.price_scale_inverted_for(pane, target)? {
+            flags |= PriceAxisMenuState::INVERT_SCALE;
+        }
+        Some(PriceAxisMenuState {
+            flags,
+            mode: json_u8(&options, "mode").unwrap_or(0),
+            left,
+            precision: self.price_precision_override,
+        })
+    }
+
+    /// Applies one Y-axis menu command through Nucleus's scale and series APIs.
+    pub fn apply_price_axis_menu_action(
+        &mut self,
+        pane: usize,
+        left: bool,
+        action: PriceAxisMenuAction,
+    ) -> bool {
+        let target = price_axis_target(left);
+        let Some(primary_id) = self.primary_series_id_on_scale(pane, target) else {
+            return false;
+        };
+        let applied = match action {
+            PriceAxisMenuAction::TogglePriceLine => {
+                self.toggle_series_flag(primary_id, "price_line_visible")
+            }
+            PriceAxisMenuAction::ToggleLastValue => {
+                self.toggle_series_flag(primary_id, "last_value_visible")
+            }
+            PriceAxisMenuAction::ToggleTitle => {
+                self.toggle_series_flag(primary_id, "title_visible")
+            }
+            PriceAxisMenuAction::ToggleCountdown => {
+                self.toggle_series_flag(primary_id, "countdown_visible")
+            }
+            PriceAxisMenuAction::ToggleIndicatorLabels => {
+                self.toggle_indicator_labels(pane, primary_id)
+            }
+            PriceAxisMenuAction::ToggleAutoScale => {
+                let enabled = self.engine.price_scale_auto_scale_for(pane, target) != Some(true);
+                self.engine
+                    .set_price_scale_auto_scale_for(pane, target, enabled);
+                true
+            }
+            PriceAxisMenuAction::ToggleInvertScale => {
+                let inverted = self.engine.price_scale_inverted_for(pane, target) != Some(true);
+                self.engine
+                    .set_price_scale_inverted_for(pane, target, inverted);
+                true
+            }
+            PriceAxisMenuAction::SetMode(mode) if mode <= 3 => self
+                .engine
+                .price_scale_apply_options_json(pane, target, &format!(r#"{{"mode":{mode}}}"#)),
+            PriceAxisMenuAction::SetMode(_) => false,
+            PriceAxisMenuAction::SetLeft(next_left) => self.move_price_axis(pane, left, next_left),
+            PriceAxisMenuAction::SetPrecision(precision) => self.set_price_precision(precision),
+        };
+        if applied {
+            self.invalidate_series_layout();
+        }
+        applied
     }
 
     /// Selects a Nucleus-owned theme without changing chart data or viewport.
@@ -774,6 +950,8 @@ impl NucleusChartView {
         install_replay(&mut self.engine, self.volume_series, replay);
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
+        self.instrument_price_precision = replay.instrument().precision.price_scale();
+        self.apply_selected_price_format();
         self.invalidate_series_layout();
         Ok(true)
     }
@@ -823,6 +1001,7 @@ impl NucleusChartView {
                 };
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
+                    self.instrument_price_precision = snapshot.instrument().precision.price_scale();
                 }
                 self.displayed_provenance.extend(update.accepted_deltas());
                 apply_merged_chart_data(
@@ -831,6 +1010,9 @@ impl NucleusChartView {
                     &mut self.price_divisor,
                     &update,
                 );
+                if mutation == SeriesMutation::Snapshot {
+                    self.apply_selected_price_format();
+                }
                 if mutation == SeriesMutation::TailReplace {
                     self.invalidate_series_frame();
                 } else {
@@ -862,6 +1044,160 @@ impl NucleusChartView {
             return;
         };
         self.engine.set_now_seconds(now.as_secs_f64());
+    }
+
+    fn apply_selected_price_format(&mut self) {
+        let precision = self
+            .price_precision_override
+            .unwrap_or(self.instrument_price_precision)
+            .min(18);
+        let min_move = price_format_min_move(precision);
+        let json = format!(r#"{{"type":"price","precision":{precision},"min_move":{min_move}}}"#);
+        let applied = self.engine.series_apply_price_format_json(0, &json);
+        debug_assert!(applied);
+    }
+
+    fn primary_series_id_on_scale(&self, pane: usize, target: PriceScaleTarget) -> Option<u32> {
+        self.primary_series_on_scale(pane, target)
+            .map(|(id, _, _, _, _)| id)
+    }
+
+    fn primary_series_on_scale(
+        &self,
+        pane: usize,
+        target: PriceScaleTarget,
+    ) -> Option<(u32, bool, bool, bool, bool)> {
+        let mut fallback = None;
+        for series in self.engine.series_entries() {
+            if series.removed || series.pane_index != pane || series.price_scale_target != target {
+                continue;
+            }
+            let chrome = (
+                series.id,
+                series.price_line_visible,
+                series.last_value_visible,
+                series.title_visible,
+                series.countdown_visible,
+            );
+            if series.id == 0 {
+                return Some(chrome);
+            }
+            if series.visible && fallback.is_none() {
+                fallback = Some(chrome);
+            }
+        }
+        fallback
+    }
+
+    fn indicator_labels_visible(&self, pane: usize, primary_id: u32) -> bool {
+        let mut any = false;
+        let mut all_shown = true;
+        for series in self.engine.series_entries() {
+            if series.removed
+                || !series.visible
+                || series.id == primary_id
+                || series.pane_index != pane
+            {
+                continue;
+            }
+            any = true;
+            if !series.last_value_visible || !series.title_visible {
+                all_shown = false;
+            }
+        }
+        !any || all_shown
+    }
+
+    fn toggle_series_flag(&mut self, id: u32, key: &str) -> bool {
+        let current = self.engine.series_entries().iter().find_map(|series| {
+            if series.id != id || series.removed {
+                return None;
+            }
+            match key {
+                "price_line_visible" => Some(series.price_line_visible),
+                "last_value_visible" => Some(series.last_value_visible),
+                "title_visible" => Some(series.title_visible),
+                "countdown_visible" => Some(series.countdown_visible),
+                _ => None,
+            }
+        });
+        let Some(current) = current else {
+            return false;
+        };
+        self.engine
+            .series_apply_options_json(id, &format!(r#"{{"{key}":{}}}"#, !current))
+    }
+
+    fn toggle_indicator_labels(&mut self, pane: usize, primary_id: u32) -> bool {
+        let show = !self.indicator_labels_visible(pane, primary_id);
+        let ids: Vec<u32> = self
+            .engine
+            .series_entries()
+            .iter()
+            .filter(|series| {
+                !series.removed
+                    && series.visible
+                    && series.id != primary_id
+                    && series.pane_index == pane
+            })
+            .map(|series| series.id)
+            .collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let json = format!(r#"{{"last_value_visible":{show},"title_visible":{show}}}"#);
+        ids.into_iter()
+            .all(|id| self.engine.series_apply_options_json(id, &json))
+    }
+
+    fn move_price_axis(&mut self, pane: usize, from_left: bool, to_left: bool) -> bool {
+        if from_left == to_left {
+            return true;
+        }
+        let from = price_axis_target(from_left);
+        let to = price_axis_target(to_left);
+        let ids: Vec<u32> = self
+            .engine
+            .series_entries()
+            .iter()
+            .filter(|series| {
+                !series.removed && series.pane_index == pane && series.price_scale_target == from
+            })
+            .map(|series| series.id)
+            .collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let options = self.engine.price_scale_options_json(pane, from);
+        for id in ids {
+            self.engine.set_series_price_scale(id, to);
+        }
+        if !self.engine.set_price_scale_visible_for(pane, to, true) {
+            return false;
+        }
+        if let Some(options) = options {
+            let _ = self
+                .engine
+                .price_scale_apply_options_json(pane, to, &options);
+        }
+        let still_used = self.engine.series_entries().iter().any(|series| {
+            !series.removed && series.pane_index == pane && series.price_scale_target == from
+        });
+        if !still_used {
+            let _ = self.engine.set_price_scale_visible_for(pane, from, false);
+        }
+        true
+    }
+
+    fn set_price_precision(&mut self, precision: Option<u8>) -> bool {
+        if let Some(digits) = precision
+            && !PRICE_AXIS_PRECISION_CHOICES.contains(&digits)
+        {
+            return false;
+        }
+        self.price_precision_override = precision;
+        self.apply_selected_price_format();
+        true
     }
 
     fn invalidate_series_layout(&mut self) {
@@ -1306,7 +1642,20 @@ impl NucleusChartView {
             window.focus(focus_handle, cx);
         }
         self.cancel_gesture();
-        self.pending_context_menu = Some(event.position);
+        let (pane_x, y) = self.local_position(event.position);
+        let kind = match self.price_axis_at(pane_x, y) {
+            Some((pane, PriceScaleTarget::Left)) => {
+                ChartContextKind::PriceAxis { pane, left: true }
+            }
+            Some((pane, PriceScaleTarget::Right)) => {
+                ChartContextKind::PriceAxis { pane, left: false }
+            }
+            _ => ChartContextKind::Pane,
+        };
+        self.pending_context_menu = Some(ChartContextRequest {
+            position: event.position,
+            kind,
+        });
         cx.stop_propagation();
         cx.notify();
     }
@@ -1845,6 +2194,62 @@ mod tests {
             texts.iter().any(|text| text == "00:50"),
             "countdown missing from last-value cluster: {texts:?}"
         );
+    }
+
+    #[test]
+    fn price_axis_menu_controls_nucleus_series_chrome_and_scale() {
+        let mut chart = interactive_chart();
+        let sma = chart
+            .add_indicator(ChartIndicator::Sma)
+            .expect("sma is available");
+        let state = chart
+            .price_axis_menu_state(0, false)
+            .expect("right price scale");
+        assert!(state.enabled(PriceAxisMenuState::PRICE_LINE));
+        assert!(state.enabled(PriceAxisMenuState::LAST_VALUE));
+        assert!(state.enabled(PriceAxisMenuState::TITLE));
+        assert!(state.enabled(PriceAxisMenuState::COUNTDOWN));
+        assert!(state.enabled(PriceAxisMenuState::AUTO_SCALE));
+        assert!(!state.enabled(PriceAxisMenuState::INVERT_SCALE));
+        assert!(!state.left);
+        assert_eq!(state.mode, 0);
+        assert_eq!(state.precision, None);
+        assert!(state.enabled(PriceAxisMenuState::INDICATOR_LABELS));
+
+        assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::ToggleTitle));
+        assert!(
+            !chart
+                .price_axis_menu_state(0, false)
+                .unwrap()
+                .enabled(PriceAxisMenuState::TITLE)
+        );
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorLabels
+        ));
+        assert!(!series_entry(&chart, sma[0]).title_visible);
+        assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::SetMode(1)));
+        assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::SetLeft(true)));
+        let moved = chart
+            .price_axis_menu_state(0, true)
+            .expect("left price scale");
+        assert!(moved.left);
+        assert_eq!(moved.mode, 1);
+        assert_eq!(
+            series_entry(&chart, 0).price_scale_target,
+            PriceScaleTarget::Left
+        );
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            true,
+            PriceAxisMenuAction::SetPrecision(Some(4))
+        ));
+        assert_eq!(
+            chart.price_axis_menu_state(0, true).unwrap().precision,
+            Some(4)
+        );
+        assert_eq!(series_entry(&chart, 0).price_format.precision, 4);
     }
 
     #[test]

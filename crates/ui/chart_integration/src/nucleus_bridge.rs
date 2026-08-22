@@ -143,9 +143,6 @@ fn apply_price_series_chrome(engine: &mut ChartEngine, title: &str) {
     if series.title != title {
         series.title = title.to_string();
     }
-    series.title_visible = true;
-    series.countdown_visible = true;
-    series.last_value_visible = true;
 }
 
 fn volume_row(volume: i64, time: f64) -> (f64, [f64; 4]) {

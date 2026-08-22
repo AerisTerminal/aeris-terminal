@@ -802,12 +802,12 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 68,200 because canvas-wide drawing/indicator removal, the
-        // drawing-rail collapse pin, and engine-owned price-axis unlock plus
-        // manual pane pan live in the client-owned chart surface.
+        // Raised from 68,400 because the Y-axis right-click menu forwards Nucleus
+        // last-value, autoscale, invert, scale-mode, left/right, and precision
+        // commands from the client-owned chart surface.
         assert!(
-            line_count <= 68_400,
-            "platform Rust source upper bound is {line_count} lines, above the 68,400-line soft review threshold"
+            line_count <= 69_100,
+            "platform Rust source upper bound is {line_count} lines, above the 69,100-line soft review threshold"
         );
     }
 

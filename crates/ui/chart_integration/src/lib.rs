@@ -14,6 +14,7 @@ pub use axiusflow_application::ReplayRecoveryCommand;
 pub use bridge::ChartBridgeMetrics;
 pub use nucleuscharts_engine::ChartTheme as NucleusChartTheme;
 pub use view::{
-    ChartDrawingTool, ChartIndicator, ChartIndicatorError, DrawingsLockSummary, NucleusChartView,
+    ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator, ChartIndicatorError,
+    DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};
