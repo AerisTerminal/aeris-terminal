@@ -764,6 +764,7 @@ struct WorkspaceSurface {
     last_persisted_viewport: Option<(i64, i64)>,
     pending_chart_context_menu: Option<ChartContextRequest>,
     resource_class: ConsumerResourceClass,
+    chart_chrome: chart_chrome::ChartChromePreferences,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
@@ -1293,6 +1294,7 @@ impl WorkspaceSurface {
         lifecycle: DesktopLifecycle,
         symbol_input: Option<Entity<InputState>>,
         indicator_input: Entity<InputState>,
+        chart_chrome: chart_chrome::ChartChromePreferences,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
         let restored_coinbase = match &startup {
@@ -1313,6 +1315,11 @@ impl WorkspaceSurface {
             provider,
             coinbase_product,
         } = terminal_startup_state(startup, cx);
+        if let Some(chart) = &chart {
+            chart.update(cx, |chart, _| {
+                chart.set_indicator_labels_visible(chart_chrome.indicator_labels_visible);
+            });
+        }
         let bridge_label = chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
@@ -1373,6 +1380,7 @@ impl WorkspaceSurface {
             last_persisted_viewport: None,
             pending_chart_context_menu: None,
             resource_class: ConsumerResourceClass::Foreground,
+            chart_chrome,
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
             #[cfg(feature = "diagnostics")]
@@ -1748,6 +1756,7 @@ impl WorkspaceSurface {
                 let chart_theme = nucleus_chart_theme(self.theme.mode);
                 let chart = cx
                     .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
+                self.apply_indicator_labels_to_chart(&chart, cx);
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
@@ -1917,6 +1926,9 @@ impl WorkspaceSurface {
     fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
         let chart_theme = nucleus_chart_theme(self.theme.mode);
         self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(chart_theme)));
+        if let Some(chart) = &self.chart {
+            self.apply_indicator_labels_to_chart(chart, cx);
+        }
         observe_chart(self.chart.as_ref(), cx);
     }
 
@@ -2215,6 +2227,26 @@ impl WorkspaceSurface {
         }
         self.theme = *theme;
         cx.notify();
+    }
+
+    fn set_indicator_labels_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.chart_chrome.indicator_labels_visible = visible;
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                chart.set_indicator_labels_visible(visible);
+                chart_cx.notify();
+            });
+        }
+    }
+
+    fn apply_indicator_labels_to_chart(
+        &self,
+        chart: &Entity<NucleusChartView>,
+        cx: &mut Context<Self>,
+    ) {
+        chart.update(cx, |chart, _| {
+            chart.set_indicator_labels_visible(self.chart_chrome.indicator_labels_visible);
+        });
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
@@ -2597,8 +2629,10 @@ impl WorkspaceSurface {
         let snapshot = bootstrap.snapshot;
         let visible_bar_count = snapshot.bars().len();
         let chart_theme = nucleus_chart_theme(self.theme.mode);
-        self.chart =
-            Some(cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme)));
+        let chart =
+            cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
+        self.apply_indicator_labels_to_chart(&chart, cx);
+        self.chart = Some(chart);
         observe_chart(self.chart.as_ref(), cx);
         self.worker_label = bootstrap.worker_label;
         self.subscription_id = bootstrap.subscription_id;
@@ -5775,6 +5809,7 @@ fn workspace_surface_entity(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
     lifecycle: &DesktopLifecycle,
+    chart_chrome: chart_chrome::ChartChromePreferences,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<WorkspaceSurface> {
@@ -5792,6 +5827,7 @@ fn workspace_surface_entity(
             workspace_lifecycle,
             symbol_input,
             indicator_input,
+            chart_chrome,
         )
     });
     lifecycle.register_terminal(&workspace);
@@ -5894,6 +5930,7 @@ struct TerminalApp {
     workspace_drag: Option<WorkspaceDragState>,
     chart_context_menu: Option<ChartContextMenu>,
     chart_settings_menu: Option<ChartContextMenu>,
+    chart_chrome: chart_chrome::ChartChromePreferences,
     window_move_pending: bool,
     closing: bool,
 }
@@ -6204,6 +6241,7 @@ impl TerminalApp {
             workspace_drag: None,
             chart_context_menu: None,
             chart_settings_menu: None,
+            chart_chrome: init.chart_chrome,
             window_move_pending: false,
             closing: false,
         }
@@ -6395,6 +6433,9 @@ impl TerminalApp {
             },
             cx,
         );
+        if action == PriceAxisMenuAction::ToggleIndicatorLabels {
+            self.broadcast_indicator_labels(menu, cx);
+        }
         if let PriceAxisMenuAction::SetLeft(next_left) = action
             && let Some(open) = &mut self.chart_context_menu
             && let ChartContextKind::PriceAxis {
@@ -6404,6 +6445,34 @@ impl TerminalApp {
             *open_left = next_left;
         }
         cx.notify();
+    }
+
+    fn broadcast_indicator_labels(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
+        let visible = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .and_then(|pane| pane.surface.read(cx).chart.clone())
+            .map_or(self.chart_chrome.indicator_labels_visible, |chart| {
+                chart.read(cx).indicator_labels_visible()
+            });
+        self.chart_chrome.indicator_labels_visible = visible;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.set_indicator_labels_visible(visible, surface_cx);
+                });
+            }
+        }
+        let preferences = self.chart_chrome;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = chart_chrome::save_chart_chrome_preferences(preferences) {
+                    eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                }
+            })
+            .detach();
     }
 
     fn resize_workspace_split(
@@ -6739,8 +6808,14 @@ impl TerminalApp {
         let workspace_id = pane.workspace_id;
         let pane_id = pane.pane_id;
         let consumer_id = pane.consumer_id;
-        let surface =
-            workspace_surface_entity(pane.startup, pane.worker, &self.lifecycle, window, cx);
+        let surface = workspace_surface_entity(
+            pane.startup,
+            pane.worker,
+            &self.lifecycle,
+            self.chart_chrome,
+            window,
+            cx,
+        );
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
             workspace.set_market_message_wake(self.market_frame_wake.callback());
@@ -6810,8 +6885,14 @@ impl TerminalApp {
                 return;
             }
         };
-        let surface =
-            workspace_surface_entity(pane.startup, pane.worker, &self.lifecycle, window, cx);
+        let surface = workspace_surface_entity(
+            pane.startup,
+            pane.worker,
+            &self.lifecycle,
+            self.chart_chrome,
+            window,
+            cx,
+        );
         surface.update(cx, |surface, surface_cx| {
             surface.apply_theme(&self.theme, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Foreground);
@@ -8031,10 +8112,18 @@ fn terminal_root(
     market_worker: MarketDataWorker,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     lifecycle: &DesktopLifecycle,
+    chart_chrome: chart_chrome::ChartChromePreferences,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<TerminalApp> {
-    let surface = workspace_surface_entity(bootstrap, market_worker, lifecycle, window, cx);
+    let surface = workspace_surface_entity(
+        bootstrap,
+        market_worker,
+        lifecycle,
+        chart_chrome,
+        window,
+        cx,
+    );
     terminal_shell_root(
         TerminalShellInit {
             workspaces: vec![WorkspaceTab {
@@ -8056,6 +8145,7 @@ fn terminal_root(
             layout_generation: 1,
             workspace_factory,
             workspace_shell: WorkspaceShellKind::Window,
+            chart_chrome,
         },
         lifecycle,
         window,
@@ -8070,6 +8160,7 @@ struct TerminalShellInit {
     layout_generation: u64,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     workspace_shell: WorkspaceShellKind,
+    chart_chrome: chart_chrome::ChartChromePreferences,
 }
 
 fn terminal_shell_root(
@@ -8101,6 +8192,7 @@ fn workspace_tabs_root(
     restored: &WorkspaceState,
     workspace_factory: engine_market_worker::WorkspaceMarketFactory,
     lifecycle: &DesktopLifecycle,
+    chart_chrome: chart_chrome::ChartChromePreferences,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<TerminalApp> {
@@ -8117,7 +8209,14 @@ fn workspace_tabs_root(
             panes.push(WorkspacePane {
                 id: pane.pane_id,
                 consumer_id: pane.consumer_id,
-                surface: workspace_surface_entity(pane.startup, pane.worker, lifecycle, window, cx),
+                surface: workspace_surface_entity(
+                    pane.startup,
+                    pane.worker,
+                    lifecycle,
+                    chart_chrome,
+                    window,
+                    cx,
+                ),
                 focus: cx.focus_handle(),
             });
         }
@@ -8159,6 +8258,7 @@ fn workspace_tabs_root(
             layout_generation: restored.layout_generation,
             workspace_factory: Some(workspace_factory),
             workspace_shell: WorkspaceShellKind::Tabs,
+            chart_chrome,
         },
         lifecycle,
         window,
@@ -8175,6 +8275,7 @@ struct ConfiguredDesktop {
     autostart_enabled: bool,
     markets_live_permitted: bool,
     layout: DesktopLayout,
+    chart_chrome: chart_chrome::ChartChromePreferences,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -8294,6 +8395,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         autostart_enabled: lifecycle.autostart_enabled,
         markets_live_permitted: lifecycle.markets_live_permitted,
         layout,
+        chart_chrome: chart_chrome::load_chart_chrome_preferences(),
     }))
 }
 
@@ -8326,6 +8428,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
     let restored_workspace = configured.restored_workspace;
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
+    let chart_chrome = configured.chart_chrome;
     application()
         .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
@@ -8384,6 +8487,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                                 market_worker,
                                 window_factory,
                                 &window_lifecycle,
+                                chart_chrome,
                                 window,
                                 cx,
                             )
@@ -8402,6 +8506,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                             &restored_workspace,
                             workspace_factory,
                             &window_lifecycle,
+                            chart_chrome,
                             window,
                             cx,
                         )

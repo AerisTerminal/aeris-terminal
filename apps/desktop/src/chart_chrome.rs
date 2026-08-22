@@ -1,4 +1,8 @@
 use axiusflow_design_system::RadiusToken;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;
 pub const CHART_CONTROL_SIZE: f32 = 32.0;
@@ -197,11 +201,124 @@ pub fn filter_indicator_specs(query: &str) -> Vec<&'static IndicatorSpec> {
         .collect()
 }
 
+/// Durable shell chrome that follows the user across charts and workspaces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChartChromePreferences {
+    pub indicator_labels_visible: bool,
+}
+
+impl Default for ChartChromePreferences {
+    fn default() -> Self {
+        Self {
+            indicator_labels_visible: true,
+        }
+    }
+}
+
+#[must_use]
+pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences {
+    let mut preferences = ChartChromePreferences::default();
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("indicator_labels=") {
+            preferences.indicator_labels_visible = value.trim() != "0";
+        }
+    }
+    preferences
+}
+
+#[must_use]
+pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
+    format!(
+        "indicator_labels={}\n",
+        u8::from(preferences.indicator_labels_visible)
+    )
+}
+
+#[must_use]
+pub fn chart_chrome_state_path() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+        return Some(
+            PathBuf::from(root)
+                .join("Axiusflow")
+                .join("desktop")
+                .join("chart-chrome"),
+        );
+    }
+    if let Some(root) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(
+            PathBuf::from(root)
+                .join("axiusflow")
+                .join("desktop")
+                .join("chart-chrome"),
+        );
+    }
+    std::env::var_os("HOME").map(|home| {
+        let home = PathBuf::from(home);
+        if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Application Support")
+                .join("Axiusflow")
+                .join("desktop")
+                .join("chart-chrome")
+        } else {
+            home.join(".local")
+                .join("share")
+                .join("axiusflow")
+                .join("desktop")
+                .join("chart-chrome")
+        }
+    })
+}
+
+#[must_use]
+pub fn load_chart_chrome_preferences() -> ChartChromePreferences {
+    chart_chrome_state_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .as_deref()
+        .map(parse_chart_chrome_preferences)
+        .unwrap_or_default()
+}
+
+/// # Errors
+///
+/// Returns an error when the per-user desktop directory cannot be created or replaced.
+pub fn save_chart_chrome_preferences(preferences: ChartChromePreferences) -> Result<(), String> {
+    let path = chart_chrome_state_path()
+        .ok_or_else(|| "desktop chart chrome directory is unavailable".to_string())?;
+    save_chart_chrome_preferences_to(&path, preferences)
+}
+
+/// # Errors
+///
+/// Returns an error when the target file cannot be created or replaced.
+pub fn save_chart_chrome_preferences_to(
+    path: &Path,
+    preferences: ChartChromePreferences,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|_| "desktop chart chrome directory could not be created".to_string())?;
+    }
+    let staging = path.with_extension("tmp");
+    fs::write(
+        &staging,
+        encode_chart_chrome_preferences(preferences).as_bytes(),
+    )
+    .map_err(|_| "desktop chart chrome could not be written".to_string())?;
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|_| "desktop chart chrome could not be replaced".to_string())?;
+    }
+    fs::rename(&staging, path)
+        .map_err(|_| "desktop chart chrome could not be published".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
-        filter_indicator_specs,
+        ChartChromePreferences, INDICATOR_SPECS, IndicatorKind, IndicatorLocation,
+        IndicatorParameters, encode_chart_chrome_preferences, filter_indicator_specs,
+        parse_chart_chrome_preferences, save_chart_chrome_preferences_to,
     };
 
     #[test]
@@ -284,5 +401,32 @@ mod tests {
             ]
         );
         assert_eq!(filter_indicator_specs("").len(), INDICATOR_SPECS.len());
+    }
+
+    #[test]
+    fn chart_chrome_preferences_round_trip_through_durable_file() {
+        assert!(parse_chart_chrome_preferences("").indicator_labels_visible);
+        assert!(!parse_chart_chrome_preferences("indicator_labels=0\n").indicator_labels_visible);
+        let hidden = ChartChromePreferences {
+            indicator_labels_visible: false,
+        };
+        assert_eq!(
+            encode_chart_chrome_preferences(hidden),
+            "indicator_labels=0\n"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "axiusflow-chart-chrome-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        save_chart_chrome_preferences_to(&path, hidden).expect("temp chrome file writes");
+        let restored = parse_chart_chrome_preferences(
+            &std::fs::read_to_string(&path).expect("temp chrome file reads"),
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("tmp"));
+        assert_eq!(restored, hidden);
     }
 }

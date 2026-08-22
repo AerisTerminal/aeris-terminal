@@ -802,12 +802,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 68,400 because the Y-axis right-click menu forwards Nucleus
-        // last-value, autoscale, invert, scale-mode, left/right, and precision
-        // commands from the client-owned chart surface.
+        // Raised from 69,100 because indicator-label visibility is now a host-owned
+        // preference applied to every indicator and persisted off GPUI.
         assert!(
-            line_count <= 69_100,
-            "platform Rust source upper bound is {line_count} lines, above the 69,100-line soft review threshold"
+            line_count <= 69_400,
+            "platform Rust source upper bound is {line_count} lines, above the 69,400-line soft review threshold"
         );
     }
 

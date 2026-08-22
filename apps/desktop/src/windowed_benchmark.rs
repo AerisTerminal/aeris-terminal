@@ -48,7 +48,7 @@ use std::{
 use crate::native_ui::input::{InputEvent, InputState};
 use crate::readiness_conformance::ProcessMemoryProbe;
 use crate::{
-    DesktopLifecycle, DesktopLifetimeMode, WorkspaceSurface, chart_pane_host,
+    DesktopLifecycle, DesktopLifetimeMode, WorkspaceSurface, chart_chrome, chart_pane_host,
     subscribe_symbol_input,
 };
 
@@ -1112,6 +1112,7 @@ fn benchmark_root(
                 .expect("benchmark lifecycle client starts"),
             Some(terminal_symbol_input),
             indicator_input,
+            chart_chrome::ChartChromePreferences::default(),
         )
     });
     terminal.update(cx, |terminal, terminal_cx| {

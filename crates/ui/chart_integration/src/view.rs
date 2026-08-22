@@ -177,6 +177,23 @@ pub enum PriceAxisMenuAction {
 
 const PRICE_AXIS_PRECISION_CHOICES: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 8];
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum IndicatorLabels {
+    #[default]
+    Shown,
+    Hidden,
+}
+
+impl IndicatorLabels {
+    const fn visible(self) -> bool {
+        matches!(self, Self::Shown)
+    }
+
+    const fn from_visible(visible: bool) -> Self {
+        if visible { Self::Shown } else { Self::Hidden }
+    }
+}
+
 fn price_axis_target(left: bool) -> PriceScaleTarget {
     if left {
         PriceScaleTarget::Left
@@ -300,6 +317,7 @@ pub struct NucleusChartView {
     pending_context_menu: Option<ChartContextRequest>,
     instrument_price_precision: u8,
     price_precision_override: Option<u8>,
+    indicator_labels: IndicatorLabels,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -350,6 +368,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             instrument_price_precision: 2,
             price_precision_override: None,
+            indicator_labels: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -420,6 +439,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             instrument_price_precision: replay.instrument().precision.price_scale(),
             price_precision_override: None,
+            indicator_labels: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -481,7 +501,7 @@ impl NucleusChartView {
     #[must_use]
     pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
         let target = price_axis_target(left);
-        let (primary_id, price_line, last_value, title, countdown) =
+        let (_, price_line, last_value, title, countdown) =
             self.primary_series_on_scale(pane, target)?;
         let options = self.engine.price_scale_options_json(pane, target)?;
         let mut flags = 0;
@@ -497,7 +517,7 @@ impl NucleusChartView {
         if countdown {
             flags |= PriceAxisMenuState::COUNTDOWN;
         }
-        if self.indicator_labels_visible(pane, primary_id) {
+        if self.indicator_labels.visible() {
             flags |= PriceAxisMenuState::INDICATOR_LABELS;
         }
         if self.engine.price_scale_auto_scale_for(pane, target)? {
@@ -538,9 +558,7 @@ impl NucleusChartView {
             PriceAxisMenuAction::ToggleCountdown => {
                 self.toggle_series_flag(primary_id, "countdown_visible")
             }
-            PriceAxisMenuAction::ToggleIndicatorLabels => {
-                self.toggle_indicator_labels(pane, primary_id)
-            }
+            PriceAxisMenuAction::ToggleIndicatorLabels => self.toggle_indicator_labels(),
             PriceAxisMenuAction::ToggleAutoScale => {
                 let enabled = self.engine.price_scale_auto_scale_for(pane, target) != Some(true);
                 self.engine
@@ -650,6 +668,7 @@ impl NucleusChartView {
             }
             return Err(ChartIndicatorError::CreationRejected(indicator));
         }
+        self.apply_indicator_label_options();
         self.invalidate_series_layout();
         Ok(ids)
     }
@@ -1089,23 +1108,43 @@ impl NucleusChartView {
         fallback
     }
 
-    fn indicator_labels_visible(&self, pane: usize, primary_id: u32) -> bool {
-        let mut any = false;
-        let mut all_shown = true;
-        for series in self.engine.series_entries() {
-            if series.removed
-                || !series.visible
-                || series.id == primary_id
-                || series.pane_index != pane
-            {
-                continue;
-            }
-            any = true;
-            if !series.last_value_visible || !series.title_visible {
-                all_shown = false;
-            }
+    fn indicator_series_ids(&self) -> Vec<u32> {
+        self.engine
+            .series_entries()
+            .iter()
+            .filter(|series| {
+                !series.removed
+                    && series.id != 0
+                    && (series.id != self.volume_series || series.visible)
+            })
+            .map(|series| series.id)
+            .collect()
+    }
+
+    fn apply_indicator_label_options(&mut self) {
+        let show = self.indicator_labels.visible();
+        let json = format!(r#"{{"last_value_visible":{show},"title_visible":{show}}}"#);
+        for id in self.indicator_series_ids() {
+            let _ = self.engine.series_apply_options_json(id, &json);
         }
-        !any || all_shown
+    }
+
+    /// Host-owned last-value/title chrome for every native indicator on this chart.
+    #[must_use]
+    pub const fn indicator_labels_visible(&self) -> bool {
+        self.indicator_labels.visible()
+    }
+
+    /// Applies the indicator-label preference to current and later indicators.
+    pub fn set_indicator_labels_visible(&mut self, visible: bool) {
+        self.indicator_labels = IndicatorLabels::from_visible(visible);
+        self.apply_indicator_label_options();
+        self.invalidate_series_layout();
+    }
+
+    fn toggle_indicator_labels(&mut self) -> bool {
+        self.set_indicator_labels_visible(!self.indicator_labels.visible());
+        true
     }
 
     fn toggle_series_flag(&mut self, id: u32, key: &str) -> bool {
@@ -1126,28 +1165,6 @@ impl NucleusChartView {
         };
         self.engine
             .series_apply_options_json(id, &format!(r#"{{"{key}":{}}}"#, !current))
-    }
-
-    fn toggle_indicator_labels(&mut self, pane: usize, primary_id: u32) -> bool {
-        let show = !self.indicator_labels_visible(pane, primary_id);
-        let ids: Vec<u32> = self
-            .engine
-            .series_entries()
-            .iter()
-            .filter(|series| {
-                !series.removed
-                    && series.visible
-                    && series.id != primary_id
-                    && series.pane_index == pane
-            })
-            .map(|series| series.id)
-            .collect();
-        if ids.is_empty() {
-            return false;
-        }
-        let json = format!(r#"{{"last_value_visible":{show},"title_visible":{show}}}"#);
-        ids.into_iter()
-            .all(|id| self.engine.series_apply_options_json(id, &json))
     }
 
     fn move_price_axis(&mut self, pane: usize, from_left: bool, to_left: bool) -> bool {
@@ -2250,6 +2267,47 @@ mod tests {
             Some(4)
         );
         assert_eq!(series_entry(&chart, 0).price_format.precision, 4);
+    }
+
+    #[test]
+    fn indicator_label_preference_applies_to_every_indicator_and_later_additions() {
+        let mut chart = interactive_chart();
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorLabels
+        ));
+        assert!(!chart.indicator_labels_visible());
+        assert!(
+            !chart
+                .price_axis_menu_state(0, false)
+                .unwrap()
+                .enabled(PriceAxisMenuState::INDICATOR_LABELS)
+        );
+
+        let sma = chart
+            .add_indicator(ChartIndicator::Sma)
+            .expect("sma is available");
+        let rsi = chart
+            .add_indicator(ChartIndicator::Rsi)
+            .expect("rsi is available");
+        assert_ne!(series_entry(&chart, rsi[0]).pane_index, 0);
+        for id in sma.iter().chain(rsi.iter()).copied() {
+            let series = series_entry(&chart, id);
+            assert!(!series.last_value_visible, "labels stayed on {id}");
+            assert!(!series.title_visible, "title stayed on {id}");
+        }
+
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorLabels
+        ));
+        for id in sma.iter().chain(rsi.iter()).copied() {
+            let series = series_entry(&chart, id);
+            assert!(series.last_value_visible);
+            assert!(series.title_visible);
+        }
     }
 
     #[test]
