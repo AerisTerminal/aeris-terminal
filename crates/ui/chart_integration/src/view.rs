@@ -150,9 +150,12 @@ impl PriceAxisMenuState {
     pub const LAST_VALUE: u16 = 2;
     pub const TITLE: u16 = 4;
     pub const COUNTDOWN: u16 = 8;
-    pub const INDICATOR_LABELS: u16 = 16;
-    pub const AUTO_SCALE: u16 = 32;
-    pub const INVERT_SCALE: u16 = 64;
+    pub const INDICATOR_NAMES: u16 = 16;
+    pub const INDICATOR_VALUES: u16 = 32;
+    pub const AUTO_SCALE: u16 = 64;
+    pub const INVERT_SCALE: u16 = 128;
+    pub const BID_ASK: u16 = 256;
+    pub const ALIGN_LABELS: u16 = 512;
 
     #[must_use]
     pub const fn enabled(self, flag: u16) -> bool {
@@ -167,7 +170,10 @@ pub enum PriceAxisMenuAction {
     ToggleLastValue,
     ToggleTitle,
     ToggleCountdown,
-    ToggleIndicatorLabels,
+    ToggleIndicatorNameLabels,
+    ToggleIndicatorValueLabels,
+    ToggleBidAsk,
+    ToggleAlignLabels,
     ToggleAutoScale,
     ToggleInvertScale,
     SetMode(u8),
@@ -206,14 +212,29 @@ fn price_format_min_move(precision: u8) -> f64 {
     10_f64.powi(-i32::from(precision.min(18)))
 }
 
-fn json_u8(json: &str, key: &str) -> Option<u8> {
+fn json_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("\"{key}\":");
-    let rest = json.split_once(&needle)?.1.trim_start();
-    rest.chars()
+    Some(json.split_once(&needle)?.1.trim_start())
+}
+
+fn json_u8(json: &str, key: &str) -> Option<u8> {
+    json_value(json, key)?
+        .chars()
         .take_while(char::is_ascii_digit)
         .collect::<String>()
         .parse()
         .ok()
+}
+
+fn json_bool(json: &str, key: &str) -> Option<bool> {
+    let rest = json_value(json, key)?;
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// A drawing tool exposed by the native chart surface.
@@ -317,7 +338,8 @@ pub struct NucleusChartView {
     pending_context_menu: Option<ChartContextRequest>,
     instrument_price_precision: u8,
     price_precision_override: Option<u8>,
-    indicator_labels: IndicatorLabels,
+    indicator_name_labels: IndicatorLabels,
+    indicator_value_labels: IndicatorLabels,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -368,7 +390,8 @@ impl NucleusChartView {
             pending_context_menu: None,
             instrument_price_precision: 2,
             price_precision_override: None,
-            indicator_labels: IndicatorLabels::Shown,
+            indicator_name_labels: IndicatorLabels::Shown,
+            indicator_value_labels: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -439,7 +462,8 @@ impl NucleusChartView {
             pending_context_menu: None,
             instrument_price_precision: replay.instrument().precision.price_scale(),
             price_precision_override: None,
-            indicator_labels: IndicatorLabels::Shown,
+            indicator_name_labels: IndicatorLabels::Shown,
+            indicator_value_labels: IndicatorLabels::Shown,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -501,7 +525,7 @@ impl NucleusChartView {
     #[must_use]
     pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
         let target = price_axis_target(left);
-        let (_, price_line, last_value, title, countdown) =
+        let (_, price_line, last_value, title, countdown, bid_ask) =
             self.primary_series_on_scale(pane, target)?;
         let options = self.engine.price_scale_options_json(pane, target)?;
         let mut flags = 0;
@@ -517,14 +541,23 @@ impl NucleusChartView {
         if countdown {
             flags |= PriceAxisMenuState::COUNTDOWN;
         }
-        if self.indicator_labels.visible() {
-            flags |= PriceAxisMenuState::INDICATOR_LABELS;
+        if self.indicator_name_labels.visible() {
+            flags |= PriceAxisMenuState::INDICATOR_NAMES;
+        }
+        if self.indicator_value_labels.visible() {
+            flags |= PriceAxisMenuState::INDICATOR_VALUES;
         }
         if self.engine.price_scale_auto_scale_for(pane, target)? {
             flags |= PriceAxisMenuState::AUTO_SCALE;
         }
         if self.engine.price_scale_inverted_for(pane, target)? {
             flags |= PriceAxisMenuState::INVERT_SCALE;
+        }
+        if bid_ask {
+            flags |= PriceAxisMenuState::BID_ASK;
+        }
+        if json_bool(&options, "align_labels").unwrap_or(true) {
+            flags |= PriceAxisMenuState::ALIGN_LABELS;
         }
         Some(PriceAxisMenuState {
             flags,
@@ -558,7 +591,14 @@ impl NucleusChartView {
             PriceAxisMenuAction::ToggleCountdown => {
                 self.toggle_series_flag(primary_id, "countdown_visible")
             }
-            PriceAxisMenuAction::ToggleIndicatorLabels => self.toggle_indicator_labels(),
+            PriceAxisMenuAction::ToggleIndicatorNameLabels => self.toggle_indicator_name_labels(),
+            PriceAxisMenuAction::ToggleIndicatorValueLabels => self.toggle_indicator_value_labels(),
+            PriceAxisMenuAction::ToggleBidAsk => {
+                self.toggle_series_flag(primary_id, "bid_ask_visible")
+            }
+            PriceAxisMenuAction::ToggleAlignLabels => {
+                self.toggle_price_scale_flag(pane, target, "align_labels", true)
+            }
             PriceAxisMenuAction::ToggleAutoScale => {
                 let enabled = self.engine.price_scale_auto_scale_for(pane, target) != Some(true);
                 self.engine
@@ -1078,14 +1118,14 @@ impl NucleusChartView {
 
     fn primary_series_id_on_scale(&self, pane: usize, target: PriceScaleTarget) -> Option<u32> {
         self.primary_series_on_scale(pane, target)
-            .map(|(id, _, _, _, _)| id)
+            .map(|(id, ..)| id)
     }
 
     fn primary_series_on_scale(
         &self,
         pane: usize,
         target: PriceScaleTarget,
-    ) -> Option<(u32, bool, bool, bool, bool)> {
+    ) -> Option<(u32, bool, bool, bool, bool, bool)> {
         let mut fallback = None;
         for series in self.engine.series_entries() {
             if series.removed || series.pane_index != pane || series.price_scale_target != target {
@@ -1097,6 +1137,7 @@ impl NucleusChartView {
                 series.last_value_visible,
                 series.title_visible,
                 series.countdown_visible,
+                series.bid_ask_visible,
             );
             if series.id == 0 {
                 return Some(chrome);
@@ -1122,28 +1163,47 @@ impl NucleusChartView {
     }
 
     fn apply_indicator_label_options(&mut self) {
-        let show = self.indicator_labels.visible();
-        let json = format!(r#"{{"last_value_visible":{show},"title_visible":{show}}}"#);
+        let names = self.indicator_name_labels.visible();
+        let values = self.indicator_value_labels.visible();
+        let json = format!(r#"{{"last_value_visible":{values},"title_visible":{names}}}"#);
         for id in self.indicator_series_ids() {
             let _ = self.engine.series_apply_options_json(id, &json);
         }
     }
 
-    /// Host-owned last-value/title chrome for every native indicator on this chart.
+    /// Host-owned indicator name-chip chrome for every native indicator on this chart.
     #[must_use]
-    pub const fn indicator_labels_visible(&self) -> bool {
-        self.indicator_labels.visible()
+    pub const fn indicator_name_labels_visible(&self) -> bool {
+        self.indicator_name_labels.visible()
     }
 
-    /// Applies the indicator-label preference to current and later indicators.
-    pub fn set_indicator_labels_visible(&mut self, visible: bool) {
-        self.indicator_labels = IndicatorLabels::from_visible(visible);
+    /// Host-owned indicator last-value chrome for every native indicator on this chart.
+    #[must_use]
+    pub const fn indicator_value_labels_visible(&self) -> bool {
+        self.indicator_value_labels.visible()
+    }
+
+    /// Applies indicator name and value label preferences to current and later indicators.
+    pub fn apply_indicator_label_preferences(&mut self, names: bool, values: bool) {
+        self.indicator_name_labels = IndicatorLabels::from_visible(names);
+        self.indicator_value_labels = IndicatorLabels::from_visible(values);
         self.apply_indicator_label_options();
         self.invalidate_series_layout();
     }
 
-    fn toggle_indicator_labels(&mut self) -> bool {
-        self.set_indicator_labels_visible(!self.indicator_labels.visible());
+    fn toggle_indicator_name_labels(&mut self) -> bool {
+        self.apply_indicator_label_preferences(
+            !self.indicator_name_labels.visible(),
+            self.indicator_value_labels.visible(),
+        );
+        true
+    }
+
+    fn toggle_indicator_value_labels(&mut self) -> bool {
+        self.apply_indicator_label_preferences(
+            self.indicator_name_labels.visible(),
+            !self.indicator_value_labels.visible(),
+        );
         true
     }
 
@@ -1157,6 +1217,7 @@ impl NucleusChartView {
                 "last_value_visible" => Some(series.last_value_visible),
                 "title_visible" => Some(series.title_visible),
                 "countdown_visible" => Some(series.countdown_visible),
+                "bid_ask_visible" => Some(series.bid_ask_visible),
                 _ => None,
             }
         });
@@ -1165,6 +1226,26 @@ impl NucleusChartView {
         };
         self.engine
             .series_apply_options_json(id, &format!(r#"{{"{key}":{}}}"#, !current))
+    }
+
+    fn toggle_price_scale_flag(
+        &mut self,
+        pane: usize,
+        target: PriceScaleTarget,
+        key: &str,
+        default: bool,
+    ) -> bool {
+        let current = self
+            .engine
+            .price_scale_options_json(pane, target)
+            .as_deref()
+            .and_then(|options| json_bool(options, key))
+            .unwrap_or(default);
+        self.engine.price_scale_apply_options_json(
+            pane,
+            target,
+            &format!(r#"{{"{key}":{}}}"#, !current),
+        )
     }
 
     fn move_price_axis(&mut self, pane: usize, from_left: bool, to_left: bool) -> bool {
@@ -2231,7 +2312,10 @@ mod tests {
         assert!(!state.left);
         assert_eq!(state.mode, 0);
         assert_eq!(state.precision, None);
-        assert!(state.enabled(PriceAxisMenuState::INDICATOR_LABELS));
+        assert!(state.enabled(PriceAxisMenuState::INDICATOR_NAMES));
+        assert!(state.enabled(PriceAxisMenuState::INDICATOR_VALUES));
+        assert!(state.enabled(PriceAxisMenuState::ALIGN_LABELS));
+        assert!(!state.enabled(PriceAxisMenuState::BID_ASK));
 
         assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::ToggleTitle));
         assert!(
@@ -2243,9 +2327,23 @@ mod tests {
         assert!(chart.apply_price_axis_menu_action(
             0,
             false,
-            PriceAxisMenuAction::ToggleIndicatorLabels
+            PriceAxisMenuAction::ToggleIndicatorNameLabels
         ));
         assert!(!series_entry(&chart, sma[0]).title_visible);
+        assert!(series_entry(&chart, sma[0]).last_value_visible);
+        assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::ToggleBidAsk));
+        assert!(series_entry(&chart, 0).bid_ask_visible);
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleAlignLabels
+        ));
+        assert!(
+            !chart
+                .price_axis_menu_state(0, false)
+                .unwrap()
+                .enabled(PriceAxisMenuState::ALIGN_LABELS)
+        );
         assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::SetMode(1)));
         assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::SetLeft(true)));
         let moved = chart
@@ -2275,15 +2373,20 @@ mod tests {
         assert!(chart.apply_price_axis_menu_action(
             0,
             false,
-            PriceAxisMenuAction::ToggleIndicatorLabels
+            PriceAxisMenuAction::ToggleIndicatorNameLabels
         ));
-        assert!(!chart.indicator_labels_visible());
-        assert!(
-            !chart
-                .price_axis_menu_state(0, false)
-                .unwrap()
-                .enabled(PriceAxisMenuState::INDICATOR_LABELS)
-        );
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorValueLabels
+        ));
+        assert!(!chart.indicator_name_labels_visible());
+        assert!(!chart.indicator_value_labels_visible());
+        let state = chart
+            .price_axis_menu_state(0, false)
+            .expect("right price scale");
+        assert!(!state.enabled(PriceAxisMenuState::INDICATOR_NAMES));
+        assert!(!state.enabled(PriceAxisMenuState::INDICATOR_VALUES));
 
         let sma = chart
             .add_indicator(ChartIndicator::Sma)
@@ -2301,7 +2404,17 @@ mod tests {
         assert!(chart.apply_price_axis_menu_action(
             0,
             false,
-            PriceAxisMenuAction::ToggleIndicatorLabels
+            PriceAxisMenuAction::ToggleIndicatorNameLabels
+        ));
+        for id in sma.iter().chain(rsi.iter()).copied() {
+            let series = series_entry(&chart, id);
+            assert!(!series.last_value_visible);
+            assert!(series.title_visible);
+        }
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::ToggleIndicatorValueLabels
         ));
         for id in sma.iter().chain(rsi.iter()).copied() {
             let series = series_entry(&chart, id);

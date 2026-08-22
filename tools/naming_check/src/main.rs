@@ -802,11 +802,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 69,100 because indicator-label visibility is now a host-owned
-        // preference applied to every indicator and persisted off GPUI.
+        // Raised from 69,400 because the Y-axis menu now uses compact Labels/Lines
+        // flyouts and independent host-owned indicator name/value chrome.
         assert!(
-            line_count <= 69_400,
-            "platform Rust source upper bound is {line_count} lines, above the 69,400-line soft review threshold"
+            line_count <= 69_700,
+            "platform Rust source upper bound is {line_count} lines, above the 69,700-line soft review threshold"
         );
     }
 

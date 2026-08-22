@@ -204,23 +204,43 @@ pub fn filter_indicator_specs(query: &str) -> Vec<&'static IndicatorSpec> {
 /// Durable shell chrome that follows the user across charts and workspaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChartChromePreferences {
-    pub indicator_labels_visible: bool,
+    pub indicator_name_labels_visible: bool,
+    pub indicator_value_labels_visible: bool,
 }
 
 impl Default for ChartChromePreferences {
     fn default() -> Self {
         Self {
-            indicator_labels_visible: true,
+            indicator_name_labels_visible: true,
+            indicator_value_labels_visible: true,
         }
     }
+}
+
+fn parse_chrome_flag(value: &str) -> bool {
+    value.trim() != "0"
 }
 
 #[must_use]
 pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences {
     let mut preferences = ChartChromePreferences::default();
+    let mut names_from_split_key = false;
+    let mut values_from_split_key = false;
     for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("indicator_labels=") {
-            preferences.indicator_labels_visible = value.trim() != "0";
+        if let Some(value) = line.strip_prefix("indicator_name_labels=") {
+            preferences.indicator_name_labels_visible = parse_chrome_flag(value);
+            names_from_split_key = true;
+        } else if let Some(value) = line.strip_prefix("indicator_value_labels=") {
+            preferences.indicator_value_labels_visible = parse_chrome_flag(value);
+            values_from_split_key = true;
+        } else if let Some(value) = line.strip_prefix("indicator_labels=") {
+            let visible = parse_chrome_flag(value);
+            if !names_from_split_key {
+                preferences.indicator_name_labels_visible = visible;
+            }
+            if !values_from_split_key {
+                preferences.indicator_value_labels_visible = visible;
+            }
         }
     }
     preferences
@@ -229,8 +249,9 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
 #[must_use]
 pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
     format!(
-        "indicator_labels={}\n",
-        u8::from(preferences.indicator_labels_visible)
+        "indicator_name_labels={}\nindicator_value_labels={}\n",
+        u8::from(preferences.indicator_name_labels_visible),
+        u8::from(preferences.indicator_value_labels_visible)
     )
 }
 
@@ -405,14 +426,24 @@ mod tests {
 
     #[test]
     fn chart_chrome_preferences_round_trip_through_durable_file() {
-        assert!(parse_chart_chrome_preferences("").indicator_labels_visible);
-        assert!(!parse_chart_chrome_preferences("indicator_labels=0\n").indicator_labels_visible);
+        let defaults = parse_chart_chrome_preferences("");
+        assert!(defaults.indicator_name_labels_visible);
+        assert!(defaults.indicator_value_labels_visible);
+        let legacy = parse_chart_chrome_preferences("indicator_labels=0\n");
+        assert!(!legacy.indicator_name_labels_visible);
+        assert!(!legacy.indicator_value_labels_visible);
+        let mixed = parse_chart_chrome_preferences(
+            "indicator_labels=0\nindicator_name_labels=1\nindicator_value_labels=0\n",
+        );
+        assert!(mixed.indicator_name_labels_visible);
+        assert!(!mixed.indicator_value_labels_visible);
         let hidden = ChartChromePreferences {
-            indicator_labels_visible: false,
+            indicator_name_labels_visible: false,
+            indicator_value_labels_visible: true,
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_labels=0\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\n"
         );
         let path = std::env::temp_dir().join(format!(
             "axiusflow-chart-chrome-{}-{}",

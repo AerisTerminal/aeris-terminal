@@ -145,6 +145,8 @@ const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 const PRICE_AXIS_MENU_HEADER_HEIGHT: f32 = 22.0;
+const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
+const PRICE_AXIS_FLYOUT_GAP: f32 = 2.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
@@ -1317,7 +1319,10 @@ impl WorkspaceSurface {
         } = terminal_startup_state(startup, cx);
         if let Some(chart) = &chart {
             chart.update(cx, |chart, _| {
-                chart.set_indicator_labels_visible(chart_chrome.indicator_labels_visible);
+                chart.apply_indicator_label_preferences(
+                    chart_chrome.indicator_name_labels_visible,
+                    chart_chrome.indicator_value_labels_visible,
+                );
             });
         }
         let bridge_label = chart.as_ref().map_or_else(
@@ -2229,11 +2234,17 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    fn set_indicator_labels_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.chart_chrome.indicator_labels_visible = visible;
+    fn apply_indicator_label_preferences(
+        &mut self,
+        names: bool,
+        values: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_chrome.indicator_name_labels_visible = names;
+        self.chart_chrome.indicator_value_labels_visible = values;
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                chart.set_indicator_labels_visible(visible);
+                chart.apply_indicator_label_preferences(names, values);
                 chart_cx.notify();
             });
         }
@@ -2245,7 +2256,10 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         chart.update(cx, |chart, _| {
-            chart.set_indicator_labels_visible(self.chart_chrome.indicator_labels_visible);
+            chart.apply_indicator_label_preferences(
+                self.chart_chrome.indicator_name_labels_visible,
+                self.chart_chrome.indicator_value_labels_visible,
+            );
         });
     }
 
@@ -4045,6 +4059,12 @@ fn workspace_title_bar(
         .child(workspace_window_controls(terminal, window, &theme))
 }
 
+fn overlay_height(rows: f32, separators: f32) -> f32 {
+    CHART_CONTEXT_MENU_VERTICAL_PADDING * 2.0
+        + CHART_CONTEXT_MENU_ROW_HEIGHT * rows
+        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
+}
+
 fn clamp_overlay_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
@@ -4053,9 +4073,7 @@ fn clamp_overlay_origin(
     separators: f32,
 ) -> gpui::Point<Pixels> {
     let width = px(width);
-    let height = px(CHART_CONTEXT_MENU_VERTICAL_PADDING * 2.0
-        + CHART_CONTEXT_MENU_ROW_HEIGHT * rows
-        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators);
+    let height = px(overlay_height(rows, separators));
     point(
         origin
             .x
@@ -4079,15 +4097,30 @@ fn clamp_price_axis_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    let width = px(CHART_CONTEXT_MENU_WIDTH);
-    let height = viewport.height * 0.9;
+    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 7.0, 2.0)
+}
+
+fn clamp_price_axis_flyout_origin(
+    root: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    flyout: PriceAxisMenuFlyout,
+) -> gpui::Point<Pixels> {
+    let (rows, separators, row, separators_before) = flyout.geometry();
+    let width = px(PRICE_AXIS_FLYOUT_WIDTH);
+    let height = px(overlay_height(rows, separators));
+    let parent_y = root.y
+        + px(CHART_CONTEXT_MENU_VERTICAL_PADDING)
+        + px(CHART_CONTEXT_MENU_ROW_HEIGHT * row)
+        + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before);
+    let left_x = root.x - width - px(PRICE_AXIS_FLYOUT_GAP);
+    let x = if left_x >= px(0.0) {
+        left_x
+    } else {
+        root.x + px(CHART_CONTEXT_MENU_WIDTH) + px(PRICE_AXIS_FLYOUT_GAP)
+    };
     point(
-        origin
-            .x
-            .max(px(0.0))
-            .min((viewport.width - width).max(px(0.0))),
-        origin
-            .y
+        x.max(px(0.0)).min((viewport.width - width).max(px(0.0))),
+        parent_y
             .max(px(0.0))
             .min((viewport.height - height).max(px(0.0))),
     )
@@ -4296,7 +4329,7 @@ fn price_axis_menu_layer(
 ) -> AnyElement {
     let origin = clamp_price_axis_menu_origin(menu.position, viewport);
     let dismiss = terminal.clone();
-    div()
+    let mut layer = div()
         .id("price_axis_menu_scrim")
         .absolute()
         .top_0()
@@ -4310,13 +4343,43 @@ fn price_axis_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(price_axis_menu_panel(
-            terminal, menu, state, origin, viewport, theme,
-        ))
-        .into_any_element()
+        .child(price_axis_menu_panel(terminal, menu, state, origin, theme));
+    if menu.flyout != PriceAxisMenuFlyout::None {
+        layer = layer.child(price_axis_flyout_panel(
+            terminal,
+            menu,
+            state,
+            clamp_price_axis_flyout_origin(origin, viewport, menu.flyout),
+            viewport,
+            theme,
+        ));
+    }
+    layer.into_any_element()
 }
 
 fn price_axis_menu_panel(
+    terminal: &Entity<TerminalApp>,
+    menu: ChartContextMenu,
+    state: PriceAxisMenuState,
+    origin: gpui::Point<Pixels>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let mut panel =
+        secondary_menu_panel("price_axis_menu", origin, CHART_CONTEXT_MENU_WIDTH, theme);
+    for (index, row) in price_axis_root_rows(menu.flyout, state)
+        .into_iter()
+        .enumerate()
+    {
+        if matches!(index, 2 | 4) {
+            panel = panel.child(menu_section_divider(&colors));
+        }
+        panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
+    }
+    panel
+}
+
+fn price_axis_flyout_panel(
     terminal: &Entity<TerminalApp>,
     menu: ChartContextMenu,
     state: PriceAxisMenuState,
@@ -4326,17 +4389,15 @@ fn price_axis_menu_panel(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let mut panel =
-        secondary_menu_panel("price_axis_menu", origin, CHART_CONTEXT_MENU_WIDTH, theme)
-            .max_h(viewport.height * 0.9)
+        secondary_menu_panel("price_axis_flyout", origin, PRICE_AXIS_FLYOUT_WIDTH, theme)
+            .max_h(viewport.height)
             .overflow_y_scroll();
-    for (index, (header, rows)) in price_axis_menu_sections(state).into_iter().enumerate() {
-        if index > 0 {
+    let rows = price_axis_flyout_rows(menu.flyout, state);
+    for (index, row) in rows.into_iter().enumerate() {
+        if menu.flyout == PriceAxisMenuFlyout::Labels && index == 9 {
             panel = panel.child(menu_section_divider(&colors));
         }
-        panel = panel.child(menu_section_header(header, &colors));
-        for row in rows {
-            panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
-        }
+        panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
     }
     panel
 }
@@ -4353,104 +4414,126 @@ fn menu_section_header(label: &'static str, colors: &axiusflow_design_system::Th
         .child(label)
 }
 
-fn price_axis_menu_sections(
+fn price_axis_root_rows(
+    flyout: PriceAxisMenuFlyout,
     state: PriceAxisMenuState,
-) -> [(&'static str, Vec<PriceAxisMenuRow>); 5] {
+) -> [PriceAxisMenuRow; 7] {
     [
-        (
-            "LABELS",
-            vec![
-                PriceAxisMenuRow::toggle(
-                    "Price line",
-                    state.enabled(PriceAxisMenuState::PRICE_LINE),
-                    PriceAxisMenuAction::TogglePriceLine,
-                ),
-                PriceAxisMenuRow::toggle(
-                    "Last value",
-                    state.enabled(PriceAxisMenuState::LAST_VALUE),
-                    PriceAxisMenuAction::ToggleLastValue,
-                ),
-                PriceAxisMenuRow::toggle(
-                    "Symbol title",
-                    state.enabled(PriceAxisMenuState::TITLE),
-                    PriceAxisMenuAction::ToggleTitle,
-                ),
-                PriceAxisMenuRow::toggle(
-                    "Countdown",
-                    state.enabled(PriceAxisMenuState::COUNTDOWN),
-                    PriceAxisMenuAction::ToggleCountdown,
-                ),
-                PriceAxisMenuRow::toggle(
-                    "Indicator labels",
-                    state.enabled(PriceAxisMenuState::INDICATOR_LABELS),
-                    PriceAxisMenuAction::ToggleIndicatorLabels,
-                ),
-            ],
+        PriceAxisMenuRow::flyout("Labels", PriceAxisMenuFlyout::Labels, flyout),
+        PriceAxisMenuRow::flyout("Lines", PriceAxisMenuFlyout::Lines, flyout),
+        PriceAxisMenuRow::toggle(
+            "Auto scale",
+            state.enabled(PriceAxisMenuState::AUTO_SCALE),
+            PriceAxisMenuAction::ToggleAutoScale,
         ),
-        (
-            "SCALE",
-            vec![
-                PriceAxisMenuRow::toggle(
-                    "Auto scale",
-                    state.enabled(PriceAxisMenuState::AUTO_SCALE),
-                    PriceAxisMenuAction::ToggleAutoScale,
-                ),
-                PriceAxisMenuRow::toggle(
-                    "Invert scale",
-                    state.enabled(PriceAxisMenuState::INVERT_SCALE),
-                    PriceAxisMenuAction::ToggleInvertScale,
-                ),
-            ],
+        PriceAxisMenuRow::toggle(
+            "Invert scale",
+            state.enabled(PriceAxisMenuState::INVERT_SCALE),
+            PriceAxisMenuAction::ToggleInvertScale,
         ),
-        (
-            "SCALE MODE",
-            vec![
-                PriceAxisMenuRow::choice(
-                    "Normal",
-                    state.mode == 0,
-                    PriceAxisMenuAction::SetMode(0),
-                ),
-                PriceAxisMenuRow::choice(
-                    "Logarithmic",
-                    state.mode == 1,
-                    PriceAxisMenuAction::SetMode(1),
-                ),
-                PriceAxisMenuRow::choice(
-                    "Percentage",
-                    state.mode == 2,
-                    PriceAxisMenuAction::SetMode(2),
-                ),
-                PriceAxisMenuRow::choice(
-                    "Indexed to 100",
-                    state.mode == 3,
-                    PriceAxisMenuAction::SetMode(3),
-                ),
-            ],
-        ),
-        (
-            "Y-AXIS",
-            vec![
-                PriceAxisMenuRow::choice("Right", !state.left, PriceAxisMenuAction::SetLeft(false)),
-                PriceAxisMenuRow::choice("Left", state.left, PriceAxisMenuAction::SetLeft(true)),
-            ],
-        ),
-        (
-            "PRECISION",
-            std::iter::once(PriceAxisMenuRow::choice(
-                "Auto",
-                state.precision.is_none(),
-                PriceAxisMenuAction::SetPrecision(None),
-            ))
-            .chain([0_u8, 1, 2, 3, 4, 5, 6, 8].into_iter().map(|digits| {
-                PriceAxisMenuRow::choice(
-                    price_axis_precision_label(digits),
-                    state.precision == Some(digits),
-                    PriceAxisMenuAction::SetPrecision(Some(digits)),
-                )
-            }))
-            .collect(),
-        ),
+        PriceAxisMenuRow::flyout("Scale mode", PriceAxisMenuFlyout::ScaleMode, flyout),
+        PriceAxisMenuRow::flyout("Y-axis", PriceAxisMenuFlyout::YAxis, flyout),
+        PriceAxisMenuRow::flyout("Precision", PriceAxisMenuFlyout::Precision, flyout),
     ]
+}
+
+fn price_axis_flyout_rows(
+    flyout: PriceAxisMenuFlyout,
+    state: PriceAxisMenuState,
+) -> Vec<PriceAxisMenuRow> {
+    match flyout {
+        PriceAxisMenuFlyout::None => Vec::new(),
+        PriceAxisMenuFlyout::Labels => vec![
+            PriceAxisMenuRow::toggle(
+                "Symbol name label",
+                state.enabled(PriceAxisMenuState::TITLE),
+                PriceAxisMenuAction::ToggleTitle,
+            ),
+            PriceAxisMenuRow::toggle(
+                "Symbol last price label",
+                state.enabled(PriceAxisMenuState::LAST_VALUE),
+                PriceAxisMenuAction::ToggleLastValue,
+            ),
+            PriceAxisMenuRow::unavailable("Symbol previous day close price label"),
+            PriceAxisMenuRow::unavailable("Pre/post/night market price label"),
+            PriceAxisMenuRow::unavailable("High and low price labels"),
+            PriceAxisMenuRow::toggle(
+                "Bid and ask labels",
+                state.enabled(PriceAxisMenuState::BID_ASK),
+                PriceAxisMenuAction::ToggleBidAsk,
+            ),
+            PriceAxisMenuRow::toggle(
+                "Indicators and financials name labels",
+                state.enabled(PriceAxisMenuState::INDICATOR_NAMES),
+                PriceAxisMenuAction::ToggleIndicatorNameLabels,
+            ),
+            PriceAxisMenuRow::toggle(
+                "Indicators and financials value labels",
+                state.enabled(PriceAxisMenuState::INDICATOR_VALUES),
+                PriceAxisMenuAction::ToggleIndicatorValueLabels,
+            ),
+            PriceAxisMenuRow::toggle(
+                "Countdown to bar close",
+                state.enabled(PriceAxisMenuState::COUNTDOWN),
+                PriceAxisMenuAction::ToggleCountdown,
+            ),
+            PriceAxisMenuRow::toggle(
+                "No overlapping labels",
+                state.enabled(PriceAxisMenuState::ALIGN_LABELS),
+                PriceAxisMenuAction::ToggleAlignLabels,
+            ),
+        ],
+        PriceAxisMenuFlyout::Lines => vec![
+            PriceAxisMenuRow::toggle(
+                "Price line",
+                state.enabled(PriceAxisMenuState::PRICE_LINE),
+                PriceAxisMenuAction::TogglePriceLine,
+            ),
+            PriceAxisMenuRow::unavailable("Previous day close price line"),
+            PriceAxisMenuRow::unavailable("Pre/post/night market price line"),
+            PriceAxisMenuRow::unavailable("High and low price lines"),
+            PriceAxisMenuRow::toggle(
+                "Bid and ask lines",
+                state.enabled(PriceAxisMenuState::BID_ASK),
+                PriceAxisMenuAction::ToggleBidAsk,
+            ),
+        ],
+        PriceAxisMenuFlyout::ScaleMode => vec![
+            PriceAxisMenuRow::toggle("Normal", state.mode == 0, PriceAxisMenuAction::SetMode(0)),
+            PriceAxisMenuRow::toggle(
+                "Logarithmic",
+                state.mode == 1,
+                PriceAxisMenuAction::SetMode(1),
+            ),
+            PriceAxisMenuRow::toggle(
+                "Percentage",
+                state.mode == 2,
+                PriceAxisMenuAction::SetMode(2),
+            ),
+            PriceAxisMenuRow::toggle(
+                "Indexed to 100",
+                state.mode == 3,
+                PriceAxisMenuAction::SetMode(3),
+            ),
+        ],
+        PriceAxisMenuFlyout::YAxis => vec![
+            PriceAxisMenuRow::toggle("Right", !state.left, PriceAxisMenuAction::SetLeft(false)),
+            PriceAxisMenuRow::toggle("Left", state.left, PriceAxisMenuAction::SetLeft(true)),
+        ],
+        PriceAxisMenuFlyout::Precision => std::iter::once(PriceAxisMenuRow::toggle(
+            "Auto",
+            state.precision.is_none(),
+            PriceAxisMenuAction::SetPrecision(None),
+        ))
+        .chain([0_u8, 1, 2, 3, 4, 5, 6, 8].into_iter().map(|digits| {
+            PriceAxisMenuRow::toggle(
+                price_axis_precision_label(digits),
+                state.precision == Some(digits),
+                PriceAxisMenuAction::SetPrecision(Some(digits)),
+            )
+        }))
+        .collect(),
+    }
 }
 
 const fn price_axis_precision_label(digits: u8) -> &'static str {
@@ -4467,25 +4550,53 @@ const fn price_axis_precision_label(digits: u8) -> &'static str {
 }
 
 #[derive(Clone, Copy)]
-struct PriceAxisMenuRow {
-    id: &'static str,
-    label: &'static str,
-    checked: bool,
-    action: PriceAxisMenuAction,
+enum PriceAxisMenuRow {
+    Toggle {
+        label: &'static str,
+        checked: bool,
+        action: PriceAxisMenuAction,
+    },
+    Unavailable {
+        label: &'static str,
+    },
+    Flyout {
+        label: &'static str,
+        flyout: PriceAxisMenuFlyout,
+        open: bool,
+    },
 }
 
 impl PriceAxisMenuRow {
     const fn toggle(label: &'static str, checked: bool, action: PriceAxisMenuAction) -> Self {
-        Self {
-            id: label,
+        Self::Toggle {
             label,
             checked,
             action,
         }
     }
 
-    const fn choice(label: &'static str, checked: bool, action: PriceAxisMenuAction) -> Self {
-        Self::toggle(label, checked, action)
+    const fn unavailable(label: &'static str) -> Self {
+        Self::Unavailable { label }
+    }
+
+    fn flyout(label: &'static str, flyout: PriceAxisMenuFlyout, open: PriceAxisMenuFlyout) -> Self {
+        Self::Flyout {
+            label,
+            flyout,
+            open: open == flyout,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Toggle { label, .. }
+            | Self::Unavailable { label }
+            | Self::Flyout { label, .. } => label,
+        }
+    }
+
+    const fn enabled(self) -> bool {
+        !matches!(self, Self::Unavailable { .. })
     }
 }
 
@@ -4497,29 +4608,46 @@ fn price_axis_menu_item(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let action_terminal = terminal.clone();
-    let PriceAxisMenuRow {
-        id,
-        label,
-        checked,
-        action,
-    } = row;
+    let enabled = row.enabled();
+    let checked = matches!(row, PriceAxisMenuRow::Toggle { checked: true, .. });
+    let open = matches!(row, PriceAxisMenuRow::Flyout { open: true, .. });
+    let chevron = matches!(row, PriceAxisMenuRow::Flyout { .. });
+    let label = row.label();
     div()
-        .id(id)
+        .id(label)
         .occlude()
         .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
         .flex()
         .items_center()
         .px_3()
         .text_sm()
-        .cursor_pointer()
-        .hover(|row| {
+        .when(open, |row| {
             row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                .text_color(gpui_color(colors.text_primary))
+        })
+        .when(enabled, |row| {
+            row.cursor_pointer().hover(|row| {
+                row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                    .text_color(gpui_color(colors.text_primary))
+            })
+        })
+        .when(!enabled, |row| {
+            row.text_color(gpui_color(colors.text_muted))
+                .cursor_not_allowed()
         })
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            action_terminal.update(cx, |terminal, terminal_cx| {
-                terminal.apply_price_axis_menu(menu, action, terminal_cx);
-            });
+            match row {
+                PriceAxisMenuRow::Toggle { action, .. } => {
+                    action_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.apply_price_axis_menu(menu, action, terminal_cx);
+                    });
+                }
+                PriceAxisMenuRow::Flyout { flyout, .. } => {
+                    action_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.toggle_price_axis_flyout(flyout, terminal_cx);
+                    });
+                }
+                PriceAxisMenuRow::Unavailable { .. } => {}
+            }
             cx.stop_propagation();
         })
         .child(div().flex_1().child(label))
@@ -4528,6 +4656,17 @@ fn price_axis_menu_item(
                 header_icon(HugeIcon::CheckmarkCircleIcon01)
                     .with_size(px(16.0))
                     .color(gpui_color(colors.icon)),
+            )
+        })
+        .when(chevron, |row| {
+            row.child(
+                header_icon(HugeIcon::ArrowRightIcon01)
+                    .with_size(px(16.0))
+                    .color(gpui_color(if enabled {
+                        colors.icon
+                    } else {
+                        colors.text_muted
+                    })),
             )
         })
 }
@@ -5897,12 +6036,37 @@ enum ChartContextAction {
     Settings,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PriceAxisMenuFlyout {
+    #[default]
+    None,
+    Labels,
+    Lines,
+    ScaleMode,
+    YAxis,
+    Precision,
+}
+
+impl PriceAxisMenuFlyout {
+    const fn geometry(self) -> (f32, f32, f32, f32) {
+        match self {
+            Self::None => (0.0, 0.0, 0.0, 0.0),
+            Self::Labels => (10.0, 1.0, 0.0, 0.0),
+            Self::Lines => (5.0, 0.0, 1.0, 0.0),
+            Self::ScaleMode => (4.0, 0.0, 4.0, 2.0),
+            Self::YAxis => (2.0, 0.0, 5.0, 2.0),
+            Self::Precision => (9.0, 0.0, 6.0, 2.0),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ChartContextMenu {
     workspace_id: u64,
     pane_id: u64,
     position: gpui::Point<Pixels>,
     kind: ChartContextKind,
+    flyout: PriceAxisMenuFlyout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6308,6 +6472,7 @@ impl TerminalApp {
                         pane_id: pane.id,
                         position: request.position,
                         kind: request.kind,
+                        flyout: PriceAxisMenuFlyout::None,
                     });
                 }
             }
@@ -6433,7 +6598,11 @@ impl TerminalApp {
             },
             cx,
         );
-        if action == PriceAxisMenuAction::ToggleIndicatorLabels {
+        if matches!(
+            action,
+            PriceAxisMenuAction::ToggleIndicatorNameLabels
+                | PriceAxisMenuAction::ToggleIndicatorValueLabels
+        ) {
             self.broadcast_indicator_labels(menu, cx);
         }
         if let PriceAxisMenuAction::SetLeft(next_left) = action
@@ -6447,21 +6616,43 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn toggle_price_axis_flyout(&mut self, flyout: PriceAxisMenuFlyout, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.chart_context_menu {
+            menu.flyout = if menu.flyout == flyout {
+                PriceAxisMenuFlyout::None
+            } else {
+                flyout
+            };
+            cx.notify();
+        }
+    }
+
     fn broadcast_indicator_labels(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
-        let visible = self
+        let (names, values) = self
             .workspaces
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
             .and_then(|pane| pane.surface.read(cx).chart.clone())
-            .map_or(self.chart_chrome.indicator_labels_visible, |chart| {
-                chart.read(cx).indicator_labels_visible()
-            });
-        self.chart_chrome.indicator_labels_visible = visible;
+            .map_or(
+                (
+                    self.chart_chrome.indicator_name_labels_visible,
+                    self.chart_chrome.indicator_value_labels_visible,
+                ),
+                |chart| {
+                    let chart = chart.read(cx);
+                    (
+                        chart.indicator_name_labels_visible(),
+                        chart.indicator_value_labels_visible(),
+                    )
+                },
+            );
+        self.chart_chrome.indicator_name_labels_visible = names;
+        self.chart_chrome.indicator_value_labels_visible = values;
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
-                    surface.set_indicator_labels_visible(visible, surface_cx);
+                    surface.apply_indicator_label_preferences(names, values, surface_cx);
                 });
             }
         }
@@ -7520,6 +7711,7 @@ fn workspace_pane_element(
                         pane_id,
                         position: event.position,
                         kind: ChartContextKind::Pane,
+                        flyout: PriceAxisMenuFlyout::None,
                     },
                     terminal_cx,
                 );
@@ -7610,8 +7802,10 @@ impl TerminalApp {
                             | PriceAxisMenuState::LAST_VALUE
                             | PriceAxisMenuState::TITLE
                             | PriceAxisMenuState::COUNTDOWN
-                            | PriceAxisMenuState::INDICATOR_LABELS
-                            | PriceAxisMenuState::AUTO_SCALE,
+                            | PriceAxisMenuState::INDICATOR_NAMES
+                            | PriceAxisMenuState::INDICATOR_VALUES
+                            | PriceAxisMenuState::AUTO_SCALE
+                            | PriceAxisMenuState::ALIGN_LABELS,
                         mode: 0,
                         left,
                         precision: None,
@@ -8523,10 +8717,10 @@ mod tests {
     use super::{
         COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS,
         CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
-        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, InputEvent,
-        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-        RithmicSessionRetirement, SidePanel, SidePanelResize, SymbolInputAction,
-        SymbolSubmitDecision, TerminalProvider, WORKSPACE_TAB_GAP,
+        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, InputEvent, PriceAxisMenuFlyout,
+        PriceAxisMenuRow, ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState,
+        RithmicReconnectTarget, RithmicSessionRetirement, SidePanel, SidePanelResize,
+        SymbolInputAction, SymbolSubmitDecision, TerminalProvider, WORKSPACE_TAB_GAP,
         WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
         WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
@@ -8535,17 +8729,18 @@ mod tests {
         clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
         default_rithmic_contract_index, durable_workspace_viewport, finish_desktop_shutdown,
         fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
-        publication_chart_state, reconciled_bridge_state, reconnect_contract_index,
-        reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
-        series_selector_label, should_finish_chrome_overlay_close, split_lifetime_mode,
-        symbol_input_action, symbol_submit_decision, timeframe_interval_group,
-        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
-        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
+        price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
+        resized_side_panel_width, rithmic_ready_action, series_selector_label,
+        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
+        symbol_submit_decision, timeframe_interval_group, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-    use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme};
+    use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
     use axiusflow_engine_protocol::{
         EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejectionReason,
@@ -9482,6 +9677,88 @@ mod tests {
             clamp_price_axis_menu_origin(point(px(2000.0), px(2000.0)), size(px(800.0), px(600.0)));
         assert!(overflow.x <= px(800.0));
         assert!(overflow.y <= px(600.0));
+    }
+
+    #[test]
+    fn price_axis_menu_compacts_labels_and_lines_into_flyouts() {
+        let state = PriceAxisMenuState {
+            flags: PriceAxisMenuState::PRICE_LINE
+                | PriceAxisMenuState::LAST_VALUE
+                | PriceAxisMenuState::TITLE
+                | PriceAxisMenuState::COUNTDOWN
+                | PriceAxisMenuState::INDICATOR_NAMES
+                | PriceAxisMenuState::INDICATOR_VALUES
+                | PriceAxisMenuState::AUTO_SCALE
+                | PriceAxisMenuState::ALIGN_LABELS,
+            mode: 0,
+            left: false,
+            precision: None,
+        };
+        assert_eq!(
+            price_axis_root_rows(PriceAxisMenuFlyout::None, state).map(PriceAxisMenuRow::label),
+            [
+                "Labels",
+                "Lines",
+                "Auto scale",
+                "Invert scale",
+                "Scale mode",
+                "Y-axis",
+                "Precision",
+            ]
+        );
+        let labels = price_axis_flyout_rows(PriceAxisMenuFlyout::Labels, state);
+        assert_eq!(
+            labels
+                .iter()
+                .copied()
+                .map(PriceAxisMenuRow::label)
+                .collect::<Vec<_>>(),
+            [
+                "Symbol name label",
+                "Symbol last price label",
+                "Symbol previous day close price label",
+                "Pre/post/night market price label",
+                "High and low price labels",
+                "Bid and ask labels",
+                "Indicators and financials name labels",
+                "Indicators and financials value labels",
+                "Countdown to bar close",
+                "No overlapping labels",
+            ]
+        );
+        assert!(labels.iter().all(|row| {
+            ![
+                "Symbol previous day close price label",
+                "Pre/post/night market price label",
+                "High and low price labels",
+            ]
+            .contains(&row.label())
+                || !row.enabled()
+        }));
+        let lines = price_axis_flyout_rows(PriceAxisMenuFlyout::Lines, state);
+        assert_eq!(
+            lines
+                .iter()
+                .copied()
+                .map(PriceAxisMenuRow::label)
+                .collect::<Vec<_>>(),
+            [
+                "Price line",
+                "Previous day close price line",
+                "Pre/post/night market price line",
+                "High and low price lines",
+                "Bid and ask lines",
+            ]
+        );
+        assert!(lines.iter().all(|row| {
+            ![
+                "Previous day close price line",
+                "Pre/post/night market price line",
+                "High and low price lines",
+            ]
+            .contains(&row.label())
+                || !row.enabled()
+        }));
     }
 
     #[test]
