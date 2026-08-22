@@ -3223,7 +3223,9 @@ fn chrome_overlay_panel(
         .when(interval_popup, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
-        .when(!interval_popup, gpui::Styled::overflow_hidden)
+        .when(!interval_popup, |panel| {
+            panel.max_h_full().overflow_hidden()
+        })
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(content)
@@ -5631,12 +5633,12 @@ fn indicator_dialog_content(
             let indicator = native_indicator(spec.kind);
             div()
                 .id(("indicator_dialog_row", index))
-                .min_h(px(52.0))
+                .min_h(px(CHROME_MENU_INDICATOR_ROW_HEIGHT))
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap_2()
-                .px_2()
+                .gap_3()
+                .px_3()
                 .rounded(px(f32::from(
                     chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
                 )))
@@ -5663,12 +5665,12 @@ fn indicator_dialog_content(
                     div()
                         .flex()
                         .flex_col()
-                        .gap_0p5()
+                        .gap_1()
                         .flex_1()
-                        .child(div().text_sm().child(spec.label))
+                        .child(div().child(spec.label))
                         .child(
                             div()
-                                .text_xs()
+                                .text_sm()
                                 .text_color(gpui_color(colors.text_secondary))
                                 .child(format!(
                                     "{}  ·  {}  ·  {}",
@@ -5735,15 +5737,15 @@ fn indicator_status_bar(
     colors: &axiusflow_design_system::ThemeColors,
 ) -> impl IntoElement + use<> {
     div()
-        .h(px(34.0))
+        .h(px(CHROME_MENU_STATUS_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
         .justify_between()
-        .px_3()
+        .px_4()
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .text_xs()
+        .text_sm()
         .text_color(gpui_color(colors.text_secondary))
         .child(format!("{result_count} native indicators"))
         .child(div().text_color(gpui_color(status_color)).child(status))
@@ -5762,15 +5764,16 @@ fn chrome_menu_search_header(
     colors: &axiusflow_design_system::ThemeColors,
 ) -> Div {
     div()
-        .h(px(chart_chrome::CHART_CHROME_HEIGHT))
+        .h(px(CHROME_MENU_SEARCH_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
-        .gap_2()
-        .px_3()
+        .gap_3()
+        .px_4()
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .child(header_icon(HugeIcon::SearchIcon01))
+        .text_color(gpui_color(colors.text_primary))
+        .child(header_icon(HugeIcon::SearchIcon01).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
         .child(
             Input::new(input)
                 .appearance(false)
@@ -5824,14 +5827,13 @@ fn instrument_dialog_content(
             let selection = instrument.selection;
             div()
                 .id(("instrument_dialog_row", index))
-                .min_h(px(48.0))
+                .min_h(px(CHROME_MENU_INSTRUMENT_ROW_HEIGHT))
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap_2()
-                .px_2()
+                .gap_3()
+                .px_3()
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .text_sm()
                 .when(state.keyboard_selection == index || checked, |row| {
                     row.bg(gpui_color(colors.active_bg.over(colors.surface)))
                         .text_color(gpui_color(colors.text_primary))
@@ -5856,20 +5858,24 @@ fn instrument_dialog_content(
                 .when(state.selection_pending, gpui::Styled::cursor_not_allowed)
                 .child(
                     div()
-                        .size(px(24.0))
+                        .size(px(CHROME_MENU_ROW_ICON_WELL))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_full()
                         .bg(gpui_color(colors.surface_secondary))
-                        .child(header_icon(HugeIcon::ExchangeIcon01)),
+                        .child(
+                            header_icon(HugeIcon::ExchangeIcon01)
+                                .with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)),
+                        ),
                 )
-                .child(div().flex_1().text_sm().child(symbol))
-                .children(
-                    checked
-                        .then(|| header_icon(HugeIcon::CheckmarkCircleIcon01).into_any_element()),
-                )
+                .child(div().flex_1().child(symbol))
+                .children(checked.then(|| {
+                    header_icon(HugeIcon::CheckmarkCircleIcon01)
+                        .with_size(px(CHROME_MENU_SEARCH_ICON_SIZE))
+                        .into_any_element()
+                }))
         });
     chrome_menu_surface(&colors)
         .child(header)
@@ -5900,8 +5906,17 @@ fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTh
     chrome_menu_search_header(input, &theme.colors).into_any_element()
 }
 
-const CHROME_MENU_WIDTH: f32 = 720.0;
-const CHROME_MENU_HEIGHT: f32 = chart_chrome::CHART_CHROME_HEIGHT + 480.0 + 40.0;
+const CHROME_MENU_WIDTH: f32 = 900.0;
+const CHROME_MENU_SEARCH_HEIGHT: f32 = 52.0;
+const CHROME_MENU_LIST_HEIGHT: f32 = 600.0;
+const CHROME_MENU_FOOTER_HEIGHT: f32 = 44.0;
+const CHROME_MENU_STATUS_HEIGHT: f32 = 40.0;
+const CHROME_MENU_HEIGHT: f32 =
+    CHROME_MENU_SEARCH_HEIGHT + CHROME_MENU_LIST_HEIGHT + CHROME_MENU_FOOTER_HEIGHT;
+const CHROME_MENU_INSTRUMENT_ROW_HEIGHT: f32 = 60.0;
+const CHROME_MENU_INDICATOR_ROW_HEIGHT: f32 = 64.0;
+const CHROME_MENU_ROW_ICON_WELL: f32 = 28.0;
+const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 18.0;
 
 fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
@@ -5909,13 +5924,14 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
         .flex_col()
         .w(px(CHROME_MENU_WIDTH))
         .h(px(CHROME_MENU_HEIGHT))
+        .max_h_full()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
         .text_color(gpui_color(colors.text_secondary))
 }
 
 fn chrome_menu_scroll_body() -> Div {
-    div().flex().flex_col().gap_1().p_2()
+    div().flex().flex_col().gap_1p5().p_3()
 }
 
 fn scrollable_menu_body(
@@ -5939,15 +5955,15 @@ fn scrollable_menu_body(
 
 fn chrome_menu_footer(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
-        .h(px(40.0))
+        .h(px(CHROME_MENU_FOOTER_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
         .justify_between()
-        .px_3()
+        .px_4()
         .border_t_1()
         .border_color(gpui_color(colors.border))
-        .text_xs()
+        .text_sm()
         .text_color(gpui_color(colors.text_secondary))
 }
 
