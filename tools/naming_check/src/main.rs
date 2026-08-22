@@ -802,11 +802,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 69,400 because the Y-axis menu now uses compact Labels/Lines
-        // flyouts and independent host-owned indicator name/value chrome.
+        // Raised from 69,700 because chart chrome type-ahead now opens the
+        // existing timeframe and instrument menus from typed digits and letters.
         assert!(
-            line_count <= 69_700,
-            "platform Rust source upper bound is {line_count} lines, above the 69,700-line soft review threshold"
+            line_count <= 69_900,
+            "platform Rust source upper bound is {line_count} lines, above the 69,900-line soft review threshold"
         );
     }
 
