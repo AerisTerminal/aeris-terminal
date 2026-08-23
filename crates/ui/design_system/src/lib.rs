@@ -298,12 +298,12 @@ impl AxiusflowTheme {
         [
             ColorToken::new(
                 "surface",
-                mode_source(dark, "#fcfcfc", "#141414"),
+                mode_source(dark, "#ffffff", "#141414"),
                 colors.surface,
             ),
             ColorToken::new(
                 "surface-secondary",
-                mode_source(dark, "#f3f3f3", "#181818"),
+                mode_source(dark, "#fafafa", "#181818"),
                 colors.surface_secondary,
             ),
             ColorToken::new(
@@ -312,14 +312,10 @@ impl AxiusflowTheme {
                 colors.border,
             ),
             ColorToken::new("border-secondary", "var(--border)", colors.border_secondary),
-            ColorToken::new(
-                "input-fill",
-                mode_source(dark, "var(--surface)", "var(--surface-secondary)"),
-                colors.input_fill,
-            ),
+            ColorToken::new("input-fill", "var(--surface-secondary)", colors.input_fill),
             ColorToken::new(
                 "input-border",
-                mode_source(dark, "var(--border)", "var(--border-secondary)"),
+                "var(--border-secondary)",
                 colors.input_border,
             ),
             ColorToken::new(
@@ -339,12 +335,12 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "hover-bg",
-                mode_source(dark, MIX_INK_4, MIX_PAPER_8),
+                mode_source(dark, MIX_INK_3_5, MIX_PAPER_8),
                 colors.hover_bg,
             ),
             ColorToken::new(
                 "active-bg",
-                mode_source(dark, MIX_INK_6, MIX_PAPER_14),
+                mode_source(dark, MIX_INK_5, MIX_PAPER_14),
                 colors.active_bg,
             ),
             ColorToken::new(
@@ -382,8 +378,8 @@ impl Default for AxiusflowTheme {
     }
 }
 
-const MIX_INK_4: &str = "color-mix(in srgb, #141414 4%, transparent)";
-const MIX_INK_6: &str = "color-mix(in srgb, #141414 6%, transparent)";
+const MIX_INK_3_5: &str = "color-mix(in srgb, #141414 3.5%, transparent)";
+const MIX_INK_5: &str = "color-mix(in srgb, #141414 5%, transparent)";
 const MIX_INK_8: &str = "color-mix(in srgb, #141414 8%, transparent)";
 const MIX_INK_20: &str = "color-mix(in srgb, #141414 20%, transparent)";
 const MIX_INK_36: &str = "color-mix(in srgb, #141414 36%, transparent)";
@@ -410,20 +406,21 @@ fn mix_srgb(red: u8, green: u8, blue: u8, percent: f32) -> ThemeColor {
 
 fn light_colors() -> ThemeColors {
     let ink = ThemeColor::from_rgb8(20, 20, 20);
-    let surface = ThemeColor::from_rgb8(252, 252, 252);
+    let surface = ThemeColor::from_rgb8(255, 255, 255);
+    let surface_secondary = ThemeColor::from_rgb8(250, 250, 250);
     let border = mix_srgb(20, 20, 20, 8.0);
     ThemeColors {
         surface,
-        surface_secondary: ThemeColor::from_rgb8(243, 243, 243),
+        surface_secondary,
         border,
         border_secondary: border,
-        input_fill: surface,
+        input_fill: surface_secondary,
         input_border: border,
         text_primary: ink,
         text_secondary: mix_srgb(20, 20, 20, 74.0),
         text_muted: mix_srgb(20, 20, 20, 36.0),
-        hover_bg: mix_srgb(20, 20, 20, 4.0),
-        active_bg: mix_srgb(20, 20, 20, 6.0),
+        hover_bg: mix_srgb(20, 20, 20, 3.5),
+        active_bg: mix_srgb(20, 20, 20, 5.0),
         icon: mix_srgb(20, 20, 20, 50.0),
         icon_active: ink,
         primary: ThemeColor::from_rgb8(62, 99, 221),
@@ -517,12 +514,12 @@ mod tests {
         let light = AxiusflowTheme::light().colors;
         let dark = AxiusflowTheme::dark().colors;
 
-        assert_eq!(light.surface, ThemeColor::from_rgb8(252, 252, 252));
+        assert_eq!(light.surface, ThemeColor::from_rgb8(255, 255, 255));
         assert_eq!(
             light.surface_secondary,
-            ThemeColor::from_rgb8(243, 243, 243)
+            ThemeColor::from_rgb8(250, 250, 250)
         );
-        assert_eq!(light.input_fill, light.surface);
+        assert_eq!(light.input_fill, light.surface_secondary);
         assert_eq!(light.input_border, light.border);
         assert_eq!(light.border_secondary, light.border);
         assert_eq!(
@@ -542,7 +539,7 @@ mod tests {
         assert_eq!(dark.bearish, light.bearish);
         assert_eq!(
             light.hover_bg,
-            ThemeColor::from_rgb8(20, 20, 20).with_alpha(0.04)
+            ThemeColor::from_rgb8(20, 20, 20).with_alpha(0.035)
         );
         assert_eq!(
             dark.active_bg,
@@ -568,13 +565,16 @@ mod tests {
 
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
-        assert_eq!(token_source(&light_tokens, "surface"), "#fcfcfc");
+        assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
         assert_eq!(
             token_source(&dark_tokens, "hover-bg"),
             "color-mix(in srgb, #f0f0f0 8%, transparent)"
         );
-        assert_eq!(token_source(&light_tokens, "input-fill"), "var(--surface)");
+        assert_eq!(
+            token_source(&light_tokens, "input-fill"),
+            "var(--surface-secondary)"
+        );
         assert_eq!(
             token_source(&dark_tokens, "danger"),
             "oklch(0.6471 0.2288 22.47)"
