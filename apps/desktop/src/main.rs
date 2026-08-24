@@ -42,10 +42,10 @@ use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, Context, Div, Entity,
-    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, ObjectFit, Orientation, Pixels,
-    QuitMode, Render, Role, ScrollHandle, SharedString, Stateful, Task, TitlebarOptions,
-    WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div,
-    ease_out_quint, img, point, prelude::*, px, relative, size,
+    FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit, Orientation,
+    Pixels, QuitMode, Render, RenderOnce, Role, ScrollHandle, SharedString, Stateful, Task,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, actions,
+    canvas, div, ease_out_quint, img, point, prelude::*, px, relative, size,
 };
 use gpui_platform::application;
 use native_ui::{
@@ -6195,14 +6195,12 @@ fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
 // which pixelates large artwork; its `svg()` element only paints a monochrome mask.
 // Rasterize bundled colored marks at the exact device-pixel size they are drawn instead.
 struct ColoredMarkCache {
-    parsed: HashMap<SharedString, gpui::ParsedSvg>,
     images: HashMap<(SharedString, u64, u64), Arc<gpui::RenderImage>>,
 }
 
 impl ColoredMarkCache {
     fn new() -> Self {
         Self {
-            parsed: HashMap::new(),
             images: HashMap::new(),
         }
     }
@@ -6230,14 +6228,14 @@ fn rasterize_colored_svg(
     window_scale: f32,
     cx: &App,
 ) -> Result<Arc<gpui::RenderImage>, gpui::ImageCacheError> {
+    let window_scale = window_scale.max(1.0);
     let size_key = ordered_f32_key(f32::from(logical_size));
     let scale_key = ordered_f32_key(window_scale);
     let key = (path.clone(), size_key, scale_key);
 
-    let mut cache = MARK_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(image) = cache.images.get(&key) {
+    if let Ok(cache) = MARK_CACHE.lock()
+        && let Some(image) = cache.images.get(&key)
+    {
         return Ok(Arc::clone(image));
     }
 
@@ -6251,48 +6249,56 @@ fn rasterize_colored_svg(
         gpui::ImageCacheError::Asset(format!("SVG intrinsic width missing: {path}").into())
     })?;
     let target_logical = f32::from(logical_size) * window_scale;
-    let scale_factor = (target_logical / intrinsic).max(0.01);
+    let scale_factor = (target_logical / intrinsic).max(1.0 / intrinsic);
 
-    let renderer = cx.svg_renderer();
-    if !cache.parsed.contains_key(path) {
-        let parsed = renderer
-            .parse_svg(&bytes)
-            .map_err(|error| gpui::ImageCacheError::Usvg(Arc::new(error)))?;
-        cache.parsed.insert(path.clone(), parsed);
-    }
-    let parsed = cache
-        .parsed
-        .get(path)
-        .expect("parsed SVG was just inserted");
-    let image = renderer
-        .render_parsed(parsed, scale_factor)
+    let image = cx
+        .svg_renderer()
+        .render_single_frame(&bytes, scale_factor)
         .map_err(|error| gpui::ImageCacheError::Usvg(Arc::new(error)))?;
-    cache.images.insert(key, Arc::clone(&image));
+
+    if let Ok(mut cache) = MARK_CACHE.lock() {
+        cache.images.insert(key, Arc::clone(&image));
+    }
     Ok(image)
 }
 
-fn colored_svg_mark(path: &SharedString, size: Pixels) -> impl IntoElement {
-    img({
-        let path = path.clone();
-        move |window: &mut Window, cx: &mut App| {
-            Some(rasterize_colored_svg(
-                &path,
-                size,
-                window.scale_factor(),
-                cx,
-            ))
-        }
-    })
-    .size(size)
-    .flex_none()
-    .object_fit(ObjectFit::Fill)
+#[derive(Clone, IntoElement)]
+struct ColoredSvgMark {
+    path: SharedString,
+    size: Pixels,
 }
 
-fn series_glyph(chart_type: ChartType, size: Pixels) -> Div {
-    div()
-        .size(size)
-        .flex_none()
-        .child(colored_svg_mark(&series_icon_kind(chart_type).path(), size))
+impl RenderOnce for ColoredSvgMark {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        colored_svg_element(&self.path, self.size, window.scale_factor(), cx)
+    }
+}
+
+fn colored_svg_element(
+    path: &SharedString,
+    size: Pixels,
+    window_scale: f32,
+    cx: &App,
+) -> AnyElement {
+    match rasterize_colored_svg(path, size, window_scale, cx) {
+        Ok(image) => img(ImageSource::Render(image))
+            .size(size)
+            .flex_none()
+            .object_fit(ObjectFit::Fill)
+            .into_any_element(),
+        Err(_) => img(path.clone())
+            .size(size)
+            .flex_none()
+            .object_fit(ObjectFit::Fill)
+            .into_any_element(),
+    }
+}
+
+fn series_glyph(chart_type: ChartType, size: Pixels) -> impl IntoElement {
+    ColoredSvgMark {
+        path: series_icon_kind(chart_type).path(),
+        size,
+    }
 }
 
 fn exchange_mark(
@@ -6313,7 +6319,10 @@ fn exchange_mark(
         .when(bordered, |mark| {
             mark.border_1().border_color(gpui_color(colors.border))
         })
-        .child(colored_svg_mark(&logo.path(), glyph_size))
+        .child(ColoredSvgMark {
+            path: logo.path(),
+            size: glyph_size,
+        })
 }
 
 fn brand_mark() -> Div {

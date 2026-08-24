@@ -462,4 +462,39 @@ mod tests {
                 .contains("viewBox=\"0 0 24 24\"")
         );
     }
+
+    #[test]
+    fn colored_marks_rasterize_at_display_size() {
+        use gpui::SvgRenderer;
+        use std::sync::Arc;
+
+        let assets = AxiusflowAssets;
+        let renderer = SvgRenderer::new(Arc::new(AxiusflowAssets));
+        let rasterize = |path: &SharedString, logical_size: f32, window_scale: f32| {
+            let bytes = assets.load(path.as_ref()).unwrap().expect("asset bytes");
+            let header = std::str::from_utf8(&bytes[..bytes.len().min(768)]).unwrap();
+            let svg = header.find("<svg").unwrap();
+            let width = header[svg..].find("width=\"").unwrap() + svg + 7;
+            let rest = &header[width..];
+            let end = rest.find('"').unwrap();
+            let intrinsic: f32 = rest[..end].parse().unwrap();
+            let scale_factor = (logical_size * window_scale / intrinsic).max(1.0 / intrinsic);
+            renderer
+                .render_single_frame(&bytes, scale_factor)
+                .expect("rasterize colored mark")
+        };
+
+        for icon in SeriesIcon::ALL {
+            let image = rasterize(&icon.path(), 16.0, 2.0);
+            assert_eq!(image.frame_count(), 1);
+            assert!(image.size(0).width.0 > 0);
+            assert!(image.size(0).height.0 > 0);
+        }
+        for logo in ExchangeLogo::ALL {
+            let image = rasterize(&logo.path(), 20.0, 2.0);
+            assert_eq!(image.frame_count(), 1);
+            assert!(image.size(0).width.0 > 0);
+            assert!(image.size(0).height.0 > 0);
+        }
+    }
 }
