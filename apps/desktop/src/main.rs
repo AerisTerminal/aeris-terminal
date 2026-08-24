@@ -5892,6 +5892,13 @@ fn instrument_dialog_content(
             colors.text_secondary,
         ))
         .child(chrome_menu_footer(&colors, "Select", trailing))
+        .when(state.exchange_menu_open, |surface| {
+            surface.child(instrument_exchange_menu(
+                app,
+                state.catalog_exchange,
+                &colors,
+            ))
+        })
 }
 
 fn instrument_dialog_row(
@@ -5950,6 +5957,7 @@ const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
 
 fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
+        .relative()
         .flex()
         .flex_col()
         .w(px(CHROME_MENU_WIDTH))
@@ -6134,29 +6142,23 @@ fn instrument_search_header(
             let toggle_app = app.clone();
             let selected = state.catalog_exchange;
             header.child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(
-                        div()
-                            .id("instrument_exchange_switcher")
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                            .cursor_pointer()
-                            .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                toggle_app
-                                    .update(cx, WorkspaceSurface::toggle_instrument_exchange_menu);
-                                cx.stop_propagation();
-                            })
-                            .child(exchange_mark(selected, px(20.0), false, &colors)),
-                    )
-                    .when(state.exchange_menu_open, |switcher| {
-                        switcher.child(instrument_exchange_menu(app, selected, &colors))
-                    }),
+                div().relative().flex_none().child(
+                    div()
+                        .id("instrument_exchange_switcher")
+                        .size(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                        .cursor_pointer()
+                        .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            toggle_app
+                                .update(cx, WorkspaceSurface::toggle_instrument_exchange_menu);
+                            cx.stop_propagation();
+                        })
+                        .child(exchange_mark(selected, px(20.0), false, &colors)),
+                ),
             )
         })
         .when(!coinbase, |header| {
@@ -6200,16 +6202,18 @@ fn instrument_exchange_menu(
     selected: assets::ExchangeLogo,
     colors: &axiusflow_design_system::ThemeColors,
 ) -> Div {
+    let panel_fill = colors.surface_secondary.over(colors.surface);
     div()
         .absolute()
-        .top_full()
-        .left_0()
-        .mt_1()
+        .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
+        .left(px(12.0))
         .w(px(168.0))
+        .flex()
+        .flex_col()
         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface_secondary))
+        .bg(gpui_color(panel_fill))
         .p_1()
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -6230,11 +6234,9 @@ fn instrument_exchange_menu(
                         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                         .cursor_pointer()
                         .when(active, |row| {
-                            row.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
+                            row.bg(gpui_color(colors.active_bg.over(panel_fill)))
                         })
-                        .hover(|row| {
-                            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                        })
+                        .hover(|row| row.bg(gpui_color(colors.hover_bg.over(panel_fill))))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             row_app.update(cx, |app, cx| {
                                 app.set_instrument_catalog_exchange(exchange, cx);
@@ -6409,9 +6411,13 @@ fn exchange_mark(
     bordered: bool,
     colors: &axiusflow_design_system::ThemeColors,
 ) -> Div {
+    let glyph_size = exchange_mark_glyph_size(size, bordered);
     div()
         .size(size)
         .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
         .rounded_full()
         .overflow_hidden()
         .when(bordered, |mark| {
@@ -6422,9 +6428,13 @@ fn exchange_mark(
         })
         .child(
             Icon::new(logo.path())
-                .with_size(size)
+                .with_size(glyph_size)
                 .color(asset_color(logo.foreground_rgb())),
         )
+}
+
+fn exchange_mark_glyph_size(size: Pixels, bordered: bool) -> Pixels {
+    if bordered { size - px(4.0) } else { size }
 }
 
 fn brand_mark() -> Div {
@@ -9717,15 +9727,16 @@ mod tests {
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress,
         chrome_typeahead_char_from, claim_once, clamp_chart_context_menu_origin,
         clamp_price_axis_menu_origin, connection_presentation, default_rithmic_contract_index,
-        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
-        instrument_selector_label, nucleus_chart_theme, price_axis_flyout_rows,
-        price_axis_root_rows, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, reorder_workspace_ids, resized_side_panel_width,
-        rithmic_ready_action, series_selector_label, should_finish_chrome_overlay_close,
-        split_lifetime_mode, symbol_input_action, symbol_submit_decision, timeframe_interval_group,
-        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
-        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
+        durable_workspace_viewport, exchange_mark_glyph_size, finish_desktop_shutdown,
+        fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
+        price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
+        resized_side_panel_width, rithmic_ready_action, series_selector_label,
+        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
+        symbol_submit_decision, timeframe_interval_group, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -10262,6 +10273,12 @@ mod tests {
             chrome_control_foreground(&colors, false, false),
             colors.text_muted
         );
+    }
+
+    #[test]
+    fn bordered_exchange_marks_center_an_inset_glyph() {
+        assert_eq!(exchange_mark_glyph_size(px(24.0), true), px(20.0));
+        assert_eq!(exchange_mark_glyph_size(px(20.0), false), px(20.0));
     }
 
     #[test]
