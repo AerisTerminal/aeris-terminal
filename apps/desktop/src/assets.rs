@@ -234,9 +234,9 @@ impl ExchangeLogo {
     #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
-            Self::Binance => "binance.png",
-            Self::Coinbase => "coinbase.png",
-            Self::Hyperliquid => "hyperliquid.png",
+            Self::Binance => "binance.svg",
+            Self::Coinbase => "coinbase.svg",
+            Self::Hyperliquid => "hyperliquid.svg",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
     }
@@ -359,10 +359,10 @@ fn brand_asset(path: &str) -> Option<&'static [u8]> {
 
 fn exchange_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(EXCHANGE_ASSET_PREFIX)? {
-        "binance.png" => include_bytes!("../assets/exchange_assets/exchange_logo/binance.png"),
-        "coinbase.png" => include_bytes!("../assets/exchange_assets/exchange_logo/coinbase.png"),
-        "hyperliquid.png" => {
-            include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.png")
+        "binance.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/binance.svg"),
+        "coinbase.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/coinbase.svg"),
+        "hyperliquid.svg" => {
+            include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.svg")
         }
         _ => return None,
     })
@@ -476,7 +476,9 @@ mod tests {
                 .load(logo.path().as_ref())
                 .unwrap()
                 .expect("exchange logo");
-            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "{}", logo.path());
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("<svg"), "{}", logo.path());
+            assert!(!svg.contains("<image"), "{}", logo.path());
 
             let (x, y) = logo.optical_offset_24();
             assert!(x.is_finite() && y.is_finite());
