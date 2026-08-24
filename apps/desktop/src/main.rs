@@ -6219,17 +6219,10 @@ fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
 }
 
 fn series_glyph(chart_type: ChartType, size: Pixels) -> Div {
-    let icon = series_icon_kind(chart_type);
     div()
         .size(size)
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(size * 0.2)
-        .overflow_hidden()
-        .bg(asset_color(icon.tile_rgb()))
-        .child(Icon::new(icon.path()).with_size(size).color(gpui::white()))
+        .child(img(series_icon_kind(chart_type).path()).size(size))
 }
 
 fn exchange_mark(
@@ -6238,41 +6231,15 @@ fn exchange_mark(
     bordered: bool,
     colors: &axiusflow_design_system::ThemeColors,
 ) -> Div {
-    let glyph_size = exchange_mark_glyph_size(size, bordered);
-    let optical_offset = exchange_mark_optical_offset(logo, glyph_size);
     div()
         .size(size)
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
         .rounded_full()
         .overflow_hidden()
         .when(bordered, |mark| {
             mark.border_1().border_color(gpui_color(colors.border))
         })
-        .when_some(logo.background_rgb(), |mark, color| {
-            mark.bg(asset_color(color))
-        })
-        .child(
-            img(logo.path())
-                .size(glyph_size)
-                .relative()
-                .left(optical_offset.x)
-                .top(optical_offset.y),
-        )
-}
-
-fn exchange_mark_glyph_size(size: Pixels, bordered: bool) -> Pixels {
-    if bordered { size - px(4.0) } else { size }
-}
-
-fn exchange_mark_optical_offset(
-    logo: assets::ExchangeLogo,
-    glyph_size: Pixels,
-) -> gpui::Point<Pixels> {
-    let (x, y) = logo.optical_offset_24();
-    point(glyph_size * (x / 24.0), glyph_size * (y / 24.0))
+        .child(img(logo.path()).size(size))
 }
 
 fn brand_mark() -> Div {
@@ -9565,20 +9532,18 @@ mod tests {
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress,
         chrome_typeahead_char_from, claim_once, clamp_chart_context_menu_origin,
         clamp_price_axis_menu_origin, connection_presentation, default_rithmic_contract_index,
-        durable_workspace_viewport, exchange_mark_glyph_size, exchange_mark_optical_offset,
-        finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
-        nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
-        resized_side_panel_width, rithmic_ready_action, series_selector_label,
-        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
-        symbol_submit_decision, timeframe_interval_group, timeframe_overlay_left,
-        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+        instrument_selector_label, nucleus_chart_theme, price_axis_flyout_rows,
+        price_axis_root_rows, publication_chart_state, reconciled_bridge_state,
+        reconnect_contract_index, reorder_workspace_ids, resized_side_panel_width,
+        rithmic_ready_action, series_selector_label, should_finish_chrome_overlay_close,
+        split_lifetime_mode, symbol_input_action, symbol_submit_decision, timeframe_interval_group,
+        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
+        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-    use crate::assets::ExchangeLogo;
     use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
     use axiusflow_engine_protocol::{
@@ -10111,20 +10076,6 @@ mod tests {
         assert_eq!(
             chrome_control_foreground(&colors, false, false),
             colors.text_muted
-        );
-    }
-
-    #[test]
-    fn bordered_exchange_marks_center_an_inset_glyph() {
-        let bordered_glyph = exchange_mark_glyph_size(px(24.0), true);
-        assert_eq!(bordered_glyph, px(20.0));
-        assert_eq!(exchange_mark_glyph_size(px(20.0), false), px(20.0));
-        let coinbase_offset = exchange_mark_optical_offset(ExchangeLogo::Coinbase, bordered_glyph);
-        assert!((0.83..0.84).contains(&coinbase_offset.x.as_f32()));
-        assert_eq!(coinbase_offset.y, px(0.0));
-        assert_eq!(
-            exchange_mark_optical_offset(ExchangeLogo::Binance, px(20.0)),
-            point(px(0.0), px(0.0))
         );
     }
 

@@ -180,18 +180,6 @@ impl SeriesIcon {
         };
         format!("{SERIES_ASSET_PREFIX}{name}").into()
     }
-
-    #[must_use]
-    pub const fn tile_rgb(self) -> (u8, u8, u8) {
-        match self {
-            Self::Candlestick => (86, 99, 232),
-            Self::OhlcBar => (229, 160, 25),
-            Self::Line => (38, 132, 216),
-            Self::Area => (11, 155, 131),
-            Self::HeikinAshi => (105, 62, 224),
-            Self::BrushableArea => (124, 77, 204),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,23 +227,6 @@ impl ExchangeLogo {
             Self::Hyperliquid => "hyperliquid.svg",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
-    }
-
-    #[must_use]
-    pub const fn background_rgb(self) -> Option<(u8, u8, u8)> {
-        match self {
-            Self::Hyperliquid => Some((7, 39, 35)),
-            Self::Binance | Self::Coinbase => None,
-        }
-    }
-
-    /// Optical correction in the logo asset's 24-unit view box.
-    #[must_use]
-    pub const fn optical_offset_24(self) -> (f32, f32) {
-        match self {
-            Self::Coinbase => (1.0, 0.0),
-            Self::Binance | Self::Hyperliquid => (0.0, 0.0),
-        }
     }
 }
 
@@ -479,13 +450,7 @@ mod tests {
             let svg = std::str::from_utf8(&bytes).unwrap();
             assert!(svg.contains("<svg"), "{}", logo.path());
             assert!(!svg.contains("<image"), "{}", logo.path());
-
-            let (x, y) = logo.optical_offset_24();
-            assert!(x.is_finite() && y.is_finite());
-            assert!(x.abs() <= 2.0 && y.abs() <= 2.0);
         }
-
-        assert_eq!(ExchangeLogo::Coinbase.optical_offset_24(), (1.0, 0.0));
 
         let brand = assets
             .load(BrandIcon::Mark.path().as_ref())
