@@ -366,7 +366,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "d695c09b6392313de296fd75730109a003d6f207";
+        let expected_revision = "39810eece70c0e6be74173f97bb05be7b33488d1";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_render",
@@ -802,11 +802,12 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 70,100 because the header now owns a Nucleus chart-type
-        // menu that survives covering snapshots and persists as chrome default.
+        // Raised from 70,400 because Coinbase instrument search now owns a
+        // header exchange filter, and chart chrome uses bundled series,
+        // exchange, and brand marks.
         assert!(
-            line_count <= 70_400,
-            "platform Rust source upper bound is {line_count} lines, above the 70,400-line soft review threshold"
+            line_count <= 71_000,
+            "platform Rust source upper bound is {line_count} lines, above the 71,000-line soft review threshold"
         );
     }
 

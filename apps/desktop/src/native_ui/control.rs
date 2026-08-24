@@ -73,6 +73,7 @@ pub(crate) struct Control {
     base: Stateful<Div>,
     style: StyleRefinement,
     icon: Option<Icon>,
+    leading: Option<AnyElement>,
     label: Option<SharedString>,
     caret: Option<Icon>,
     loading_icon: Option<Icon>,
@@ -99,6 +100,7 @@ impl Control {
             id,
             style: StyleRefinement::default(),
             icon: None,
+            leading: None,
             label: None,
             caret: None,
             loading_icon: None,
@@ -129,6 +131,11 @@ impl Control {
 
     pub(crate) fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    pub(crate) fn leading(mut self, element: impl IntoElement) -> Self {
+        self.leading = Some(element.into_any_element());
         self
     }
 
@@ -343,6 +350,7 @@ impl RenderOnce for Control {
                     .justify_center()
                     .gap_1()
                     .children(leading)
+                    .children(self.leading)
                     .children(self.label)
                     .children(self.children)
                     .children(self.caret.map(|caret| {

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision">
+  <path d="M5 17 8.5 13.5l3 1.75 4-6L19 11.5V19H5Z" fill="currentColor" fill-opacity="0.22">
+  </path>
+  <path d="M5 17 8.5 13.5l3 1.75 4-6L19 11.5" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+  </path>
+  <path d="M5 19h14" stroke="currentColor" stroke-opacity="0.48" stroke-width="0.8">
+  </path>
+</svg>

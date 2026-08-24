@@ -758,6 +758,7 @@ struct WorkspaceSurface {
     chart_type_trigger_bounds: Option<Bounds<Pixels>>,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
+    instrument_exchange: InstrumentExchangeUi,
     provider: TerminalProvider,
     coinbase_product: Option<InstallProviderInstrument>,
     coinbase_switch: CoinbaseSwitchState,
@@ -818,6 +819,24 @@ enum ChromeOverlay {
     Timeframe,
     QuickTimeframe,
     ChartType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstrumentExchangeUi {
+    Idle(assets::ExchangeLogo),
+    Menu(assets::ExchangeLogo),
+}
+
+impl InstrumentExchangeUi {
+    const fn exchange(self) -> assets::ExchangeLogo {
+        match self {
+            Self::Idle(exchange) | Self::Menu(exchange) => exchange,
+        }
+    }
+
+    const fn is_open(self) -> bool {
+        matches!(self, Self::Menu(_))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -970,6 +989,7 @@ const fn symbol_submit_decision(
 #[derive(Clone)]
 struct InstrumentMenuEntry {
     symbol: String,
+    detail: String,
     checked: bool,
     selection: InstrumentMenuSelection,
 }
@@ -1008,6 +1028,7 @@ struct HeaderState {
     provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
+    chart_type: ChartType,
     chart_type_label: String,
     instruments: Vec<InstrumentMenuEntry>,
     selected_series: Option<rithmic_history::RithmicSeries>,
@@ -1386,6 +1407,7 @@ impl WorkspaceSurface {
             chart_type_trigger_bounds: None,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
+            instrument_exchange: InstrumentExchangeUi::Idle(assets::ExchangeLogo::Coinbase),
             provider,
             coinbase_product,
             coinbase_switch: CoinbaseSwitchState::Idle,
@@ -1547,6 +1569,9 @@ impl WorkspaceSurface {
 
     fn instrument_entries(&self, cx: &App) -> Vec<InstrumentMenuEntry> {
         if self.provider == TerminalProvider::Coinbase {
+            if self.instrument_exchange.exchange() != assets::ExchangeLogo::Coinbase {
+                return Vec::new();
+            }
             let query = self
                 .symbol_input
                 .as_ref()
@@ -1565,13 +1590,29 @@ impl WorkspaceSurface {
                             .as_deref()
                             .is_some_and(|name| name.contains(&query))
                 })
-                .map(|(index, result)| InstrumentMenuEntry {
-                    symbol: result.name.clone().unwrap_or_else(|| result.symbol.clone()),
-                    checked: self
-                        .coinbase_product
-                        .as_ref()
-                        .is_some_and(|selected| selected.provider_symbol == result.symbol),
-                    selection: InstrumentMenuSelection::Coinbase(index),
+                .map(|(index, result)| {
+                    let named = result
+                        .name
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|name| !name.is_empty());
+                    InstrumentMenuEntry {
+                        symbol: if named {
+                            result.name.clone().unwrap_or_else(|| result.symbol.clone())
+                        } else {
+                            result.symbol.replace('-', "/")
+                        },
+                        detail: if named {
+                            result.symbol.clone()
+                        } else {
+                            "Coinbase spot".to_string()
+                        },
+                        checked: self
+                            .coinbase_product
+                            .as_ref()
+                            .is_some_and(|selected| selected.provider_symbol == result.symbol),
+                        selection: InstrumentMenuSelection::Coinbase(index),
+                    }
                 })
                 .collect();
         }
@@ -1581,6 +1622,11 @@ impl WorkspaceSurface {
             .enumerate()
             .map(|(index, instrument)| InstrumentMenuEntry {
                 symbol: instrument.symbol.clone(),
+                detail: if instrument.exchange.is_empty() {
+                    "Rithmic".to_string()
+                } else {
+                    instrument.exchange.clone()
+                },
                 checked: self.symbol_browser.selected().is_some_and(|selected| {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange
@@ -1668,6 +1714,8 @@ impl WorkspaceSurface {
         };
         match overlay {
             ChromeOverlay::Instrument => {
+                self.instrument_exchange =
+                    InstrumentExchangeUi::Idle(assets::ExchangeLogo::Coinbase);
                 if let Some(input) = &self.symbol_input {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
@@ -1738,6 +1786,24 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    fn toggle_instrument_exchange_menu(&mut self, cx: &mut Context<Self>) {
+        self.instrument_exchange = match self.instrument_exchange {
+            InstrumentExchangeUi::Idle(exchange) => InstrumentExchangeUi::Menu(exchange),
+            InstrumentExchangeUi::Menu(exchange) => InstrumentExchangeUi::Idle(exchange),
+        };
+        cx.notify();
+    }
+
+    fn set_instrument_catalog_exchange(
+        &mut self,
+        exchange: assets::ExchangeLogo,
+        cx: &mut Context<Self>,
+    ) {
+        self.instrument_exchange = InstrumentExchangeUi::Idle(exchange);
+        self.chrome_selection = 0;
+        cx.notify();
+    }
+
     fn on_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -1758,7 +1824,14 @@ impl WorkspaceSurface {
             return false;
         }
         match event.keystroke.key.as_str() {
-            "escape" => self.close_chrome_overlay(window, cx),
+            "escape" => {
+                if let InstrumentExchangeUi::Menu(exchange) = self.instrument_exchange {
+                    self.instrument_exchange = InstrumentExchangeUi::Idle(exchange);
+                    cx.notify();
+                } else {
+                    self.close_chrome_overlay(window, cx);
+                }
+            }
             "up" => {
                 self.chrome_selection = self.chrome_selection.saturating_sub(1);
                 cx.notify();
@@ -3100,9 +3173,10 @@ fn chrome_overlay_layer(
             .occlude()
             .track_focus(&overlay_focus)
             .flex()
-            .items_start()
-            .when(compact_menu, |scrim| scrim.justify_start().pl(menu_left))
-            .when(!compact_menu, |scrim| scrim.justify_center().pt_2())
+            .when(compact_menu, |scrim| {
+                scrim.items_start().justify_start().pl(menu_left)
+            })
+            .when(!compact_menu, |scrim| scrim.items_center().justify_center())
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
                     app.close_chrome_overlay(window, app_cx);
@@ -3150,6 +3224,8 @@ fn chrome_overlay_content(
                 selection_pending: app_state.symbol_selection_pending,
                 enabled: true,
                 provider: app_state.provider,
+                catalog_exchange: app_state.instrument_exchange.exchange(),
+                exchange_menu_open: app_state.instrument_exchange.is_open(),
                 keyboard_selection: app_state.chrome_selection,
                 scroll: app_state.scrolls.instrument.clone(),
             },
@@ -3509,6 +3585,7 @@ fn chart_type_overlay_row(
             });
             cx.stop_propagation();
         })
+        .child(series_glyph(chart_type, px(16.0)))
         .child(div().flex_1().child(chart_type.label()))
         .when(selected, |row| {
             row.child(
@@ -3687,7 +3764,7 @@ const DRAWING_TOOLS: [DrawingToolSpec; 8] = [
         id: "drawing_cursor",
         label: "Cursor",
         tool: ChartDrawingTool::Cursor,
-        icon: DrawingToolIcon::Huge(HugeIcon::CursorIcon01),
+        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Cursor),
         icon_size: 24.0,
     },
     DrawingToolSpec {
@@ -3729,14 +3806,14 @@ const DRAWING_TOOLS: [DrawingToolSpec; 8] = [
         id: "drawing_brush",
         label: "Brush",
         tool: ChartDrawingTool::Brush,
-        icon: DrawingToolIcon::Huge(HugeIcon::Brush),
+        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Brush),
         icon_size: 24.0,
     },
     DrawingToolSpec {
         id: "drawing_text",
         label: "Text",
         tool: ChartDrawingTool::Text,
-        icon: DrawingToolIcon::Huge(HugeIcon::Text),
+        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Text),
         icon_size: 24.0,
     },
 ];
@@ -4442,7 +4519,9 @@ fn workspace_title_bar(
             .items_center()
             .pl_4()
             .pr_2()
+            .gap_2()
             .text_sm()
+            .child(brand_mark())
             .child("Axiusflow"),
         terminal,
     );
@@ -5445,6 +5524,8 @@ fn header_controls(
                 selection_pending: state.pending.symbol_selection,
                 enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 provider: state.provider,
+                catalog_exchange: assets::ExchangeLogo::Coinbase,
+                exchange_menu_open: false,
                 keyboard_selection: 0,
                 scroll: state.instrument_scroll,
             },
@@ -5461,6 +5542,7 @@ fn header_controls(
         ))
         .child(chart_type_selector(
             app.clone(),
+            state.chart_type,
             state.chart_type_label,
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
@@ -5513,7 +5595,14 @@ fn instrument_selector(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
-        .icon(header_icon(HugeIcon::ExchangeIcon01))
+        .when(state.provider == TerminalProvider::Coinbase, |trigger| {
+            trigger.leading(exchange_mark(
+                assets::ExchangeLogo::Coinbase,
+                px(16.0),
+                false,
+                &theme.colors,
+            ))
+        })
         .loading_icon(header_icon(HugeIcon::Loader))
         .label(state.label.clone())
         .caret(header_icon(HugeIcon::ChevronDown))
@@ -5621,166 +5710,80 @@ fn indicator_dialog_content(
     let colors = theme.colors;
     let indicator_specs = chart_chrome::filter_indicator_specs(input.read(cx).value().as_ref());
     let result_count = indicator_specs.len();
-    let (status, status_color) = indicator_status(message, &colors);
-    let rows = indicator_specs
-        .into_iter()
-        .enumerate()
-        .map(|(index, spec)| {
-            let row_app = app.clone();
-            let add_app = app.clone();
-            let row_input = input.clone();
-            let add_input = input.clone();
-            let indicator = native_indicator(spec.kind);
-            div()
-                .id(("indicator_dialog_row", index))
-                .min_h(px(CHROME_MENU_INDICATOR_ROW_HEIGHT))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .rounded(px(f32::from(
-                    chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
-                )))
-                .cursor_pointer()
-                .when(keyboard_selection == index, |row| {
-                    row.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .hover(|row| {
-                    row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    let added = row_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
-                    if added {
-                        let _ = &row_input;
-                        row_app.update(cx, |app, app_cx| {
-                            app.close_chrome_overlay(window, app_cx);
-                        });
-                    }
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .flex_1()
-                        .child(div().child(spec.label))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(gpui_color(colors.text_secondary))
-                                .child(format!(
-                                    "{}  ·  {}  ·  {}",
-                                    spec.kind.identifier().to_ascii_uppercase(),
-                                    spec.parameter_description,
-                                    spec.location_description()
-                                )),
-                        ),
-                )
-                .child(button_activation(
-                    chrome_button_style(
-                        Button::new(("add_indicator", index))
-                            .icon(header_icon(HugeIcon::AddIcon01))
-                            .border_0()
-                            .compact()
-                            .cursor_pointer()
-                            .tab_stop(false),
-                        theme,
-                        false,
-                        true,
-                    ),
-                    true,
-                    move |window, cx| {
-                        let added = add_app.update(cx, |app, cx| app.add_indicator(indicator, cx));
-                        if added {
-                            let _ = &add_input;
-                            add_app.update(cx, |app, app_cx| {
-                                app.close_chrome_overlay(window, app_cx);
-                            });
-                        }
-                    },
-                ))
-        });
-    chrome_menu_surface(&colors)
-        .child(chrome_menu_search_header(input, &colors))
-        .child(indicator_status_bar(
-            result_count,
-            status,
-            status_color,
+    let hint = message.map_or_else(|| format!("{result_count} native"), str::to_string);
+    let list = if indicator_specs.is_empty() {
+        chrome_menu_scroll_body().child(chrome_menu_empty(
+            "No matching indicators",
+            "Try “average”, “bands”, or a kind like SMA.",
             &colors,
         ))
-        .child(scrollable_menu_body(
-            chrome_menu_scroll_body().children(rows),
-            scroll,
-            colors.text_secondary,
+    } else {
+        chrome_menu_scroll_body()
+            .child(chrome_menu_group_heading("Indicators", &colors))
+            .children(
+                indicator_specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, spec)| {
+                        let row_app = app.clone();
+                        let add_app = app.clone();
+                        let indicator = native_indicator(spec.kind);
+                        chrome_menu_row(&colors, keyboard_selection == index)
+                            .id(("indicator_dialog_row", index))
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                                    row_app.update(cx, |app, app_cx| {
+                                        app.close_chrome_overlay(window, app_cx);
+                                    });
+                                }
+                                cx.stop_propagation();
+                            })
+                            .child(chrome_menu_copy(
+                                spec.label,
+                                format!(
+                                    "{} · {}",
+                                    spec.parameter_description,
+                                    spec.location_description()
+                                ),
+                                &colors,
+                            ))
+                            .child(button_activation(
+                                Button::new(("add_indicator", index))
+                                    .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
+                                    .theme(theme)
+                                    .resting_fill(colors.surface)
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .compact()
+                                    .border_1()
+                                    .border_color(gpui_color(colors.border))
+                                    .cursor_pointer()
+                                    .tab_stop(false),
+                                true,
+                                move |window, cx| {
+                                    if add_app
+                                        .update(cx, |app, cx| app.add_indicator(indicator, cx))
+                                    {
+                                        add_app.update(cx, |app, app_cx| {
+                                            app.close_chrome_overlay(window, app_cx);
+                                        });
+                                    }
+                                },
+                            ))
+                    }),
+            )
+    };
+    chrome_menu_surface(&colors)
+        .child(chrome_menu_search_header(
+            input,
+            theme,
+            app,
+            hint,
+            CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
         ))
-        .child(indicator_dialog_footer(&colors))
-}
-
-fn indicator_status(
-    message: Option<&str>,
-    colors: &axiusflow_design_system::ThemeColors,
-) -> (String, ThemeColor) {
-    message.map_or_else(
-        || ("OHLC-compatible".to_string(), colors.text_secondary),
-        |message| (message.to_string(), colors.danger),
-    )
-}
-
-fn indicator_status_bar(
-    result_count: usize,
-    status: String,
-    status_color: ThemeColor,
-    colors: &axiusflow_design_system::ThemeColors,
-) -> impl IntoElement + use<> {
-    div()
-        .h(px(CHROME_MENU_STATUS_HEIGHT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_4()
-        .border_b_1()
-        .border_color(gpui_color(colors.border))
-        .text_sm()
-        .text_color(gpui_color(colors.text_secondary))
-        .child(format!("{result_count} native indicators"))
-        .child(div().text_color(gpui_color(status_color)).child(status))
-}
-
-fn indicator_dialog_footer(
-    colors: &axiusflow_design_system::ThemeColors,
-) -> impl IntoElement + use<> {
-    chrome_menu_footer(colors)
-        .child("Enter Add  ·  Esc Close")
-        .child("Publisher: Native")
-}
-
-fn chrome_menu_search_header(
-    input: &Entity<InputState>,
-    colors: &axiusflow_design_system::ThemeColors,
-) -> Div {
-    div()
-        .h(px(CHROME_MENU_SEARCH_HEIGHT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_3()
-        .px_4()
-        .border_b_1()
-        .border_color(gpui_color(colors.border))
-        .text_color(gpui_color(colors.text_primary))
-        .child(header_icon(HugeIcon::SearchIcon01).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .flex_1(),
-        )
+        .child(scrollable_menu_body(list, scroll, colors.text_secondary))
+        .child(chrome_menu_footer(&colors, "Add", "Publisher: Native"))
 }
 
 const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {
@@ -5805,6 +5808,8 @@ struct InstrumentSelectorState {
     selection_pending: bool,
     enabled: bool,
     provider: TerminalProvider,
+    catalog_exchange: assets::ExchangeLogo,
+    exchange_menu_open: bool,
     keyboard_selection: usize,
     scroll: ScrollHandle,
 }
@@ -5815,115 +5820,140 @@ fn instrument_dialog_content(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let header = instrument_dialog_header(state, theme);
-    let rows = state
+    let count = state.instruments.len();
+    let current = state
         .instruments
         .iter()
         .enumerate()
-        .map(|(index, instrument)| {
-            let checked = instrument.checked;
-            let app = app.clone();
-            let symbol = instrument.symbol.clone();
-            let selection = instrument.selection;
-            div()
-                .id(("instrument_dialog_row", index))
-                .min_h(px(CHROME_MENU_INSTRUMENT_ROW_HEIGHT))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .when(state.keyboard_selection == index || checked, |row| {
-                    row.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .when(!state.selection_pending, |row| {
-                    row.cursor_pointer()
-                        .hover(|row| {
-                            row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                                .text_color(gpui_color(colors.text_primary))
-                        })
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            let dispatched =
-                                app.update(cx, |app, cx| app.select_instrument(selection, cx));
-                            if dispatched {
-                                app.update(cx, |app, app_cx| {
-                                    app.close_chrome_overlay(window, app_cx);
-                                });
-                            }
-                            cx.stop_propagation();
-                        })
-                })
-                .when(state.selection_pending, gpui::Styled::cursor_not_allowed)
-                .child(
-                    div()
-                        .size(px(CHROME_MENU_ROW_ICON_WELL))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(gpui_color(colors.surface_secondary))
-                        .child(
-                            header_icon(HugeIcon::ExchangeIcon01)
-                                .with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)),
-                        ),
-                )
-                .child(div().flex_1().child(symbol))
-                .children(checked.then(|| {
-                    header_icon(HugeIcon::CheckmarkCircleIcon01)
-                        .with_size(px(CHROME_MENU_SEARCH_ICON_SIZE))
-                        .into_any_element()
-                }))
-        });
+        .filter(|(_, instrument)| instrument.checked);
+    let markets = state
+        .instruments
+        .iter()
+        .enumerate()
+        .filter(|(_, instrument)| !instrument.checked);
+    let market_heading = match state.provider {
+        TerminalProvider::Coinbase => "Coinbase markets",
+        TerminalProvider::Rithmic => "Rithmic markets",
+    };
+    let trailing = state
+        .instruments
+        .iter()
+        .find(|instrument| instrument.checked)
+        .map_or_else(
+            || match state.provider {
+                TerminalProvider::Coinbase => "Coinbase public spot".to_string(),
+                TerminalProvider::Rithmic => "Rithmic Test".to_string(),
+            },
+            |instrument| format!("Current stream: {}", instrument.symbol),
+        );
+    let mut list = chrome_menu_scroll_body();
+    if count == 0 {
+        let (title, detail) = if state.provider == TerminalProvider::Coinbase
+            && state.catalog_exchange != assets::ExchangeLogo::Coinbase
+        {
+            (
+                "No markets for this exchange",
+                "This terminal currently lists Coinbase spot. Switch the filter back to Coinbase.",
+            )
+        } else {
+            (
+                "No matching markets",
+                "Try a symbol like BTC, ETH, SOL, or the quote asset.",
+            )
+        };
+        list = list.child(chrome_menu_empty(title, detail, &colors));
+    } else {
+        if current.clone().next().is_some() {
+            list = list
+                .child(chrome_menu_group_heading("Current market", &colors))
+                .children(current.map(|(index, instrument)| {
+                    instrument_dialog_row(app, instrument, index, state, &colors)
+                }));
+        }
+        if markets.clone().next().is_some() {
+            list = list
+                .child(chrome_menu_group_heading(market_heading, &colors))
+                .children(markets.map(|(index, instrument)| {
+                    instrument_dialog_row(app, instrument, index, state, &colors)
+                }));
+        }
+    }
     chrome_menu_surface(&colors)
-        .child(header)
+        .child(state.input.as_ref().map_or_else(
+            || div().into_any_element(),
+            |input| {
+                instrument_search_header(input, theme, app, format!("{count} markets"), state)
+                    .into_any_element()
+            },
+        ))
         .child(scrollable_menu_body(
-            chrome_menu_scroll_body().children(rows),
+            list,
             &state.scroll,
             colors.text_secondary,
         ))
-        .child(instrument_dialog_footer(&colors, state.provider))
+        .child(chrome_menu_footer(&colors, "Select", trailing))
 }
 
-fn instrument_dialog_footer(
+fn instrument_dialog_row(
+    app: &Entity<WorkspaceSurface>,
+    instrument: &InstrumentMenuEntry,
+    index: usize,
+    state: &InstrumentSelectorState,
     colors: &axiusflow_design_system::ThemeColors,
-    provider: TerminalProvider,
 ) -> impl IntoElement + use<> {
-    chrome_menu_footer(colors)
-        .child("Enter Search  ·  Esc Close")
-        .child(match provider {
-            TerminalProvider::Coinbase => "Coinbase public spot catalog",
-            TerminalProvider::Rithmic => "Rithmic Test catalog",
+    let checked = instrument.checked;
+    let app = app.clone();
+    let selection = instrument.selection;
+    chrome_menu_row(colors, state.keyboard_selection == index || checked)
+        .id(("instrument_dialog_row", index))
+        .when(!state.selection_pending, |row| {
+            row.cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
+                        app.update(cx, |app, app_cx| {
+                            app.close_chrome_overlay(window, app_cx);
+                        });
+                    }
+                    cx.stop_propagation();
+                })
         })
+        .when(state.selection_pending, gpui::Styled::cursor_not_allowed)
+        .when(state.provider == TerminalProvider::Coinbase, |row| {
+            row.child(exchange_mark(
+                state.catalog_exchange,
+                px(CHROME_MENU_ROW_ICON_WELL),
+                true,
+                colors,
+            ))
+        })
+        .child(chrome_menu_copy(
+            &instrument.symbol,
+            &instrument.detail,
+            colors,
+        ))
+        .children(checked.then(|| {
+            header_icon(HugeIcon::CheckmarkCircleIcon01)
+                .with_size(px(14.0))
+                .into_any_element()
+        }))
 }
 
-fn instrument_dialog_header(state: &InstrumentSelectorState, theme: &AxiusflowTheme) -> AnyElement {
-    let Some(input) = state.input.as_ref() else {
-        return div().into_any_element();
-    };
-    chrome_menu_search_header(input, &theme.colors).into_any_element()
-}
-
-const CHROME_MENU_WIDTH: f32 = 1040.0;
-const CHROME_MENU_SEARCH_HEIGHT: f32 = 52.0;
-const CHROME_MENU_LIST_HEIGHT: f32 = 600.0;
-const CHROME_MENU_FOOTER_HEIGHT: f32 = 44.0;
-const CHROME_MENU_STATUS_HEIGHT: f32 = 40.0;
-const CHROME_MENU_HEIGHT: f32 =
-    CHROME_MENU_SEARCH_HEIGHT + CHROME_MENU_LIST_HEIGHT + CHROME_MENU_FOOTER_HEIGHT;
-const CHROME_MENU_INSTRUMENT_ROW_HEIGHT: f32 = 60.0;
-const CHROME_MENU_INDICATOR_ROW_HEIGHT: f32 = 64.0;
-const CHROME_MENU_ROW_ICON_WELL: f32 = 28.0;
-const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 18.0;
+const CHROME_MENU_WIDTH: f32 = 896.0;
+const CHROME_MENU_SEARCH_HEIGHT: f32 = 44.0;
+const CHROME_MENU_INDICATOR_SEARCH_HEIGHT: f32 = 40.0;
+const CHROME_MENU_LIST_HEIGHT: f32 = 480.0;
+const CHROME_MENU_FOOTER_HEIGHT: f32 = 40.0;
+const CHROME_MENU_MAX_HEIGHT: f32 = 704.0;
+const CHROME_MENU_ROW_HEIGHT: f32 = 40.0;
+const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
+const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
 
 fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
     div()
         .flex()
         .flex_col()
         .w(px(CHROME_MENU_WIDTH))
-        .h(px(CHROME_MENU_HEIGHT))
+        .max_h(px(CHROME_MENU_MAX_HEIGHT))
         .max_h_full()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
@@ -5931,7 +5961,320 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
 }
 
 fn chrome_menu_scroll_body() -> Div {
-    div().flex().flex_col().gap_1p5().p_3()
+    div().flex().flex_col().px(px(6.0)).py(px(6.0))
+}
+
+fn chrome_menu_row(colors: &axiusflow_design_system::ThemeColors, selected: bool) -> Div {
+    div()
+        .h(px(CHROME_MENU_ROW_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+        .when(selected, |row| {
+            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
+                .text_color(gpui_color(colors.text_primary))
+        })
+        .hover(|row| {
+            row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                .text_color(gpui_color(colors.text_primary))
+        })
+}
+
+fn chrome_menu_copy(
+    title: impl Into<gpui::SharedString>,
+    detail: impl Into<gpui::SharedString>,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .flex_1()
+        .min_w_0()
+        .child(
+            div()
+                .min_w_0()
+                .text_size(px(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(gpui_color(colors.text_primary))
+                .truncate()
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .text_size(px(11.0))
+                .text_color(gpui_color(colors.text_muted))
+                .truncate()
+                .child(detail.into()),
+        )
+}
+
+fn chrome_menu_group_heading(
+    label: &'static str,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> Div {
+    div()
+        .flex_none()
+        .px(px(10.0))
+        .pt(px(2.0))
+        .pb(px(4.0))
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(gpui_color(colors.text_muted))
+        .child(label.to_ascii_uppercase())
+}
+
+fn chrome_menu_empty(
+    title: &'static str,
+    detail: &'static str,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> Div {
+    div()
+        .h(px(144.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .px_6()
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(gpui_color(colors.text_primary))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui_color(colors.text_muted))
+                .child(detail),
+        )
+}
+
+fn chrome_menu_search_header(
+    input: &Entity<InputState>,
+    theme: &AxiusflowTheme,
+    app: &Entity<WorkspaceSurface>,
+    hint: impl Into<gpui::SharedString>,
+    search_height: f32,
+) -> Div {
+    let colors = theme.colors;
+    let close_app = app.clone();
+    div()
+        .h(px(search_height))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(if search_height <= 40.0 { 16.0 } else { 12.0 }))
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .text_sm()
+        .text_color(gpui_color(colors.text_primary))
+        .child(header_icon(HugeIcon::SearchIcon01).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false)
+                .flex_1(),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui_color(colors.text_muted))
+                .child(hint.into()),
+        )
+        .child(button_activation(
+            chrome_button_style(
+                Button::new("chrome_menu_close")
+                    .icon(header_icon(HugeIcon::CancelIcon01).with_size(px(16.0)))
+                    .compact()
+                    .cursor_pointer()
+                    .tab_stop(false),
+                theme,
+                false,
+                true,
+            ),
+            true,
+            move |window, cx| {
+                close_app.update(cx, |app, app_cx| app.close_chrome_overlay(window, app_cx));
+            },
+        ))
+}
+
+fn instrument_search_header(
+    input: &Entity<InputState>,
+    theme: &AxiusflowTheme,
+    app: &Entity<WorkspaceSurface>,
+    hint: impl Into<gpui::SharedString>,
+    state: &InstrumentSelectorState,
+) -> Div {
+    let colors = theme.colors;
+    let close_app = app.clone();
+    let coinbase = state.provider == TerminalProvider::Coinbase;
+    div()
+        .h(px(CHROME_MENU_SEARCH_HEIGHT))
+        .relative()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .text_sm()
+        .text_color(gpui_color(colors.text_primary))
+        .when(coinbase, |header| {
+            let toggle_app = app.clone();
+            let selected = state.catalog_exchange;
+            header.child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(
+                        div()
+                            .id("instrument_exchange_switcher")
+                            .size(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                            .cursor_pointer()
+                            .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                toggle_app
+                                    .update(cx, WorkspaceSurface::toggle_instrument_exchange_menu);
+                                cx.stop_propagation();
+                            })
+                            .child(exchange_mark(selected, px(20.0), false, &colors)),
+                    )
+                    .when(state.exchange_menu_open, |switcher| {
+                        switcher.child(instrument_exchange_menu(app, selected, &colors))
+                    }),
+            )
+        })
+        .when(!coinbase, |header| {
+            header.child(
+                header_icon(HugeIcon::SearchIcon01).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)),
+            )
+        })
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false)
+                .flex_1(),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(gpui_color(colors.text_muted))
+                .child(hint.into()),
+        )
+        .child(button_activation(
+            chrome_button_style(
+                Button::new("chrome_menu_close")
+                    .icon(header_icon(HugeIcon::CancelIcon01).with_size(px(16.0)))
+                    .compact()
+                    .cursor_pointer()
+                    .tab_stop(false),
+                theme,
+                false,
+                true,
+            ),
+            true,
+            move |window, cx| {
+                close_app.update(cx, |app, app_cx| app.close_chrome_overlay(window, app_cx));
+            },
+        ))
+}
+
+fn instrument_exchange_menu(
+    app: &Entity<WorkspaceSurface>,
+    selected: assets::ExchangeLogo,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> Div {
+    div()
+        .absolute()
+        .top_full()
+        .left_0()
+        .mt_1()
+        .w(px(168.0))
+        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface_secondary))
+        .p_1()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .children(
+            assets::ExchangeLogo::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, exchange)| {
+                    let row_app = app.clone();
+                    let active = exchange == selected;
+                    div()
+                        .id(("instrument_exchange_row", index))
+                        .h(px(32.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                        .cursor_pointer()
+                        .when(active, |row| {
+                            row.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
+                        })
+                        .hover(|row| {
+                            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            row_app.update(cx, |app, cx| {
+                                app.set_instrument_catalog_exchange(exchange, cx);
+                            });
+                            cx.stop_propagation();
+                        })
+                        .child(exchange_mark(exchange, px(20.0), false, colors))
+                        .child(div().flex_1().text_sm().child(exchange.label()))
+                        .children(active.then(|| {
+                            header_icon(HugeIcon::CheckmarkCircleIcon01)
+                                .with_size(px(14.0))
+                                .into_any_element()
+                        }))
+                }),
+        )
+}
+
+fn chrome_menu_shortcut(
+    colors: &axiusflow_design_system::ThemeColors,
+    keys: &'static [&'static str],
+    caption: &'static str,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .children(keys.iter().copied().map(|key| {
+            div()
+                .h(px(20.0))
+                .min_w(px(20.0))
+                .px_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                .border_1()
+                .border_color(gpui_color(colors.border))
+                .child(key)
+        }))
+        .child(caption)
 }
 
 fn scrollable_menu_body(
@@ -5941,19 +6284,23 @@ fn scrollable_menu_body(
 ) -> impl IntoElement + use<> {
     div()
         .relative()
-        .flex()
-        .flex_1()
-        .min_h_0()
+        .flex_none()
+        .w_full()
+        .max_h(px(CHROME_MENU_LIST_HEIGHT))
         .overflow_hidden()
         .child(
             tracked_overflow_y_scrollbar(body, scroll)
-                .size_full()
-                .min_h_0(),
+                .w_full()
+                .max_h(px(CHROME_MENU_LIST_HEIGHT)),
         )
         .child(ThinScrollbar::new(scroll, gpui_color(color)))
 }
 
-fn chrome_menu_footer(colors: &axiusflow_design_system::ThemeColors) -> Div {
+fn chrome_menu_footer(
+    colors: &axiusflow_design_system::ThemeColors,
+    enter: &'static str,
+    trailing: impl Into<gpui::SharedString>,
+) -> Div {
     div()
         .h(px(CHROME_MENU_FOOTER_HEIGHT))
         .flex_none()
@@ -5963,8 +6310,18 @@ fn chrome_menu_footer(colors: &axiusflow_design_system::ThemeColors) -> Div {
         .px_4()
         .border_t_1()
         .border_color(gpui_color(colors.border))
-        .text_sm()
-        .text_color(gpui_color(colors.text_secondary))
+        .text_xs()
+        .text_color(gpui_color(colors.text_muted))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_4()
+                .child(chrome_menu_shortcut(colors, &["↑", "↓"], "Navigate"))
+                .child(chrome_menu_shortcut(colors, &["Enter"], enter))
+                .child(chrome_menu_shortcut(colors, &["Esc"], "Close")),
+        )
+        .child(trailing.into())
 }
 
 #[derive(Clone, Copy)]
@@ -6021,6 +6378,74 @@ fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl I
 
 fn header_icon(name: HugeIcon) -> Icon {
     Icon::default().path(name.path())
+}
+
+fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
+    match chart_type {
+        ChartType::Candles => assets::SeriesIcon::Candlestick,
+        ChartType::Bars => assets::SeriesIcon::OhlcBar,
+        ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
+        ChartType::Area => assets::SeriesIcon::Area,
+    }
+}
+
+fn series_glyph(chart_type: ChartType, size: Pixels) -> Div {
+    let icon = series_icon_kind(chart_type);
+    div()
+        .size(size)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(size * 0.2)
+        .overflow_hidden()
+        .bg(asset_color(icon.tile_rgb()))
+        .child(Icon::new(icon.path()).with_size(size).color(gpui::white()))
+}
+
+fn exchange_mark(
+    logo: assets::ExchangeLogo,
+    size: Pixels,
+    bordered: bool,
+    colors: &axiusflow_design_system::ThemeColors,
+) -> Div {
+    div()
+        .size(size)
+        .flex_none()
+        .rounded_full()
+        .overflow_hidden()
+        .when(bordered, |mark| {
+            mark.border_1().border_color(gpui_color(colors.border))
+        })
+        .when_some(logo.background_rgb(), |mark, color| {
+            mark.bg(asset_color(color))
+        })
+        .child(
+            Icon::new(logo.path())
+                .with_size(size)
+                .color(asset_color(logo.foreground_rgb())),
+        )
+}
+
+fn brand_mark() -> Div {
+    div()
+        .size(px(22.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .overflow_hidden()
+        .bg(asset_color((38, 38, 38)))
+        .child(
+            Icon::new(assets::BrandIcon::Mark.path())
+                .with_size(px(18.0))
+                .color(gpui::white().opacity(0.84)),
+        )
+}
+
+fn asset_color((red, green, blue): (u8, u8, u8)) -> Hsla {
+    gpui_color(ThemeColor::from_rgb8(red, green, blue))
 }
 
 fn chrome_tooltip(
@@ -6091,11 +6516,13 @@ fn series_selector(
 
 fn chart_type_selector(
     app: Entity<WorkspaceSurface>,
+    chart_type: ChartType,
     label: String,
     enabled: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let button = Button::new("chart_type_selector")
+        .leading(series_glyph(chart_type, px(16.0)))
         .label(label)
         .caret(header_icon(HugeIcon::ChevronDown))
         .disabled(!enabled)
@@ -7970,6 +8397,7 @@ fn active_header_state(
                     .map(|request| request.series),
             )
         },
+        chart_type: workspace.chart_type(cx),
         chart_type_label: workspace.chart_type(cx).label().to_string(),
         instruments: workspace.instrument_entries(cx),
         selected_series: workspace
