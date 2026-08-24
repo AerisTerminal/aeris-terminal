@@ -9,7 +9,7 @@ use gpui::{
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 const COMPACT_ROW_HEIGHT: Pixels = px(32.0);
-const SEARCH_ROW_HEIGHT: Pixels = px(40.0);
+const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
 const PANEL_PADDING: Pixels = px(4.0);
 const SEPARATOR_HEIGHT: Pixels = px(9.0);
 
@@ -40,7 +40,6 @@ pub(crate) struct MenuRow {
     theme: AxiusflowTheme,
     resting_fill: ThemeColor,
     label: SharedString,
-    detail: Option<SharedString>,
     leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
     activation: Option<Activation>,
@@ -60,11 +59,9 @@ impl MenuRow {
     pub(crate) fn search_result(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        detail: impl Into<SharedString>,
         theme: &AxiusflowTheme,
     ) -> Self {
         let mut row = Self::new(id, label, theme, RowKind::SearchResult);
-        row.detail = Some(detail.into());
         row.resting_fill = theme.colors.surface;
         row
     }
@@ -89,7 +86,6 @@ impl MenuRow {
             theme: *theme,
             resting_fill: theme.colors.surface_secondary,
             label: label.into(),
-            detail: None,
             leading: None,
             trailing: None,
             activation: None,
@@ -142,36 +138,11 @@ impl RenderOnce for MenuRow {
         }
         .over(self.resting_fill);
         let (height, horizontal_padding, rounded) = row_geometry(self.kind);
-        let label = match self.detail {
-            Some(detail) => div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme_color(colors.text_primary))
-                        .truncate()
-                        .child(self.label.clone()),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_size(px(11.0))
-                        .text_color(theme_color(colors.text_muted))
-                        .truncate()
-                        .child(detail),
-                ),
-            None => div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(self.label.clone()),
-        };
+        let label = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .child(self.label.clone());
 
         div()
             .id(self.id)

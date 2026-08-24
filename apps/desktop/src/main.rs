@@ -991,7 +991,6 @@ const fn symbol_submit_decision(
 #[derive(Clone)]
 struct InstrumentMenuEntry {
     symbol: String,
-    detail: String,
     checked: bool,
     selection: InstrumentMenuSelection,
 }
@@ -1604,11 +1603,6 @@ impl WorkspaceSurface {
                         } else {
                             result.symbol.replace('-', "/")
                         },
-                        detail: if named {
-                            result.symbol.clone()
-                        } else {
-                            "Coinbase spot".to_string()
-                        },
                         checked: self
                             .coinbase_product
                             .as_ref()
@@ -1624,11 +1618,6 @@ impl WorkspaceSurface {
             .enumerate()
             .map(|(index, instrument)| InstrumentMenuEntry {
                 symbol: instrument.symbol.clone(),
-                detail: if instrument.exchange.is_empty() {
-                    "Rithmic".to_string()
-                } else {
-                    instrument.exchange.clone()
-                },
                 checked: self.symbol_browser.selected().is_some_and(|selected| {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange
@@ -5623,45 +5612,38 @@ fn indicator_dialog_content(
                         let row_app = app.clone();
                         let add_app = app.clone();
                         let indicator = native_indicator(spec.kind);
-                        MenuRow::search_result(
-                            ("indicator_dialog_row", index),
-                            spec.label,
-                            format!(
-                                "{} · {}",
-                                spec.parameter_description,
-                                spec.location_description()
-                            ),
-                            theme,
-                        )
-                        .highlighted(keyboard_selection == index)
-                        .on_click(move |_, window, cx| {
-                            if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                                row_app.update(cx, |app, app_cx| {
-                                    app.close_chrome_overlay(window, app_cx);
-                                });
-                            }
-                        })
-                        .trailing(button_activation(
-                            Button::new(("add_indicator", index))
-                                .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
-                                .theme(theme)
-                                .resting_fill(colors.surface)
-                                .w(px(24.0))
-                                .h(px(24.0))
-                                .compact()
-                                .border_1()
-                                .border_color(gpui_color(colors.border))
-                                .cursor_pointer()
-                                .tab_stop(false),
-                            true,
-                            move |window, cx| {
-                                if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                                    add_app.update(cx, |app, app_cx| {
+                        MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
+                            .highlighted(keyboard_selection == index)
+                            .on_click(move |_, window, cx| {
+                                if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                                    row_app.update(cx, |app, app_cx| {
                                         app.close_chrome_overlay(window, app_cx);
                                     });
                                 }
-                            },
-                        ))
+                            })
+                            .trailing(button_activation(
+                                Button::new(("add_indicator", index))
+                                    .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
+                                    .theme(theme)
+                                    .resting_fill(colors.surface)
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .compact()
+                                    .border_1()
+                                    .border_color(gpui_color(colors.border))
+                                    .cursor_pointer()
+                                    .tab_stop(false),
+                                true,
+                                move |window, cx| {
+                                    if add_app
+                                        .update(cx, |app, cx| app.add_indicator(indicator, cx))
+                                    {
+                                        add_app.update(cx, |app, app_cx| {
+                                            app.close_chrome_overlay(window, app_cx);
+                                        });
+                                    }
+                                },
+                            ))
                     }),
             )
     };
@@ -5801,7 +5783,6 @@ fn instrument_dialog_row(
     let mut row = MenuRow::search_result(
         ("instrument_dialog_row", index),
         instrument.symbol.clone(),
-        instrument.detail.clone(),
         theme,
     )
     .highlighted(state.keyboard_selection == index || checked)
@@ -5850,7 +5831,7 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
 }
 
 fn chrome_menu_scroll_body() -> Div {
-    div().flex().flex_col().px(px(6.0)).py(px(6.0))
+    div().flex().flex_col().gap(px(2.0)).px(px(6.0)).py(px(6.0))
 }
 
 fn chrome_menu_group_heading(
@@ -5904,7 +5885,6 @@ fn chrome_menu_search_header(
     search_height: f32,
 ) -> Div {
     let colors = theme.colors;
-    let close_app = app.clone();
     div()
         .h(px(search_height))
         .flex_none()
@@ -5930,22 +5910,29 @@ fn chrome_menu_search_header(
                 .text_color(gpui_color(colors.text_muted))
                 .child(hint.into()),
         )
-        .child(button_activation(
-            chrome_button_style(
-                Button::new("chrome_menu_close")
-                    .icon(header_icon(HugeIcon::CancelIcon01).with_size(px(16.0)))
-                    .compact()
-                    .cursor_pointer()
-                    .tab_stop(false),
-                theme,
-                false,
-                true,
-            ),
-            true,
-            move |window, cx| {
-                close_app.update(cx, |app, app_cx| app.close_chrome_overlay(window, app_cx));
-            },
-        ))
+        .child(chrome_menu_close_button(app, theme))
+}
+
+/// Small 24px close control for command-palette headers; the standard chrome
+/// button is a 32px hit area whose hover fill dwarfs the compact header.
+fn chrome_menu_close_button(app: &Entity<WorkspaceSurface>, theme: &AxiusflowTheme) -> Button {
+    let colors = theme.colors;
+    let close_app = app.clone();
+    button_activation(
+        Button::new("chrome_menu_close")
+            .theme(theme)
+            .resting_fill(colors.surface)
+            .icon(header_icon(HugeIcon::CancelIcon01))
+            .with_size(px(24.0))
+            .border_0()
+            .text_color(gpui_color(colors.icon))
+            .cursor_pointer()
+            .tab_stop(false),
+        true,
+        move |window, cx| {
+            close_app.update(cx, |app, app_cx| app.close_chrome_overlay(window, app_cx));
+        },
+    )
 }
 
 fn instrument_search_header(
@@ -5956,7 +5943,6 @@ fn instrument_search_header(
     state: &InstrumentSelectorState,
 ) -> Div {
     let colors = theme.colors;
-    let close_app = app.clone();
     let coinbase = state.provider == TerminalProvider::Coinbase;
     div()
         .h(px(CHROME_MENU_SEARCH_HEIGHT))
@@ -6011,22 +5997,7 @@ fn instrument_search_header(
                 .text_color(gpui_color(colors.text_muted))
                 .child(hint.into()),
         )
-        .child(button_activation(
-            chrome_button_style(
-                Button::new("chrome_menu_close")
-                    .icon(header_icon(HugeIcon::CancelIcon01).with_size(px(16.0)))
-                    .compact()
-                    .cursor_pointer()
-                    .tab_stop(false),
-                theme,
-                false,
-                true,
-            ),
-            true,
-            move |window, cx| {
-                close_app.update(cx, |app, app_cx| app.close_chrome_overlay(window, app_cx));
-            },
-        ))
+        .child(chrome_menu_close_button(app, theme))
 }
 
 fn instrument_exchange_menu(
@@ -6049,6 +6020,7 @@ fn instrument_exchange_menu(
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(panel_fill))
         .p_1()
+        .gap(px(2.0))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .children(
