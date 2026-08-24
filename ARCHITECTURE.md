@@ -217,7 +217,7 @@ A release Windows lifecycle run measured cold process-to-authenticated-status re
 - `crates/ui/terminal_ui`: reusable terminal and DOM presentation components.
 - `crates/ui/chart_integration`: the boundary between Axiusflow models/GPUI and Nucleus Charts.
 
-[`NucleusCharts/financial-charts`](https://github.com/NucleusCharts/financial-charts.git) is a separate repository and is not governed by this document. The main workspace pins `nucleuscharts_engine`, `nucleuscharts_render`, and `nucleuscharts_render_gpui` to commit `39810eece70c0e6be74173f97bb05be7b33488d1`. Changes to Nucleus Charts documentation or implementation must be made in that repository deliberately, never as collateral work in Axiusflow.
+[`NucleusCharts/financial-charts`](https://github.com/NucleusCharts/financial-charts.git) is a separate repository and is not governed by this document. The main workspace pins `nucleuscharts_engine`, `nucleuscharts_render`, and `nucleuscharts_render_gpui` to commit `f85ba4211c7b7a2b4e879a8173b9a30c14f9630d`. Changes to Nucleus Charts documentation or implementation must be made in that repository deliberately, never as collateral work in Axiusflow.
 
 ### Desktop presentation and chart boundary
 
