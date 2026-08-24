@@ -41,11 +41,11 @@ use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Hsla,
-    KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode, Render, Role,
-    ScrollHandle, Stateful, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowControlArea, WindowOptions, actions, canvas, div, ease_out_quint, img, point, prelude::*,
-    px, relative, size,
+    Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, Context, Div, Entity,
+    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode,
+    Render, Role, ScrollHandle, SharedString, Stateful, Task, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div, ease_out_quint, img,
+    point, prelude::*, px, relative, size,
 };
 use gpui_platform::application;
 use native_ui::{
@@ -62,6 +62,7 @@ use num_traits::ToPrimitive;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
+    collections::HashMap,
     pin::Pin,
     rc::Rc,
     sync::{
@@ -6218,11 +6219,62 @@ fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
     }
 }
 
+// Rasterized colored marks, keyed by asset path and target logical size.
+// GPUI's `img()` renders an SVG once at intrinsic size and stretches that bitmap, which
+// pixelates large artwork; its `svg()` element only paints a monochrome mask. Rasterizing at a
+// fixed supersample of the drawn size keeps the bundled colored marks sharp without overriding them.
+struct ColoredMarkCache {
+    images: HashMap<(SharedString, u64), Arc<gpui::RenderImage>>,
+    renderer: Option<gpui::SvgRenderer>,
+}
+
+fn ordered_f32_key(value: f32) -> u64 {
+    value.to_bits().into()
+}
+
+impl ColoredMarkCache {
+    fn new() -> Self {
+        Self {
+            images: HashMap::new(),
+            renderer: None,
+        }
+    }
+
+    fn mark(
+        &mut self,
+        path: &SharedString,
+        logical_size: Pixels,
+    ) -> Option<Arc<gpui::RenderImage>> {
+        let milli = ordered_f32_key(f32::from(logical_size));
+        let key = (path.clone(), milli);
+        if let Some(image) = self.images.get(&key) {
+            return Some(Arc::clone(image));
+        }
+        let renderer = self
+            .renderer
+            .get_or_insert_with(|| gpui::SvgRenderer::new(Arc::new(assets::AxiusflowAssets)));
+        let bytes = assets::AxiusflowAssets.load(path.as_ref()).ok().flatten()?;
+        let image = renderer.render_single_frame(&bytes, 4.0).ok()?;
+        self.images.insert(key, Arc::clone(&image));
+        Some(image)
+    }
+}
+
+thread_local! {
+    static MARK_CACHE: RefCell<ColoredMarkCache> = RefCell::new(ColoredMarkCache::new());
+}
+
+fn colored_svg_mark(path: SharedString, size: Pixels) -> Div {
+    let mark = div().size(size).flex_none();
+    let image = MARK_CACHE.with(|cache| cache.borrow_mut().mark(&path, size));
+    match image {
+        Some(image) => mark.child(gpui::img(gpui::ImageSource::Render(image)).size(size)),
+        None => mark.child(img(path).size(size)),
+    }
+}
+
 fn series_glyph(chart_type: ChartType, size: Pixels) -> Div {
-    div()
-        .size(size)
-        .flex_none()
-        .child(img(series_icon_kind(chart_type).path()).size(size))
+    colored_svg_mark(series_icon_kind(chart_type).path(), size)
 }
 
 fn exchange_mark(
@@ -6239,7 +6291,7 @@ fn exchange_mark(
         .when(bordered, |mark| {
             mark.border_1().border_color(gpui_color(colors.border))
         })
-        .child(img(logo.path()).size(size))
+        .child(colored_svg_mark(logo.path(), size))
 }
 
 fn brand_mark() -> Div {
