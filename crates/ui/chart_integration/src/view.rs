@@ -2,8 +2,8 @@
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::nucleus_bridge::{
-    apply_merged_chart_data, chart_data_queue_capacity, install_replay, install_volume_series,
-    replay_price_divisor,
+    ProductPriceBars, apply_merged_chart_data, chart_data_queue_capacity,
+    install_product_price_series, install_replay, install_volume_series, replay_price_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::ReplayRecoveryCommand;
@@ -17,8 +17,10 @@ use gpui::{
     canvas, div, prelude::*, px,
 };
 use nucleuscharts_engine::{
-    ChartEngine, ChartFrame, ChartTheme, DrawingId, DrawingKind, DrawingModifiers, PriceScaleTarget,
+    BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
+    DrawingKind, DrawingModifiers, FeatureSeriesOptionsPatch, NativePrimitiveId, PriceScaleTarget,
 };
+use nucleuscharts_render::color::Color;
 use nucleuscharts_render::draw_list::Prim;
 use nucleuscharts_render_gpui::backend::measure_text;
 use nucleuscharts_render_gpui::{GpuiChartRenderer, NucleusViewport, PreparedNucleusFrame};
@@ -33,6 +35,9 @@ const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
 const PANE_SEPARATOR_HIT: f64 = 4.0;
+const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
+const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
+const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -131,16 +136,18 @@ pub enum ChartType {
     Line,
     Area,
     Baseline,
+    BrushableArea,
 }
 
 impl ChartType {
     /// Built-in OHLC chart types Nucleus can render from the product price series.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Candles,
         Self::Bars,
         Self::Line,
         Self::Area,
         Self::Baseline,
+        Self::BrushableArea,
     ];
 
     /// Returns the header and menu label.
@@ -152,6 +159,7 @@ impl ChartType {
             Self::Line => "Line",
             Self::Area => "Area",
             Self::Baseline => "Baseline",
+            Self::BrushableArea => "Brushable area",
         }
     }
 
@@ -164,6 +172,7 @@ impl ChartType {
             Self::Line => "line",
             Self::Area => "area",
             Self::Baseline => "baseline",
+            Self::BrushableArea => "brushable_area",
         }
     }
 
@@ -175,13 +184,14 @@ impl ChartType {
             .find(|chart_type| chart_type.identifier() == value.trim())
     }
 
-    const fn series_kind(self) -> nucleuscharts_engine::SeriesKind {
+    pub(crate) const fn series_kind(self) -> Option<nucleuscharts_engine::SeriesKind> {
         match self {
-            Self::Candles => nucleuscharts_engine::SeriesKind::Candlestick,
-            Self::Bars => nucleuscharts_engine::SeriesKind::Bar,
-            Self::Line => nucleuscharts_engine::SeriesKind::Line,
-            Self::Area => nucleuscharts_engine::SeriesKind::Area,
-            Self::Baseline => nucleuscharts_engine::SeriesKind::Baseline,
+            Self::Candles => Some(nucleuscharts_engine::SeriesKind::Candlestick),
+            Self::Bars => Some(nucleuscharts_engine::SeriesKind::Bar),
+            Self::Line => Some(nucleuscharts_engine::SeriesKind::Line),
+            Self::Area => Some(nucleuscharts_engine::SeriesKind::Area),
+            Self::Baseline => Some(nucleuscharts_engine::SeriesKind::Baseline),
+            Self::BrushableArea => None,
         }
     }
 }
@@ -346,6 +356,7 @@ enum ChartDrag {
     Pane {
         price_pan: Option<(usize, PriceScaleTarget)>,
     },
+    BrushableRange,
     TimeAxis,
     PriceAxis {
         pane: usize,
@@ -405,6 +416,8 @@ pub struct NucleusChartView {
     instrument_price_precision: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
+    product_bars: ProductPriceBars,
+    brushable_tooltip: Option<NativePrimitiveId>,
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
@@ -459,6 +472,8 @@ impl NucleusChartView {
             instrument_price_precision: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
+            product_bars: ProductPriceBars::default(),
+            brushable_tooltip: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
@@ -502,7 +517,14 @@ impl NucleusChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         let volume_series = install_volume_series(&mut engine);
-        install_replay(&mut engine, volume_series, replay);
+        let mut product_bars = ProductPriceBars::default();
+        install_replay(
+            &mut engine,
+            volume_series,
+            replay,
+            ChartType::Candles,
+            &mut product_bars,
+        );
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
         debug_assert!(retention_applied);
@@ -533,6 +555,8 @@ impl NucleusChartView {
             instrument_price_precision: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
+            product_bars,
+            brushable_tooltip: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
@@ -565,7 +589,13 @@ impl NucleusChartView {
                 replay,
             )?);
         }
-        install_replay(&mut self.engine, self.volume_series, replay);
+        install_replay(
+            &mut self.engine,
+            self.volume_series,
+            replay,
+            self.chart_type,
+            &mut self.product_bars,
+        );
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
@@ -1083,7 +1113,13 @@ impl NucleusChartView {
         if !bridge.install_recovery_snapshot(request_id, replay)? {
             return Ok(false);
         }
-        install_replay(&mut self.engine, self.volume_series, replay);
+        install_replay(
+            &mut self.engine,
+            self.volume_series,
+            replay,
+            self.chart_type,
+            &mut self.product_bars,
+        );
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.price_divisor = replay_price_divisor(replay);
@@ -1145,9 +1181,12 @@ impl NucleusChartView {
                     &mut self.engine,
                     self.volume_series,
                     &mut self.price_divisor,
+                    self.chart_type,
+                    &mut self.product_bars,
                     &update,
                 );
                 if mutation == SeriesMutation::Snapshot {
+                    self.sync_brushable_interaction();
                     self.apply_price_series_kind();
                     self.apply_selected_price_format();
                 }
@@ -1273,9 +1312,98 @@ impl NucleusChartView {
     }
 
     fn apply_price_series_kind(&mut self) {
-        self.engine
-            .convert_series_kind(0, self.chart_type.series_kind());
+        if self.chart_type != ChartType::BrushableArea {
+            self.teardown_brushable_interaction();
+        }
+        install_product_price_series(&mut self.engine, self.chart_type, &self.product_bars);
+        self.sync_brushable_interaction();
         self.invalidate_series_layout();
+    }
+
+    fn sync_brushable_interaction(&mut self) {
+        if self.chart_type != ChartType::BrushableArea {
+            self.teardown_brushable_interaction();
+            return;
+        }
+        if self.brushable_tooltip.is_none() {
+            self.brushable_tooltip = self
+                .engine
+                .add_delta_tooltip(0, DeltaTooltipOptions::default());
+        }
+        self.sync_brushable_range();
+    }
+
+    fn teardown_brushable_interaction(&mut self) {
+        if let Some(id) = self.brushable_tooltip.take() {
+            let _ = self.engine.clear_delta_tooltip(id);
+            let _ = self.engine.remove_native_primitive(id);
+        }
+        if matches!(self.drag, Some(ChartDrag::BrushableRange)) {
+            self.drag = None;
+        }
+    }
+
+    fn sync_brushable_range(&mut self) {
+        let Some(id) = self.brushable_tooltip else {
+            return;
+        };
+        let (base_style, ranges) = match self.engine.delta_tooltip_active_range(id) {
+            Some(range) => (
+                Self::brush_style(BRUSHABLE_LINE, 51, 13, 2.0),
+                vec![BrushRange {
+                    from: f64::from(i32::try_from(range.from).unwrap_or(0)),
+                    to: f64::from(i32::try_from(range.to).unwrap_or(0)),
+                    style: if range.positive {
+                        Self::brush_style(BRUSHABLE_UP, 255, 102, 3.0)
+                    } else {
+                        Self::brush_style(BRUSHABLE_DOWN, 255, 102, 3.0)
+                    },
+                }],
+            ),
+            None => (Self::brush_style(BRUSHABLE_LINE, 255, 102, 2.0), Vec::new()),
+        };
+        let _ = self.engine.apply_feature_series_options(
+            0,
+            FeatureSeriesOptionsPatch {
+                line_color: Some(base_style.line_color),
+                top_color: Some(base_style.top_color),
+                bottom_color: Some(base_style.bottom_color),
+                line_width: Some(base_style.line_width),
+                brush_ranges: Some(ranges),
+                ..FeatureSeriesOptionsPatch::default()
+            },
+        );
+    }
+
+    const fn brush_style(
+        rgb: (u8, u8, u8),
+        line_alpha: u8,
+        top_alpha: u8,
+        width: f64,
+    ) -> BrushStyle {
+        BrushStyle {
+            line_color: Color::rgba(rgb.0, rgb.1, rgb.2, line_alpha),
+            top_color: Color::rgba(rgb.0, rgb.1, rgb.2, top_alpha),
+            bottom_color: Color::rgba(rgb.0, rgb.1, rgb.2, 0),
+            line_width: width,
+        }
+    }
+
+    fn begin_brushable_range(&mut self, pane_x: f64, y: f64) {
+        self.end_drag(pane_x, y);
+        if self.engine.delta_tooltip_mouse_down(pane_x) {
+            self.drag = Some(ChartDrag::BrushableRange);
+            self.sync_brushable_range();
+        }
+        self.update_cursor(pane_x, y);
+        self.update_crosshair(pane_x, y);
+    }
+
+    fn clear_brushable_range(&mut self) {
+        if let Some(id) = self.brushable_tooltip {
+            let _ = self.engine.clear_delta_tooltip(id);
+            self.sync_brushable_range();
+        }
     }
 
     /// Host-owned indicator name-chip chrome for every native indicator on this chart.
@@ -1597,7 +1725,7 @@ impl NucleusChartView {
                 Some(ChartDrag::PaneSeparator { .. }) => CursorStyle::ResizeRow,
                 None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
                 None if self.price_axis_at(pane_x, y).is_some() => CursorStyle::ResizeUpDown,
-                None => CursorStyle::Crosshair,
+                Some(ChartDrag::BrushableRange) | None => CursorStyle::Crosshair,
             }
         };
     }
@@ -1654,6 +1782,8 @@ impl NucleusChartView {
                 self.engine.reset_time_scale();
             } else if self.price_axis_at(pane_x, y).is_some() {
                 self.engine.reset_price_scales();
+            } else if self.chart_type == ChartType::BrushableArea {
+                self.clear_brushable_range();
             }
             self.update_crosshair(pane_x, y);
             return;
@@ -1671,6 +1801,12 @@ impl NucleusChartView {
                 self.drag = None;
             }
         } else if pane_x >= 0.0 && y >= 0.0 && y <= self.engine.pane_h {
+            if self.chart_type == ChartType::BrushableArea
+                && self.drawing_tool == ChartDrawingTool::Cursor
+            {
+                self.begin_brushable_range(pane_x, y);
+                return;
+            }
             self.engine.time_scale.start_scroll(pane_x);
             let price_pan = self
                 .engine
@@ -1696,6 +1832,10 @@ impl NucleusChartView {
                 if let Some((pane, target)) = price_pan {
                     self.engine.price_axis_scroll_to(pane, target, y);
                 }
+            }
+            Some(ChartDrag::BrushableRange) => {
+                self.engine.delta_tooltip_mouse_move(pane_x);
+                self.sync_brushable_range();
             }
             Some(ChartDrag::TimeAxis) => self.engine.time_axis_scale_to(pane_x),
             Some(ChartDrag::PriceAxis { pane, target }) => {
@@ -1724,6 +1864,10 @@ impl NucleusChartView {
                 if let Some((pane, target)) = price_pan {
                     self.engine.price_axis_end_scroll(pane, target);
                 }
+            }
+            Some(ChartDrag::BrushableRange) => {
+                self.engine.delta_tooltip_mouse_up();
+                self.sync_brushable_range();
             }
             Some(ChartDrag::TimeAxis) => self.engine.time_axis_end_scale(),
             Some(ChartDrag::PriceAxis { pane, target }) => {
@@ -1849,6 +1993,7 @@ impl NucleusChartView {
             self.update_crosshair(pane_x, y);
         } else if !self.pointer_on_axis(pane_x, y)
             && self.drawing_tool == ChartDrawingTool::Cursor
+            && self.chart_type != ChartType::BrushableArea
             && self.select_series_at(pane_x, y)
         {
             self.update_cursor(pane_x, y);
@@ -2222,6 +2367,52 @@ mod tests {
         assert_eq!(
             series_entry(&chart, chart.volume_series).kind,
             nucleuscharts_engine::SeriesKind::Histogram
+        );
+    }
+
+    #[test]
+    fn brushable_area_uses_nucleus_feature_series_and_restores_ohlc() {
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+            .expect("embedded replay validates");
+        let mut chart = NucleusChartView::with_replay(&replay);
+        let original = chart.engine.series_data(0);
+        assert!(!original.is_empty());
+        let original_high = original[0].high;
+
+        chart.set_chart_type(ChartType::BrushableArea);
+        assert_eq!(chart.chart_type(), ChartType::BrushableArea);
+        assert_eq!(
+            series_entry(&chart, 0).kind,
+            nucleuscharts_engine::SeriesKind::Feature
+        );
+        assert_eq!(
+            chart.engine.feature_series_kind(0),
+            Some(nucleuscharts_engine::FeatureSeriesKind::BrushableArea)
+        );
+        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        let start = chart.engine.time_scale.index_to_coordinate(2);
+        let end = chart.engine.time_scale.index_to_coordinate(8);
+        chart.begin_drag(start, 200.0, 1);
+        assert_eq!(chart.drag, Some(ChartDrag::BrushableRange));
+        chart.drag_to(end, 200.0);
+        chart.end_drag(end, 200.0);
+        assert!(chart.drag.is_none());
+        let options = chart
+            .engine
+            .feature_series_options_json(0)
+            .expect("brushable options");
+        assert!(options.contains("brush_ranges"));
+        assert!(options.contains("\"from\""));
+
+        chart.set_chart_type(ChartType::Candles);
+        assert_eq!(
+            series_entry(&chart, 0).kind,
+            nucleuscharts_engine::SeriesKind::Candlestick
+        );
+        assert_eq!(
+            chart.engine.series_data(0)[0].high.to_bits(),
+            original_high.to_bits()
         );
     }
 

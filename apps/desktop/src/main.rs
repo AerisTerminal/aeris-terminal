@@ -6214,6 +6214,7 @@ fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
         ChartType::Bars => assets::SeriesIcon::OhlcBar,
         ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
         ChartType::Area => assets::SeriesIcon::Area,
+        ChartType::BrushableArea => assets::SeriesIcon::BrushableArea,
     }
 }
 

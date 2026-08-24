@@ -802,11 +802,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Raised from 71,000 after repeated menu interaction and styling moved
-        // behind one native component shared by both menu families.
+        // Raised from 71,100 after the chart-type selector gained Nucleus's
+        // brushable-area feature series and host drag-to-brush interaction.
         assert!(
-            line_count <= 71_100,
-            "platform Rust source upper bound is {line_count} lines, above the 71,100-line soft review threshold"
+            line_count <= 71_400,
+            "platform Rust source upper bound is {line_count} lines, above the 71,400-line soft review threshold"
         );
     }
 
