@@ -308,7 +308,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "border",
-                mode_source(dark, MIX_INK_8, MIX_PAPER_8),
+                mode_source(dark, MIX_INK_6, MIX_PAPER_8),
                 colors.border,
             ),
             ColorToken::new("border-secondary", "var(--border)", colors.border_secondary),
@@ -380,7 +380,7 @@ impl Default for AxiusflowTheme {
 
 const MIX_INK_3_5: &str = "color-mix(in srgb, #141414 3.5%, transparent)";
 const MIX_INK_5: &str = "color-mix(in srgb, #141414 5%, transparent)";
-const MIX_INK_8: &str = "color-mix(in srgb, #141414 8%, transparent)";
+const MIX_INK_6: &str = "color-mix(in srgb, #141414 6%, transparent)";
 const MIX_INK_20: &str = "color-mix(in srgb, #141414 20%, transparent)";
 const MIX_INK_36: &str = "color-mix(in srgb, #141414 36%, transparent)";
 const MIX_INK_50: &str = "color-mix(in srgb, #141414 50%, transparent)";
@@ -408,7 +408,7 @@ fn light_colors() -> ThemeColors {
     let ink = ThemeColor::from_rgb8(20, 20, 20);
     let surface = ThemeColor::from_rgb8(255, 255, 255);
     let surface_secondary = ThemeColor::from_rgb8(250, 250, 250);
-    let border = mix_srgb(20, 20, 20, 8.0);
+    let border = mix_srgb(20, 20, 20, 6.0);
     ThemeColors {
         surface,
         surface_secondary,
@@ -523,6 +523,10 @@ mod tests {
         assert_eq!(light.input_border, light.border);
         assert_eq!(light.border_secondary, light.border);
         assert_eq!(
+            light.border,
+            ThemeColor::from_rgb8(20, 20, 20).with_alpha(0.06)
+        );
+        assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
@@ -566,6 +570,10 @@ mod tests {
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
+        assert_eq!(
+            token_source(&light_tokens, "border"),
+            "color-mix(in srgb, #141414 6%, transparent)"
+        );
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
         assert_eq!(
             token_source(&dark_tokens, "hover-bg"),
