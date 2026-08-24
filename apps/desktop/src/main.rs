@@ -44,8 +44,8 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Hsla,
     KeyBinding, KeyDownEvent, MouseButton, Orientation, Pixels, QuitMode, Render, Role,
     ScrollHandle, Stateful, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowControlArea, WindowOptions, actions, canvas, div, ease_out_quint, point, prelude::*, px,
-    relative, size,
+    WindowControlArea, WindowOptions, actions, canvas, div, ease_out_quint, img, point, prelude::*,
+    px, relative, size,
 };
 use gpui_platform::application;
 use native_ui::{
@@ -6255,12 +6255,11 @@ fn exchange_mark(
             mark.bg(asset_color(color))
         })
         .child(
-            Icon::new(logo.path())
-                .with_size(glyph_size)
+            img(logo.path())
+                .size(glyph_size)
                 .relative()
                 .left(optical_offset.x)
-                .top(optical_offset.y)
-                .color(asset_color(logo.foreground_rgb())),
+                .top(optical_offset.y),
         )
 }
 

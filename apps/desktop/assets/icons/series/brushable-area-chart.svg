@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision">
-  <path d="M4.5 16.5 8 13.25l2.75 1.75 3.75-5.5 5 2.25V19h-15Z" fill="currentColor" fill-opacity="0.16">
-  </path>
-  <path d="M4.5 16.5 8 13.25l2.75 1.75 3.75-5.5 5 2.25" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
-  </path>
-  <rect x="7.5" y="5.5" width="9" height="13" fill="currentColor" fill-opacity="0.1" stroke="currentColor" stroke-opacity="0.76" stroke-width="0.8" stroke-dasharray="1.5 1.5">
+  <rect x="2" y="2" width="20" height="20" rx="5" fill="#7C4DCC">
   </rect>
-  <rect x="6.75" y="8" width="1.5" height="8" fill="currentColor">
+  <path d="M4.5 16.5 8 13.25l2.75 1.75 3.75-5.5 5 2.25V19h-15Z" fill="white" fill-opacity="0.16">
+  </path>
+  <path d="M4.5 16.5 8 13.25l2.75 1.75 3.75-5.5 5 2.25" stroke="white" stroke-width="1.25">
+  </path>
+  <rect x="7.5" y="5.5" width="9" height="13" fill="white" fill-opacity="0.1" stroke="white" stroke-opacity="0.76" stroke-width="0.8" stroke-dasharray="1.5 1.5">
   </rect>
-  <rect x="15.75" y="8" width="1.5" height="8" fill="currentColor">
+  <rect x="6.75" y="8" width="1.5" height="8" fill="white">
+  </rect>
+  <rect x="15.75" y="8" width="1.5" height="8" fill="white">
   </rect>
 </svg>

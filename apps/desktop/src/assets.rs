@@ -234,20 +234,11 @@ impl ExchangeLogo {
     #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
-            Self::Binance => "binance.svg",
-            Self::Coinbase => "coinbase.svg",
-            Self::Hyperliquid => "hyperliquid.svg",
+            Self::Binance => "binance.png",
+            Self::Coinbase => "coinbase.png",
+            Self::Hyperliquid => "hyperliquid.png",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
-    }
-
-    #[must_use]
-    pub const fn foreground_rgb(self) -> (u8, u8, u8) {
-        match self {
-            Self::Binance => (243, 186, 47),
-            Self::Coinbase => (0, 82, 255),
-            Self::Hyperliquid => (151, 252, 228),
-        }
     }
 
     #[must_use]
@@ -368,10 +359,10 @@ fn brand_asset(path: &str) -> Option<&'static [u8]> {
 
 fn exchange_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(EXCHANGE_ASSET_PREFIX)? {
-        "binance.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/binance.svg"),
-        "coinbase.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/coinbase.svg"),
-        "hyperliquid.svg" => {
-            include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.svg")
+        "binance.png" => include_bytes!("../assets/exchange_assets/exchange_logo/binance.png"),
+        "coinbase.png" => include_bytes!("../assets/exchange_assets/exchange_logo/coinbase.png"),
+        "hyperliquid.png" => {
+            include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.png")
         }
         _ => return None,
     })
@@ -485,10 +476,7 @@ mod tests {
                 .load(logo.path().as_ref())
                 .unwrap()
                 .expect("exchange logo");
-            let svg = std::str::from_utf8(&bytes).unwrap();
-            assert!(svg.contains("viewBox=\"0 0 24 24\""));
-            assert!(!svg.contains("<image"));
-            assert!(!svg.contains("<filter"));
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "{}", logo.path());
 
             let (x, y) = logo.optical_offset_24();
             assert!(x.is_finite() && y.is_finite());

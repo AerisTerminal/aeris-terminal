@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false" shape-rendering="geometricPrecision">
-  <path d="M5 17 8.75 13l3 2.25 4.1-6L19 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="2" y="2" width="20" height="20" rx="5" fill="#2684D8">
+  </rect>
+  <path d="M5 17 8.75 13l3 2.25 4.1-6L19 11" stroke="white" stroke-width="1.8">
   </path>
 </svg>
