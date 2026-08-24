@@ -53,6 +53,7 @@ use native_ui::{
     icon::Icon,
     input::{Input, InputEvent, InputState},
     loader::Loader,
+    menu::{MenuRow, compact_menu_panel, menu_separator},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     toggle::Toggle,
     tooltip::{TooltipSpec, with_tooltip},
@@ -3352,7 +3353,7 @@ fn timeframe_overlay_content(
         let group = timeframe_interval_group(interval);
         if last_group != Some(group) {
             if last_group.is_some() {
-                panel = panel.child(menu_section_divider(&colors));
+                panel = panel.child(menu_separator(theme));
             }
             panel = panel.child(menu_section_header(group, &colors));
             last_group = Some(group);
@@ -3439,7 +3440,7 @@ fn quick_timeframe_overlay_content(
                 .child("No matching interval"),
         );
     }
-    panel = panel.child(menu_section_divider(&colors));
+    panel = panel.child(menu_separator(theme));
     for (index, interval) in intervals.iter().copied().enumerate() {
         panel = panel.child(timeframe_overlay_row(
             app,
@@ -3512,45 +3513,25 @@ fn timeframe_overlay_row(
     pending: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let row_app = app.clone();
-    div()
-        .id(("timeframe_overlay_row", index))
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .px_3()
-        .text_sm()
-        .when(keyboard, |row| {
-            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-        })
-        .when(!pending, |row| {
-            row.cursor_pointer()
-                .hover(|row| {
-                    row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    row_app.update(cx, |app, app_cx| {
-                        if app.select_interval(interval, app_cx) {
-                            app.close_chrome_overlay(window, app_cx);
-                        }
-                    });
-                    cx.stop_propagation();
-                })
-        })
-        .when(pending, |row| {
-            row.text_color(gpui_color(colors.text_muted))
-                .cursor_not_allowed()
-        })
-        .child(div().flex_1().child(interval.label()))
-        .when(selected, |row| {
-            row.child(
-                header_icon(HugeIcon::CheckmarkCircleIcon01)
-                    .with_size(px(16.0))
-                    .color(gpui_color(colors.icon)),
-            )
-        })
+    let mut row = MenuRow::compact(("timeframe_overlay_row", index), interval.label(), theme)
+        .highlighted(keyboard)
+        .disabled(pending)
+        .on_click(move |_, window, cx| {
+            row_app.update(cx, |app, app_cx| {
+                if app.select_interval(interval, app_cx) {
+                    app.close_chrome_overlay(window, app_cx);
+                }
+            });
+        });
+    if selected {
+        row = row.trailing(
+            header_icon(HugeIcon::CheckmarkCircleIcon01)
+                .with_size(px(16.0))
+                .color(gpui_color(theme.colors.icon)),
+        );
+    }
+    row
 }
 
 fn chart_type_overlay_row(
@@ -3561,39 +3542,24 @@ fn chart_type_overlay_row(
     keyboard: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let row_app = app.clone();
-    div()
-        .id(("chart_type_overlay_row", index))
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .px_3()
-        .text_sm()
-        .when(keyboard, |row| {
-            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-        })
-        .cursor_pointer()
-        .hover(|row| {
-            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                .text_color(gpui_color(colors.text_primary))
-        })
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+    let mut row = MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)
+        .leading(series_glyph(chart_type, px(16.0)))
+        .highlighted(keyboard)
+        .on_click(move |_, window, cx| {
             row_app.update(cx, |app, app_cx| {
                 app.set_chart_type(chart_type, app_cx);
                 app.close_chrome_overlay(window, app_cx);
             });
-            cx.stop_propagation();
-        })
-        .child(series_glyph(chart_type, px(16.0)))
-        .child(div().flex_1().child(chart_type.label()))
-        .when(selected, |row| {
-            row.child(
-                header_icon(HugeIcon::CheckmarkCircleIcon01)
-                    .with_size(px(16.0))
-                    .color(gpui_color(colors.icon)),
-            )
-        })
+        });
+    if selected {
+        row = row.trailing(
+            header_icon(HugeIcon::CheckmarkCircleIcon01)
+                .with_size(px(16.0))
+                .color(gpui_color(theme.colors.icon)),
+        );
+    }
+    row
 }
 
 struct MarketWorkspaceState<'a> {
@@ -4617,42 +4583,6 @@ fn clamp_price_axis_flyout_origin(
     )
 }
 
-fn menu_section_divider(colors: &axiusflow_design_system::ThemeColors) -> Div {
-    div()
-        .h(px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT))
-        .flex()
-        .items_center()
-        .child(
-            div()
-                .h_px()
-                .w_full()
-                .bg(gpui_color(colors.border_secondary)),
-        )
-}
-
-fn secondary_menu_panel(
-    id: &'static str,
-    origin: gpui::Point<Pixels>,
-    width: f32,
-    theme: &AxiusflowTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .absolute()
-        .left(origin.x)
-        .top(origin.y)
-        .w(px(width))
-        .occlude()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .text_color(gpui_color(colors.text_primary))
-        .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-}
-
 fn chart_context_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: ChartContextMenu,
@@ -4689,16 +4619,15 @@ fn chart_context_menu_panel(
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
-    let mut panel = secondary_menu_panel(
+    let mut panel = compact_menu_panel(
         "chart_context_menu",
         origin,
-        CHART_CONTEXT_MENU_WIDTH,
+        px(CHART_CONTEXT_MENU_WIDTH),
         theme,
     );
     for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
         if matches!(index, 1 | 3 | 5 | 6) {
-            panel = panel.child(menu_section_divider(&colors));
+            panel = panel.child(menu_separator(theme));
         }
         panel = panel.child(chart_context_menu_item(terminal, item, theme, menu));
     }
@@ -4765,12 +4694,11 @@ fn chart_context_menu_item(
     theme: &AxiusflowTheme,
     menu: ChartContextMenu,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let action_terminal = terminal.clone();
     let icon_color = gpui_color(if item.enabled {
-        colors.icon
+        theme.colors.icon
     } else {
-        colors.text_muted
+        theme.colors.text_muted
     });
     let ChartContextMenuItem {
         id,
@@ -4779,35 +4707,16 @@ fn chart_context_menu_item(
         enabled,
         action,
     } = item;
-    div()
-        .id(id)
-        .occlude()
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .text_sm()
-        .when(enabled, |row| {
-            row.cursor_pointer().hover(|row| {
-                row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                    .text_color(gpui_color(colors.text_primary))
-            })
-        })
-        .when(!enabled, |row| {
-            row.text_color(gpui_color(colors.text_muted))
-                .cursor_not_allowed()
-        })
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+    MenuRow::compact(id, label, theme)
+        .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
+        .disabled(!enabled)
+        .on_click(move |_, window, cx| {
             if enabled {
                 action_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.finish_chart_context_menu(menu, action, window, terminal_cx);
                 });
             }
-            cx.stop_propagation();
         })
-        .child(header_icon(icon).with_size(px(16.0)).color(icon_color))
-        .child(label)
 }
 
 fn price_axis_menu_layer(
@@ -4854,15 +4763,18 @@ fn price_axis_menu_panel(
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
-    let mut panel =
-        secondary_menu_panel("price_axis_menu", origin, CHART_CONTEXT_MENU_WIDTH, theme);
+    let mut panel = compact_menu_panel(
+        "price_axis_menu",
+        origin,
+        px(CHART_CONTEXT_MENU_WIDTH),
+        theme,
+    );
     for (index, row) in price_axis_root_rows(menu.flyout, state)
         .into_iter()
         .enumerate()
     {
         if matches!(index, 2 | 4) {
-            panel = panel.child(menu_section_divider(&colors));
+            panel = panel.child(menu_separator(theme));
         }
         panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
     }
@@ -4877,15 +4789,18 @@ fn price_axis_flyout_panel(
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
-    let mut panel =
-        secondary_menu_panel("price_axis_flyout", origin, PRICE_AXIS_FLYOUT_WIDTH, theme)
-            .max_h(viewport.height)
-            .overflow_y_scroll();
+    let mut panel = compact_menu_panel(
+        "price_axis_flyout",
+        origin,
+        px(PRICE_AXIS_FLYOUT_WIDTH),
+        theme,
+    )
+    .max_h(viewport.height)
+    .overflow_y_scroll();
     let rows = price_axis_flyout_rows(menu.flyout, state);
     for (index, row) in rows.into_iter().enumerate() {
         if menu.flyout == PriceAxisMenuFlyout::Labels && index == 9 {
-            panel = panel.child(menu_section_divider(&colors));
+            panel = panel.child(menu_separator(theme));
         }
         panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
     }
@@ -5108,62 +5023,41 @@ fn price_axis_menu_item(
     let open = matches!(row, PriceAxisMenuRow::Flyout { open: true, .. });
     let chevron = matches!(row, PriceAxisMenuRow::Flyout { .. });
     let label = row.label();
-    div()
-        .id(label)
-        .occlude()
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .px_3()
-        .text_sm()
-        .when(open, |row| {
-            row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-        })
-        .when(enabled, |row| {
-            row.cursor_pointer().hover(|row| {
-                row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                    .text_color(gpui_color(colors.text_primary))
-            })
-        })
-        .when(!enabled, |row| {
-            row.text_color(gpui_color(colors.text_muted))
-                .cursor_not_allowed()
-        })
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            match row {
-                PriceAxisMenuRow::Toggle { action, .. } => {
-                    action_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.apply_price_axis_menu(menu, action, terminal_cx);
-                    });
-                }
-                PriceAxisMenuRow::Flyout { flyout, .. } => {
-                    action_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.toggle_price_axis_flyout(flyout, terminal_cx);
-                    });
-                }
-                PriceAxisMenuRow::Unavailable { .. } => {}
+    let mut item = MenuRow::compact(label, label, theme)
+        .highlighted(open)
+        .disabled(!enabled)
+        .on_click(move |_, _, cx| match row {
+            PriceAxisMenuRow::Toggle { action, .. } => {
+                action_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.apply_price_axis_menu(menu, action, terminal_cx);
+                });
             }
-            cx.stop_propagation();
-        })
-        .child(div().flex_1().child(label))
-        .when(checked, |row| {
-            row.child(
-                header_icon(HugeIcon::CheckmarkCircleIcon01)
-                    .with_size(px(16.0))
-                    .color(gpui_color(colors.icon)),
-            )
-        })
-        .when(chevron, |row| {
-            row.child(
-                header_icon(HugeIcon::ArrowRightIcon01)
-                    .with_size(px(16.0))
-                    .color(gpui_color(if enabled {
-                        colors.icon
-                    } else {
-                        colors.text_muted
-                    })),
-            )
-        })
+            PriceAxisMenuRow::Flyout { flyout, .. } => {
+                action_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.toggle_price_axis_flyout(flyout, terminal_cx);
+                });
+            }
+            PriceAxisMenuRow::Unavailable { .. } => {}
+        });
+    if checked {
+        item = item.trailing(
+            header_icon(HugeIcon::CheckmarkCircleIcon01)
+                .with_size(px(16.0))
+                .color(gpui_color(colors.icon)),
+        );
+    }
+    if chevron {
+        item = item.trailing(
+            header_icon(HugeIcon::ArrowRightIcon01)
+                .with_size(px(16.0))
+                .color(gpui_color(if enabled {
+                    colors.icon
+                } else {
+                    colors.text_muted
+                })),
+        );
+    }
+    item
 }
 
 fn chart_settings_menu_layer(
@@ -5193,10 +5087,10 @@ fn chart_settings_menu_layer(
             cx.stop_propagation();
         })
         .child(
-            secondary_menu_panel(
+            compact_menu_panel(
                 "chart_settings_menu",
                 origin,
-                CHART_SETTINGS_MENU_WIDTH,
+                px(CHART_SETTINGS_MENU_WIDTH),
                 theme,
             )
             .child(settings_mode_row(
@@ -5223,7 +5117,7 @@ fn chart_settings_menu_layer(
                 !pending && state.markets_live_permitted,
                 theme,
             ))
-            .child(menu_section_divider(&colors))
+            .child(menu_separator(theme))
             .child(settings_toggle_row(
                 terminal,
                 "settings_login_start",
@@ -5233,7 +5127,7 @@ fn chart_settings_menu_layer(
                 theme,
                 TerminalApp::toggle_engine_autostart,
             ))
-            .child(menu_section_divider(&colors))
+            .child(menu_separator(theme))
             .child(settings_toggle_row(
                 terminal,
                 "settings_live_retention",
@@ -5728,49 +5622,45 @@ fn indicator_dialog_content(
                         let row_app = app.clone();
                         let add_app = app.clone();
                         let indicator = native_indicator(spec.kind);
-                        chrome_menu_row(&colors, keyboard_selection == index)
-                            .id(("indicator_dialog_row", index))
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                                    row_app.update(cx, |app, app_cx| {
+                        MenuRow::search_result(
+                            ("indicator_dialog_row", index),
+                            spec.label,
+                            format!(
+                                "{} · {}",
+                                spec.parameter_description,
+                                spec.location_description()
+                            ),
+                            theme,
+                        )
+                        .highlighted(keyboard_selection == index)
+                        .on_click(move |_, window, cx| {
+                            if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                                row_app.update(cx, |app, app_cx| {
+                                    app.close_chrome_overlay(window, app_cx);
+                                });
+                            }
+                        })
+                        .trailing(button_activation(
+                            Button::new(("add_indicator", index))
+                                .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
+                                .theme(theme)
+                                .resting_fill(colors.surface)
+                                .w(px(24.0))
+                                .h(px(24.0))
+                                .compact()
+                                .border_1()
+                                .border_color(gpui_color(colors.border))
+                                .cursor_pointer()
+                                .tab_stop(false),
+                            true,
+                            move |window, cx| {
+                                if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                                    add_app.update(cx, |app, app_cx| {
                                         app.close_chrome_overlay(window, app_cx);
                                     });
                                 }
-                                cx.stop_propagation();
-                            })
-                            .child(chrome_menu_copy(
-                                spec.label,
-                                format!(
-                                    "{} · {}",
-                                    spec.parameter_description,
-                                    spec.location_description()
-                                ),
-                                &colors,
-                            ))
-                            .child(button_activation(
-                                Button::new(("add_indicator", index))
-                                    .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
-                                    .theme(theme)
-                                    .resting_fill(colors.surface)
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .compact()
-                                    .border_1()
-                                    .border_color(gpui_color(colors.border))
-                                    .cursor_pointer()
-                                    .tab_stop(false),
-                                true,
-                                move |window, cx| {
-                                    if add_app
-                                        .update(cx, |app, cx| app.add_indicator(indicator, cx))
-                                    {
-                                        add_app.update(cx, |app, app_cx| {
-                                            app.close_chrome_overlay(window, app_cx);
-                                        });
-                                    }
-                                },
-                            ))
+                            },
+                        ))
                     }),
             )
     };
@@ -5867,14 +5757,14 @@ fn instrument_dialog_content(
             list = list
                 .child(chrome_menu_group_heading("Current market", &colors))
                 .children(current.map(|(index, instrument)| {
-                    instrument_dialog_row(app, instrument, index, state, &colors)
+                    instrument_dialog_row(app, instrument, index, state, theme)
                 }));
         }
         if markets.clone().next().is_some() {
             list = list
                 .child(chrome_menu_group_heading(market_heading, &colors))
                 .children(markets.map(|(index, instrument)| {
-                    instrument_dialog_row(app, instrument, index, state, &colors)
+                    instrument_dialog_row(app, instrument, index, state, theme)
                 }));
         }
     }
@@ -5893,11 +5783,7 @@ fn instrument_dialog_content(
         ))
         .child(chrome_menu_footer(&colors, "Select", trailing))
         .when(state.exchange_menu_open, |surface| {
-            surface.child(instrument_exchange_menu(
-                app,
-                state.catalog_exchange,
-                &colors,
-            ))
+            surface.child(instrument_exchange_menu(app, state.catalog_exchange, theme))
         })
 }
 
@@ -5906,43 +5792,38 @@ fn instrument_dialog_row(
     instrument: &InstrumentMenuEntry,
     index: usize,
     state: &InstrumentSelectorState,
-    colors: &axiusflow_design_system::ThemeColors,
+    theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let checked = instrument.checked;
     let app = app.clone();
     let selection = instrument.selection;
-    chrome_menu_row(colors, state.keyboard_selection == index || checked)
-        .id(("instrument_dialog_row", index))
-        .when(!state.selection_pending, |row| {
-            row.cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
-                        app.update(cx, |app, app_cx| {
-                            app.close_chrome_overlay(window, app_cx);
-                        });
-                    }
-                    cx.stop_propagation();
-                })
-        })
-        .when(state.selection_pending, gpui::Styled::cursor_not_allowed)
-        .when(state.provider == TerminalProvider::Coinbase, |row| {
-            row.child(exchange_mark(
-                state.catalog_exchange,
-                px(CHROME_MENU_ROW_ICON_WELL),
-                true,
-                colors,
-            ))
-        })
-        .child(chrome_menu_copy(
-            &instrument.symbol,
-            &instrument.detail,
-            colors,
-        ))
-        .children(checked.then(|| {
-            header_icon(HugeIcon::CheckmarkCircleIcon01)
-                .with_size(px(14.0))
-                .into_any_element()
-        }))
+    let mut row = MenuRow::search_result(
+        ("instrument_dialog_row", index),
+        instrument.symbol.clone(),
+        instrument.detail.clone(),
+        theme,
+    )
+    .highlighted(state.keyboard_selection == index || checked)
+    .disabled(state.selection_pending)
+    .on_click(move |_, window, cx| {
+        if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
+            app.update(cx, |app, app_cx| {
+                app.close_chrome_overlay(window, app_cx);
+            });
+        }
+    });
+    if state.provider == TerminalProvider::Coinbase {
+        row = row.leading(exchange_mark(
+            state.catalog_exchange,
+            px(CHROME_MENU_ROW_ICON_WELL),
+            true,
+            &theme.colors,
+        ));
+    }
+    if checked {
+        row = row.trailing(header_icon(HugeIcon::CheckmarkCircleIcon01).with_size(px(14.0)));
+    }
+    row
 }
 
 const CHROME_MENU_WIDTH: f32 = 896.0;
@@ -5951,7 +5832,6 @@ const CHROME_MENU_INDICATOR_SEARCH_HEIGHT: f32 = 40.0;
 const CHROME_MENU_LIST_HEIGHT: f32 = 480.0;
 const CHROME_MENU_FOOTER_HEIGHT: f32 = 40.0;
 const CHROME_MENU_MAX_HEIGHT: f32 = 704.0;
-const CHROME_MENU_ROW_HEIGHT: f32 = 40.0;
 const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
 const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
 
@@ -5970,55 +5850,6 @@ fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
 
 fn chrome_menu_scroll_body() -> Div {
     div().flex().flex_col().px(px(6.0)).py(px(6.0))
-}
-
-fn chrome_menu_row(colors: &axiusflow_design_system::ThemeColors, selected: bool) -> Div {
-    div()
-        .h(px(CHROME_MENU_ROW_HEIGHT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .when(selected, |row| {
-            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                .text_color(gpui_color(colors.text_primary))
-        })
-        .hover(|row| {
-            row.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                .text_color(gpui_color(colors.text_primary))
-        })
-}
-
-fn chrome_menu_copy(
-    title: impl Into<gpui::SharedString>,
-    detail: impl Into<gpui::SharedString>,
-    colors: &axiusflow_design_system::ThemeColors,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .flex_1()
-        .min_w_0()
-        .child(
-            div()
-                .min_w_0()
-                .text_size(px(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(gpui_color(colors.text_primary))
-                .truncate()
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .text_size(px(11.0))
-                .text_color(gpui_color(colors.text_muted))
-                .truncate()
-                .child(detail.into()),
-        )
 }
 
 fn chrome_menu_group_heading(
@@ -6200,10 +6031,12 @@ fn instrument_search_header(
 fn instrument_exchange_menu(
     app: &Entity<WorkspaceSurface>,
     selected: assets::ExchangeLogo,
-    colors: &axiusflow_design_system::ThemeColors,
-) -> Div {
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
     let panel_fill = colors.surface_secondary.over(colors.surface);
     div()
+        .id("instrument_exchange_menu")
         .absolute()
         .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
         .left(px(12.0))
@@ -6224,32 +6057,25 @@ fn instrument_exchange_menu(
                 .map(|(index, exchange)| {
                     let row_app = app.clone();
                     let active = exchange == selected;
-                    div()
-                        .id(("instrument_exchange_row", index))
-                        .h(px(32.0))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                        .cursor_pointer()
-                        .when(active, |row| {
-                            row.bg(gpui_color(colors.active_bg.over(panel_fill)))
-                        })
-                        .hover(|row| row.bg(gpui_color(colors.hover_bg.over(panel_fill))))
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            row_app.update(cx, |app, cx| {
-                                app.set_instrument_catalog_exchange(exchange, cx);
-                            });
-                            cx.stop_propagation();
-                        })
-                        .child(exchange_mark(exchange, px(20.0), false, colors))
-                        .child(div().flex_1().text_sm().child(exchange.label()))
-                        .children(active.then(|| {
-                            header_icon(HugeIcon::CheckmarkCircleIcon01)
-                                .with_size(px(14.0))
-                                .into_any_element()
-                        }))
+                    let mut row = MenuRow::compact_inset(
+                        ("instrument_exchange_row", index),
+                        exchange.label(),
+                        theme,
+                    )
+                    .resting_fill(panel_fill)
+                    .leading(exchange_mark(exchange, px(20.0), false, &colors))
+                    .highlighted(active)
+                    .on_click(move |_, _, cx| {
+                        row_app.update(cx, |app, cx| {
+                            app.set_instrument_catalog_exchange(exchange, cx);
+                        });
+                    });
+                    if active {
+                        row = row.trailing(
+                            header_icon(HugeIcon::CheckmarkCircleIcon01).with_size(px(14.0)),
+                        );
+                    }
+                    row
                 }),
         )
 }
@@ -6412,6 +6238,7 @@ fn exchange_mark(
     colors: &axiusflow_design_system::ThemeColors,
 ) -> Div {
     let glyph_size = exchange_mark_glyph_size(size, bordered);
+    let optical_offset = exchange_mark_optical_offset(logo, glyph_size);
     div()
         .size(size)
         .flex_none()
@@ -6429,12 +6256,23 @@ fn exchange_mark(
         .child(
             Icon::new(logo.path())
                 .with_size(glyph_size)
+                .relative()
+                .left(optical_offset.x)
+                .top(optical_offset.y)
                 .color(asset_color(logo.foreground_rgb())),
         )
 }
 
 fn exchange_mark_glyph_size(size: Pixels, bordered: bool) -> Pixels {
     if bordered { size - px(4.0) } else { size }
+}
+
+fn exchange_mark_optical_offset(
+    logo: assets::ExchangeLogo,
+    glyph_size: Pixels,
+) -> gpui::Point<Pixels> {
+    let (x, y) = logo.optical_offset_24();
+    point(glyph_size * (x / 24.0), glyph_size * (y / 24.0))
 }
 
 fn brand_mark() -> Div {
@@ -9727,9 +9565,9 @@ mod tests {
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress,
         chrome_typeahead_char_from, claim_once, clamp_chart_context_menu_origin,
         clamp_price_axis_menu_origin, connection_presentation, default_rithmic_contract_index,
-        durable_workspace_viewport, exchange_mark_glyph_size, finish_desktop_shutdown,
-        fullscreen_escape_command, gpui_color, instrument_selector_label, nucleus_chart_theme,
-        price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+        durable_workspace_viewport, exchange_mark_glyph_size, exchange_mark_optical_offset,
+        finish_desktop_shutdown, fullscreen_escape_command, gpui_color, instrument_selector_label,
+        nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
         reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
         resized_side_panel_width, rithmic_ready_action, series_selector_label,
         should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
@@ -9740,6 +9578,7 @@ mod tests {
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
+    use crate::assets::ExchangeLogo;
     use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
     use axiusflow_engine_protocol::{
@@ -10277,8 +10116,16 @@ mod tests {
 
     #[test]
     fn bordered_exchange_marks_center_an_inset_glyph() {
-        assert_eq!(exchange_mark_glyph_size(px(24.0), true), px(20.0));
+        let bordered_glyph = exchange_mark_glyph_size(px(24.0), true);
+        assert_eq!(bordered_glyph, px(20.0));
         assert_eq!(exchange_mark_glyph_size(px(20.0), false), px(20.0));
+        let coinbase_offset = exchange_mark_optical_offset(ExchangeLogo::Coinbase, bordered_glyph);
+        assert!((0.83..0.84).contains(&coinbase_offset.x.as_f32()));
+        assert_eq!(coinbase_offset.y, px(0.0));
+        assert_eq!(
+            exchange_mark_optical_offset(ExchangeLogo::Binance, px(20.0)),
+            point(px(0.0), px(0.0))
+        );
     }
 
     #[test]

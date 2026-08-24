@@ -257,6 +257,15 @@ impl ExchangeLogo {
             Self::Binance | Self::Coinbase => None,
         }
     }
+
+    /// Optical correction in the logo asset's 24-unit view box.
+    #[must_use]
+    pub const fn optical_offset_24(self) -> (f32, f32) {
+        match self {
+            Self::Coinbase => (1.0, 0.0),
+            Self::Binance | Self::Hyperliquid => (0.0, 0.0),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -480,7 +489,13 @@ mod tests {
             assert!(svg.contains("viewBox=\"0 0 24 24\""));
             assert!(!svg.contains("<image"));
             assert!(!svg.contains("<filter"));
+
+            let (x, y) = logo.optical_offset_24();
+            assert!(x.is_finite() && y.is_finite());
+            assert!(x.abs() <= 2.0 && y.abs() <= 2.0);
         }
+
+        assert_eq!(ExchangeLogo::Coinbase.optical_offset_24(), (1.0, 0.0));
 
         let brand = assets
             .load(BrandIcon::Mark.path().as_ref())
