@@ -1,0 +1,42 @@
+# Axiusflow
+
+Axiusflow is a local-first professional trading terminal. It is a native Rust desktop for live market data, charting, market-depth workflows, and local history, with a path to safe execution.
+
+It belongs in the same product category as MotiveWave and ATAS: a workstation that runs on the trader's machine, not a browser app and not a remote Axiusflow service.
+
+## What ships today
+
+- Native Windows, macOS, and Linux desktop
+- A resident local engine that owns provider sessions, canonical series, encrypted history, and publication
+- Professional charting through [Nucleus Charts](https://github.com/NucleusCharts/financial-charts), consumed as a pinned Git dependency
+- Coinbase and Rithmic market data
+- Chart types, drawings, DOM, and multi-pane workspaces
+
+Closing the window keeps the engine warm by default. Settings can instead keep markets live after the last UI client detaches, or shut the engine down completely.
+
+## Requirements
+
+- Rust 1.97.1, pinned in `rust-toolchain.toml`
+- On Linux, the desktop libraries installed by `tools/setup_linux_desktop.sh`
+
+Nucleus Charts is a separate repository. Do not clone it into this workspace; Cargo fetches the pinned revision.
+
+## Run
+
+From the repository root:
+
+```text
+cargo run --release --package axiusflow_desktop
+```
+
+The desktop starts or reconnects to the per-user local engine. Use `--workspace-tabs` for a persisted tab and split-pane shell, or `--multi-chart` for independent chart windows.
+
+## Documentation
+
+- [Architecture.md](Architecture.md) — current implemented architecture
+- [Agents.md](Agents.md) — engineering and delivery rules for work in this repository
+- [Axiusflow Local Engine Architecture Migration Specification.md](Axiusflow%20Local%20Engine%20Architecture%20Migration%20Specification.md) — approved target-state contract
+
+## License
+
+Proprietary. This workspace is not published.

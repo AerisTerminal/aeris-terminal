@@ -13,12 +13,15 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "target",
     "third_party",
 ];
+const REPOSITORY_MARKDOWN_FILES: &[&str] = &[
+    "Agents.md",
+    "Architecture.md",
+    "Axiusflow Local Engine Architecture Migration Specification.md",
+    "Readme.md",
+];
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     ".gitignore",
     ".gitmodules",
-    "AGENTS.md",
-    "ARCHITECTURE.md",
-    "AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md",
     "Cargo.lock",
     "Cargo.toml",
     "Dockerfile",
@@ -85,7 +88,9 @@ fn should_skip_directory(name: &OsStr) -> bool {
 
 fn is_valid_file_name(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
-    if PLATFORM_FILE_EXCEPTIONS.contains(&name.as_ref()) {
+    if PLATFORM_FILE_EXCEPTIONS.contains(&name.as_ref())
+        || REPOSITORY_MARKDOWN_FILES.contains(&name.as_ref())
+    {
         return true;
     }
 
@@ -441,11 +446,7 @@ mod tests {
             }
         }
 
-        for relative in [
-            "AGENTS.md",
-            "ARCHITECTURE.md",
-            "AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md",
-        ] {
+        for relative in super::REPOSITORY_MARKDOWN_FILES {
             let contents = manifest(relative);
             for retired in [
                 concat!("Ori", "gin", " Charts"),
@@ -614,14 +615,11 @@ mod tests {
                     .then(|| path.file_name().expect("Markdown has a name").to_owned())
             })
             .collect::<BTreeSet<_>>();
-        let expected = [
-            "AGENTS.md",
-            "ARCHITECTURE.md",
-            "AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION.md",
-        ]
-        .into_iter()
-        .map(std::ffi::OsString::from)
-        .collect();
+        let expected = super::REPOSITORY_MARKDOWN_FILES
+            .iter()
+            .copied()
+            .map(std::ffi::OsString::from)
+            .collect();
         assert_eq!(actual, expected, "repository Markdown inventory drifted");
     }
 

@@ -1,4 +1,4 @@
-# AXIUSFLOW LOCAL ENGINE ARCHITECTURE MIGRATION SPECIFICATION
+# Axiusflow Local Engine Architecture Migration Specification
 
 ## Migration checklist status
 
@@ -3343,7 +3343,7 @@ Avoid nested lock graphs.
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-15): `ARCHITECTURE.md` now inventories every production queue family with producer, consumer, capacity, full behavior, conflation, resynchronization, and control priority. Engine command/history/storage/catalog lanes are bounded at 64/8/16/64 items; realtime lanes are 2,048 events with a 4,096-item history handoff; Rithmic callbacks are bounded by 256 items and 8 MiB; provider environment/session commands are eight; desktop publication/command lanes are 32/32 and 32/8; chart publication is 64; history and lifecycle rendezvous are one. Data producers use nonblocking or bounded submission, loss of correctness-critical data invalidates the generation and requires covering recovery, semantic presentation slots alone conflate, and independent control/cancellation lanes prevent drain deadlock. A production-source conformance scan rejects unbounded channel constructors.
+Evidence (2026-08-15): `Architecture.md` now inventories every production queue family with producer, consumer, capacity, full behavior, conflation, resynchronization, and control priority. Engine command/history/storage/catalog lanes are bounded at 64/8/16/64 items; realtime lanes are 2,048 events with a 4,096-item history handoff; Rithmic callbacks are bounded by 256 items and 8 MiB; provider environment/session commands are eight; desktop publication/command lanes are 32/32 and 32/8; chart publication is 64; history and lifecycle rendezvous are one. Data producers use nonblocking or bounded submission, loss of correctness-critical data invalidates the generation and requires covering recovery, semantic presentation slots alone conflate, and independent control/cancellation lanes prevent drain deadlock. A production-source conformance scan rejects unbounded channel constructors.
 
 Every queue documents:
 
@@ -4054,13 +4054,13 @@ Then optimize observed hot spots.
 
 ---
 
-# 119. `ARCHITECTURE.md`
+# 119. `Architecture.md`
 
 - [x] **Status: Verified complete**
 
-Evidence (2026-08-18): `ARCHITECTURE.md` is synchronized with manifests and call paths. It explicitly assigns provider sessions, canonical market state, shared subscriptions, local persistence, lifecycle, and bounded publication to `axiusflow_engine`; assigns GPUI presentation and chart interaction to `axiusflow_desktop`; documents authenticated local IPC, persistence-independent first pixels, warm/markets-live/complete-exit behavior, independent multi-consumer charts, the current one-chart and `--multi-chart` surfaces, and the future desktop-owned tab/pane model. It also records the sole `chart_integration`/Nucleus boundary and the current unimplemented persistent multi-tab limitation without claiming target behavior as shipped.
+Evidence (2026-08-18): `Architecture.md` is synchronized with manifests and call paths. It explicitly assigns provider sessions, canonical market state, shared subscriptions, local persistence, lifecycle, and bounded publication to `axiusflow_engine`; assigns GPUI presentation and chart interaction to `axiusflow_desktop`; documents authenticated local IPC, persistence-independent first pixels, warm/markets-live/complete-exit behavior, independent multi-consumer charts, the current one-chart and `--multi-chart` surfaces, and the future desktop-owned tab/pane model. It also records the sole `chart_integration`/Nucleus boundary and the current unimplemented persistent multi-tab limitation without claiming target behavior as shipped.
 
-Update the existing root `ARCHITECTURE.md`.
+Update the existing root `Architecture.md`.
 
 Do not create another architecture document.
 
@@ -4087,11 +4087,11 @@ Respect the repository rule against document sprawl.
 
 ---
 
-# 120. `AGENTS.md`
+# 120. `Agents.md`
 
 - [x] **Status: Verified complete**
 
-Update `AGENTS.md` with enforceable rules for future coding agents.
+Update `Agents.md` with enforceable rules for future coding agents.
 
 At minimum include:
 
@@ -4111,7 +4111,7 @@ At minimum include:
 14. Replaced code must be deleted.
 15. Compile success is not runtime success.
 
-Evidence (2026-08-14): `AGENTS.md` now contains an enforceable market-architecture guardrail section covering GPUI blocking/provider/storage exclusions, provider-neutral desktop types, single `MarketEngine` demand ownership, shared provider runtimes, stable sessions across presentation changes, memory-before-persistence publication, generation fencing, bounded Loading/recovery, one runtime/IPC path, crate/trait justification, deletion of replaced code, and runtime verification beyond compilation.
+Evidence (2026-08-14): `Agents.md` now contains an enforceable market-architecture guardrail section covering GPUI blocking/provider/storage exclusions, provider-neutral desktop types, single `MarketEngine` demand ownership, shared provider runtimes, stable sessions across presentation changes, memory-before-persistence publication, generation fencing, bounded Loading/recovery, one runtime/IPC path, crate/trait justification, deletion of replaced code, and runtime verification beyond compilation.
 
 ---
 
@@ -6141,7 +6141,7 @@ becomes an unstructured dumping ground, organize it internally before inventing 
 
 - [x] **Status: Verified complete**
 
-Historical evidence (2026-08-11): the following implementation-grounded pre-migration map was completed before protocol v3 was edited. Sections A and B intentionally describe the ownership that existed at that point; those runtime paths were subsequently removed, and sections 150, 151, and `ARCHITECTURE.md` describe the current topology.
+Historical evidence (2026-08-11): the following implementation-grounded pre-migration map was completed before protocol v3 was edited. Sections A and B intentionally describe the ownership that existed at that point; those runtime paths were subsequently removed, and sections 150, 151, and `Architecture.md` describe the current topology.
 
 ## A. Historical pre-migration ownership
 
