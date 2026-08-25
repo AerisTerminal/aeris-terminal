@@ -316,6 +316,12 @@ impl EngineHistorySession {
                 {
                     return Err("Rithmic engine snapshot identity mismatched".to_string());
                 }
+                // A warm engine can publish retained data tagged with an older
+                // provider session before the current-session repair lands, so
+                // stale generations are skipped instead of failing the fetch.
+                if snapshot.provider_generation < request.instrument.session_generation {
+                    return Ok(None);
+                }
                 bootstrap_from_snapshot(request, &snapshot)
                     .map(Box::new)
                     .map(EngineUpdate::History)
@@ -328,6 +334,9 @@ impl EngineHistorySession {
                     || update.series.as_ref() != Some(&series)
                 {
                     return Err("Rithmic engine update identity mismatched".to_string());
+                }
+                if update.provider_generation < request.instrument.session_generation {
+                    return Ok(None);
                 }
                 tail_from_update(request, &update)
                     .map(ReplayStreamUpdate::Tail)
@@ -362,6 +371,9 @@ impl EngineHistorySession {
             envelope::Payload::OrderBookSnapshot(snapshot) => {
                 if snapshot.consumer_id != self.consumer_id {
                     return Err("Rithmic engine order-book consumer mismatched".to_string());
+                }
+                if snapshot.provider_generation < request.instrument.session_generation {
+                    return Ok(None);
                 }
                 dom_from_snapshot(request, &snapshot)
                     .map(EngineUpdate::Dom)

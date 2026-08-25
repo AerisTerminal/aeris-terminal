@@ -2933,16 +2933,19 @@ impl WorkspaceSurface {
         result: Result<Box<MarketWorkerBootstrap>, String>,
         cx: &mut Context<Self>,
     ) {
-        let Ok(bootstrap) = result else {
-            if self.series_browser.reject(series_generation) {
-                self.series_message = "Rithmic visible history is unavailable".to_string();
-                self.set_chart_state(
-                    ChartState::Error,
-                    "Rithmic visible history could not be loaded".to_string(),
-                    cx,
-                );
+        let bootstrap = match result {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => {
+                if self.series_browser.reject(series_generation) {
+                    self.series_message = "Rithmic visible history is unavailable".to_string();
+                    self.set_chart_state(
+                        ChartState::Error,
+                        format!("Rithmic visible history could not be loaded: {error}"),
+                        cx,
+                    );
+                }
+                return;
             }
-            return;
         };
         if !self
             .series_browser

@@ -2600,10 +2600,11 @@ impl Coordinator<'_> {
         if !key_exists_after_reset && retained_catalog_len >= MAXIMUM_CATALOG_INSTRUMENTS {
             return Err("provider instrument catalog capacity is exhausted".to_string());
         }
-        if engine_generation.is_none()
-            || provider != "rithmic"
-                && engine_generation.is_some_and(|current| provider_generation > current)
-        {
+        // A newer install generation proves the provider opened a newer catalog
+        // session, so the engine session must advance with it: Rithmic history
+        // demands are fenced against the engine generation, and the realtime
+        // worker only announces its generation after history succeeds.
+        if engine_generation.is_none_or(|current| provider_generation > current) {
             self.engine
                 .begin_provider_session(&provider, provider_generation)
                 .map_err(|error| error.to_string())?;
@@ -8265,6 +8266,43 @@ mod tests {
                     && snapshot.quantity_scale == 0
                     && snapshot.series == Some(series)
                     && snapshot.bars.len() == 1
+        ));
+    }
+
+    #[test]
+    fn newer_rithmic_catalog_session_install_advances_the_engine_generation() {
+        let service = MarketService::start_fixture(vec![history_bar()]).expect("market service");
+        service.attach(7).expect("client attaches");
+        service
+            .register_consumer(7, 1, 9)
+            .expect("consumer registers");
+        service
+            .install_provider_instrument(&provider_instrument(11, 4))
+            .expect("first catalog session installs");
+        // A resident engine outlives desktop sessions, so a reopened catalog
+        // session installs with a newer session generation. History demand is
+        // fenced against the engine generation and must observe the new one.
+        service
+            .install_provider_instrument(&provider_instrument(12, 1))
+            .expect("newer catalog session installs");
+        let series = SeriesKey {
+            provider: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            cadence_value: 100,
+            definition_revision: 1,
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            cadence: SeriesCadence::Trades as i32,
+        };
+        service
+            .set_demand(7, 9, 2, &series)
+            .expect("Rithmic history demand is accepted");
+        let event = poll_until(&service, 7, 9, |event| {
+            matches!(event, envelope::Payload::SeriesSnapshot(_))
+        });
+        assert!(matches!(
+            event,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.provider_generation == 12 && snapshot.bars.len() == 1
         ));
     }
 
