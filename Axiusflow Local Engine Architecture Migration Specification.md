@@ -9,9 +9,9 @@ Every numbered section is a migration task or verification gate. Its status mark
 
 Partial implementation remains unchecked. Existing desktop-owned behavior does not count as completion when the section requires engine ownership. When a task is completed, change only its marker to `[x]` and add a short evidence note with the validating test, command, or runtime result.
 
-**Verified progress: 161 of 180 tasks complete.**
+**Verified progress: 162 of 187 tasks complete.**
 
-The 180-section ledger was recalculated on 2026-08-19 as 161 checked and 19 unchecked sections. The unchecked sections are the authoritative remaining-work ledger. They primarily cover physical reboot/login and macOS lifecycle proof, real updater/uninstaller integration, long-running memory evidence, and remaining provider/performance measurements. Historical progress notes are labeled as such and do not describe the current ownership topology.
+The 180-section ledger was recalculated on 2026-08-19 as 161 checked and 19 unchecked sections. On 2026-08-25 a live-streaming reliability investigation added sections 181-187: section 181 records the verified ground truth and sections 182-187 are new unchecked migration tasks, giving 162 checked and 25 unchecked sections. The unchecked sections are the authoritative remaining-work ledger. They primarily cover physical reboot/login and macOS lifecycle proof, real updater/uninstaller integration, long-running memory evidence, remaining provider/performance measurements, and the section 182-187 live-streaming reliability, observability, and measurement program. Historical progress notes are labeled as such and do not describe the current ownership topology.
 
 You are working on Axiusflow, a local-first professional trading platform written in Rust with GPUI.
 
@@ -6332,3 +6332,132 @@ measured performance
 over architectural ceremony.
 
 The final platform should contain one understandable working path.
+
+---
+
+# MANDATORY ADDENDUM — LIVE STREAMING RELIABILITY, SYMBOL-SWITCH INTEGRITY, AND MEASURABLE STREAMING PERFORMANCE
+
+This addendum was added on 2026-08-25 after an end-to-end code and runtime investigation of live-market-data startup reliability, symbol switching, failure detection, recovery, and measurement. Section 181 records the verified ground truth. Sections 182-187 are migration tasks with the same status discipline as every other numbered section. They exist because the investigation confirmed defects and observability gaps inside already-verified slices (notably sections 36, 61, 62, 104, 105, and 131): the recovery *correctness* those sections verified is real, but intentional lifecycle transitions are misreported as failures, several silent failure paths exist, and none of the startup/streaming latency and reliability questions can currently be answered with measurements. These tasks are ordered by dependency and can proceed alongside the other unchecked sections.
+
+---
+
+# 181. LIVE STREAMING INVESTIGATION GROUND TRUTH (2026-08-25)
+
+- [x] **Status: Verified complete**
+
+Evidence (2026-08-25): every finding below was established from the shipping source, a deterministic reproduction against the production coordinator, or a live authenticated status probe of the resident engine. This section is the factual record that sections 182-187 remediate; it adds no new requirement itself.
+
+**Confirmed from code and deterministic runtime reproduction:**
+
+1. **Symbol-switch false failure.** A Coinbase cross-product switch changes the demanded product set; `sync_coinbase_realtime` (`apps/engine/src/market_service.rs`) intentionally stops the shared WebSocket session so the worker can reconnect with the new subscription set. The worker then emits `RealtimeEvent::Disconnected` for the still-current provider generation, and the coordinator's handler treats every same-generation disconnect as a failure: `realtime_interrupted(FailureStage::ProviderRealtime, "Coinbase realtime disconnected")` broadcasts a `DemandError` to **every** live series consumer — including the newly selected symbol's new consumer generation. The desktop maps any polled `DemandError` to `ChartState::Error` without a generation fence (`apps/desktop/src/engine_market_worker.rs`). The next covering snapshot heals the chart. A deterministic fixture run against the production coordinator reproduced exactly `stage=provider_realtime generation=2 detail="Coinbase realtime disconnected"` delivered to the new consumer after a BTC→ETH switch. Same-product cadence switches reuse the session and do not hit this path. The user-visible symbol-switch error is therefore an intentional, coordinator-initiated resubscription being reported as a provider failure; it is not a genuine failure.
+2. **Realtime worker silent-exit paths.** In `run_realtime_worker`, a `configure()` error terminates the worker thread permanently; the coordinator then receives `TrySendError::Disconnected` from the control channel and silently returns without publishing any failure. `CoinbaseConfig::try_new` only fails on empty, oversized, duplicate, or malformed product identifiers and the coordinator pre-guards empty/oversized sets, so this is latent rather than routine — but if reached it is permanent, silent, and unrecoverable until engine restart. A WebSocket connect failure inside `run_generation` returns without any distinct event; the surrounding loop retries every 250 ms indefinitely, so each failed connect surfaces as a `Connecting`/`Disconnected` cycle that also triggers the section-182 false `DemandError` broadcast.
+3. **Realtime control-channel races.** The coordinator commands the worker through a capacity-one channel plus a shared stop flag. A `Start` dropped on `TrySendError::Full` is retried by the 16 ms coordinator tick while live demand exists (self-healing), but the worker's `stop.store(false)` after `recv()` can overwrite a stop the coordinator set for a newer product set, leaving the worker permanently subscribed to an obsolete product set while the coordinator believes the new set is active. In that state history is Ready, the provider is Online, heartbeats for the stale products keep the session alive, and no trade ever arrives for the demanded symbol — an undetectable believes-streaming-while-no-data state. The window is small but real under rapid switching.
+4. **Stale provider connection state.** A live authenticated status probe of the resident engine (PID 3699, 100 minutes uptime, zero desktop clients, Warm mode) reported Coinbase `Connecting` at provider generation 24 with no active realtime worker: when realtime idles out mid-connect, the late `Connected`/`Disconnected` event no longer matches the ended session and is ignored, freezing the published provider state. Provider health does not currently resolve to `Disconnected` when realtime stops because demand went idle. Generation 24 also shows roughly two dozen reconnect/resubscription cycles accumulated in one morning of ordinary use.
+5. **Coinbase liveness detection is real but session-scoped.** The adapter subscribes to the provider `heartbeats` channel alongside `market_trades`, advances liveness only on subscribed-channel messages (WebSocket pings do not count), and enforces a 5-second inactivity bound and 15-second connect deadline. Rithmic uses a 2-minute message-silence bound plus heartbeat-response deadlines. There is **no** coordinator-level or per-product data-activity health: Coinbase `Online` requires WebSocket connect plus covering history (not first data), Rithmic `Online` is set on connect or heartbeat alone, and `ProviderHealth::Failed` is never assigned anywhere in production — recovery loops forever as `Recovering` with no terminal, user-actionable state.
+6. **Unbounded desktop bootstrap wait.** `initialize_endpoint`/`request_snapshot` in `apps/desktop/src/engine_market_worker.rs` polls without a deadline; if the engine never publishes a snapshot, failure, or demand error for that consumer, the chart remains in Loading indefinitely, violating the section 62 no-hidden-infinite-loading contract at the desktop boundary. Engine start failure at desktop launch is a 3-second bounded hard exit whose diagnostics go only to stderr.
+7. **No streaming disable control exists.** The settings controls the product owner recalled ("Markets live" mode row and the "Live retention" toggle) gate only post-close retention: whether the resident engine may keep provider sessions and hot-set demand live after the last UI client detaches, and whether that mode may be selected. No user-facing control stops live streaming for an open, subscribed chart; interactive demand always starts realtime regardless of these preferences. No change to these controls is required by this addendum; any future provider on/off control remains a section 171 engine command.
+8. **Measurement infrastructure does not cover streaming.** Existing evidence tools measure storage (`axiusflow_market_data_performance`), diagnostics overhead (`axiusflow_diagnostics_overhead`), fixture-driven GPUI latency (`--windowed-benchmark`, no engine or provider), and cached IPC demand/switch latency (ignored release verifier, deterministic fixtures with provider priming fenced out). `observability::FeedDiagnostics` supports connection state, heartbeat/message ages, reconnect counts, and opt-in latency histograms, but the production engine constructs it on no live path, `GetEngineStatus` exposes none of it, and neither process has structured logging or startup-phase timestamps. Consequently none of the following can be measured today: process-start→first-live-tick, provider connect duration, symbol-switch→first-new-symbol-tick, startup success rate across repeated runs, or stall/recovery counts.
+
+**Observed behavior consistent with the confirmed mechanisms:** intermittent error banners on symbol switch that self-heal within roughly one reconnect round-trip; occasional startups that render history without live data; inconsistent behavior across development rebuilds because a protocol-compatible resident engine from an older build (and with accumulated state such as the frozen `Connecting` above) is silently reused by a newer desktop.
+
+**Relationship to the migration:** the measurement and benchmark gaps map directly onto already-unchecked sections 104, 105, 118, 137, and 169. The false-failure broadcast, silent worker-exit paths, control-channel races, stale provider state, and missing data-activity health are **defects and gaps inside already-verified migration slices**, not consequences of the remaining unchecked work; without sections 182-187 they would survive completion of the existing ledger.
+
+---
+
+# 182. INTENTIONAL REALTIME RESUBSCRIPTION MUST NOT SURFACE AS FAILURE
+
+- [ ] **Status: Not verified complete**
+
+An engine-initiated realtime lifecycle transition is not a provider failure and must never be reported to any consumer as one.
+
+Required:
+
+- The coordinator must distinguish disconnects it caused (product-set resubscription, idle release, shutdown, generation supersession) from unexpected session loss (inactivity, peer close, sequence gap, transport error). The worker/coordinator contract must carry that distinction explicitly; inferring it from timing is not acceptable.
+- An intentional resubscription publishes at most a generation-qualified `Connecting`/`Recovering` provider state to affected consumers. It must not publish `DemandError`, must not put the new selection's chart into an error state, and must not clear retained covering history from consumer view.
+- Unexpected session loss keeps its current explicit behavior: staged error, `Recovering`, buffered-handoff reset, covering repair.
+- The desktop must additionally fence `DemandError` by consumer generation exactly as snapshots, updates, and series states already are, so a late error for a superseded generation can never mark the current chart failed.
+- Symbol switching must remain as fast as the provider allows: the switch path may not add waits, and the existing immediate (no reconnect-delay) restart for intentional stops must be preserved.
+- Regression proof: a deterministic fixture test that performs a cross-product switch against the production coordinator and asserts the new consumer generation receives history, live continuation, and **no** `DemandError`; and a companion test proving a genuine mid-session disconnect still produces the staged error and recovery. The 2026-08-25 reproduction (BTC→ETH switch delivering `stage=provider_realtime` to generation 2) is the failing baseline this must flip.
+
+---
+
+# 183. REALTIME WORKER LIFECYCLE MUST BE FAIL-CLOSED AND RACE-FREE
+
+- [ ] **Status: Not verified complete**
+
+The shared realtime worker is the only path live Coinbase data has into the engine. Its lifecycle must not contain silent exits, lost commands, or state the coordinator cannot observe.
+
+Required:
+
+- No silent worker exit. A `configure()` failure, control-channel loss, or worker panic must latch an explicit provider-scoped terminal state (`ProviderHealth::Failed` plus staged error with cause) to the coordinator and all demanding consumers, and the coordinator must be able to restart the worker deterministically. `ProviderHealth::Failed` must become reachable in production for exactly these terminal cases.
+- Connect failures must be distinct, observable events (with cause), not an indistinguishable `Connecting`/`Disconnected` cycle.
+- The coordinator→worker control contract must be lossless and race-free for the newest command: replace the capacity-one channel plus shared stop flag with a bounded latest-value command slot (matching the queue policy for control state elsewhere in this document) such that (a) a newer `Start` can never be dropped, (b) the worker can never clear a stop intended for a newer command, and (c) the running subscription set can never silently diverge from the coordinator's demanded set.
+- The worker must acknowledge the exact product set each session actually subscribed, and the coordinator must verify that acknowledgment against current demand before treating the session as serving it; a mismatch forces resubscription, never silent continuation.
+- Provider connection state must always resolve: when realtime idles out because demand went away, the published provider state must transition to `Disconnected` rather than freezing at the last in-flight `Connecting`/`Recovering` (the observed stale `Connecting` at generation 24 must be impossible).
+- Regression proof: deterministic tests for configure-failure latching, worker-restart-after-terminal-failure, newest-command-wins under rapid product-set churn, acknowledged-set verification, and idle-release state resolution.
+
+---
+
+# 184. STREAMING HEALTH MUST TRACK DATA ACTIVITY, NOT ONLY CONNECTION STATE
+
+- [ ] **Status: Not verified complete**
+
+A trading platform must not equate "session established" with "market data flowing". Connection state, data activity, and series readiness are separate signals and all three must be observable.
+
+Required:
+
+- The coordinator must retain per-provider (and, for trades, per-demanded-product) last-activity evidence: last subscribed-channel message age, last trade age, session generation, reconnect count, and cumulative interruption count. The existing adapter-level liveness bounds (Coinbase 5-second heartbeat inactivity, Rithmic message-silence) remain the enforcement mechanism; this section makes their outcome continuously visible above the session.
+- `GetEngineStatus` must expose, per provider: connection state, generation, reconnect count, last-message age, last-trade age, and per-series load state counts; plus the engine build identity (version/build hash) so a stale resident engine from an older build is detectable by the desktop and by test harnesses. Status remains cheap, bounded, and free of provider payloads or credentials.
+- The desktop must render a truthful distinction between "connected, market quiet (heartbeats current)" and "connected, data stalled" using the exposed ages; a stalled state older than the provider's liveness bound is a defect signal, not a cosmetic label.
+- Rithmic `Online` semantics must be reviewed against the same standard: heartbeat-only `Online` is acceptable only if the DOM/chart presentation cannot claim live data that is not arriving; the Rithmic desktop client must derive its Streaming label from engine provider state rather than from instrument installation.
+- Wire the existing `observability::FeedDiagnostics` accumulator into the engine's Coinbase and Rithmic live paths (counters always on, histograms opt-in), so gaps, overflows, reconnects, and stale callbacks are counted on the production path instead of only in tests.
+- Regression proof: deterministic tests that a silent fixture session (connected, no subscribed messages) is reported stalled within the liveness bound; that status ages advance with fixture traffic; and that the engine build identity round-trips through status.
+
+---
+
+# 185. DESKTOP STARTUP AND BOOTSTRAP WAITS MUST BE BOUNDED AND ACTIONABLE
+
+- [ ] **Status: Not verified complete**
+
+Section 62 (no hidden infinite loading) applies to the desktop bootstrap path exactly as it applies to the engine.
+
+Required:
+
+- The blocking `initialize_endpoint`/`request_snapshot` bootstrap must carry an explicit deadline. On expiry the chart enters an explicit, user-visible retry/error state naming the stage that did not complete (attach, install, demand, snapshot), and retry must be possible without restarting the desktop. No code path may poll forever for a publication that may never arrive.
+- Engine start/attach failure at launch (current 3-second bound) must surface in the native UI with the failing stage and a retry action, not only on stderr followed by process exit.
+- Supervisor reconnect/restore keeps its existing 4-second bound but its terminal failure must likewise be an explicit chart/connection state with retry, never a silently dead poll loop.
+- The bootstrap, reconnect, and retry deadlines must be single named constants with documented values, not scattered literals.
+- Regression proof: deterministic tests that a non-publishing engine fixture produces the bounded explicit failure state (not indefinite Loading) and that retry after engine recovery succeeds.
+
+---
+
+# 186. STARTUP AND STREAMING PHASES MUST BE TIMESTAMPED IN MILLISECONDS
+
+- [ ] **Status: Not verified complete**
+
+The platform must be able to answer, from its own evidence and in milliseconds: how long boot took, how long the market-data connection took, when the first live data arrived, and how long a symbol switch took.
+
+Required:
+
+- The engine records monotonic timestamps at these phase boundaries: process start, IPC listener ready, client authenticated/attached, demand accepted, catalog instrument installed, history request issued, covering snapshot published, realtime connect started, session established (subscribe acknowledged), first subscribed-channel message, first trade applied, and series `Live`. Symbol switches record the same chain from demand acceptance through first new-symbol trade.
+- The desktop records its complement: process start, engine connect duration, first chart snapshot applied, first live tail applied.
+- These are bounded, allocation-light instruments (fixed slots per provider/series consistent with existing diagnostics discipline), exposed through the status/diagnostics surface and — for harness use — as one structured line or evidence record per run. No unbounded logging, no label-cardinality growth, no provider payloads.
+- Derived durations that must be computable from the recorded boundaries: boot→IPC-ready, launch→attach, demand→covering-snapshot, connect-start→established, established→first-data, launch→first-live-tick, switch→first-new-symbol-tick.
+- Regression proof: deterministic fixture runs assert the boundary chain is complete and ordered for startup and for a symbol switch; missing or out-of-order boundaries fail.
+
+---
+
+# 187. STREAMING RELIABILITY AND LATENCY MUST BE REPEATABLY MEASURED
+
+- [ ] **Status: Not verified complete**
+
+"It seems to work" is not evidence. Reliability and latency for startup, live delivery, symbol switching, failure detection, and recovery must be measured across repeated runs and guarded against regression.
+
+Required:
+
+- **Deterministic CI tier** (fixture transports, no network or credentials): a harness that repeatedly drives the production coordinator and IPC boundary through cold start→Live, cross-product switch→Live, forced mid-session disconnect→recovery, silent-session stall detection (section 184), worker terminal failure and restart (section 183), and bounded bootstrap failure (section 185). Each scenario records the section 186 phase durations and a pass/stall/retry outcome; the run fails on any stall, any false-failure publication (section 182 invariant), any incomplete phase chain, or configured latency-budget regression on the local (non-provider) segments. Evidence is machine-specific JSON under `.cache`, consistent with the existing evidence tools.
+- **Credentialed local tier** (real providers, explicitly not CI, consistent with section 105): the same harness run against live Coinbase (and Rithmic Test where entitled) for N repeated cold starts and M symbol switches, recording per-run success/failure/stall, connect duration, launch→first-live-tick, switch→first-new-tick, reconnect counts, and recovery outcomes, with provider-network segments reported separately from local segments so provider latency never excuses local orchestration cost (section 105 rule). Output includes distribution statistics (p50/p95/p99) and a run-level success rate; a stalled run is a failure, not a discarded sample.
+- Both tiers must be runnable by one documented command each, and their pass/fail criteria live in the harness, not in prose.
+- This section, together with 104/105/118/137, defines the streaming portion of the measurement ledger; completing it requires sections 182-186 first (there is no point hardening budgets around behavior that misreports failures or cannot be timestamped).
+
+---
