@@ -148,7 +148,9 @@ const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 const PRICE_AXIS_MENU_HEADER_HEIGHT: f32 = 22.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
-const PRICE_AXIS_FLYOUT_GAP: f32 = 2.0;
+const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
+const PRICE_AXIS_MENU_GAP: f32 = 4.0;
+const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
@@ -771,6 +773,7 @@ struct WorkspaceSurface {
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
     pending_chart_context_menu: Option<ChartContextRequest>,
+    pending_pane_activate: bool,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
     #[cfg(feature = "diagnostics")]
@@ -942,8 +945,17 @@ impl RithmicReconnectState {
 fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
-            if let Some(request) = chart.update(cx, |chart, _| chart.take_context_menu_request()) {
+            let (activate, request) = chart.update(cx, |chart, _| {
+                (chart.take_activate_request(), chart.take_context_menu_request())
+            });
+            if activate {
+                app.pending_pane_activate = true;
+            }
+            let had_menu = request.is_some();
+            if let Some(request) = request {
                 app.pending_chart_context_menu = Some(request);
+            }
+            if activate || had_menu {
                 cx.notify();
             }
             if app.provider == TerminalProvider::Coinbase
@@ -1420,6 +1432,7 @@ impl WorkspaceSurface {
             restored_viewport: restored_coinbase.and_then(|restored| restored.1),
             last_persisted_viewport: None,
             pending_chart_context_menu: None,
+            pending_pane_activate: false,
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
             #[cfg(feature = "diagnostics")]
@@ -1871,6 +1884,13 @@ impl WorkspaceSurface {
             return false;
         }
         if self.drawing_toolbar_state(cx).active_tool == ChartDrawingTool::Text {
+            return false;
+        }
+        if self
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).is_editing_text())
+        {
             return false;
         }
         let Some(typed) = chrome_typeahead_char(event) else {
@@ -3782,9 +3802,9 @@ fn drawing_toolbar(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let tool_app = app.clone();
+    let tool_terminal = terminal.clone();
     let tools = DRAWING_TOOLS.into_iter().map(move |spec| {
-        let app = tool_app.clone();
+        let terminal = tool_terminal.clone();
         let enabled = state.availability == DrawingToolbarAvailability::Available;
         let button = drawing_toolbar_action(
             drawing_toolbar_button(
@@ -3801,8 +3821,8 @@ fn drawing_toolbar(
             spec.id,
             spec.label,
             button_activation(button, enabled, move |_, cx| {
-                app.update(cx, |app, app_cx| {
-                    app.select_drawing_tool(spec.tool, app_cx);
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.select_drawing_tool_on_active_workspace(spec.tool, terminal_cx);
                 });
             }),
             theme,
@@ -4521,15 +4541,12 @@ fn clamp_overlay_origin(
 ) -> gpui::Point<Pixels> {
     let width = px(width);
     let height = px(overlay_height(rows, separators));
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let max_x = (viewport.width - width - margin).max(margin);
+    let max_y = (viewport.height - height - margin).max(margin);
     point(
-        origin
-            .x
-            .max(px(0.0))
-            .min((viewport.width - width).max(px(0.0))),
-        origin
-            .y
-            .max(px(0.0))
-            .min((viewport.height - height).max(px(0.0))),
+        origin.x.max(margin).min(max_x),
+        origin.y.max(margin).min(max_y),
     )
 }
 
@@ -4540,11 +4557,28 @@ fn clamp_chart_context_menu_origin(
     clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 7.0, 4.0)
 }
 
+/// Prefer opening the Y-axis menu into the chart, then keep an edge margin so it
+/// never sits flush against the window.
 fn clamp_price_axis_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
+    axis_on_left: bool,
 ) -> gpui::Point<Pixels> {
-    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 7.0, 2.0)
+    let width = px(CHART_CONTEXT_MENU_WIDTH);
+    let height = px(overlay_height(7.0, 2.0));
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let gap = px(PRICE_AXIS_MENU_GAP);
+    let preferred_x = if axis_on_left {
+        origin.x + gap
+    } else {
+        origin.x - width - gap
+    };
+    let max_x = (viewport.width - width - margin).max(margin);
+    let max_y = (viewport.height - height - margin).max(margin);
+    point(
+        preferred_x.max(margin).min(max_x),
+        origin.y.max(margin).min(max_y),
+    )
 }
 
 fn clamp_price_axis_flyout_origin(
@@ -4555,21 +4589,29 @@ fn clamp_price_axis_flyout_origin(
     let (rows, separators, row, separators_before) = flyout.geometry();
     let width = px(PRICE_AXIS_FLYOUT_WIDTH);
     let height = px(overlay_height(rows, separators));
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let gap = px(PRICE_AXIS_FLYOUT_GAP);
     let parent_y = root.y
         + px(CHART_CONTEXT_MENU_VERTICAL_PADDING)
         + px(CHART_CONTEXT_MENU_ROW_HEIGHT * row)
         + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before);
-    let left_x = root.x - width - px(PRICE_AXIS_FLYOUT_GAP);
-    let x = if left_x >= px(0.0) {
+    let left_x = root.x - width - gap;
+    let right_x = root.x + px(CHART_CONTEXT_MENU_WIDTH) + gap;
+    let max_x = (viewport.width - width - margin).max(margin);
+    let x = if left_x >= margin {
         left_x
+    } else if right_x <= max_x {
+        right_x
+    } else if left_x.max(margin) + width <= viewport.width - margin {
+        left_x.max(margin)
     } else {
-        root.x + px(CHART_CONTEXT_MENU_WIDTH) + px(PRICE_AXIS_FLYOUT_GAP)
+        right_x.min(max_x)
     };
     point(
-        x.max(px(0.0)).min((viewport.width - width).max(px(0.0))),
+        x.max(margin).min(max_x),
         parent_y
-            .max(px(0.0))
-            .min((viewport.height - height).max(px(0.0))),
+            .max(margin)
+            .min((viewport.height - height - margin).max(margin)),
     )
 }
 
@@ -4716,7 +4758,7 @@ fn price_axis_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
-    let origin = clamp_price_axis_menu_origin(menu.position, viewport);
+    let origin = clamp_price_axis_menu_origin(menu.position, viewport, state.left);
     let dismiss = terminal.clone();
     let mut layer = div()
         .id("price_axis_menu_scrim")
@@ -7326,6 +7368,40 @@ impl TerminalApp {
         }
     }
 
+    fn absorb_pane_activate_requests(&mut self, cx: &mut Context<Self>) {
+        let mut requested = None;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                let activate = pane
+                    .surface
+                    .update(cx, |surface, _| std::mem::take(&mut surface.pending_pane_activate));
+                if activate {
+                    requested = Some((workspace.id, pane.id));
+                }
+            }
+        }
+        if let Some((workspace_id, pane_id)) = requested {
+            self.select_pane(workspace_id, pane_id, cx);
+        }
+    }
+
+    fn select_drawing_tool_on_active_workspace(
+        &mut self,
+        tool: ChartDrawingTool,
+        cx: &mut Context<Self>,
+    ) {
+        let panes: Vec<_> = self.workspaces[self.active]
+            .panes
+            .iter()
+            .map(|pane| pane.surface.clone())
+            .collect();
+        for surface in panes {
+            surface.update(cx, |surface, surface_cx| {
+                surface.select_drawing_tool(tool, surface_cx);
+            });
+        }
+    }
+
     fn absorb_chart_context_menu_requests(&mut self, cx: &mut Context<Self>) {
         let mut requested = None;
         for workspace in &self.workspaces {
@@ -7934,14 +8010,18 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let (product, interval) = {
+        let (product, interval, drawing_tool) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.coinbase_product.clone() else {
                 self.workspace_error = Some("The active pane has no market to copy".to_string());
                 cx.notify();
                 return;
             };
-            (product, source.coinbase_interval)
+            (
+                product,
+                source.coinbase_interval,
+                source.drawing_toolbar_state(cx).active_tool,
+            )
         };
         let workspace_id = workspace.id;
         let insertion_index = workspace.active_pane.saturating_add(1);
@@ -7965,6 +8045,7 @@ impl TerminalApp {
             surface.apply_theme(&self.theme, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Foreground);
             surface.set_market_message_wake(self.market_frame_wake.callback());
+            surface.select_drawing_tool(drawing_tool, surface_cx);
         });
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
         let workspace = &mut self.workspaces[self.active];
@@ -8744,6 +8825,7 @@ impl Render for TerminalApp {
         }
         self.track_window_activation(window, cx);
         self.schedule_market_frame(window, cx);
+        self.absorb_pane_activate_requests(cx);
         self.absorb_chart_context_menu_requests(cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
@@ -9602,9 +9684,10 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS,
-        CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
-        ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, InputEvent, PriceAxisMenuFlyout,
+        CHART_CONTEXT_MENU_WIDTH, COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID,
+        COINBASE_INTERVALS, CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement,
+        ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
+        InputEvent, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout,
         PriceAxisMenuRow, ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState,
         RithmicReconnectTarget, RithmicSessionRetirement, SidePanel, SidePanelResize,
         SymbolInputAction, SymbolSubmitDecision, TerminalProvider, WORKSPACE_TAB_GAP,
@@ -10579,23 +10662,47 @@ mod tests {
             point(px(2000.0), px(2000.0)),
             size(px(800.0), px(600.0)),
         );
-        assert!(overflow.x <= px(800.0));
-        assert!(overflow.y <= px(600.0));
+        assert!(overflow.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+        assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
         assert_eq!(
             clamp_chart_context_menu_origin(
                 point(px(-20.0), px(-20.0)),
                 size(px(800.0), px(600.0))
             ),
-            point(px(0.0), px(0.0))
+            point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
         );
     }
 
     #[test]
     fn price_axis_menu_stays_inside_the_window() {
-        let overflow =
-            clamp_price_axis_menu_origin(point(px(2000.0), px(2000.0)), size(px(800.0), px(600.0)));
-        assert!(overflow.x <= px(800.0));
-        assert!(overflow.y <= px(600.0));
+        let overflow = clamp_price_axis_menu_origin(
+            point(px(2000.0), px(2000.0)),
+            size(px(800.0), px(600.0)),
+            false,
+        );
+        assert!(overflow.x >= px(OVERLAY_EDGE_MARGIN));
+        assert!(overflow.y >= px(OVERLAY_EDGE_MARGIN));
+        assert!(overflow.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+        assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
+    }
+
+    #[test]
+    fn price_axis_menu_opens_into_the_chart() {
+        let right_axis = clamp_price_axis_menu_origin(
+            point(px(780.0), px(200.0)),
+            size(px(800.0), px(600.0)),
+            false,
+        );
+        assert!(right_axis.x + px(CHART_CONTEXT_MENU_WIDTH) + px(PRICE_AXIS_MENU_GAP) <= px(780.0));
+        assert!(right_axis.x >= px(OVERLAY_EDGE_MARGIN));
+
+        let left_axis = clamp_price_axis_menu_origin(
+            point(px(24.0), px(200.0)),
+            size(px(800.0), px(600.0)),
+            true,
+        );
+        assert!(left_axis.x >= px(24.0) + px(PRICE_AXIS_MENU_GAP));
+        assert!(left_axis.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
     }
 
     #[test]

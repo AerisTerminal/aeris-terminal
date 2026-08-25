@@ -39,6 +39,29 @@ const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
 const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 
+fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
+    if let Some(text) = event.keystroke.key_char.as_deref() {
+        let mut chars = text.chars();
+        let ch = chars.next()?;
+        return (chars.next().is_none() && !ch.is_control()).then_some(ch);
+    }
+    match event.keystroke.key.as_str() {
+        "space" => Some(' '),
+        key => {
+            let mut chars = key.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() || ch.is_control() {
+                return None;
+            }
+            if ch.is_ascii_alphabetic() && event.keystroke.modifiers.shift {
+                Some(ch.to_ascii_uppercase())
+            } else {
+                Some(ch)
+            }
+        }
+    }
+}
+
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ChartIndicator {
@@ -413,6 +436,7 @@ pub struct NucleusChartView {
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
     pending_context_menu: Option<ChartContextRequest>,
+    pending_activate: bool,
     instrument_price_precision: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
@@ -469,6 +493,7 @@ impl NucleusChartView {
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
+            pending_activate: false,
             instrument_price_precision: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
@@ -552,6 +577,7 @@ impl NucleusChartView {
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
+            pending_activate: false,
             instrument_price_precision: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
@@ -622,6 +648,11 @@ impl NucleusChartView {
     /// Takes a pending chart right-click request in window coordinates.
     pub fn take_context_menu_request(&mut self) -> Option<ChartContextRequest> {
         self.pending_context_menu.take()
+    }
+
+    /// Takes a pending request to make this chart's workspace pane active.
+    pub fn take_activate_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_activate)
     }
 
     /// Reads Nucleus-owned Y-axis chrome for the hit-tested price scale.
@@ -829,6 +860,7 @@ impl NucleusChartView {
     /// Arms a drawing tool, replacing any unfinished drawing gesture.
     pub fn set_drawing_tool(&mut self, tool: ChartDrawingTool) {
         self.end_drag(-1.0, -1.0);
+        let _ = self.finish_text_edit();
         self.cancel_drawing_gesture();
         self.drawing_tool = tool;
         if let Some(kind) = tool.drawing_kind()
@@ -844,10 +876,106 @@ impl NucleusChartView {
     /// Cancels creation or movement and returns to the cursor tool.
     pub fn cancel_drawing(&mut self) {
         self.end_drag(-1.0, -1.0);
+        let _ = self.finish_text_edit();
         self.cancel_drawing_gesture();
         self.drawing_tool = ChartDrawingTool::Cursor;
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
+    }
+
+    /// Whether the host is editing a Nucleus text drawing.
+    #[must_use]
+    pub fn is_editing_text(&self) -> bool {
+        self.engine.editing_drawing().is_some()
+    }
+
+    fn begin_text_edit(&mut self, id: nucleuscharts_engine::DrawingId) {
+        self.engine.set_editing_drawing(Some(id));
+        self.engine.set_selected_drawing(Some(id));
+        self.invalidate_series_frame();
+    }
+
+    /// Commit or discard the active text edit. Empty text drawings are removed.
+    pub fn finish_text_edit(&mut self) -> bool {
+        let Some(id) = self.engine.editing_drawing() else {
+            return false;
+        };
+        self.engine.set_editing_drawing(None);
+        let empty = self
+            .engine
+            .drawings()
+            .iter()
+            .find(|drawing| drawing.id == id)
+            .is_some_and(|drawing| drawing.text.is_empty());
+        if empty {
+            self.engine.set_selected_drawing(Some(id));
+            let _ = self.engine.remove_selected_drawing();
+            self.locked_drawings.remove(&id);
+        }
+        self.invalidate_series_frame();
+        true
+    }
+
+    fn editing_text_value(&self) -> Option<String> {
+        let id = self.engine.editing_drawing()?;
+        self.engine
+            .drawings()
+            .iter()
+            .find(|drawing| drawing.id == id)
+            .map(|drawing| drawing.text.clone())
+    }
+
+    fn set_editing_text_value(&mut self, text: &str) -> bool {
+        let Some(id) = self.engine.editing_drawing() else {
+            return false;
+        };
+        let Ok(encoded) = serde_json::to_string(text) else {
+            return false;
+        };
+        let json = format!(r#"{{"text":{encoded}}}"#);
+        if !self.engine.drawing_apply_options(id, &json) {
+            return false;
+        }
+        self.invalidate_series_frame();
+        true
+    }
+
+    fn apply_text_edit_key(&mut self, event: &KeyDownEvent) -> bool {
+        if !self.is_editing_text() {
+            return false;
+        }
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" | "enter" => self.finish_text_edit(),
+            "backspace" => {
+                let Some(mut text) = self.editing_text_value() else {
+                    return false;
+                };
+                text.pop();
+                self.set_editing_text_value(&text)
+            }
+            "delete" => {
+                // Host typing mode treats Delete like Backspace for the caret-at-end model.
+                let Some(mut text) = self.editing_text_value() else {
+                    return false;
+                };
+                text.pop();
+                self.set_editing_text_value(&text)
+            }
+            _ => {
+                let Some(ch) = text_edit_char(event) else {
+                    return false;
+                };
+                let Some(mut text) = self.editing_text_value() else {
+                    return false;
+                };
+                text.push(ch);
+                self.set_editing_text_value(&text)
+            }
+        }
     }
 
     /// Returns the number of committed drawings.
@@ -1012,6 +1140,7 @@ impl NucleusChartView {
 
     /// Removes every committed drawing.
     pub fn clear_drawings(&mut self) {
+        self.engine.set_editing_drawing(None);
         self.cancel_drawing_gesture();
         self.engine.clear_drawings();
         self.locked_drawings.clear();
@@ -1582,10 +1711,40 @@ impl NucleusChartView {
         self.engine.brush_create_cancel();
     }
 
-    fn drawing_pointer_down(&mut self, pane_x: f64, y: f64, modifiers: DrawingModifiers) -> bool {
+    fn drawing_pointer_down(
+        &mut self,
+        pane_x: f64,
+        y: f64,
+        modifiers: DrawingModifiers,
+        click_count: usize,
+    ) -> bool {
+        if self.is_editing_text() {
+            let editing = self.engine.editing_drawing();
+            let hit_id = self.engine.hit_test_drawing(pane_x, y).map(|hit| hit.id);
+            if click_count >= 2 {
+                if let Some(id) = hit_id.filter(|&id| self.drawing_is_text(id)) {
+                    self.begin_text_edit(id);
+                    return true;
+                }
+            }
+            if hit_id != editing {
+                let _ = self.finish_text_edit();
+            } else if hit_id.is_some() {
+                // Keep typing focus on the current text drawing; avoid starting a drag.
+                return true;
+            }
+        }
+
         match self.drawing_tool {
             ChartDrawingTool::Cursor => {
                 let hit = self.engine.hit_test_drawing(pane_x, y);
+                if click_count >= 2
+                    && let Some(hit) = hit
+                    && self.drawing_is_text(hit.id)
+                {
+                    self.begin_text_edit(hit.id);
+                    return true;
+                }
                 if let Some(hit) = hit
                     && self.locked_drawings.contains(&hit.id)
                 {
@@ -1600,15 +1759,26 @@ impl NucleusChartView {
                 false
             }
             ChartDrawingTool::Brush => self.engine.brush_create_start(None, pane_x, y),
-            _ => {
+            tool => {
+                let placing_text = tool == ChartDrawingTool::Text;
                 let result = self.engine.drawing_create_click(pane_x, y, modifiers);
                 if result > 0 {
                     self.drawing_tool = ChartDrawingTool::Cursor;
                     self.cursor_style = CursorStyle::Crosshair;
+                    if placing_text {
+                        self.begin_text_edit(result as DrawingId);
+                    }
                 }
                 result != 0
             }
         }
+    }
+
+    fn drawing_is_text(&self, id: DrawingId) -> bool {
+        self.engine
+            .drawings()
+            .iter()
+            .any(|drawing| drawing.id == id && drawing.kind == DrawingKind::Text)
     }
 
     fn drawing_pointer_move(
@@ -1905,6 +2075,7 @@ impl NucleusChartView {
     }
 
     fn cancel_gesture(&mut self) {
+        let _ = self.finish_text_edit();
         self.end_drag(-1.0, -1.0);
         self.engine.drawing_drag_end();
         self.engine.brush_create_cancel();
@@ -1982,11 +2153,17 @@ impl NucleusChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
+        self.pending_activate = true;
         let (pane_x, y) = self.local_position(event.position);
         if self.separator_at(y).is_some() {
             self.begin_drag(pane_x, y, event.click_count);
         } else if !self.pointer_on_axis(pane_x, y)
-            && self.drawing_pointer_down(pane_x, y, Self::drawing_modifiers(event.modifiers))
+            && self.drawing_pointer_down(
+                pane_x,
+                y,
+                Self::drawing_modifiers(event.modifiers),
+                event.click_count,
+            )
         {
             self.engine.set_selected_series(None);
             self.update_cursor(pane_x, y);
@@ -2014,6 +2191,7 @@ impl NucleusChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
+        self.pending_activate = true;
         self.cancel_gesture();
         let (pane_x, y) = self.local_position(event.position);
         let kind = match self.price_axis_at(pane_x, y) {
@@ -2034,6 +2212,11 @@ impl NucleusChartView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.apply_text_edit_key(event) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
         if self.apply_key(
             event.keystroke.key.as_str(),
@@ -2224,7 +2407,7 @@ impl Render for NucleusChartView {
             .clone();
 
         div()
-            .id("nucleus_chart_surface")
+            .id(("nucleus_chart_surface", cx.entity_id()))
             .size_full()
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
@@ -3339,7 +3522,7 @@ mod tests {
             chart.set_drawing_tool(tool);
             assert_eq!(chart.drawing_tool(), tool);
             for &x in anchor_x.iter().take(anchors) {
-                let handled = chart.drawing_pointer_down(x, y, DrawingModifiers::default());
+                let handled = chart.drawing_pointer_down(x, y, DrawingModifiers::default(), 1);
                 assert!(handled);
             }
             assert_eq!(chart.drawing_count(), index + 1);
@@ -3349,11 +3532,47 @@ mod tests {
     }
 
     #[test]
+    fn text_tool_place_enters_edit_mode_and_keeps_typed_label() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::Text);
+        assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+        assert!(chart.is_editing_text());
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+
+        assert!(chart.set_editing_text_value("NQ"));
+        assert_eq!(chart.editing_text_value().as_deref(), Some("NQ"));
+        assert!(chart.finish_text_edit());
+        assert!(!chart.is_editing_text());
+        assert_eq!(chart.drawing_count(), 1);
+        assert_eq!(chart.engine.drawings()[0].text, "NQ");
+    }
+
+    #[test]
+    fn activate_request_is_latched_until_taken() {
+        let mut chart = interactive_chart();
+        assert!(!chart.take_activate_request());
+        chart.pending_activate = true;
+        assert!(chart.take_activate_request());
+        assert!(!chart.take_activate_request());
+    }
+
+    #[test]
+    fn unfinished_empty_text_edit_is_removed_on_finish() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::Text);
+        assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+        assert!(chart.is_editing_text());
+        assert!(chart.finish_text_edit());
+        assert!(!chart.is_editing_text());
+        assert_eq!(chart.drawing_count(), 0);
+    }
+
+    #[test]
     fn brush_capture_commits_on_release_and_returns_to_cursor() {
         let mut chart = interactive_chart();
         chart.set_drawing_tool(ChartDrawingTool::Brush);
 
-        assert!(chart.drawing_pointer_down(240.0, 180.0, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(240.0, 180.0, DrawingModifiers::default(), 1));
         assert!(chart.drawing_pointer_move(280.0, 210.0, true, DrawingModifiers::default()));
         assert!(chart.drawing_pointer_up(320.0, 240.0, DrawingModifiers::default()));
 
@@ -3366,7 +3585,7 @@ mod tests {
     fn cursor_selects_and_moves_unlocked_drawings_but_locked_drawings_do_not_drag() {
         let mut chart = interactive_chart();
         chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-        assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
         let id = chart.selected_drawing_id().expect("drawing selected");
         let (_, drawing_y) = chart
             .engine
@@ -3375,12 +3594,12 @@ mod tests {
         chart.set_drawing_tool(ChartDrawingTool::Cursor);
 
         assert!(chart.set_selected_drawing_locked(true));
-        assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default(), 1));
         assert!(!chart.engine.drawing_drag_active());
         assert_eq!(chart.selected_drawing_id(), Some(id));
 
         assert!(chart.set_selected_drawing_locked(false));
-        assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default(), 1));
         assert!(chart.engine.drawing_drag_active());
         assert!(chart.drawing_pointer_up(500.0, drawing_y + 30.0, DrawingModifiers::default()));
         assert!(!chart.engine.drawing_drag_active());
@@ -3390,9 +3609,9 @@ mod tests {
     fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
         let mut chart = interactive_chart();
         chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-        assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default(), 1));
         chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-        assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default()));
+        assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default(), 1));
         assert_eq!(chart.drawing_count(), 2);
 
         assert!(chart.set_all_drawings_locked(true));
@@ -3422,7 +3641,7 @@ mod tests {
     #[test]
     fn cursor_mode_still_falls_through_to_chart_pan_on_a_drawing_miss() {
         let mut chart = interactive_chart();
-        assert!(!chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default()));
+        assert!(!chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
 
         chart.begin_drag(300.0, 200.0, 1);
 

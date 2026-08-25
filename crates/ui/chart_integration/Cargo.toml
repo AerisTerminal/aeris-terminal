@@ -17,6 +17,7 @@ num-traits = "=0.2.19"
 nucleuscharts_engine.workspace = true
 nucleuscharts_render.workspace = true
 nucleuscharts_render_gpui.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

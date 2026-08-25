@@ -636,6 +636,7 @@ dependencies = [
  "nucleuscharts_render",
  "nucleuscharts_render_gpui",
  "num-traits",
+ "serde_json",
 ]
 
 [[package]]
