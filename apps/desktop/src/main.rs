@@ -659,6 +659,22 @@ fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> Chart
     }
 }
 
+const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
+
+/// The instrument menu should open with a default provider listing instead of
+/// a blank list. A completed Coinbase selection consumes the previous search
+/// results (one-shot selection authorization), so an empty idle browser means
+/// a fresh default search must be dispatched.
+fn instrument_listing_refresh_needed(
+    browser: &rithmic_shell::RithmicSymbolBrowser,
+    selection_pending: bool,
+) -> bool {
+    !selection_pending
+        && browser.results().is_empty()
+        && !browser.search_pending()
+        && !browser.has_retained_search()
+}
+
 fn default_rithmic_contract_index(results: &[ProviderInstrumentSummary]) -> Option<usize> {
     results
         .iter()
@@ -1723,6 +1739,7 @@ impl WorkspaceSurface {
                 if let Some(input) = &self.symbol_input {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
+                self.refresh_default_instrument_listing(cx);
             }
             ChromeOverlay::Indicator => {
                 self.indicator_input
@@ -2468,7 +2485,7 @@ impl WorkspaceSurface {
             }
             RithmicReadyAction::Autoload => {
                 self.rithmic_autoload_started = true;
-                let _ = self.search_symbol_query("MNQ", cx);
+                let _ = self.search_symbol_query(DEFAULT_RITHMIC_LISTING_QUERY, cx);
             }
             RithmicReadyAction::None => {}
         }
@@ -2547,6 +2564,18 @@ impl WorkspaceSurface {
             })
             .detach();
         cx.notify();
+    }
+
+    fn refresh_default_instrument_listing(&mut self, cx: &mut Context<Self>) {
+        if !instrument_listing_refresh_needed(&self.symbol_browser, self.symbol_selection_pending) {
+            return;
+        }
+        let query = if self.provider == TerminalProvider::Coinbase {
+            ""
+        } else {
+            DEFAULT_RITHMIC_LISTING_QUERY
+        };
+        let _ = self.search_symbol_query(query, cx);
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
@@ -9698,6 +9727,7 @@ mod tests {
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress,
         chrome_typeahead_char_from, claim_once, clamp_chart_context_menu_origin,
         clamp_price_axis_menu_origin, connection_presentation, default_rithmic_contract_index,
+        instrument_listing_refresh_needed,
         durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
         instrument_selector_label, nucleus_chart_theme, price_axis_flyout_rows,
         price_axis_root_rows, publication_chart_state, reconciled_bridge_state,
@@ -9732,6 +9762,53 @@ mod tests {
             ProviderCatalogCommand::Search => CatalogCommandDomain::Search,
             ProviderCatalogCommand::Selection => CatalogCommandDomain::Selection,
         }
+    }
+
+    #[test]
+    fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
+        use crate::rithmic_shell::RithmicSymbolBrowser;
+        use std::num::NonZeroUsize;
+
+        let startup = NonZeroUsize::MIN;
+        let mut browser = RithmicSymbolBrowser::coinbase_catalog_awaiting_search(startup, "");
+        assert!(
+            !instrument_listing_refresh_needed(&browser, false),
+            "startup search is already pending"
+        );
+
+        let result = ProviderInstrumentSummary {
+            symbol: "BTC-USD".to_string(),
+            exchange: "coinbase".to_string(),
+            name: Some("BTC/USD".to_string()),
+            product_code: Some("BTC-USD".to_string()),
+            instrument_type: Some("spot".to_string()),
+            expiration_date: None,
+        };
+        assert!(browser.apply_results(startup, vec![result]));
+        assert!(
+            !instrument_listing_refresh_needed(&browser, false),
+            "populated listing needs no refresh"
+        );
+
+        let selection = browser.select(0).expect("catalog result is selectable");
+        assert!(
+            !instrument_listing_refresh_needed(&browser, true),
+            "in-flight selection defers the refresh"
+        );
+        assert!(browser.confirm_selection(selection.generation));
+        assert!(browser.consume_completed_search(selection.search_generation));
+        assert!(
+            instrument_listing_refresh_needed(&browser, false),
+            "consumed selection authorization reopens as a fresh default listing"
+        );
+
+        browser
+            .retain_latest_search("ETH")
+            .expect("typed query validates");
+        assert!(
+            !instrument_listing_refresh_needed(&browser, false),
+            "a retained typed query outranks the default listing"
+        );
     }
 
     fn should_apply_rithmic_worker_stop(
