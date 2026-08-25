@@ -26,6 +26,11 @@ const COMMAND_CAPACITY: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const ENGINE_WORKSPACE_ID: u64 = 1;
 
+/// Connection message contract that arms the desktop autoload and
+/// reconnect instrument searches (`rithmic_ready_action`).
+pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
+    "Rithmic Test session is ready for instrument search";
+
 struct WorkerState {
     catalog: EngineCatalogSession,
     history: RithmicHistoryTask,
@@ -87,7 +92,7 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
     send_connection(
         messages,
         FeedConnectionState::Authenticating,
-        "resident engine owns the Rithmic catalog session",
+        RITHMIC_CATALOG_READY_MESSAGE,
     );
 
     loop {
@@ -102,6 +107,11 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
                     messages,
                     FeedConnectionState::Recovering,
                     "resident Rithmic engine restarted; restoring catalog demand",
+                );
+                send_connection(
+                    messages,
+                    FeedConnectionState::Authenticating,
+                    RITHMIC_CATALOG_READY_MESSAGE,
                 );
             }
             Ok(poll) => {

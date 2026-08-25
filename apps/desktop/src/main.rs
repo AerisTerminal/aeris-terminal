@@ -1037,7 +1037,7 @@ fn rithmic_ready_action(
     autoload_started: bool,
 ) -> RithmicReadyAction {
     if state != FeedConnectionState::Authenticating
-        || !message.contains("ready for instrument search")
+        || !message.contains(crate::rithmic_engine_client::RITHMIC_CATALOG_READY_MESSAGE)
     {
         return RithmicReadyAction::None;
     }
