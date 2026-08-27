@@ -68,9 +68,9 @@ prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland", "x11"] }
-nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "f85ba4211c7b7a2b4e879a8173b9a30c14f9630d", version = "=0.1.0" }
-nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "f85ba4211c7b7a2b4e879a8173b9a30c14f9630d", version = "=0.1.0" }
-nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "f85ba4211c7b7a2b4e879a8173b9a30c14f9630d", version = "=0.1.0", features = ["gpui-backend"] }
+nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "c4cba8d8785aede8496a8752ace52f53ec6c2a0a", version = "=0.1.0" }
+nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "c4cba8d8785aede8496a8752ace52f53ec6c2a0a", version = "=0.1.0" }
+nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "c4cba8d8785aede8496a8752ace52f53ec6c2a0a", version = "=0.1.0", features = ["gpui-backend"] }
 
 [patch.crates-io]
 # Nucleus Charts pins the published `gpui = 0.2.2`; replace it with the same Git source

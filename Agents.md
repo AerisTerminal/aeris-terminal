@@ -10,6 +10,8 @@ The target is best-in-class performance while remaining lightweight. Architectur
 
 Nucleus Charts is a separate repository consumed through the Git dependencies pinned in `Cargo.toml`. Never clone or copy its repository inside the Axiusflow workspace: the additional codebase overwhelms repository searches and agent context, and the platform build does not use a local clone. Let Cargo fetch the pinned revision into its external cache. If the user explicitly requests Nucleus Charts development, work from a separate checkout outside this workspace and follow that repository's instructions.
 
+A Nucleus pin bump does not copy example-host behavior. Axiusflow's GPUI host is `crates/ui/chart_integration`; Nucleus's `gpui_probe` is not linked. If a chart visual or interaction still looks wrong after pinning the latest Nucleus commit, check whether the Nucleus change lives in an example host or in the engine/renderer crates. Brush smoothness in particular is host-owned pointer cadence: keep only the newest sample per painted frame and flush it in rebuild (and on pointer-up). Do not call `brush_create_add` on every Wayland/HID motion event. When bumping Nucleus, update only the `nucleuscharts_*` revisions in `Cargo.toml` / `Cargo.lock` / `Architecture.md` / `tools/naming_check`; do not unscoped `cargo update` Git GPUI. Keep Zed at the `Cargo.lock` commit (`1c9cbd3b24d47e0cfab5f1673574f96d307c8b3e`) unless a GPUI bump is explicitly requested and verified on Linux clipboard.
+
 ## Working with the maintainer
 
 The primary maintainer is a product owner, not a technical developer. Treat requested product outcomes seriously, but do not blindly implement the proposed technical mechanism.

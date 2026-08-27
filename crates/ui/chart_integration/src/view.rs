@@ -442,6 +442,7 @@ pub struct NucleusChartView {
     chart_type: ChartType,
     product_bars: ProductPriceBars,
     brushable_tooltip: Option<NativePrimitiveId>,
+    pending_brush_point: Option<(f64, f64)>,
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
@@ -499,6 +500,7 @@ impl NucleusChartView {
             chart_type: ChartType::Candles,
             product_bars: ProductPriceBars::default(),
             brushable_tooltip: None,
+            pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
@@ -583,6 +585,7 @@ impl NucleusChartView {
             chart_type: ChartType::Candles,
             product_bars,
             brushable_tooltip: None,
+            pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
@@ -1709,6 +1712,27 @@ impl NucleusChartView {
         self.engine.drawing_drag_end();
         self.engine.drawing_create_cancel();
         self.engine.brush_create_cancel();
+        self.pending_brush_point = None;
+    }
+
+    /// Capture at most the newest brush sample per painted frame.
+    ///
+    /// Wayland delivers per-HID-report motion, often one axis per event. Adding
+    /// every sample records that staircase as stroke knots. Browser hosts
+    /// coalesce to display frames; this GPUI host does the same.
+    fn flush_pending_brush(&mut self) -> bool {
+        let Some((x, y)) = self.pending_brush_point.take() else {
+            return false;
+        };
+        if !self.engine.brush_create_active() {
+            return false;
+        }
+        if self.engine.brush_create_add(x, y) {
+            self.invalidate_series_frame();
+            true
+        } else {
+            false
+        }
     }
 
     fn drawing_pointer_down(
@@ -1790,8 +1814,9 @@ impl NucleusChartView {
     ) -> bool {
         if self.engine.brush_create_active() {
             if dragging {
-                self.engine.brush_create_add(pane_x, y);
+                self.pending_brush_point = Some((pane_x, y));
             } else {
+                self.pending_brush_point = None;
                 self.engine.brush_create_cancel();
             }
             return true;
@@ -1813,7 +1838,8 @@ impl NucleusChartView {
 
     fn drawing_pointer_up(&mut self, pane_x: f64, y: f64, modifiers: DrawingModifiers) -> bool {
         if self.engine.brush_create_active() {
-            self.engine.brush_create_add(pane_x, y);
+            self.pending_brush_point = Some((pane_x, y));
+            self.flush_pending_brush();
             self.engine.brush_create_end();
             self.drawing_tool = ChartDrawingTool::Cursor;
             self.cursor_style = CursorStyle::Crosshair;
@@ -2079,6 +2105,7 @@ impl NucleusChartView {
         self.end_drag(-1.0, -1.0);
         self.engine.drawing_drag_end();
         self.engine.brush_create_cancel();
+        self.pending_brush_point = None;
         self.engine.crosshair = None;
         self.engine.set_separator_hover(None);
         self.engine.set_hovered_series(None);
@@ -2289,6 +2316,7 @@ impl NucleusChartView {
     }
 
     fn rebuild(&mut self, width: f32, height: f32, scale_factor: f32, window: &Window) {
+        self.flush_pending_brush();
         #[cfg(feature = "diagnostics")]
         let rebuild_started = Instant::now();
         #[cfg(feature = "diagnostics")]
@@ -3579,6 +3607,36 @@ mod tests {
         assert_eq!(chart.drawing_count(), 1);
         assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
         assert!(!chart.engine.brush_create_active());
+    }
+
+    #[test]
+    fn brush_capture_coalesces_pointer_samples_to_one_knot_per_flush() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::Brush);
+        let modifiers = DrawingModifiers::default();
+
+        assert!(chart.drawing_pointer_down(100.0, 100.0, modifiers, 1));
+        for offset in 1..=8 {
+            let x = 100.0 + f64::from(offset);
+            assert!(chart.drawing_pointer_move(x, 100.0 + x, true, modifiers));
+        }
+        assert!(
+            chart.flush_pending_brush(),
+            "the newest pending sample is captured once"
+        );
+        assert!(
+            !chart.flush_pending_brush(),
+            "an idle flush without a pending sample captures nothing"
+        );
+        assert!(chart.drawing_pointer_up(180.0, 180.0, modifiers));
+
+        let drawing = &chart.engine.drawings()[0];
+        assert_eq!(drawing.kind, DrawingKind::Brush);
+        assert_eq!(
+            drawing.points.len(),
+            3,
+            "start + one coalesced move + release; intermediate staircase samples must not become knots"
+        );
     }
 
     #[test]
