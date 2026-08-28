@@ -144,17 +144,19 @@ const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
-const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
-const PRICE_AXIS_MENU_HEADER_HEIGHT: f32 = 22.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
 const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
+const TIMEFRAME_FLYOUT_WIDTH: f32 = 136.0;
+const TIMEFRAME_FLYOUT_GAP: f32 = 5.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
+const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
+const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 8;
@@ -774,6 +776,11 @@ struct WorkspaceSurface {
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
+    timeframe_menu_flyout: Option<TimeframeMenuGroup>,
+    timeframe_flyout_close_token: u64,
+    timeframe_flyout_keyboard: bool,
+    chrome_list_keyboard: bool,
+    timeframe_hover_regions: u32,
     timeframe_trigger_bounds: Option<Bounds<Pixels>>,
     chart_type_trigger_bounds: Option<Bounds<Pixels>>,
     chrome_selection: usize,
@@ -848,6 +855,29 @@ enum ChromeOverlay {
     Timeframe,
     QuickTimeframe,
     ChartType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TimeframeMenuGroup {
+    Ticks,
+    Minutes,
+    Hours,
+    Days,
+    Weeks,
+    Months,
+}
+
+impl TimeframeMenuGroup {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ticks => "Ticks",
+            Self::Minutes => "Minutes",
+            Self::Hours => "Hours",
+            Self::Days => "Days",
+            Self::Weeks => "Weeks",
+            Self::Months => "Months",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1028,6 +1058,23 @@ const fn symbol_submit_decision(
         TerminalProvider::Rithmic => SymbolSubmitDecision::Search,
         TerminalProvider::Coinbase => SymbolSubmitDecision::None,
     }
+}
+
+const fn instrument_row_highlighted(
+    checked: bool,
+    row_index: usize,
+    keyboard_selection: usize,
+    keyboard_active: bool,
+) -> bool {
+    if keyboard_active {
+        keyboard_selection == row_index
+    } else {
+        checked
+    }
+}
+
+fn current_instrument_menu_index(entries: &[InstrumentMenuEntry]) -> Option<usize> {
+    entries.iter().position(|entry| entry.checked)
 }
 
 #[derive(Clone)]
@@ -1454,6 +1501,11 @@ impl WorkspaceSurface {
             chrome_overlay: None,
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
+            timeframe_menu_flyout: None,
+            timeframe_flyout_close_token: 0,
+            timeframe_flyout_keyboard: false,
+            chrome_list_keyboard: false,
+            timeframe_hover_regions: 0,
             timeframe_trigger_bounds: None,
             chart_type_trigger_bounds: None,
             chrome_selection: 0,
@@ -1522,11 +1574,98 @@ impl WorkspaceSurface {
     }
 
     fn sync_timeframe_menu_selection(&mut self) {
-        self.chrome_selection = self
-            .available_intervals()
+        self.timeframe_menu_flyout = None;
+        self.timeframe_flyout_keyboard = false;
+        self.timeframe_hover_regions = 0;
+        let selected_group = timeframe_interval_group(self.selected_interval());
+        self.chrome_selection = timeframe_menu_groups(self.available_intervals())
             .iter()
-            .position(|interval| *interval == self.selected_interval())
+            .position(|group| *group == selected_group)
             .unwrap_or(0);
+    }
+
+    fn open_timeframe_group(
+        &mut self,
+        group: TimeframeMenuGroup,
+        from_keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.retain_timeframe_flyout();
+        let already_open = self.timeframe_menu_flyout == Some(group);
+        if !already_open {
+            self.timeframe_menu_flyout = Some(group);
+            self.chrome_selection = timeframe_group_intervals(group, self.available_intervals())
+                .iter()
+                .position(|interval| *interval == self.selected_interval())
+                .unwrap_or(0);
+        }
+        if self.timeframe_flyout_keyboard != from_keyboard || !already_open {
+            self.timeframe_flyout_keyboard = from_keyboard;
+            cx.notify();
+        }
+    }
+
+    fn retain_timeframe_flyout(&mut self) {
+        self.timeframe_flyout_close_token = self.timeframe_flyout_close_token.saturating_add(1);
+    }
+
+    fn arm_timeframe_flyout_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retain_timeframe_flyout();
+        let token = self.timeframe_flyout_close_token;
+        cx.spawn_in(window, async move |app, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
+            let _ = app.update_in(cx, |app, _, app_cx| {
+                if app.chrome_overlay == Some(ChromeOverlay::Timeframe)
+                    && app.timeframe_flyout_close_token == token
+                {
+                    app.close_timeframe_flyout(app_cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn hover_timeframe_menu_region(
+        &mut self,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if hovered {
+            self.timeframe_hover_regions = self.timeframe_hover_regions.saturating_add(1);
+            self.retain_timeframe_flyout();
+            return;
+        }
+        if self.timeframe_hover_regions == 0 {
+            return;
+        }
+        self.timeframe_hover_regions -= 1;
+        if self.timeframe_hover_regions == 0 {
+            self.arm_timeframe_flyout_close(window, cx);
+        }
+    }
+
+    fn close_timeframe_flyout(&mut self, cx: &mut Context<Self>) {
+        let Some(group) = self.timeframe_menu_flyout.take() else {
+            return;
+        };
+        self.timeframe_flyout_keyboard = false;
+        self.timeframe_hover_regions = 0;
+        self.chrome_selection = timeframe_menu_groups(self.available_intervals())
+            .iter()
+            .position(|item| *item == group)
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    fn timeframe_menu_keyboard_count(&self) -> usize {
+        if let Some(group) = self.timeframe_menu_flyout {
+            timeframe_group_intervals(group, self.available_intervals()).len()
+        } else {
+            timeframe_menu_groups(self.available_intervals()).len()
+        }
     }
 
     fn sync_chart_type_menu_selection(&mut self, cx: &App) {
@@ -1679,6 +1818,23 @@ impl WorkspaceSurface {
             .collect()
     }
 
+    fn activate_chrome_list_keyboard(&mut self) {
+        if matches!(
+            self.chrome_overlay,
+            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator)
+        ) {
+            self.chrome_list_keyboard = true;
+        }
+    }
+
+    fn sync_instrument_menu_keyboard(&mut self, cx: &App) {
+        if self.chrome_list_keyboard {
+            return;
+        }
+        self.chrome_selection =
+            current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0);
+    }
+
     fn select_instrument(
         &mut self,
         selection: InstrumentMenuSelection,
@@ -1740,6 +1896,12 @@ impl WorkspaceSurface {
                 input.set_value("", window, input_cx);
             });
         }
+        if overlay != ChromeOverlay::Timeframe {
+            self.timeframe_menu_flyout = None;
+            self.timeframe_flyout_keyboard = false;
+            self.timeframe_hover_regions = 0;
+        }
+        self.chrome_list_keyboard = false;
         self.chrome_selection = match overlay {
             ChromeOverlay::Timeframe => {
                 self.sync_timeframe_menu_selection();
@@ -1753,7 +1915,10 @@ impl WorkspaceSurface {
                 self.sync_quick_timeframe_selection(cx);
                 self.chrome_selection
             }
-            ChromeOverlay::Instrument | ChromeOverlay::Indicator => 0,
+            ChromeOverlay::Instrument => {
+                current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0)
+            }
+            ChromeOverlay::Indicator => 0,
         };
         match overlay {
             ChromeOverlay::Instrument => {
@@ -1763,6 +1928,7 @@ impl WorkspaceSurface {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
                 self.refresh_default_instrument_listing(cx);
+                self.sync_instrument_menu_keyboard(cx);
             }
             ChromeOverlay::Indicator => {
                 self.indicator_input
@@ -1803,6 +1969,10 @@ impl WorkspaceSurface {
         self.chrome_focus.focus(window, cx);
         if cx.reduce_motion() {
             self.chrome_overlay = None;
+            self.timeframe_menu_flyout = None;
+            self.timeframe_flyout_keyboard = false;
+            self.chrome_list_keyboard = false;
+            self.timeframe_hover_regions = 0;
             cx.notify();
             return;
         }
@@ -1821,6 +1991,10 @@ impl WorkspaceSurface {
                     generation,
                 ) {
                     app.chrome_overlay = None;
+                    app.timeframe_menu_flyout = None;
+                    app.timeframe_flyout_keyboard = false;
+                    app.chrome_list_keyboard = false;
+                    app.timeframe_hover_regions = 0;
                     app.chrome_overlay_phase = ChromeOverlayPhase::Opening;
                     app_cx.notify();
                 }
@@ -1872,32 +2046,80 @@ impl WorkspaceSurface {
                 if let InstrumentExchangeUi::Menu(exchange) = self.instrument_exchange {
                     self.instrument_exchange = InstrumentExchangeUi::Idle(exchange);
                     cx.notify();
+                } else if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
+                    && self.timeframe_menu_flyout.is_some()
+                {
+                    self.close_timeframe_flyout(cx);
                 } else {
                     self.close_chrome_overlay(window, cx);
                 }
             }
             "up" => {
+                if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
+                    && self.timeframe_menu_flyout.is_some()
+                    && !self.timeframe_flyout_keyboard
+                {
+                    self.timeframe_flyout_keyboard = true;
+                    cx.notify();
+                    return true;
+                }
+                self.activate_chrome_list_keyboard();
                 self.chrome_selection = self.chrome_selection.saturating_sub(1);
                 cx.notify();
             }
             "down" => {
+                if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
+                    && self.timeframe_menu_flyout.is_some()
+                    && !self.timeframe_flyout_keyboard
+                {
+                    self.timeframe_flyout_keyboard = true;
+                    cx.notify();
+                    return true;
+                }
                 let count = match self.chrome_overlay {
                     Some(ChromeOverlay::Instrument) => self.instrument_entries(cx).len(),
                     Some(ChromeOverlay::Indicator) => chart_chrome::filter_indicator_specs(
                         self.indicator_input.read(cx).value().as_ref(),
                     )
                     .len(),
-                    Some(ChromeOverlay::Timeframe) => self.available_intervals().len(),
+                    Some(ChromeOverlay::Timeframe) => self.timeframe_menu_keyboard_count(),
                     Some(ChromeOverlay::ChartType) => ChartType::ALL.len(),
                     Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
                     None => 0,
                 };
+                self.activate_chrome_list_keyboard();
                 self.chrome_selection = (self.chrome_selection + 1).min(count.saturating_sub(1));
                 cx.notify();
             }
+            "left" if self.chrome_overlay == Some(ChromeOverlay::Timeframe) => {
+                self.close_timeframe_flyout(cx);
+            }
+            "right" if self.chrome_overlay == Some(ChromeOverlay::Timeframe) => {
+                if self.timeframe_menu_flyout.is_none()
+                    && let Some(group) = timeframe_menu_groups(self.available_intervals())
+                        .get(self.chrome_selection)
+                        .copied()
+                {
+                    self.open_timeframe_group(group, true, cx);
+                }
+            }
             "enter" => match self.chrome_overlay {
                 Some(ChromeOverlay::Timeframe) => {
-                    self.apply_highlighted_interval(self.available_intervals(), window, cx);
+                    if let Some(group) = self.timeframe_menu_flyout {
+                        if !self.timeframe_flyout_keyboard {
+                            self.timeframe_flyout_keyboard = true;
+                            cx.notify();
+                        } else {
+                            let intervals =
+                                timeframe_group_intervals(group, self.available_intervals());
+                            self.apply_highlighted_interval(&intervals, window, cx);
+                        }
+                    } else if let Some(group) = timeframe_menu_groups(self.available_intervals())
+                        .get(self.chrome_selection)
+                        .copied()
+                    {
+                        self.open_timeframe_group(group, true, cx);
+                    }
                 }
                 Some(ChromeOverlay::ChartType) => self.apply_highlighted_chart_type(window, cx),
                 Some(ChromeOverlay::QuickTimeframe) => {
@@ -2849,6 +3071,9 @@ impl WorkspaceSurface {
                     self.select_rithmic_symbol(index, cx);
                 }
                 self.dispatch_retained_symbol_search(cx);
+                if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
+                    self.sync_instrument_menu_keyboard(cx);
+                }
             }
             ProviderCatalogEvent::SelectionInstalled(instrument) if coinbase => {
                 if !self.confirm_catalog_selection(instrument.selection_generation) {
@@ -3251,6 +3476,7 @@ fn chrome_overlay_layer(
         overlay,
         ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe | ChromeOverlay::ChartType
     );
+    let dual_container = overlay == ChromeOverlay::Timeframe;
     let menu_left = compact_menu_left(overlay, app_state);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
@@ -3283,6 +3509,7 @@ fn chrome_overlay_layer(
                 panel,
                 theme,
                 compact_menu,
+                dual_container,
                 closing,
                 generation,
                 phase,
@@ -3323,6 +3550,7 @@ fn chrome_overlay_content(
                 catalog_exchange: app_state.instrument_exchange.exchange(),
                 exchange_menu_open: app_state.instrument_exchange.is_open(),
                 keyboard_selection: app_state.chrome_selection,
+                keyboard_active: app_state.chrome_list_keyboard,
                 scroll: app_state.scrolls.instrument.clone(),
             },
             theme,
@@ -3342,7 +3570,9 @@ fn chrome_overlay_content(
             app,
             app_state.available_intervals(),
             app_state.selected_interval(),
+            app_state.timeframe_menu_flyout,
             app_state.chrome_selection,
+            app_state.timeframe_flyout_keyboard,
             pending,
             theme,
         )
@@ -3371,6 +3601,7 @@ fn chrome_overlay_panel(
     content: AnyElement,
     theme: &AxiusflowTheme,
     interval_popup: bool,
+    dual_container: bool,
     closing: bool,
     generation: u64,
     phase: ChromeOverlayPhase,
@@ -3380,19 +3611,22 @@ fn chrome_overlay_panel(
         .id("chrome_overlay_panel")
         .relative()
         .flex_none()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(if interval_popup {
-            colors.border_secondary
-        } else {
-            colors.border
-        }))
-        .bg(gpui_color(if interval_popup {
-            colors.surface_secondary
-        } else {
-            colors.surface
-        }))
-        .when(interval_popup, |panel| {
+        .when(!dual_container, |panel| {
+            panel
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .border_1()
+                .border_color(gpui_color(if interval_popup {
+                    colors.border_secondary
+                } else {
+                    colors.border
+                }))
+                .bg(gpui_color(if interval_popup {
+                    colors.surface_secondary
+                } else {
+                    colors.surface
+                }))
+        })
+        .when(interval_popup && !dual_container, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
         .when(!interval_popup, |panel| {
@@ -3428,42 +3662,212 @@ fn timeframe_overlay_left(trigger_bounds: Option<Bounds<Pixels>>) -> Pixels {
     trigger_bounds.map_or(px(0.0), |bounds| bounds.origin.x.max(px(0.0)))
 }
 
+fn timeframe_flyout_offset(group_index: usize) -> f32 {
+    CHART_CONTEXT_MENU_ROW_HEIGHT * group_index as f32
+}
+
+fn timeframe_flyout_height(interval_count: usize) -> f32 {
+    CHART_CONTEXT_MENU_ROW_HEIGHT * interval_count as f32 + 2.0
+}
+
+fn timeframe_overlay_extent(group_count: usize, flyout: Option<(usize, usize)>) -> (f32, f32) {
+    let root_height = overlay_height(group_count as f32, 0.0);
+    let Some((group_index, interval_count)) = flyout else {
+        return (TIMEFRAME_MENU_WIDTH, root_height);
+    };
+    (
+        TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP + TIMEFRAME_FLYOUT_WIDTH,
+        root_height
+            .max(timeframe_flyout_offset(group_index) + timeframe_flyout_height(interval_count)),
+    )
+}
+
 fn timeframe_overlay_content(
     app: &Entity<WorkspaceSurface>,
     intervals: &[ChartInterval],
     selected: ChartInterval,
+    flyout: Option<TimeframeMenuGroup>,
     keyboard_selection: usize,
+    keyboard_active: bool,
     pending: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let mut panel = div()
-        .w(px(TIMEFRAME_MENU_WIDTH))
-        .flex()
-        .flex_col()
-        .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
-        .text_color(gpui_color(colors.text_primary));
-    let mut last_group = None;
-    for (index, interval) in intervals.iter().copied().enumerate() {
-        let group = timeframe_interval_group(interval);
-        if last_group != Some(group) {
-            if last_group.is_some() {
-                panel = panel.child(menu_separator(theme));
-            }
-            panel = panel.child(menu_section_header(group, &colors));
-            last_group = Some(group);
-        }
+    let groups = timeframe_menu_groups(intervals);
+    let flyout_layout = flyout.and_then(|group| {
+        groups.iter().position(|item| *item == group).map(|index| {
+            (
+                group,
+                index,
+                timeframe_group_intervals(group, intervals).len(),
+            )
+        })
+    });
+    let (width, height) = timeframe_overlay_extent(
+        groups.len(),
+        flyout_layout.map(|(_, index, count)| (index, count)),
+    );
+    let hover_root = app.clone();
+    let mut root = timeframe_menu_surface(
+        "timeframe_overlay_root",
+        TIMEFRAME_MENU_WIDTH,
+        colors.surface,
+        colors.border,
+        0.0,
+        0.0,
+    )
+    .on_hover(move |hovered, window, cx| {
+        hover_root.update(cx, |app, app_cx| {
+            app.hover_timeframe_menu_region(*hovered, window, app_cx);
+        });
+    });
+    let group_count = groups.len();
+    let last_group = group_count.saturating_sub(1);
+    for (index, group) in groups.into_iter().enumerate() {
+        let active_in_group = timeframe_group_intervals(group, intervals)
+            .into_iter()
+            .find(|interval| *interval == selected)
+            .map(ChartInterval::label);
+        let highlighted =
+            flyout == Some(group) || (flyout.is_none() && keyboard_selection == index);
+        root = root.child(timeframe_group_row(
+            app,
+            group,
+            active_in_group,
+            highlighted,
+            pending,
+            index == 0,
+            index == last_group,
+            theme,
+        ));
+    }
+
+    let mut overlay = div()
+        .id("timeframe_overlay")
+        .relative()
+        .flex_none()
+        .w(px(width))
+        .h(px(height))
+        .occlude()
+        .text_color(gpui_color(colors.text_primary))
+        .child(root);
+    if let Some((group, index, count)) = flyout_layout {
+        let flyout_height = timeframe_flyout_height(count);
+        let bridge_app = app.clone();
+        overlay = overlay
+            .child(
+                div()
+                    .id("timeframe_overlay_hover_bridge")
+                    .absolute()
+                    .left(px(TIMEFRAME_MENU_WIDTH))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(TIMEFRAME_FLYOUT_GAP))
+                    .occlude()
+                    .on_hover(move |hovered, window, cx| {
+                        bridge_app.update(cx, |app, app_cx| {
+                            app.hover_timeframe_menu_region(*hovered, window, app_cx);
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("timeframe_overlay_flyout_host")
+                    .absolute()
+                    .left(px(TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP))
+                    .top(px(timeframe_flyout_offset(index)))
+                    .w(px(TIMEFRAME_FLYOUT_WIDTH))
+                    .h(px(flyout_height))
+                    .flex_none()
+                    .child(timeframe_flyout_panel(
+                        app,
+                        intervals,
+                        selected,
+                        group,
+                        keyboard_active.then_some(keyboard_selection),
+                        pending,
+                        theme,
+                    )),
+            );
+    }
+    overlay
+}
+
+fn timeframe_flyout_panel(
+    app: &Entity<WorkspaceSurface>,
+    intervals: &[ChartInterval],
+    selected: ChartInterval,
+    group: TimeframeMenuGroup,
+    keyboard_index: Option<usize>,
+    pending: bool,
+    theme: &AxiusflowTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let hover_panel = app.clone();
+    let mut panel = timeframe_menu_surface(
+        "timeframe_overlay_flyout",
+        TIMEFRAME_FLYOUT_WIDTH,
+        colors.surface_secondary,
+        colors.border_secondary,
+        0.0,
+        0.0,
+    )
+    .on_hover(move |hovered, window, cx| {
+        hover_panel.update(cx, |app, app_cx| {
+            app.hover_timeframe_menu_region(*hovered, window, app_cx);
+        });
+    });
+    let rows = timeframe_group_intervals(group, intervals);
+    let last = rows.len().saturating_sub(1);
+    for (index, interval) in rows.into_iter().enumerate() {
         panel = panel.child(timeframe_overlay_row(
             app,
             interval,
             index,
-            selected == interval,
-            keyboard_selection == index,
+            timeframe_flyout_row_is_active(interval, selected, keyboard_index, index),
             pending,
+            colors.surface_secondary,
+            true,
+            index == 0,
+            index == last,
             theme,
         ));
     }
     panel
+}
+
+fn timeframe_flyout_row_is_active(
+    interval: ChartInterval,
+    selected: ChartInterval,
+    keyboard_index: Option<usize>,
+    row_index: usize,
+) -> bool {
+    interval == selected || keyboard_index == Some(row_index)
+}
+
+fn timeframe_menu_surface(
+    id: &'static str,
+    width: f32,
+    fill: ThemeColor,
+    border: ThemeColor,
+    vertical_padding: f32,
+    horizontal_padding: f32,
+) -> Stateful<Div> {
+    // Compact dropdown lists pass 0, 0. Do not restore panel padding here.
+    div()
+        .id(id)
+        .w(px(width))
+        .flex()
+        .flex_col()
+        .flex_none()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(border))
+        .bg(gpui_color(fill))
+        .px(px(horizontal_padding))
+        .py(px(vertical_padding))
+        .overflow_hidden()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 fn chart_type_overlay_content(
@@ -3477,8 +3881,8 @@ fn chart_type_overlay_content(
         .w(px(TIMEFRAME_MENU_WIDTH))
         .flex()
         .flex_col()
-        .py(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
         .text_color(gpui_color(colors.text_primary));
+    let last = ChartType::ALL.len().saturating_sub(1);
     for (index, chart_type) in ChartType::ALL.into_iter().enumerate() {
         panel = panel.child(chart_type_overlay_row(
             app,
@@ -3486,6 +3890,8 @@ fn chart_type_overlay_content(
             index,
             selected == chart_type,
             keyboard_selection == index,
+            index == 0,
+            index == last,
             theme,
         ));
     }
@@ -3506,13 +3912,11 @@ fn quick_timeframe_overlay_content(
         .w(px(TIMEFRAME_MENU_WIDTH))
         .flex()
         .flex_col()
-        .pt(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
-        .pb(px(CHART_CONTEXT_MENU_VERTICAL_PADDING))
         .text_color(gpui_color(colors.text_primary))
         .child(
             div()
                 .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-                .px_2()
+                .px(px(12.0))
                 .flex()
                 .items_center()
                 .child(
@@ -3525,46 +3929,89 @@ fn quick_timeframe_overlay_content(
         );
     if intervals.is_empty() {
         return panel.child(
-            div()
-                .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-                .px_3()
-                .flex()
-                .items_center()
-                .text_sm()
-                .text_color(gpui_color(colors.text_muted))
-                .child("No matching interval"),
+            MenuRow::compact("quick_timeframe_empty", "No matching interval", theme)
+                .resting_fill(colors.surface_secondary)
+                .disabled(true)
+                .flush_in_panel(false, true),
         );
     }
     panel = panel.child(menu_separator(theme));
+    let last = intervals.len().saturating_sub(1);
     for (index, interval) in intervals.iter().copied().enumerate() {
         panel = panel.child(timeframe_overlay_row(
             app,
             interval,
             index,
-            selected == interval,
-            keyboard_selection == index,
+            selected == interval || keyboard_selection == index,
             pending,
+            colors.surface_secondary,
+            false,
+            false,
+            index == last,
             theme,
         ));
     }
     panel
 }
 
-const fn timeframe_interval_group(interval: ChartInterval) -> &'static str {
+const fn timeframe_interval_group(interval: ChartInterval) -> TimeframeMenuGroup {
     match interval {
-        ChartInterval::Tick100 => "TICKS",
+        ChartInterval::Tick100 => TimeframeMenuGroup::Ticks,
         ChartInterval::Minute1
         | ChartInterval::Minute3
         | ChartInterval::Minute5
         | ChartInterval::Minute15
-        | ChartInterval::Minute30 => "MINUTES",
+        | ChartInterval::Minute30 => TimeframeMenuGroup::Minutes,
         ChartInterval::Hour1
         | ChartInterval::Hour2
         | ChartInterval::Hour4
         | ChartInterval::Hour8
-        | ChartInterval::Hour12 => "HOURS",
-        ChartInterval::Day1 | ChartInterval::Day3 => "DAYS",
-        ChartInterval::Week1 | ChartInterval::Month1 => "CALENDAR",
+        | ChartInterval::Hour12 => TimeframeMenuGroup::Hours,
+        ChartInterval::Day1 | ChartInterval::Day3 => TimeframeMenuGroup::Days,
+        ChartInterval::Week1 => TimeframeMenuGroup::Weeks,
+        ChartInterval::Month1 => TimeframeMenuGroup::Months,
+    }
+}
+
+fn timeframe_menu_groups(intervals: &[ChartInterval]) -> Vec<TimeframeMenuGroup> {
+    let mut groups = Vec::new();
+    for interval in intervals.iter().copied() {
+        let group = timeframe_interval_group(interval);
+        if groups.last() != Some(&group) {
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+fn timeframe_group_intervals(
+    group: TimeframeMenuGroup,
+    intervals: &[ChartInterval],
+) -> Vec<ChartInterval> {
+    intervals
+        .iter()
+        .copied()
+        .filter(|interval| timeframe_interval_group(*interval) == group)
+        .collect()
+}
+
+const fn timeframe_menu_row_label(interval: ChartInterval) -> &'static str {
+    match interval {
+        ChartInterval::Tick100 => "100 Ticks",
+        ChartInterval::Minute1 => "1 Minute",
+        ChartInterval::Minute3 => "3 Minutes",
+        ChartInterval::Minute5 => "5 Minutes",
+        ChartInterval::Minute15 => "15 Minutes",
+        ChartInterval::Minute30 => "30 Minutes",
+        ChartInterval::Hour1 => "1 Hour",
+        ChartInterval::Hour2 => "2 Hours",
+        ChartInterval::Hour4 => "4 Hours",
+        ChartInterval::Hour8 => "8 Hours",
+        ChartInterval::Hour12 => "12 Hours",
+        ChartInterval::Day1 => "1 Day",
+        ChartInterval::Day3 => "3 Days",
+        ChartInterval::Week1 => "1 Week",
+        ChartInterval::Month1 => "1 Month",
     }
 }
 
@@ -3599,34 +4046,101 @@ fn chrome_typeahead_char_from(key: &str, key_char: Option<&str>, shift: bool) ->
     }
 }
 
+fn timeframe_group_row(
+    app: &Entity<WorkspaceSurface>,
+    group: TimeframeMenuGroup,
+    active_label: Option<&'static str>,
+    open: bool,
+    pending: bool,
+    first: bool,
+    last: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let hover_app = app.clone();
+    let click_app = app.clone();
+    let mut trailing = div().flex().items_center().gap_1();
+    if let Some(label) = active_label {
+        trailing = trailing.child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(label),
+        );
+    }
+    trailing = trailing.child(
+        header_icon(HugeIcon::ArrowRightIcon01)
+            .with_size(px(16.0))
+            .color(gpui_color(colors.icon)),
+    );
+    let row = MenuRow::compact(
+        ("timeframe_overlay_group", group as u64),
+        group.label(),
+        theme,
+    )
+    .resting_fill(theme.colors.surface)
+    .highlighted(open)
+    .disabled(pending)
+    .trailing(trailing)
+    .flush_in_panel(first, last)
+    .on_hover(move |hovered, window, cx| {
+        hover_app.update(cx, |app, app_cx| {
+            if *hovered {
+                app.hover_timeframe_menu_region(true, window, app_cx);
+                app.open_timeframe_group(group, false, app_cx);
+            } else {
+                app.hover_timeframe_menu_region(false, window, app_cx);
+            }
+        });
+    })
+    .on_click(move |_, _, cx| {
+        click_app.update(cx, |app, app_cx| {
+            app.open_timeframe_group(group, false, app_cx);
+        });
+    });
+    div()
+        .id(("timeframe_overlay_group_host", group as u64))
+        .w_full()
+        .child(row)
+}
+
 fn timeframe_overlay_row(
     app: &Entity<WorkspaceSurface>,
     interval: ChartInterval,
     index: usize,
-    selected: bool,
-    keyboard: bool,
+    active: bool,
     pending: bool,
+    fill: ThemeColor,
+    track_menu_hover: bool,
+    round_top: bool,
+    round_bottom: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
-    let mut row = MenuRow::compact(("timeframe_overlay_row", index), interval.label(), theme)
-        .highlighted(keyboard)
-        .disabled(pending)
-        .on_click(move |_, window, cx| {
-            row_app.update(cx, |app, app_cx| {
-                if app.select_interval(interval, app_cx) {
-                    app.close_chrome_overlay(window, app_cx);
-                }
+    let mut row = MenuRow::compact(
+        ("timeframe_overlay_row", index),
+        timeframe_menu_row_label(interval),
+        theme,
+    )
+    .resting_fill(fill)
+    .highlighted(active)
+    .disabled(pending)
+    .flush_in_panel(round_top, round_bottom);
+    if track_menu_hover {
+        let hover_app = app.clone();
+        row = row.on_hover(move |hovered, window, cx| {
+            hover_app.update(cx, |app, app_cx| {
+                app.hover_timeframe_menu_region(*hovered, window, app_cx);
             });
         });
-    if selected {
-        row = row.trailing(
-            header_icon(HugeIcon::CheckmarkCircleIcon01)
-                .with_size(px(16.0))
-                .color(gpui_color(theme.colors.icon)),
-        );
     }
-    row
+    row.on_click(move |_, window, cx| {
+        row_app.update(cx, |app, app_cx| {
+            if app.select_interval(interval, app_cx) {
+                app.close_chrome_overlay(window, app_cx);
+            }
+        });
+    })
 }
 
 fn chart_type_overlay_row(
@@ -3635,12 +4149,15 @@ fn chart_type_overlay_row(
     index: usize,
     selected: bool,
     keyboard: bool,
+    first: bool,
+    last: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
     let mut row = MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)
         .leading(series_glyph(chart_type, px(16.0)))
         .highlighted(keyboard)
+        .flush_in_panel(first, last)
         .on_click(move |_, window, cx| {
             row_app.update(cx, |app, app_cx| {
                 app.set_chart_type(chart_type, app_cx);
@@ -4612,9 +5129,8 @@ fn workspace_title_bar(
 }
 
 fn overlay_height(rows: f32, separators: f32) -> f32 {
-    CHART_CONTEXT_MENU_VERTICAL_PADDING * 2.0
-        + CHART_CONTEXT_MENU_ROW_HEIGHT * rows
-        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
+    // 1px border on each side. Compact dropdowns have no extra panel padding.
+    2.0 + CHART_CONTEXT_MENU_ROW_HEIGHT * rows + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
 }
 
 fn clamp_overlay_origin(
@@ -4677,7 +5193,6 @@ fn clamp_price_axis_flyout_origin(
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_FLYOUT_GAP);
     let parent_y = root.y
-        + px(CHART_CONTEXT_MENU_VERTICAL_PADDING)
         + px(CHART_CONTEXT_MENU_ROW_HEIGHT * row)
         + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before);
     let left_x = root.x - width - gap;
@@ -4742,11 +5257,20 @@ fn chart_context_menu_panel(
         px(CHART_CONTEXT_MENU_WIDTH),
         theme,
     );
-    for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
+    let items = chart_context_menu_items(state);
+    let last = items.len().saturating_sub(1);
+    for (index, item) in items.into_iter().enumerate() {
         if matches!(index, 1 | 3 | 5 | 6) {
             panel = panel.child(menu_separator(theme));
         }
-        panel = panel.child(chart_context_menu_item(terminal, item, theme, menu));
+        panel = panel.child(chart_context_menu_item(
+            terminal,
+            item,
+            theme,
+            menu,
+            index == 0,
+            index == last,
+        ));
     }
     panel
 }
@@ -4810,6 +5334,8 @@ fn chart_context_menu_item(
     item: ChartContextMenuItem,
     theme: &AxiusflowTheme,
     menu: ChartContextMenu,
+    first: bool,
+    last: bool,
 ) -> impl IntoElement {
     let action_terminal = terminal.clone();
     let icon_color = gpui_color(if item.enabled {
@@ -4827,6 +5353,7 @@ fn chart_context_menu_item(
     MenuRow::compact(id, label, theme)
         .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .disabled(!enabled)
+        .flush_in_panel(first, last)
         .on_click(move |_, window, cx| {
             if enabled {
                 action_terminal.update(cx, |terminal, terminal_cx| {
@@ -4886,14 +5413,20 @@ fn price_axis_menu_panel(
         px(CHART_CONTEXT_MENU_WIDTH),
         theme,
     );
-    for (index, row) in price_axis_root_rows(menu.flyout, state)
-        .into_iter()
-        .enumerate()
-    {
+    let rows = price_axis_root_rows(menu.flyout, state);
+    let last = rows.len().saturating_sub(1);
+    for (index, row) in rows.into_iter().enumerate() {
         if matches!(index, 2 | 4) {
             panel = panel.child(menu_separator(theme));
         }
-        panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
+        panel = panel.child(price_axis_menu_item(
+            terminal,
+            menu,
+            row,
+            theme,
+            index == 0,
+            index == last,
+        ));
     }
     panel
 }
@@ -4915,25 +5448,21 @@ fn price_axis_flyout_panel(
     .max_h(viewport.height)
     .overflow_y_scroll();
     let rows = price_axis_flyout_rows(menu.flyout, state);
+    let last = rows.len().saturating_sub(1);
     for (index, row) in rows.into_iter().enumerate() {
         if menu.flyout == PriceAxisMenuFlyout::Labels && index == 9 {
             panel = panel.child(menu_separator(theme));
         }
-        panel = panel.child(price_axis_menu_item(terminal, menu, row, theme));
+        panel = panel.child(price_axis_menu_item(
+            terminal,
+            menu,
+            row,
+            theme,
+            index == 0,
+            index == last,
+        ));
     }
     panel
-}
-
-fn menu_section_header(label: &'static str, colors: &axiusflow_design_system::ThemeColors) -> Div {
-    div()
-        .h(px(PRICE_AXIS_MENU_HEADER_HEIGHT))
-        .px_3()
-        .flex()
-        .items_end()
-        .pb_1()
-        .text_xs()
-        .text_color(gpui_color(colors.text_secondary))
-        .child(label)
 }
 
 fn price_axis_root_rows(
@@ -5132,6 +5661,8 @@ fn price_axis_menu_item(
     menu: ChartContextMenu,
     row: PriceAxisMenuRow,
     theme: &AxiusflowTheme,
+    first: bool,
+    last: bool,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let action_terminal = terminal.clone();
@@ -5143,6 +5674,7 @@ fn price_axis_menu_item(
     let mut item = MenuRow::compact(label, label, theme)
         .highlighted(open)
         .disabled(!enabled)
+        .flush_in_panel(first, last)
         .on_click(move |_, _, cx| match row {
             PriceAxisMenuRow::Toggle { action, .. } => {
                 action_terminal.update(cx, |terminal, terminal_cx| {
@@ -5538,6 +6070,7 @@ fn header_controls(
                 catalog_exchange: assets::ExchangeLogo::Coinbase,
                 exchange_menu_open: false,
                 keyboard_selection: 0,
+                keyboard_active: false,
                 scroll: state.instrument_scroll,
             },
             &state.theme,
@@ -5811,6 +6344,7 @@ struct InstrumentSelectorState {
     catalog_exchange: assets::ExchangeLogo,
     exchange_menu_open: bool,
     keyboard_selection: usize,
+    keyboard_active: bool,
     scroll: ScrollHandle,
 }
 
@@ -5912,7 +6446,12 @@ fn instrument_dialog_row(
         instrument.symbol.clone(),
         theme,
     )
-    .highlighted(state.keyboard_selection == index || checked)
+    .highlighted(instrument_row_highlighted(
+        checked,
+        index,
+        state.keyboard_selection,
+        state.keyboard_active,
+    ))
     .disabled(state.selection_pending)
     .on_click(move |_, window, cx| {
         if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
@@ -6040,26 +6579,40 @@ fn chrome_menu_search_header(
         .child(chrome_menu_close_button(app, theme))
 }
 
-/// Small 24px close control for command-palette headers; the standard chrome
-/// button is a 32px hit area whose hover fill dwarfs the compact header.
-fn chrome_menu_close_button(app: &Entity<WorkspaceSurface>, theme: &AxiusflowTheme) -> Button {
+/// Compact 24px close control matching the workspace tab add button: a circular
+/// hit with a 13px glyph, flex-centered. The standard chrome `Button` is a 32px
+/// control whose 75% icon scaling and inner wrapper throw the X off-center.
+fn chrome_menu_close_button(
+    app: &Entity<WorkspaceSurface>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
     let colors = theme.colors;
     let close_app = app.clone();
-    button_activation(
-        Button::new("chrome_menu_close")
-            .theme(theme)
-            .resting_fill(colors.surface)
-            .icon(header_icon(HugeIcon::CancelIcon01))
-            .with_size(px(24.0))
-            .border_0()
-            .text_color(gpui_color(colors.icon))
-            .cursor_pointer()
-            .tab_stop(false),
-        true,
-        move |window, cx| {
-            close_app.update(cx, |app, app_cx| app.close_chrome_overlay(window, app_cx));
-        },
-    )
+    div()
+        .id("chrome_menu_close")
+        .occlude()
+        .size(px(WORKSPACE_TAB_ICON_HIT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .text_color(gpui_color(colors.icon))
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Close")
+        .hover(move |close| {
+            close
+                .bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                .text_color(gpui_color(colors.text_primary))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            close_app.update(cx, |app, app_cx| {
+                app.close_chrome_overlay(window, app_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(header_icon(HugeIcon::CancelIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
 fn instrument_search_header(
@@ -6822,7 +7375,16 @@ fn subscribe_symbol_input(
                 }
                 SymbolInputAction::Search => {
                     terminal.update(cx, |app, cx| {
-                        app.chrome_selection = 0;
+                        let typed = app
+                            .symbol_input
+                            .as_ref()
+                            .is_some_and(|input| !input.read(cx).value().trim().is_empty());
+                        app.chrome_list_keyboard = typed;
+                        app.chrome_selection = if typed {
+                            0
+                        } else {
+                            current_instrument_menu_index(&app.instrument_entries(cx)).unwrap_or(0)
+                        };
                         app.search_symbol_input(cx);
                         cx.notify();
                     });
@@ -9057,7 +9619,7 @@ fn workspace_tab_close_button(
     div()
         .id(("close_workspace", tab_id))
         .occlude()
-        .size(px(20.0))
+        .size(px(WORKSPACE_TAB_ICON_HIT))
         .flex_none()
         .flex()
         .items_center()
@@ -9088,7 +9650,7 @@ fn workspace_tab_close_button(
                 cx.stop_propagation();
             }
         })
-        .child(header_icon(HugeIcon::CancelIcon01).with_size(px(12.0)))
+        .child(header_icon(HugeIcon::CancelIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
 fn handle_workspace_tab_key(
@@ -9131,7 +9693,7 @@ fn workspace_add_button(
     div()
         .id("add_workspace")
         .occlude()
-        .size(px(24.0))
+        .size(px(WORKSPACE_TAB_ICON_HIT))
         .flex_none()
         .flex()
         .items_center()
@@ -9166,7 +9728,7 @@ fn workspace_add_button(
                     }
                 })
         })
-        .child(header_icon(HugeIcon::AddIcon01).with_size(px(13.0)))
+        .child(header_icon(HugeIcon::AddIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
 fn workspace_tab(
@@ -9771,30 +10333,34 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHART_CONTEXT_MENU_WIDTH, COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID,
-        COINBASE_INTERVALS, CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement,
-        ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
-        InputEvent, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout,
-        PriceAxisMenuRow, ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState,
-        RithmicReconnectTarget, RithmicSessionRetirement, SidePanel, SidePanelResize,
-        SymbolInputAction, SymbolSubmitDecision, TerminalProvider, WORKSPACE_TAB_GAP,
-        WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
-        WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-        active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
-        caption_pointer_owner, catalog_rejection_message, chart_status_detail,
-        chart_surface_notice, chrome_control_foreground, chrome_overlay_progress,
-        chrome_typeahead_char_from, claim_once, clamp_chart_context_menu_origin,
-        clamp_price_axis_menu_origin, connection_presentation, default_rithmic_contract_index,
-        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
-        instrument_listing_refresh_needed, instrument_selector_label, nucleus_chart_theme,
-        price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+        CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, COINBASE_CALENDAR_HISTORY_STATUS,
+        COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS, CaptionPlatform, CaptionPointerOwner,
+        ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode,
+        HeaderControls, InputEvent, InstrumentMenuEntry, InstrumentMenuSelection,
+        OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow,
+        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        RithmicSessionRetirement, SidePanel, SidePanelResize, SymbolInputAction,
+        SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
+        TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
+        WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
+        WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
+        caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+        chart_status_detail, chart_surface_notice, chrome_control_foreground,
+        chrome_overlay_progress, chrome_typeahead_char_from, claim_once,
+        clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
+        current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
+        finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+        instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
+        nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
         reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
         resized_side_panel_width, rithmic_ready_action, series_selector_label,
         should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
-        symbol_submit_decision, timeframe_interval_group, timeframe_overlay_left,
-        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
-        workspace_title_bar_visible, wrapped_workspace_index,
+        symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+        timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
+        timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
+        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
+        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
+        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -9958,18 +10524,31 @@ mod tests {
 
     #[test]
     fn timeframe_menu_groups_every_catalog_interval() {
-        let groups: Vec<&'static str> = ChartInterval::ALL
+        let groups: Vec<TimeframeMenuGroup> = ChartInterval::ALL
             .into_iter()
             .map(timeframe_interval_group)
             .collect();
         assert_eq!(
             groups,
             [
-                "TICKS", "MINUTES", "MINUTES", "MINUTES", "MINUTES", "MINUTES", "HOURS", "HOURS",
-                "HOURS", "HOURS", "HOURS", "DAYS", "DAYS", "CALENDAR", "CALENDAR",
+                TimeframeMenuGroup::Ticks,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Days,
+                TimeframeMenuGroup::Days,
+                TimeframeMenuGroup::Weeks,
+                TimeframeMenuGroup::Months,
             ]
         );
-        let coinbase_groups: Vec<&'static str> = COINBASE_INTERVALS
+        let coinbase_groups: Vec<TimeframeMenuGroup> = COINBASE_INTERVALS
             .iter()
             .copied()
             .map(timeframe_interval_group)
@@ -9977,10 +10556,99 @@ mod tests {
         assert_eq!(
             coinbase_groups,
             [
-                "MINUTES", "MINUTES", "MINUTES", "MINUTES", "MINUTES", "HOURS", "HOURS", "HOURS",
-                "HOURS", "HOURS", "DAYS", "CALENDAR", "CALENDAR",
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Days,
+                TimeframeMenuGroup::Weeks,
+                TimeframeMenuGroup::Months,
             ]
         );
+    }
+
+    #[test]
+    fn timeframe_menu_uses_dual_group_and_interval_containers() {
+        assert_eq!(
+            timeframe_menu_groups(&ChartInterval::ALL),
+            [
+                TimeframeMenuGroup::Ticks,
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Days,
+                TimeframeMenuGroup::Weeks,
+                TimeframeMenuGroup::Months,
+            ]
+        );
+        assert_eq!(
+            timeframe_menu_groups(COINBASE_INTERVALS),
+            [
+                TimeframeMenuGroup::Minutes,
+                TimeframeMenuGroup::Hours,
+                TimeframeMenuGroup::Days,
+                TimeframeMenuGroup::Weeks,
+                TimeframeMenuGroup::Months,
+            ]
+        );
+        assert_eq!(
+            timeframe_group_intervals(TimeframeMenuGroup::Minutes, &ChartInterval::ALL),
+            [
+                ChartInterval::Minute1,
+                ChartInterval::Minute3,
+                ChartInterval::Minute5,
+                ChartInterval::Minute15,
+                ChartInterval::Minute30,
+            ]
+        );
+        assert_eq!(timeframe_menu_row_label(ChartInterval::Minute1), "1 Minute");
+        assert_eq!(timeframe_menu_row_label(ChartInterval::Hour4), "4 Hours");
+        assert_eq!(timeframe_menu_row_label(ChartInterval::Day1), "1 Day");
+        assert_eq!(TimeframeMenuGroup::Minutes.label(), "Minutes");
+        assert!(
+            timeframe_menu_groups(COINBASE_INTERVALS)
+                .into_iter()
+                .all(|group| !timeframe_group_intervals(group, COINBASE_INTERVALS).is_empty()),
+            "a hovered group owns its submenu; the root list does not keep a flyout open"
+        );
+        assert_eq!(timeframe_flyout_offset(1), CHART_CONTEXT_MENU_ROW_HEIGHT);
+        assert_eq!(
+            timeframe_flyout_height(1),
+            CHART_CONTEXT_MENU_ROW_HEIGHT + 2.0,
+            "submenu height is the rows plus the 1px border"
+        );
+        assert_eq!(
+            timeframe_overlay_extent(5, None).0,
+            TIMEFRAME_MENU_WIDTH,
+            "closed menu must not reserve a dead gap beside the root list"
+        );
+        let hours = timeframe_overlay_extent(5, Some((1, 5)));
+        assert_eq!(
+            hours.0,
+            TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP + TIMEFRAME_FLYOUT_WIDTH
+        );
+        assert!(hours.1 >= timeframe_flyout_offset(1) + timeframe_flyout_height(5));
+        assert!(
+            !timeframe_flyout_row_is_active(ChartInterval::Hour1, ChartInterval::Minute1, None, 0),
+            "hovering a group must not mark its first row selected"
+        );
+        assert!(timeframe_flyout_row_is_active(
+            ChartInterval::Minute1,
+            ChartInterval::Minute1,
+            None,
+            0
+        ));
+        assert!(timeframe_flyout_row_is_active(
+            ChartInterval::Hour1,
+            ChartInterval::Minute1,
+            Some(0),
+            0
+        ));
     }
 
     #[test]
@@ -10455,6 +11123,43 @@ mod tests {
         assert_eq!(
             symbol_submit_decision(TerminalProvider::Coinbase, 0, 0),
             SymbolSubmitDecision::None
+        );
+    }
+
+    #[test]
+    fn instrument_menu_highlights_only_the_live_market_until_keyboard_moves() {
+        assert!(instrument_row_highlighted(true, 4, 0, false));
+        assert!(
+            !instrument_row_highlighted(false, 0, 0, false),
+            "opening the menu must not paint catalog index 0 as the live stream"
+        );
+        assert!(instrument_row_highlighted(false, 0, 0, true));
+        assert!(!instrument_row_highlighted(true, 4, 0, true));
+        assert!(instrument_row_highlighted(true, 4, 4, true));
+    }
+
+    #[test]
+    fn instrument_menu_index_follows_the_checked_live_market() {
+        let entries = [
+            InstrumentMenuEntry {
+                symbol: "BTC/USD".into(),
+                checked: false,
+                selection: InstrumentMenuSelection::Coinbase(0),
+            },
+            InstrumentMenuEntry {
+                symbol: "ETH/USD".into(),
+                checked: true,
+                selection: InstrumentMenuSelection::Coinbase(1),
+            },
+        ];
+        assert_eq!(current_instrument_menu_index(&entries), Some(1));
+        assert_eq!(
+            current_instrument_menu_index(&[InstrumentMenuEntry {
+                symbol: "AAVE/USD".into(),
+                checked: false,
+                selection: InstrumentMenuSelection::Coinbase(0),
+            }]),
+            None
         );
     }
 

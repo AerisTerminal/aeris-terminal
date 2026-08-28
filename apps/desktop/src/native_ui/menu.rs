@@ -7,10 +7,10 @@ use gpui::{
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type Hover = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 
 const COMPACT_ROW_HEIGHT: Pixels = px(32.0);
 const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
-const PANEL_PADDING: Pixels = px(4.0);
 const SEPARATOR_HEIGHT: Pixels = px(1.0);
 
 #[derive(Clone, Copy)]
@@ -43,8 +43,12 @@ pub(crate) struct MenuRow {
     leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
     activation: Option<Activation>,
+    hover: Option<Hover>,
     highlighted: bool,
     disabled: bool,
+    round_top: bool,
+    round_bottom: bool,
+    fill_width: bool,
 }
 
 impl MenuRow {
@@ -89,8 +93,12 @@ impl MenuRow {
             leading: None,
             trailing: None,
             activation: None,
+            hover: None,
             highlighted: false,
             disabled: false,
+            round_top: false,
+            round_bottom: false,
+            fill_width: false,
         }
     }
 
@@ -119,11 +127,34 @@ impl MenuRow {
         self
     }
 
+    pub(crate) fn round_panel_ends(mut self, top: bool, bottom: bool) -> Self {
+        self.round_top = top;
+        self.round_bottom = bottom;
+        self
+    }
+
+    pub(crate) fn fill_width(mut self) -> Self {
+        self.fill_width = true;
+        self
+    }
+
+    pub(crate) fn flush_in_panel(self, first: bool, last: bool) -> Self {
+        self.fill_width().round_panel_ends(first, last)
+    }
+
     pub(crate) fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.activation = Some(Rc::new(handler));
+        self
+    }
+
+    pub(crate) fn on_hover(
+        mut self,
+        handler: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.hover = Some(Rc::new(handler));
         self
     }
 }
@@ -138,6 +169,13 @@ impl RenderOnce for MenuRow {
         }
         .over(self.resting_fill);
         let (height, horizontal_padding, rounded) = row_geometry(self.kind);
+        let hover = self.hover;
+        // Inner path of a 6px panel with a 1px border. Matching the outer radius
+        // on the content box pulls the hover off the corners and leaves gaps.
+        let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels()) - 1.0).max(0.0));
+        let round_top = self.round_top;
+        let round_bottom = self.round_bottom;
+        let fill_width = self.fill_width;
         let label = div()
             .flex_1()
             .min_w_0()
@@ -147,6 +185,10 @@ impl RenderOnce for MenuRow {
         div()
             .id(self.id)
             .block_mouse_except_scroll()
+            .when_some(hover, |row, hover| {
+                row.on_hover(move |hovered, window, cx| hover(hovered, window, cx))
+            })
+            .when(fill_width, |row| row.w_full())
             .h(height)
             .flex_none()
             .flex()
@@ -157,14 +199,34 @@ impl RenderOnce for MenuRow {
             .when(rounded, |row| {
                 row.rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             })
+            .when(round_top, |row| {
+                row.rounded_tl(inner_radius).rounded_tr(inner_radius)
+            })
+            .when(round_bottom, |row| {
+                row.rounded_bl(inner_radius).rounded_br(inner_radius)
+            })
             .when(self.highlighted, |row| {
                 row.bg(theme_color(highlighted_fill))
                     .text_color(theme_color(colors.text_primary))
+                    .when(round_top, |row| {
+                        row.rounded_tl(inner_radius).rounded_tr(inner_radius)
+                    })
+                    .when(round_bottom, |row| {
+                        row.rounded_bl(inner_radius).rounded_br(inner_radius)
+                    })
             })
             .when(enabled, |row| {
-                row.cursor_pointer().hover(|row| {
-                    row.bg(theme_color(colors.hover_bg.over(self.resting_fill)))
-                        .text_color(theme_color(colors.text_primary))
+                row.cursor_pointer().hover(|style| {
+                    let mut style = style
+                        .bg(theme_color(colors.hover_bg.over(self.resting_fill)))
+                        .text_color(theme_color(colors.text_primary));
+                    if round_top {
+                        style = style.rounded_tl(inner_radius).rounded_tr(inner_radius);
+                    }
+                    if round_bottom {
+                        style = style.rounded_bl(inner_radius).rounded_br(inner_radius);
+                    }
+                    style
                 })
             })
             .when(!enabled, |row| {
@@ -183,6 +245,9 @@ impl RenderOnce for MenuRow {
     }
 }
 
+/// Flush compact dropdown surface: 1px rounded border, no panel padding.
+/// Rows use [`MenuRow::compact`] plus [`MenuRow::flush_in_panel`]; do not wrap
+/// this panel in `py`/`px` or `overflow_hidden` (that clips the border).
 pub(crate) fn compact_menu_panel(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
@@ -202,8 +267,6 @@ pub(crate) fn compact_menu_panel(
         .border_color(theme_color(colors.border_secondary))
         .bg(theme_color(colors.surface_secondary))
         .text_color(theme_color(colors.text_primary))
-        .overflow_hidden()
-        .py(PANEL_PADDING)
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 

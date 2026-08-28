@@ -1,6 +1,6 @@
 use gpui::{
     App, Hsla, IntoElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled,
-    Transformation, Window, svg,
+    Transformation, Window, div, prelude::*, svg,
 };
 
 /// An Axiusflow-owned SVG icon loaded through the application's `AssetSource`.
@@ -79,14 +79,23 @@ impl RenderOnce for Icon {
         let mut glyph = svg().path(self.path).flex_none().flex_shrink_0();
         *glyph.style() = self.style;
         let glyph = glyph.size(size).text_color(color);
-
-        if let Some(turns) = self.rotation_turns {
+        let glyph = if let Some(turns) = self.rotation_turns {
             glyph
                 .with_transformation(Transformation::rotate(gpui::percentage(turns)))
                 .into_any_element()
         } else {
             glyph.into_any_element()
-        }
+        };
+        // GPUI SVG participates in text layout and can sit on the baseline with
+        // extra descent, which makes compact close glyphs look high in the hit.
+        div()
+            .size(size)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .child(glyph)
     }
 }
 
