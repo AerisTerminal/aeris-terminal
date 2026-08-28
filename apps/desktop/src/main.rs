@@ -3834,6 +3834,7 @@ fn timeframe_flyout_panel(
             interval,
             index,
             timeframe_flyout_row_is_active(interval, selected, keyboard_index, index),
+            interval == selected,
             pending,
             colors.surface_secondary,
             true,
@@ -4101,6 +4102,7 @@ fn timeframe_overlay_row(
     interval: ChartInterval,
     index: usize,
     active: bool,
+    selected: bool,
     pending: bool,
     fill: ThemeColor,
     track_menu_hover: bool,
@@ -4118,6 +4120,13 @@ fn timeframe_overlay_row(
     .highlighted(active)
     .disabled(pending)
     .flush_in_panel(round_top, round_bottom);
+    if selected {
+        row = row.trailing(
+            header_icon(HugeIcon::CheckIcon)
+                .with_size(px(16.0))
+                .color(gpui_color(theme.colors.icon)),
+        );
+    }
     if track_menu_hover {
         let hover_app = app.clone();
         row = row.on_hover(move |hovered, window, cx| {
@@ -4158,7 +4167,7 @@ fn chart_type_overlay_row(
         });
     if selected {
         row = row.trailing(
-            header_icon(HugeIcon::CheckmarkCircleIcon01)
+            header_icon(HugeIcon::CheckIcon)
                 .with_size(px(16.0))
                 .color(gpui_color(theme.colors.icon)),
         );
@@ -5271,21 +5280,21 @@ fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuIt
     [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
-            icon: HugeIcon::Reload,
+            icon: HugeIcon::Refresh01Icon,
             label: "Reset view",
             enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::Reset,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
-            icon: HugeIcon::AiEraser,
+            icon: HugeIcon::DeleteIcon02,
             label: "Remove drawings",
             enabled: state.enabled(ChartContextMenuState::DRAWINGS),
             action: ChartContextAction::ClearDrawings,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_indicators",
-            icon: HugeIcon::ChartLineDataIcon02,
+            icon: HugeIcon::DeleteIcon02,
             label: "Remove indicators",
             enabled: state.enabled(ChartContextMenuState::INDICATORS),
             action: ChartContextAction::ClearIndicators,
@@ -5330,7 +5339,14 @@ fn chart_context_menu_item(
     last: bool,
 ) -> impl IntoElement {
     let action_terminal = terminal.clone();
-    let icon_color = gpui_color(if item.enabled {
+    let destructive = item.action.is_destructive();
+    let icon_color = gpui_color(if destructive {
+        if item.enabled {
+            theme.colors.danger
+        } else {
+            theme.colors.danger.with_alpha(0.55)
+        }
+    } else if item.enabled {
         theme.colors.icon
     } else {
         theme.colors.text_muted
@@ -5345,6 +5361,7 @@ fn chart_context_menu_item(
     MenuRow::compact(id, label, theme)
         .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .disabled(!enabled)
+        .destructive(destructive)
         .flush_in_panel(first, last)
         .on_click(move |_, window, cx| {
             if enabled {
@@ -5682,7 +5699,7 @@ fn price_axis_menu_item(
         });
     if checked {
         item = item.trailing(
-            header_icon(HugeIcon::CheckmarkCircleIcon01)
+            header_icon(HugeIcon::CheckIcon)
                 .with_size(px(16.0))
                 .color(gpui_color(colors.icon)),
         );
@@ -5830,7 +5847,7 @@ fn settings_mode_row(
         })
         .child(mode.label())
         .children(selected.then(|| {
-            header_icon(HugeIcon::CheckmarkCircleIcon01)
+            header_icon(HugeIcon::CheckIcon)
                 .with_size(px(16.0))
                 .color(gpui_color(colors.primary))
         }))
@@ -6208,7 +6225,7 @@ fn indicator_selector(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("indicator_selector")
-        .icon(header_icon(HugeIcon::ChartLineDataIcon02))
+        .icon(header_icon(HugeIcon::AnalyticsUpIcon))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -6461,7 +6478,7 @@ fn instrument_dialog_row(
         ));
     }
     if checked {
-        row = row.trailing(header_icon(HugeIcon::CheckmarkCircleIcon01).with_size(px(14.0)));
+        row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
     }
     row
 }
@@ -6716,9 +6733,7 @@ fn instrument_exchange_menu(
                         });
                     });
                     if active {
-                        row = row.trailing(
-                            header_icon(HugeIcon::CheckmarkCircleIcon01).with_size(px(14.0)),
-                        );
+                        row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
                     }
                     row
                 }),
@@ -7580,6 +7595,12 @@ enum ChartContextAction {
     Split(ChartSplitDirection),
     Close,
     Settings,
+}
+
+impl ChartContextAction {
+    const fn is_destructive(self) -> bool {
+        matches!(self, Self::ClearDrawings | Self::ClearIndicators)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -11508,6 +11529,29 @@ mod tests {
                 size(px(800.0), px(600.0))
             ),
             point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
+        );
+    }
+
+    #[test]
+    fn chart_context_remove_actions_use_destructive_color() {
+        assert!(super::ChartContextAction::ClearDrawings.is_destructive());
+        assert!(super::ChartContextAction::ClearIndicators.is_destructive());
+        assert!(!super::ChartContextAction::Reset.is_destructive());
+        assert!(!super::ChartContextAction::Close.is_destructive());
+        assert!(!super::ChartContextAction::Settings.is_destructive());
+        let items = super::chart_context_menu_items(super::ChartContextMenuState {
+            pane_count: 1,
+            flags: 0,
+        });
+        assert_eq!(items[0].icon, super::HugeIcon::Refresh01Icon);
+        let trash = items
+            .into_iter()
+            .filter(|item| item.action.is_destructive())
+            .map(|item| item.icon)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trash,
+            [super::HugeIcon::DeleteIcon02, super::HugeIcon::DeleteIcon02]
         );
     }
 

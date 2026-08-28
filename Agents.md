@@ -57,19 +57,6 @@ Ponytail governs unnecessary complexity. It must never simplify away trading cor
 - Do not add a dependency without checking the workspace first and justifying its runtime, binary-size, maintenance, and supply-chain cost.
 - Do not weaken tests, silence lints, discard errors, or use `unwrap`/`expect` outside tests and unavoidable process-startup invariants merely to pass a gate.
 
-## Compact dropdown menus
-
-Agents repeatedly recreate compact dropdowns with extra panel padding, inset rows, and stretched flyouts. That chrome is not part of the product. Do not add it, and do not reintroduce it when "fixing" hover overflow.
-
-This applies to the timeframe group list and its flyout, the digit typeahead (quick timeframe) overlay, the chart-type (series) menu, the pane context menu, the Y-axis menu and its Labels/Lines flyouts, and the chart settings menu. It does not apply to the instrument/indicator command palettes (40px search rows).
-
-Contract:
-
-- Use `compact_menu_panel` plus `MenuRow::compact(...).flush_in_panel(first, last)`. Do not wrap those rows in `py`/`px`, `PANEL_PADDING`, `compact_inset`, or a padded inner column.
-- Overlay height is `2 + 32 * rows + 1 * separators` (1px border on each side). Do not add 4px×2 padding into height or stretch a flyout to the parent list height.
-- Hover fills the panel flush. Inner corner radius is 5px (outer 6px minus the 1px border). Matching the outer 6px on the content box leaves corner gaps.
-- GPUI `overflow_hidden` clips to an axis-aligned box, not the rounded path. Do not inset rows or add panel padding to hide square hover in the corner wedges; that fattens the menu. Do not clip the panel either: that eats the 1px border.
-
 ## Market architecture guardrails
 
 1. GPUI performs no provider, persistent-history, blocking network, disk, process, or shutdown work.

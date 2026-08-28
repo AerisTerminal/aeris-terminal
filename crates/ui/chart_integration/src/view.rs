@@ -245,6 +245,10 @@ impl ChartType {
             Self::BrushableArea => None,
         }
     }
+
+    const fn shows_ohlc_legend(self) -> bool {
+        matches!(self, Self::Candles | Self::Bars)
+    }
 }
 
 /// Distinguishes a pane-canvas right-click from a price-axis right-click.
@@ -1424,20 +1428,27 @@ impl NucleusChartView {
             .find(|series| series.id == 0 && !series.removed)
         {
             let snapshot = snapshots.iter().find(|snapshot| snapshot.series_id == 0);
-            let values = snapshot
-                .map(|snapshot| {
-                    let value = |label: &str, value: &Option<String>| {
-                        format!("{label} {}", value.as_deref().unwrap_or("--"))
-                    };
-                    [
-                        value("O", &snapshot.formatted_open),
-                        value("H", &snapshot.formatted_high),
-                        value("L", &snapshot.formatted_low),
-                        value("C", &snapshot.formatted_close),
-                    ]
-                    .join("  ")
-                })
-                .unwrap_or_default();
+            let (values, values_tone) = if asset.visible && self.chart_type.shows_ohlc_legend() {
+                (
+                    snapshot
+                        .map(|snapshot| {
+                            let value = |label: &str, value: &Option<String>| {
+                                format!("{label} {}", value.as_deref().unwrap_or("--"))
+                            };
+                            [
+                                value("O", &snapshot.formatted_open),
+                                value("H", &snapshot.formatted_high),
+                                value("L", &snapshot.formatted_low),
+                                value("C", &snapshot.formatted_close),
+                            ]
+                            .join("  ")
+                        })
+                        .unwrap_or_default(),
+                    snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
+                )
+            } else {
+                (String::new(), LegendValueTone::Neutral)
+            };
             rows.push(LegendRow {
                 item: LegendItem::Asset,
                 pane: asset.pane_index,
@@ -1449,7 +1460,7 @@ impl NucleusChartView {
                     asset.title.clone()
                 },
                 values,
-                values_tone: snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
+                values_tone,
                 visible: asset.visible,
             });
         }
@@ -1462,7 +1473,11 @@ impl NucleusChartView {
                 item: LegendItem::Volume,
                 pane: volume.pane_index,
                 title: "Volume".to_string(),
-                values: legend_series_value(&snapshots, self.volume_series),
+                values: if volume.visible {
+                    legend_series_value(&snapshots, self.volume_series)
+                } else {
+                    String::new()
+                },
                 values_tone: LegendValueTone::Neutral,
                 visible: volume.visible,
             });
@@ -1489,28 +1504,34 @@ impl NucleusChartView {
             let Some(first) = outputs.first() else {
                 continue;
             };
-            let values = outputs
-                .iter()
-                .filter_map(|series| {
-                    let output = self.engine.indicator_info(series.id)?;
-                    let value = legend_series_value(&snapshots, series.id);
-                    if value.is_empty() {
-                        None
-                    } else if output.output_count > 1 {
-                        Some(format!("{} {value}", output.output_name))
-                    } else {
-                        Some(value)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("  ");
+            let visible = outputs.iter().any(|series| series.visible);
+            let values = if visible {
+                outputs
+                    .iter()
+                    .filter(|series| series.visible)
+                    .filter_map(|series| {
+                        let output = self.engine.indicator_info(series.id)?;
+                        let value = legend_series_value(&snapshots, series.id);
+                        if value.is_empty() {
+                            None
+                        } else if output.output_count > 1 {
+                            Some(format!("{} {value}", output.output_name))
+                        } else {
+                            Some(value)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            } else {
+                String::new()
+            };
             rows.push(LegendRow {
                 item: LegendItem::Indicator(info.binding_id),
                 pane: first.pane_index,
                 title: first.title.clone(),
                 values,
                 values_tone: LegendValueTone::Neutral,
-                visible: outputs.iter().any(|series| series.visible),
+                visible,
             });
         }
         rows
@@ -2945,7 +2966,8 @@ fn chart_legend_layers(
                 .overflow_hidden()
                 .flex()
                 .flex_col()
-                .items_start();
+                .items_start()
+                .cursor(CursorStyle::Arrow);
             let mut row_count = 0;
             for row in pane_rows {
                 row_count += 1;
@@ -3002,6 +3024,7 @@ fn chart_legend_row(
         } else {
             palette.muted
         })
+        .cursor(CursorStyle::Arrow)
         .hover(|style| style.bg(palette.hover))
         .child(
             div()
@@ -3009,7 +3032,7 @@ fn chart_legend_row(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(row.title.clone()),
         )
-        .when(!row.values.is_empty(), |legend| {
+        .when(row.visible && !row.values.is_empty(), |legend| {
             legend.child(
                 div()
                     .min_w_0()
@@ -4040,25 +4063,73 @@ mod tests {
     }
 
     #[test]
+    fn asset_legend_shows_ohlc_only_on_candles_and_bars() {
+        let mut chart = interactive_chart();
+        let asset_values = |chart: &NucleusChartView| {
+            chart
+                .legend_rows()
+                .into_iter()
+                .find(|row| row.item == LegendItem::Asset)
+                .expect("asset legend")
+                .values
+        };
+        assert!(asset_values(&chart).contains("O "));
+        assert!(asset_values(&chart).contains("C "));
+
+        chart.set_chart_type(ChartType::Bars);
+        assert!(asset_values(&chart).contains("O "));
+        assert!(asset_values(&chart).contains("C "));
+
+        for chart_type in [
+            ChartType::Line,
+            ChartType::Area,
+            ChartType::Baseline,
+            ChartType::BrushableArea,
+        ] {
+            chart.set_chart_type(chart_type);
+            assert!(
+                asset_values(&chart).is_empty(),
+                "OHLC stayed on {chart_type:?}"
+            );
+        }
+
+        chart.set_chart_type(ChartType::Candles);
+        assert!(asset_values(&chart).contains("O "));
+        assert!(asset_values(&chart).contains("C "));
+    }
+
+    #[test]
     fn legend_visibility_preserves_rows_and_indicator_removal_clears_bindings() {
         let mut chart = interactive_chart();
         let sma = chart
             .add_indicator(ChartIndicator::Sma)
             .expect("SMA is created")[0];
 
+        assert!(!chart.legend_rows()[0].values.is_empty());
         assert!(chart.set_legend_item_visible(LegendItem::Asset, false));
         assert!(!series_entry(&chart, 0).visible);
         assert_eq!(chart.legend_rows()[0].item, LegendItem::Asset);
+        assert!(!chart.legend_rows()[0].visible);
+        assert!(chart.legend_rows()[0].values.is_empty());
         assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), false));
         assert!(!series_entry(&chart, sma).visible);
+        let sma_row = chart
+            .legend_rows()
+            .into_iter()
+            .find(|row| row.item == LegendItem::Indicator(sma))
+            .expect("SMA legend remains while hidden");
+        assert!(!sma_row.visible);
+        assert!(sma_row.values.is_empty());
+        assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), true));
+        assert!(series_entry(&chart, sma).visible);
         assert!(
             chart
                 .legend_rows()
                 .iter()
-                .any(|row| row.item == LegendItem::Indicator(sma) && !row.visible)
+                .any(|row| row.item == LegendItem::Indicator(sma)
+                    && row.visible
+                    && !row.values.is_empty())
         );
-        assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), true));
-        assert!(series_entry(&chart, sma).visible);
         assert!(chart.remove_legend_indicator(LegendItem::Indicator(sma)));
         assert!(
             chart
@@ -4079,12 +4150,13 @@ mod tests {
         assert!(chart.set_legend_item_visible(LegendItem::Volume, false));
         assert!(!series_entry(&chart, volume).visible);
         assert!(chart.has_indicators());
-        assert!(
-            chart
-                .legend_rows()
-                .iter()
-                .any(|row| row.item == LegendItem::Volume && !row.visible)
-        );
+        let volume_row = chart
+            .legend_rows()
+            .into_iter()
+            .find(|row| row.item == LegendItem::Volume)
+            .expect("volume legend remains while hidden");
+        assert!(!volume_row.visible);
+        assert!(volume_row.values.is_empty());
         assert!(chart.remove_legend_indicator(LegendItem::Volume));
         assert!(!chart.has_indicators());
         assert!(

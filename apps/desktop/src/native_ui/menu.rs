@@ -46,6 +46,7 @@ pub(crate) struct MenuRow {
     hover: Option<Hover>,
     highlighted: bool,
     disabled: bool,
+    destructive: bool,
     round_top: bool,
     round_bottom: bool,
     fill_width: bool,
@@ -96,6 +97,7 @@ impl MenuRow {
             hover: None,
             highlighted: false,
             disabled: false,
+            destructive: false,
             round_top: false,
             round_bottom: false,
             fill_width: false,
@@ -124,6 +126,11 @@ impl MenuRow {
 
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub(crate) fn destructive(mut self, destructive: bool) -> Self {
+        self.destructive = destructive;
         self
     }
 
@@ -163,11 +170,32 @@ impl RenderOnce for MenuRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
         let enabled = accepts_input(self.disabled, self.activation.is_some());
-        let highlighted_fill = match self.kind {
-            RowKind::Compact | RowKind::CompactInset => colors.hover_bg,
-            RowKind::SearchResult => colors.active_bg,
-        }
-        .over(self.resting_fill);
+        let destructive = self.destructive;
+        let label_color = if destructive {
+            if enabled {
+                colors.danger
+            } else {
+                colors.danger.with_alpha(0.55)
+            }
+        } else if enabled {
+            colors.text_primary
+        } else {
+            colors.text_muted
+        };
+        let highlighted_fill = if destructive {
+            colors.danger.with_alpha(0.10).over(self.resting_fill)
+        } else {
+            match self.kind {
+                RowKind::Compact | RowKind::CompactInset => colors.hover_bg,
+                RowKind::SearchResult => colors.active_bg,
+            }
+            .over(self.resting_fill)
+        };
+        let hover_fill = if destructive {
+            colors.danger.with_alpha(0.10).over(self.resting_fill)
+        } else {
+            colors.hover_bg.over(self.resting_fill)
+        };
         let (height, horizontal_padding, rounded) = row_geometry(self.kind);
         let hover = self.hover;
         // Inner path of a 6px panel with a 1px border. Matching the outer radius
@@ -180,6 +208,7 @@ impl RenderOnce for MenuRow {
             .flex_1()
             .min_w_0()
             .truncate()
+            .text_color(theme_color(label_color))
             .child(self.label.clone());
 
         div()
@@ -196,6 +225,7 @@ impl RenderOnce for MenuRow {
             .gap_2()
             .px(horizontal_padding)
             .text_sm()
+            .text_color(theme_color(label_color))
             .when(rounded, |row| {
                 row.rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             })
@@ -207,7 +237,7 @@ impl RenderOnce for MenuRow {
             })
             .when(self.highlighted, |row| {
                 row.bg(theme_color(highlighted_fill))
-                    .text_color(theme_color(colors.text_primary))
+                    .text_color(theme_color(label_color))
                     .when(round_top, |row| {
                         row.rounded_tl(inner_radius).rounded_tr(inner_radius)
                     })
@@ -218,8 +248,8 @@ impl RenderOnce for MenuRow {
             .when(enabled, |row| {
                 row.cursor_pointer().hover(|style| {
                     let mut style = style
-                        .bg(theme_color(colors.hover_bg.over(self.resting_fill)))
-                        .text_color(theme_color(colors.text_primary));
+                        .bg(theme_color(hover_fill))
+                        .text_color(theme_color(label_color));
                     if round_top {
                         style = style.rounded_tl(inner_radius).rounded_tr(inner_radius);
                     }
@@ -229,10 +259,7 @@ impl RenderOnce for MenuRow {
                     style
                 })
             })
-            .when(!enabled, |row| {
-                row.text_color(theme_color(colors.text_muted))
-                    .cursor_not_allowed()
-            })
+            .when(!enabled, |row| row.cursor_not_allowed())
             .when_some(self.activation.filter(|_| enabled), |row, activation| {
                 row.on_click(move |event, window, cx| {
                     activation(event, window, cx);
