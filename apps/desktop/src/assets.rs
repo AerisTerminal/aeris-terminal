@@ -489,7 +489,7 @@ mod tests {
         };
 
         for icon in SeriesIcon::ALL {
-            let image = rasterize(&icon.path(), 16.0, 2.0);
+            let image = rasterize(&icon.path(), 18.0, 2.0);
             assert_eq!(image.frame_count(), 1);
             assert!(image.size(0).width.0 > 0);
             assert!(image.size(0).height.0 > 0);

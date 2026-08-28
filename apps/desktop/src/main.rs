@@ -4156,7 +4156,7 @@ fn chart_type_overlay_row(
 ) -> impl IntoElement {
     let row_app = app.clone();
     let mut row = MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)
-        .leading(series_glyph(chart_type, px(16.0)))
+        .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
         .highlighted(keyboard)
         .flush_in_panel(first, last)
         .on_click(move |_, window, cx| {
@@ -7107,7 +7107,7 @@ fn chart_type_selector(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let button = Button::new("chart_type_selector")
-        .leading(series_glyph(chart_type, px(16.0)))
+        .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
         .label(label)
         .caret(header_icon(HugeIcon::ChevronDown))
         .disabled(!enabled)
