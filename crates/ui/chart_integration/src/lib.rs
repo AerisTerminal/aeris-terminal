@@ -15,6 +15,7 @@ pub use bridge::ChartBridgeMetrics;
 pub use nucleuscharts_engine::ChartTheme as NucleusChartTheme;
 pub use view::{
     ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator, ChartIndicatorError,
-    ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartIndicatorState, ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction,
+    PriceAxisMenuState,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

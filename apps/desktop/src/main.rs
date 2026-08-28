@@ -20,8 +20,8 @@ use assets::UiIcon as HugeIcon;
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator,
-    ChartSplitDirection, ChartType, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView,
-    NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartIndicatorState, ChartSplitDirection, ChartType, ChartWorkspaceLayout, NucleusChartTheme,
+    NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
@@ -792,6 +792,7 @@ struct WorkspaceSurface {
     pending_pane_activate: PaneActivationRequest,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
+    retained_indicators: Vec<ChartIndicatorState>,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
@@ -983,6 +984,9 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
             }
             if activate || had_menu {
                 cx.notify();
+            }
+            if chart.read(cx).has_market_data() {
+                app.retained_indicators = chart.read(cx).indicator_states();
             }
             if app.provider == TerminalProvider::Coinbase
                 && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
@@ -1469,6 +1473,7 @@ impl WorkspaceSurface {
             pending_pane_activate: PaneActivationRequest::None,
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
+            retained_indicators: Vec::new(),
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
             #[cfg(feature = "diagnostics")]
@@ -2052,6 +2057,7 @@ impl WorkspaceSurface {
                 let chart = cx
                     .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
                 self.apply_chart_chrome_to_chart(&chart, cx);
+                self.apply_retained_indicators_to_chart(&chart, cx);
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
@@ -2219,6 +2225,7 @@ impl WorkspaceSurface {
     }
 
     fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
+        self.retain_chart_indicators(cx);
         let chart_theme = nucleus_chart_theme(self.theme.mode);
         self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(chart_theme)));
         if let Some(chart) = &self.chart {
@@ -2390,6 +2397,7 @@ impl WorkspaceSurface {
         }
         self.coinbase_pending_sequence = None;
         self.coinbase_switch = CoinbaseSwitchState::Idle;
+        self.retain_chart_indicators(cx);
         self.chart = None;
         self.restored_viewport = None;
         self.last_persisted_viewport = None;
@@ -2555,6 +2563,29 @@ impl WorkspaceSurface {
             );
             chart.set_chart_type(self.chart_chrome.chart_type);
         });
+    }
+
+    fn retain_chart_indicators(&mut self, cx: &App) {
+        if let Some(chart) = &self.chart
+            && chart.read(cx).has_market_data()
+        {
+            self.retained_indicators = chart.read(cx).indicator_states();
+        }
+    }
+
+    fn apply_retained_indicators_to_chart(
+        &self,
+        chart: &Entity<NucleusChartView>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.retained_indicators.is_empty() {
+            return;
+        }
+        let states = self.retained_indicators.clone();
+        let result = chart.update(cx, |chart, _| chart.restore_indicator_states(&states));
+        if let Err(error) = result {
+            eprintln!("Axiusflow chart indicators could not be restored: {error}");
+        }
     }
 
     fn chart_type(&self, cx: &App) -> ChartType {
@@ -2982,6 +3013,7 @@ impl WorkspaceSurface {
         let chart =
             cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
         self.apply_chart_chrome_to_chart(&chart, cx);
+        self.apply_retained_indicators_to_chart(&chart, cx);
         self.chart = Some(chart);
         observe_chart(self.chart.as_ref(), cx);
         self.worker_label = bootstrap.worker_label;
@@ -3119,6 +3151,7 @@ impl WorkspaceSurface {
                     chart_cx.notify();
                 }
             });
+            self.retain_chart_indicators(cx);
             cx.notify();
         }
     }
@@ -3165,6 +3198,7 @@ impl WorkspaceSurface {
                     chart_cx.notify();
                 }
             });
+            self.retain_chart_indicators(cx);
             cx.notify();
         }
     }
@@ -3185,6 +3219,7 @@ impl WorkspaceSurface {
         match result {
             Ok(_) => {
                 self.indicator_message = None;
+                self.retain_chart_indicators(cx);
                 true
             }
             Err(error) => {
