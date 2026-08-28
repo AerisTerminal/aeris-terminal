@@ -145,7 +145,7 @@ const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_VERTICAL_PADDING: f32 = 4.0;
-const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const PRICE_AXIS_MENU_HEADER_HEIGHT: f32 = 22.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
@@ -789,7 +789,7 @@ struct WorkspaceSurface {
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
     pending_chart_context_menu: Option<ChartContextRequest>,
-    pending_pane_activate: bool,
+    pending_pane_activate: PaneActivationRequest,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
     #[cfg(feature = "diagnostics")]
@@ -798,6 +798,13 @@ struct WorkspaceSurface {
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PaneActivationRequest {
+    #[default]
+    None,
+    Pending,
 }
 
 #[derive(Default)]
@@ -962,10 +969,13 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
             let (activate, request) = chart.update(cx, |chart, _| {
-                (chart.take_activate_request(), chart.take_context_menu_request())
+                (
+                    chart.take_activate_request(),
+                    chart.take_context_menu_request(),
+                )
             });
             if activate {
-                app.pending_pane_activate = true;
+                app.pending_pane_activate = PaneActivationRequest::Pending;
             }
             let had_menu = request.is_some();
             if let Some(request) = request {
@@ -1128,7 +1138,7 @@ impl SidePanel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartNoticePlacement {
     Center,
-    TopLeft,
+    BottomRight,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1152,7 +1162,7 @@ fn chart_surface_notice(
     detail: &str,
 ) -> Option<ChartSurfaceNotice> {
     let placement = if has_market_data {
-        ChartNoticePlacement::TopLeft
+        ChartNoticePlacement::BottomRight
     } else {
         ChartNoticePlacement::Center
     };
@@ -1345,6 +1355,23 @@ fn initial_symbol_message(provider: TerminalProvider) -> String {
     .to_string()
 }
 
+fn initialize_chart_chrome(
+    chart: Option<&Entity<NucleusChartView>>,
+    preferences: chart_chrome::ChartChromePreferences,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    if let Some(chart) = chart {
+        chart.update(cx, |chart, _| {
+            chart.apply_indicator_chrome_preferences(
+                preferences.indicator_name_labels_visible,
+                preferences.indicator_value_labels_visible,
+                preferences.indicator_price_lines_visible,
+            );
+            chart.set_chart_type(preferences.chart_type);
+        });
+    }
+}
+
 impl WorkspaceSurface {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1376,16 +1403,7 @@ impl WorkspaceSurface {
             provider,
             coinbase_product,
         } = terminal_startup_state(startup, cx);
-        if let Some(chart) = &chart {
-            chart.update(cx, |chart, _| {
-                chart.apply_indicator_chrome_preferences(
-                    chart_chrome.indicator_name_labels_visible,
-                    chart_chrome.indicator_value_labels_visible,
-                    chart_chrome.indicator_price_lines_visible,
-                );
-                chart.set_chart_type(chart_chrome.chart_type);
-            });
-        }
+        initialize_chart_chrome(chart.as_ref(), chart_chrome, cx);
         let bridge_label = chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
@@ -1448,7 +1466,7 @@ impl WorkspaceSurface {
             restored_viewport: restored_coinbase.and_then(|restored| restored.1),
             last_persisted_viewport: None,
             pending_chart_context_menu: None,
-            pending_pane_activate: false,
+            pending_pane_activate: PaneActivationRequest::None,
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
             #[cfg(feature = "diagnostics")]
@@ -4221,10 +4239,10 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
             .justify_center()
             .child(label)
             .into_any_element(),
-        ChartNoticePlacement::TopLeft => div()
+        ChartNoticePlacement::BottomRight => div()
             .absolute()
-            .top_2()
-            .left_2()
+            .right_2()
+            .bottom_2()
             .child(label)
             .into_any_element(),
     }
@@ -7404,9 +7422,11 @@ impl TerminalApp {
         let mut requested = None;
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
-                let activate = pane
-                    .surface
-                    .update(cx, |surface, _| std::mem::take(&mut surface.pending_pane_activate));
+                let activate = pane.surface.update(cx, |surface, _| {
+                    let pending = surface.pending_pane_activate == PaneActivationRequest::Pending;
+                    surface.pending_pane_activate = PaneActivationRequest::None;
+                    pending
+                });
                 if activate {
                     requested = Some((workspace.id, pane.id));
                 }
@@ -9730,16 +9750,16 @@ mod tests {
         chart_surface_notice, chrome_control_foreground, chrome_overlay_progress,
         chrome_typeahead_char_from, claim_once, clamp_chart_context_menu_origin,
         clamp_price_axis_menu_origin, connection_presentation, default_rithmic_contract_index,
-        instrument_listing_refresh_needed,
         durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
-        instrument_selector_label, nucleus_chart_theme, price_axis_flyout_rows,
-        price_axis_root_rows, publication_chart_state, reconciled_bridge_state,
-        reconnect_contract_index, reorder_workspace_ids, resized_side_panel_width,
-        rithmic_ready_action, series_selector_label, should_finish_chrome_overlay_close,
-        split_lifetime_mode, symbol_input_action, symbol_submit_decision, timeframe_interval_group,
-        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
-        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
+        instrument_listing_refresh_needed, instrument_selector_label, nucleus_chart_theme,
+        price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
+        resized_side_panel_width, rithmic_ready_action, series_selector_label,
+        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
+        symbol_submit_decision, timeframe_interval_group, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -10543,7 +10563,7 @@ mod tests {
             )
             .expect("retained chart error notice")
             .placement,
-            ChartNoticePlacement::TopLeft
+            ChartNoticePlacement::BottomRight
         );
         assert_eq!(
             chart_surface_notice(
@@ -10902,7 +10922,7 @@ mod tests {
         )
         .expect("recovery notice");
         assert_eq!(recovery.label, "Reconnecting chart");
-        assert_eq!(recovery.placement, ChartNoticePlacement::TopLeft);
+        assert_eq!(recovery.placement, ChartNoticePlacement::BottomRight);
         assert_eq!(recovery.tone, ChartNoticeTone::Warning);
         assert!(chart_surface_notice(ChartState::Ready, true, "current").is_none());
     }

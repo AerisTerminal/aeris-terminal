@@ -11,7 +11,7 @@ type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 const COMPACT_ROW_HEIGHT: Pixels = px(32.0);
 const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
 const PANEL_PADDING: Pixels = px(4.0);
-const SEPARATOR_HEIGHT: Pixels = px(9.0);
+const SEPARATOR_HEIGHT: Pixels = px(1.0);
 
 #[derive(Clone, Copy)]
 enum RowKind {
@@ -146,7 +146,7 @@ impl RenderOnce for MenuRow {
 
         div()
             .id(self.id)
-            .occlude()
+            .block_mouse_except_scroll()
             .h(height)
             .flex_none()
             .flex()
@@ -202,6 +202,7 @@ pub(crate) fn compact_menu_panel(
         .border_color(theme_color(colors.border_secondary))
         .bg(theme_color(colors.surface_secondary))
         .text_color(theme_color(colors.text_primary))
+        .overflow_hidden()
         .py(PANEL_PADDING)
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }

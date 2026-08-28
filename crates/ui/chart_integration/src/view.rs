@@ -12,9 +12,9 @@ use axiusflow_application::{
     ReplayStreamUpdate, ReplayValidationError,
 };
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, Window,
-    canvas, div, prelude::*, px,
+    AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
+    ScrollWheelEvent, SharedString, Window, canvas, div, prelude::*, px, rgba,
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
@@ -38,6 +38,8 @@ const PANE_SEPARATOR_HIT: f64 = 4.0;
 const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
 const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
+const LEGEND_INSET: f32 = 8.0;
+const LEGEND_ROW_HEIGHT: f32 = 24.0;
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
@@ -400,6 +402,83 @@ enum SeriesMutation {
     TailReplace,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum LegendItem {
+    Asset,
+    Volume,
+    Indicator(u32),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LegendPresence {
+    #[default]
+    Absent,
+    Present,
+}
+
+impl LegendPresence {
+    const fn is_present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ActivationRequest {
+    #[default]
+    None,
+    Pending,
+}
+
+impl LegendItem {
+    fn key(self) -> u64 {
+        match self {
+            Self::Asset => 0,
+            Self::Volume => 1,
+            Self::Indicator(binding) => u64::from(binding) + 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegendRow {
+    item: LegendItem,
+    pane: usize,
+    title: String,
+    values: String,
+    visible: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LegendLayout {
+    left: f32,
+    time_axis_height: f32,
+    pane_stretches: Vec<f32>,
+}
+
+#[derive(Clone, Copy)]
+struct LegendPalette {
+    text: Rgba,
+    muted: Rgba,
+    hover: Rgba,
+    control: Rgba,
+    border: Rgba,
+    danger: Rgba,
+}
+
+fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], id: u32) -> String {
+    snapshots
+        .iter()
+        .find(|snapshot| snapshot.series_id == id)
+        .and_then(|snapshot| {
+            snapshot
+                .formatted_value
+                .as_ref()
+                .or(snapshot.formatted_close.as_ref())
+        })
+        .cloned()
+        .unwrap_or_default()
+}
+
 impl SeriesMutation {
     #[cfg(feature = "diagnostics")]
     const fn label(self) -> &'static str {
@@ -419,11 +498,13 @@ const fn should_stop_mouse_up_propagation(outside_chart: bool) -> bool {
 /// A GPUI entity hosting one authoritative Nucleus chart engine and renderer.
 pub struct NucleusChartView {
     engine: ChartEngine,
+    theme: ChartTheme,
     renderer: GpuiChartRenderer,
     data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
     volume_series: u32,
+    volume_legend: LegendPresence,
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
     built_for: (f32, f32, f32),
@@ -436,7 +517,7 @@ pub struct NucleusChartView {
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
     pending_context_menu: Option<ChartContextRequest>,
-    pending_activate: bool,
+    pending_activate: ActivationRequest,
     instrument_price_precision: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
@@ -477,11 +558,13 @@ impl NucleusChartView {
         debug_assert!(volume_retention_applied);
         Self {
             engine,
+            theme,
             renderer: GpuiChartRenderer::new(),
             data_bridge: None,
             displayed_provenance: DisplayedProvenance::empty(),
             price_divisor: 1.0,
             volume_series,
+            volume_legend: LegendPresence::Absent,
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
             built_for: (0.0, 0.0, 0.0),
@@ -494,7 +577,7 @@ impl NucleusChartView {
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
-            pending_activate: false,
+            pending_activate: ActivationRequest::None,
             instrument_price_precision: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
@@ -562,11 +645,13 @@ impl NucleusChartView {
         debug_assert!(data_bridge.is_some());
         let mut chart = Self {
             engine,
+            theme,
             renderer: GpuiChartRenderer::new(),
             data_bridge,
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
             price_divisor: replay_price_divisor(replay),
             volume_series,
+            volume_legend: LegendPresence::Absent,
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
             built_for: (0.0, 0.0, 0.0),
@@ -579,7 +664,7 @@ impl NucleusChartView {
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
-            pending_activate: false,
+            pending_activate: ActivationRequest::None,
             instrument_price_precision: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
@@ -655,7 +740,13 @@ impl NucleusChartView {
 
     /// Takes a pending request to make this chart's workspace pane active.
     pub fn take_activate_request(&mut self) -> bool {
-        std::mem::take(&mut self.pending_activate)
+        let pending = self.pending_activate == ActivationRequest::Pending;
+        self.pending_activate = ActivationRequest::None;
+        pending
+    }
+
+    fn request_activation(&mut self) {
+        self.pending_activate = ActivationRequest::Pending;
     }
 
     /// Reads Nucleus-owned Y-axis chrome for the hit-tested price scale.
@@ -767,6 +858,7 @@ impl NucleusChartView {
 
     /// Selects a Nucleus-owned theme without changing chart data or viewport.
     pub fn set_theme(&mut self, theme: ChartTheme) {
+        self.theme = theme;
         self.engine.set_theme(theme);
         self.invalidate_series_layout();
     }
@@ -815,6 +907,7 @@ impl NucleusChartView {
         }
         let ids = match indicator {
             ChartIndicator::Volume => {
+                self.volume_legend = LegendPresence::Present;
                 self.engine.set_series_visible(self.volume_series, true);
                 vec![self.volume_series]
             }
@@ -1092,6 +1185,7 @@ impl NucleusChartView {
         }
         if series == self.volume_series {
             self.engine.set_series_visible(series, false);
+            self.volume_legend = LegendPresence::Absent;
             self.engine.set_selected_series(None);
         } else if !self.engine.remove_series(series) {
             return false;
@@ -1104,7 +1198,9 @@ impl NucleusChartView {
     #[must_use]
     pub fn has_indicators(&self) -> bool {
         self.engine.series_entries().iter().any(|series| {
-            !series.removed && series.id != 0 && (series.id != self.volume_series || series.visible)
+            !series.removed
+                && series.id != 0
+                && (series.id != self.volume_series || self.volume_legend.is_present())
         })
     }
 
@@ -1133,12 +1229,171 @@ impl NucleusChartView {
         for id in ids {
             if id == self.volume_series {
                 self.engine.set_series_visible(id, false);
+                self.volume_legend = LegendPresence::Absent;
             } else {
                 let _ = self.engine.remove_series(id);
             }
         }
         self.invalidate_series_layout();
         true
+    }
+
+    fn legend_rows(&self) -> Vec<LegendRow> {
+        let logical_index = self
+            .engine
+            .crosshair
+            .map(|(x, _)| self.engine.time_scale.coordinate_to_index(x));
+        let snapshots = self.engine.value_snapshot(logical_index);
+        let entries = self.engine.series_entries();
+        let mut rows = Vec::new();
+        if let Some(asset) = entries
+            .iter()
+            .find(|series| series.id == 0 && !series.removed)
+        {
+            let values = snapshots
+                .iter()
+                .find(|snapshot| snapshot.series_id == 0)
+                .map(|snapshot| {
+                    if !matches!(self.chart_type, ChartType::Candles | ChartType::Bars) {
+                        return snapshot.formatted_value.clone().unwrap_or_default();
+                    }
+                    let value = |label: &str, value: &Option<String>| {
+                        format!("{label} {}", value.as_deref().unwrap_or("--"))
+                    };
+                    [
+                        value("O", &snapshot.formatted_open),
+                        value("H", &snapshot.formatted_high),
+                        value("L", &snapshot.formatted_low),
+                        value("C", &snapshot.formatted_close),
+                    ]
+                    .join("  ")
+                })
+                .unwrap_or_default();
+            rows.push(LegendRow {
+                item: LegendItem::Asset,
+                pane: asset.pane_index,
+                title: if asset.title.is_empty() {
+                    "Asset".to_string()
+                } else {
+                    asset.title.clone()
+                },
+                values,
+                visible: asset.visible,
+            });
+        }
+        if self.volume_legend.is_present()
+            && let Some(volume) = entries
+                .iter()
+                .find(|series| series.id == self.volume_series && !series.removed)
+        {
+            rows.push(LegendRow {
+                item: LegendItem::Volume,
+                pane: volume.pane_index,
+                title: "Volume".to_string(),
+                values: legend_series_value(&snapshots, self.volume_series),
+                visible: volume.visible,
+            });
+        }
+
+        let mut bindings = HashSet::new();
+        for &id in self.engine.series_order() {
+            let Some(info) = self.engine.indicator_info(id) else {
+                continue;
+            };
+            if !bindings.insert(info.binding_id) {
+                continue;
+            }
+            let outputs: Vec<_> = entries
+                .iter()
+                .filter(|series| {
+                    !series.removed
+                        && self
+                            .engine
+                            .indicator_info(series.id)
+                            .is_some_and(|output| output.binding_id == info.binding_id)
+                })
+                .collect();
+            let Some(first) = outputs.first() else {
+                continue;
+            };
+            let values = outputs
+                .iter()
+                .filter_map(|series| {
+                    let output = self.engine.indicator_info(series.id)?;
+                    let value = legend_series_value(&snapshots, series.id);
+                    if value.is_empty() {
+                        None
+                    } else if output.output_count > 1 {
+                        Some(format!("{} {value}", output.output_name))
+                    } else {
+                        Some(value)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            rows.push(LegendRow {
+                item: LegendItem::Indicator(info.binding_id),
+                pane: first.pane_index,
+                title: first.title.clone(),
+                values,
+                visible: outputs.iter().any(|series| series.visible),
+            });
+        }
+        rows
+    }
+
+    fn set_legend_item_visible(&mut self, item: LegendItem, visible: bool) -> bool {
+        let ids: Vec<u32> = match item {
+            LegendItem::Asset => vec![0],
+            LegendItem::Volume if self.volume_legend.is_present() => vec![self.volume_series],
+            LegendItem::Volume => return false,
+            LegendItem::Indicator(binding) => self
+                .engine
+                .series_order()
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    self.engine
+                        .indicator_info(id)
+                        .is_some_and(|info| info.binding_id == binding)
+                })
+                .collect(),
+        };
+        if ids.is_empty() {
+            return false;
+        }
+        let changed = ids.iter().any(|&id| {
+            self.engine
+                .series_entries()
+                .iter()
+                .any(|series| series.id == id && !series.removed && series.visible != visible)
+        });
+        for id in ids {
+            self.engine.set_series_visible(id, visible);
+        }
+        if changed {
+            self.invalidate_series_layout();
+        }
+        changed
+    }
+
+    fn remove_legend_indicator(&mut self, item: LegendItem) -> bool {
+        let removed = match item {
+            LegendItem::Volume if self.volume_legend.is_present() => {
+                self.volume_legend = LegendPresence::Absent;
+                self.engine.set_series_visible(self.volume_series, false);
+                if self.engine.selected_series() == Some(self.volume_series) {
+                    self.engine.set_selected_series(None);
+                }
+                true
+            }
+            LegendItem::Asset | LegendItem::Volume => false,
+            LegendItem::Indicator(binding) => self.engine.remove_series(binding),
+        };
+        if removed {
+            self.invalidate_series_layout();
+        }
+        removed
     }
 
     /// Removes every committed drawing.
@@ -1745,11 +2000,11 @@ impl NucleusChartView {
         if self.is_editing_text() {
             let editing = self.engine.editing_drawing();
             let hit_id = self.engine.hit_test_drawing(pane_x, y).map(|hit| hit.id);
-            if click_count >= 2 {
-                if let Some(id) = hit_id.filter(|&id| self.drawing_is_text(id)) {
-                    self.begin_text_edit(id);
-                    return true;
-                }
+            if click_count >= 2
+                && let Some(id) = hit_id.filter(|&id| self.drawing_is_text(id))
+            {
+                self.begin_text_edit(id);
+                return true;
             }
             if hit_id != editing {
                 let _ = self.finish_text_edit();
@@ -1789,8 +2044,8 @@ impl NucleusChartView {
                 if result > 0 {
                     self.drawing_tool = ChartDrawingTool::Cursor;
                     self.cursor_style = CursorStyle::Crosshair;
-                    if placing_text {
-                        self.begin_text_edit(result as DrawingId);
+                    if placing_text && let Ok(id) = DrawingId::try_from(result) {
+                        self.begin_text_edit(id);
                     }
                 }
                 result != 0
@@ -2180,7 +2435,7 @@ impl NucleusChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
-        self.pending_activate = true;
+        self.request_activation();
         let (pane_x, y) = self.local_position(event.position);
         if self.separator_at(y).is_some() {
             self.begin_drag(pane_x, y, event.click_count);
@@ -2218,7 +2473,7 @@ impl NucleusChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
-        self.pending_activate = true;
+        self.request_activation();
         self.cancel_gesture();
         let (pane_x, y) = self.local_position(event.position);
         let kind = match self.price_axis_at(pane_x, y) {
@@ -2315,14 +2570,20 @@ impl NucleusChartView {
         cx.notify();
     }
 
-    fn rebuild(&mut self, width: f32, height: f32, scale_factor: f32, window: &Window) {
+    fn rebuild(
+        &mut self,
+        width: f32,
+        height: f32,
+        scale_factor: f32,
+        mutation: SeriesMutation,
+        window: &Window,
+    ) -> bool {
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = mutation;
+        let previous_legend_layout = self.legend_pane_layout();
         self.flush_pending_brush();
         #[cfg(feature = "diagnostics")]
         let rebuild_started = Instant::now();
-        #[cfg(feature = "diagnostics")]
-        let mutation = self.apply_pending_data();
-        #[cfg(not(feature = "diagnostics"))]
-        self.apply_pending_data();
         self.pin_host_clock();
         let dimensions = (width, height, scale_factor);
         let dimensions_changed = self.built_for != dimensions;
@@ -2332,7 +2593,7 @@ impl NucleusChartView {
             && !self.engine.frame_requires_axis()
             && !self.frame.panes.is_empty()
         {
-            return;
+            return false;
         }
 
         if dimensions_changed {
@@ -2369,6 +2630,7 @@ impl NucleusChartView {
         self.engine.build_frame_into(&mut self.frame);
         self.engine
             .build_axis_primitives_into(&axis_frame, &mut self.axis_prims, |_| 0.0);
+        let legend_layout_changed = previous_legend_layout != self.legend_pane_layout();
         #[cfg(feature = "diagnostics")]
         {
             let elapsed = rebuild_started.elapsed();
@@ -2388,6 +2650,20 @@ impl NucleusChartView {
                     layout_recomputed
                 );
             }
+        }
+        legend_layout_changed
+    }
+
+    fn legend_pane_layout(&self) -> LegendLayout {
+        LegendLayout {
+            left: self.engine.pane_left.to_f32().unwrap_or_default(),
+            time_axis_height: self.engine.time_axis_height().to_f32().unwrap_or_default(),
+            pane_stretches: self
+                .engine
+                .panes
+                .iter()
+                .map(|pane| pane.stretch_factor.to_f32().unwrap_or(0.01).max(0.01))
+                .collect(),
         }
     }
 
@@ -2424,8 +2700,178 @@ impl Default for NucleusChartView {
     }
 }
 
+fn legend_palette(theme: ChartTheme) -> LegendPalette {
+    match theme {
+        ChartTheme::Light => LegendPalette {
+            text: rgba(0x1414_14ff),
+            muted: rgba(0x6666_66ff),
+            hover: rgba(0x0000_000a),
+            control: rgba(0xffff_ffff),
+            border: rgba(0xdddd_ddff),
+            danger: rgba(0xc43c_35ff),
+        },
+        ChartTheme::Dark => LegendPalette {
+            text: rgba(0xf0f0_f0ff),
+            muted: rgba(0x9999_99ff),
+            hover: rgba(0xffff_ff0d),
+            control: rgba(0x2020_20f2),
+            border: rgba(0x3636_36ff),
+            danger: rgba(0xef53_50ff),
+        },
+    }
+}
+
+fn chart_legend_layers(
+    chart: &Entity<NucleusChartView>,
+    rows: &[LegendRow],
+    layout: &LegendLayout,
+    theme: ChartTheme,
+) -> Vec<AnyElement> {
+    let palette = legend_palette(theme);
+    let mut stack = div()
+        .id("chart_legend_stack")
+        .absolute()
+        .left(px(layout.left + LEGEND_INSET))
+        .right_0()
+        .top_0()
+        .bottom(px(layout.time_axis_height))
+        .flex()
+        .flex_col()
+        .overflow_hidden();
+    let pane_count = layout.pane_stretches.len();
+    for (pane_index, stretch) in layout.pane_stretches.iter().copied().enumerate() {
+        let mut rows_layer = div()
+            .max_w(px(640.0))
+            .mt(px(LEGEND_INSET))
+            .flex()
+            .flex_col()
+            .items_start();
+        for row in rows.iter().filter(|row| row.pane == pane_index) {
+            rows_layer = rows_layer.child(chart_legend_row(chart, row, palette));
+        }
+        stack = stack.child(
+            div()
+                .id(("chart_legend_pane", pane_index))
+                .min_h_0()
+                .flex_basis(px(0.0))
+                .flex_grow(stretch)
+                .overflow_hidden()
+                .child(rows_layer),
+        );
+        if pane_index + 1 < pane_count {
+            stack = stack.child(div().h(px(1.0)).flex_none());
+        }
+    }
+    vec![stack.into_any_element()]
+}
+
+fn chart_legend_row(
+    chart: &Entity<NucleusChartView>,
+    row: &LegendRow,
+    palette: LegendPalette,
+) -> impl IntoElement {
+    let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
+    let mut controls = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .invisible()
+        .group_hover(group.clone(), gpui::Styled::visible)
+        .child(legend_control(
+            chart,
+            row.item,
+            if row.visible { "Hide" } else { "Show" },
+            !row.visible,
+            false,
+            palette,
+        ));
+    if row.item != LegendItem::Asset {
+        controls = controls.child(legend_control(
+            chart, row.item, "Remove", false, true, palette,
+        ));
+    }
+    div()
+        .id(("chart_legend_row", row.item.key()))
+        .group(group)
+        .h(px(LEGEND_ROW_HEIGHT))
+        .max_w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_1()
+        .rounded(px(3.0))
+        .text_xs()
+        .text_color(if row.visible {
+            palette.text
+        } else {
+            palette.muted
+        })
+        .hover(|style| style.bg(palette.hover))
+        .child(
+            div()
+                .flex_none()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(row.title.clone()),
+        )
+        .when(!row.values.is_empty(), |legend| {
+            legend.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(palette.muted)
+                    .child(row.values.clone()),
+            )
+        })
+        .child(controls)
+}
+
+fn legend_control(
+    chart: &Entity<NucleusChartView>,
+    item: LegendItem,
+    label: &'static str,
+    visible: bool,
+    remove: bool,
+    palette: LegendPalette,
+) -> impl IntoElement {
+    let action_chart = chart.clone();
+    let id = item.key() * 2 + u64::from(remove);
+    div()
+        .id(("chart_legend_control", id))
+        .h(px(20.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(palette.border)
+        .bg(palette.control)
+        .text_color(if remove { palette.danger } else { palette.text })
+        .cursor_pointer()
+        .hover(|style| style.bg(palette.hover))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            action_chart.update(cx, |chart, chart_cx| {
+                if let Some(focus_handle) = &chart.focus_handle {
+                    window.focus(focus_handle, chart_cx);
+                }
+                chart.request_activation();
+                let changed = if remove {
+                    chart.remove_legend_indicator(item)
+                } else {
+                    chart.set_legend_item_visible(item, visible)
+                };
+                let _ = changed;
+                chart_cx.notify();
+            });
+            cx.stop_propagation();
+        })
+        .child(label)
+}
+
 impl Render for NucleusChartView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mutation = self.apply_pending_data();
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
         let hover_entity = entity.clone();
@@ -2433,9 +2879,16 @@ impl Render for NucleusChartView {
             .focus_handle
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
+        let legends = chart_legend_layers(
+            &entity,
+            &self.legend_rows(),
+            &self.legend_pane_layout(),
+            self.theme,
+        );
 
         div()
             .id(("nucleus_chart_surface", cx.entity_id()))
+            .relative()
             .size_full()
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
@@ -2458,10 +2911,12 @@ impl Render for NucleusChartView {
                         let width = bounds.size.width.into();
                         let height = bounds.size.height.into();
                         let scale_factor = window.scale_factor();
-                        prepaint_entity.update(cx, |chart, _| {
+                        prepaint_entity.update(cx, |chart, chart_cx| {
                             chart.viewport_origin =
                                 (bounds.origin.x.into(), bounds.origin.y.into());
-                            chart.rebuild(width, height, scale_factor, window);
+                            if chart.rebuild(width, height, scale_factor, mutation, window) {
+                                chart_cx.notify();
+                            }
                         });
                         bounds
                     },
@@ -2473,6 +2928,7 @@ impl Render for NucleusChartView {
                 )
                 .size_full(),
             )
+            .children(legends)
     }
 }
 
@@ -3340,6 +3796,113 @@ mod tests {
     }
 
     #[test]
+    fn chart_legends_group_outputs_and_follow_native_indicator_panes() {
+        let mut chart = interactive_chart();
+        let bollinger = chart
+            .add_indicator(ChartIndicator::Bollinger)
+            .expect("Bollinger is created");
+        let macd = chart
+            .add_indicator(ChartIndicator::Macd)
+            .expect("MACD is created");
+        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+
+        let rows = chart.legend_rows();
+        let asset = rows.first().expect("asset legend is always first");
+        assert_eq!(asset.item, LegendItem::Asset);
+        assert_eq!(asset.pane, 0);
+        assert!(asset.values.contains("O "));
+        assert!(asset.values.contains("C "));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.item == LegendItem::Indicator(bollinger[0]))
+                .count(),
+            1
+        );
+        let macd_row = rows
+            .iter()
+            .find(|row| row.item == LegendItem::Indicator(macd[0]))
+            .expect("grouped MACD legend");
+        assert!(macd_row.pane > 0);
+        assert!(macd_row.values.contains("MACD"));
+        assert!(macd_row.values.contains("Signal"));
+        assert!(macd_row.values.contains("Histogram"));
+    }
+
+    #[test]
+    fn scalar_asset_legends_use_the_native_series_value() {
+        let mut chart = interactive_chart();
+        chart.set_chart_type(ChartType::Line);
+
+        let asset = chart
+            .legend_rows()
+            .into_iter()
+            .find(|row| row.item == LegendItem::Asset)
+            .expect("asset legend");
+
+        assert!(!asset.values.is_empty());
+        assert!(!asset.values.contains("--"));
+    }
+
+    #[test]
+    fn legend_visibility_preserves_rows_and_indicator_removal_clears_bindings() {
+        let mut chart = interactive_chart();
+        let sma = chart
+            .add_indicator(ChartIndicator::Sma)
+            .expect("SMA is created")[0];
+
+        assert!(chart.set_legend_item_visible(LegendItem::Asset, false));
+        assert!(!series_entry(&chart, 0).visible);
+        assert_eq!(chart.legend_rows()[0].item, LegendItem::Asset);
+        assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), false));
+        assert!(!series_entry(&chart, sma).visible);
+        assert!(
+            chart
+                .legend_rows()
+                .iter()
+                .any(|row| row.item == LegendItem::Indicator(sma) && !row.visible)
+        );
+        assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), true));
+        assert!(series_entry(&chart, sma).visible);
+        assert!(chart.remove_legend_indicator(LegendItem::Indicator(sma)));
+        assert!(
+            chart
+                .legend_rows()
+                .iter()
+                .all(|row| row.item != LegendItem::Indicator(sma))
+        );
+        assert!(!chart.remove_legend_indicator(LegendItem::Asset));
+    }
+
+    #[test]
+    fn hidden_volume_keeps_its_legend_until_removed() {
+        let mut chart = interactive_chart();
+        let volume = chart
+            .add_indicator(ChartIndicator::Volume)
+            .expect("volume is created")[0];
+
+        assert!(chart.set_legend_item_visible(LegendItem::Volume, false));
+        assert!(!series_entry(&chart, volume).visible);
+        assert!(chart.has_indicators());
+        assert!(
+            chart
+                .legend_rows()
+                .iter()
+                .any(|row| row.item == LegendItem::Volume && !row.visible)
+        );
+        chart.engine.set_selected_series(Some(volume));
+        assert!(chart.remove_legend_indicator(LegendItem::Volume));
+        assert_eq!(chart.engine.selected_series(), None);
+        assert!(!chart.has_deletable_selection());
+        assert!(!chart.has_indicators());
+        assert!(
+            chart
+                .legend_rows()
+                .iter()
+                .all(|row| row.item != LegendItem::Volume)
+        );
+    }
+
+    #[test]
     fn native_indicator_hover_selection_and_delete_reach_nucleus() {
         let mut chart = interactive_chart();
         let indicator = chart
@@ -3579,7 +4142,7 @@ mod tests {
     fn activate_request_is_latched_until_taken() {
         let mut chart = interactive_chart();
         assert!(!chart.take_activate_request());
-        chart.pending_activate = true;
+        chart.request_activation();
         assert!(chart.take_activate_request());
         assert!(!chart.take_activate_request());
     }
