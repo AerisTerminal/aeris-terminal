@@ -3,7 +3,8 @@
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::nucleus_bridge::{
     ProductPriceBars, apply_merged_chart_data, chart_data_queue_capacity,
-    install_product_price_series, install_replay, install_volume_series, replay_price_divisor,
+    install_product_price_series, install_replay, install_volume_series, replay_legend_title,
+    replay_price_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::ReplayRecoveryCommand;
@@ -12,9 +13,10 @@ use axiusflow_application::{
     ReplayStreamUpdate, ReplayValidationError,
 };
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
-    ScrollWheelEvent, SharedString, Window, canvas, div, prelude::*, px, rgba,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
+    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Window, canvas, div, prelude::*, px,
+    rgba, svg,
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
@@ -29,7 +31,7 @@ use std::collections::HashSet;
 use std::fmt;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
@@ -40,6 +42,8 @@ const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
+const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
+const TEXT_EDIT_PAD: f32 = 4.0;
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
@@ -467,7 +471,16 @@ struct LegendRow {
     pane: usize,
     title: String,
     values: String,
+    values_tone: LegendValueTone,
     visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LegendValueTone {
+    #[default]
+    Neutral,
+    Bullish,
+    Bearish,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -481,11 +494,15 @@ struct LegendPaneLayout {
 struct LegendPalette {
     text: Rgba,
     muted: Rgba,
+    bullish: Rgba,
+    bearish: Rgba,
     hover: Rgba,
-    control: Rgba,
-    border: Rgba,
     danger: Rgba,
 }
+
+const LEGEND_VIEW_ICON: &str = "axiusflow/icons/ui/view.svg";
+const LEGEND_VIEW_OFF_ICON: &str = "axiusflow/icons/ui/view-off.svg";
+const LEGEND_REMOVE_ICON: &str = "axiusflow/icons/ui/cancel-01.svg";
 
 fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], id: u32) -> String {
     snapshots
@@ -499,6 +516,16 @@ fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], 
         })
         .cloned()
         .unwrap_or_default()
+}
+
+fn asset_legend_value_tone(
+    snapshot: &nucleuscharts_engine::SeriesValueSnapshot,
+) -> LegendValueTone {
+    match (snapshot.open, snapshot.close) {
+        (Some(open), Some(close)) if close >= open => LegendValueTone::Bullish,
+        (Some(_), Some(_)) => LegendValueTone::Bearish,
+        _ => LegendValueTone::Neutral,
+    }
 }
 
 impl SeriesMutation {
@@ -527,6 +554,7 @@ pub struct NucleusChartView {
     price_divisor: f64,
     volume_series: u32,
     volume_legend: LegendPresence,
+    asset_legend_title: String,
     legend_panes: Vec<LegendPaneLayout>,
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
@@ -588,6 +616,7 @@ impl NucleusChartView {
             price_divisor: 1.0,
             volume_series,
             volume_legend: LegendPresence::Absent,
+            asset_legend_title: String::new(),
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
@@ -676,6 +705,7 @@ impl NucleusChartView {
             price_divisor: replay_price_divisor(replay),
             volume_series,
             volume_legend: LegendPresence::Absent,
+            asset_legend_title: replay_legend_title(replay),
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
@@ -737,6 +767,7 @@ impl NucleusChartView {
         );
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
+        self.asset_legend_title = replay_legend_title(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
@@ -1130,6 +1161,54 @@ impl NucleusChartView {
         true
     }
 
+    fn text_caret_overlay(&self, window: &Window) -> Option<AnyElement> {
+        let id = self.engine.editing_drawing()?;
+        let drawing = self
+            .engine
+            .drawings()
+            .iter()
+            .find(|drawing| drawing.id == id)?;
+        let (anchor_x, anchor_y) = self.engine.drawing_point_to_coordinate(id, 0)?;
+        let layout = &self.engine.options.get().layout;
+        let size = drawing.resolved_text_size(layout.font_size).to_f32()?;
+        let metrics = measure_text(
+            window,
+            &drawing.text,
+            &layout.font_family,
+            size,
+            drawing.text_weight.unwrap_or(400),
+            drawing.text_italic,
+        );
+        let options: serde_json::Value =
+            serde_json::from_str(&self.engine.drawing_options_json(id)?).ok()?;
+        let (left, top, height) = text_caret_geometry(
+            anchor_x.to_f32()? + self.engine.pane_left.to_f32()?,
+            anchor_y.to_f32()?,
+            metrics.width,
+            size,
+            options["text_h_align"].as_str().unwrap_or("center"),
+            options["text_v_align"].as_str().unwrap_or("middle"),
+            drawing.text.is_empty(),
+        );
+        let color = legend_palette(self.theme).text;
+        Some(
+            div()
+                .id(("chart_text_caret", id))
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(1.5))
+                .h(px(height))
+                .bg(color)
+                .with_animation(
+                    ("chart_text_caret_blink", id),
+                    Animation::new(TEXT_CARET_PERIOD).repeat(),
+                    |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn apply_text_edit_key(&mut self, event: &KeyDownEvent) -> bool {
         if !self.is_editing_text() {
             return false;
@@ -1344,9 +1423,8 @@ impl NucleusChartView {
             .iter()
             .find(|series| series.id == 0 && !series.removed)
         {
-            let values = snapshots
-                .iter()
-                .find(|snapshot| snapshot.series_id == 0)
+            let snapshot = snapshots.iter().find(|snapshot| snapshot.series_id == 0);
+            let values = snapshot
                 .map(|snapshot| {
                     let value = |label: &str, value: &Option<String>| {
                         format!("{label} {}", value.as_deref().unwrap_or("--"))
@@ -1363,12 +1441,15 @@ impl NucleusChartView {
             rows.push(LegendRow {
                 item: LegendItem::Asset,
                 pane: asset.pane_index,
-                title: if asset.title.is_empty() {
+                title: if !self.asset_legend_title.is_empty() {
+                    self.asset_legend_title.clone()
+                } else if asset.title.is_empty() {
                     "Asset".to_string()
                 } else {
                     asset.title.clone()
                 },
                 values,
+                values_tone: snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
                 visible: asset.visible,
             });
         }
@@ -1382,6 +1463,7 @@ impl NucleusChartView {
                 pane: volume.pane_index,
                 title: "Volume".to_string(),
                 values: legend_series_value(&snapshots, self.volume_series),
+                values_tone: LegendValueTone::Neutral,
                 visible: volume.visible,
             });
         }
@@ -1427,6 +1509,7 @@ impl NucleusChartView {
                 pane: first.pane_index,
                 title: first.title.clone(),
                 values,
+                values_tone: LegendValueTone::Neutral,
                 visible: outputs.iter().any(|series| series.visible),
             });
         }
@@ -1597,6 +1680,7 @@ impl NucleusChartView {
         );
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
+        self.asset_legend_title = replay_legend_title(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
@@ -1649,6 +1733,7 @@ impl NucleusChartView {
                 };
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
+                    self.asset_legend_title = replay_legend_title(snapshot);
                     self.instrument_price_precision = snapshot.instrument().precision.price_scale();
                 }
                 self.displayed_provenance.extend(update.accepted_deltas());
@@ -2439,12 +2524,11 @@ impl NucleusChartView {
     }
 
     fn clear_pointer(&mut self, cx: &mut Context<Self>) {
-        self.cancel_gesture();
+        self.cancel_pointer_gesture();
         cx.notify();
     }
 
-    fn cancel_gesture(&mut self) {
-        let _ = self.finish_text_edit();
+    fn cancel_pointer_gesture(&mut self) {
         self.end_drag(-1.0, -1.0);
         self.engine.drawing_drag_end();
         self.engine.brush_create_cancel();
@@ -2562,7 +2646,8 @@ impl NucleusChartView {
             window.focus(focus_handle, cx);
         }
         self.pending_activate = ActivationRequest::Pending;
-        self.cancel_gesture();
+        let _ = self.finish_text_edit();
+        self.cancel_pointer_gesture();
         let (pane_x, y) = self.local_position(event.position);
         let kind = match self.price_axis_at(pane_x, y) {
             Some((pane, PriceScaleTarget::Left)) => {
@@ -2581,8 +2666,9 @@ impl NucleusChartView {
         cx.notify();
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.apply_text_edit_key(event) {
+            window.prevent_default();
             cx.stop_propagation();
             cx.notify();
             return;
@@ -2796,20 +2882,44 @@ fn legend_palette(theme: ChartTheme) -> LegendPalette {
         ChartTheme::Light => LegendPalette {
             text: rgba(0x1414_14ff),
             muted: rgba(0x6666_66ff),
+            bullish: rgba(0x0899_81ff),
+            bearish: rgba(0xf236_45ff),
             hover: rgba(0x0000_000a),
-            control: rgba(0xffff_ffff),
-            border: rgba(0xdddd_ddff),
             danger: rgba(0xc43c_35ff),
         },
         ChartTheme::Dark => LegendPalette {
             text: rgba(0xf0f0_f0ff),
             muted: rgba(0x9999_99ff),
+            bullish: rgba(0x0899_81ff),
+            bearish: rgba(0xf236_45ff),
             hover: rgba(0xffff_ff0d),
-            control: rgba(0x2020_20f2),
-            border: rgba(0x3636_36ff),
             danger: rgba(0xef53_50ff),
         },
     }
+}
+
+fn text_caret_geometry(
+    anchor_x: f32,
+    anchor_y: f32,
+    text_width: f32,
+    size: f32,
+    horizontal: &str,
+    vertical: &str,
+    empty: bool,
+) -> (f32, f32, f32) {
+    let run_width = if empty { size } else { text_width };
+    let left = match horizontal {
+        "left" => anchor_x + TEXT_EDIT_PAD,
+        "right" => anchor_x - TEXT_EDIT_PAD - run_width,
+        _ => anchor_x - run_width / 2.0,
+    };
+    let run_y = match vertical {
+        "top" => anchor_y - TEXT_EDIT_PAD - size / 2.0,
+        "bottom" => anchor_y + TEXT_EDIT_PAD + size / 2.0,
+        _ => anchor_y,
+    };
+    let caret_x = if empty { left } else { left + text_width };
+    (caret_x, run_y - size * 0.6, size * 1.2)
 }
 
 fn chart_legend_layers(
@@ -2852,25 +2962,29 @@ fn chart_legend_row(
     palette: LegendPalette,
 ) -> impl IntoElement {
     let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
+    let visibility = legend_control(
+        chart,
+        row.item,
+        LegendControl::Visibility(row.visible),
+        palette,
+    )
+    .when(row.visible, |control| {
+        control
+            .invisible()
+            .group_hover(group.clone(), gpui::Styled::visible)
+    });
     let mut controls = div()
         .flex_none()
         .flex()
         .items_center()
         .gap_1()
-        .invisible()
-        .group_hover(group.clone(), gpui::Styled::visible)
-        .child(legend_control(
-            chart,
-            row.item,
-            if row.visible { "Hide" } else { "Show" },
-            !row.visible,
-            false,
-            palette,
-        ));
+        .child(visibility);
     if row.item != LegendItem::Asset {
-        controls = controls.child(legend_control(
-            chart, row.item, "Remove", false, true, palette,
-        ));
+        controls = controls.child(
+            legend_control(chart, row.item, LegendControl::Remove, palette)
+                .invisible()
+                .group_hover(group.clone(), gpui::Styled::visible),
+        );
     }
     div()
         .id(("chart_legend_row", row.item.key()))
@@ -2900,35 +3014,49 @@ fn chart_legend_row(
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_color(palette.muted)
+                    .text_color(match row.values_tone {
+                        LegendValueTone::Neutral => palette.muted,
+                        LegendValueTone::Bullish => palette.bullish,
+                        LegendValueTone::Bearish => palette.bearish,
+                    })
                     .child(row.values.clone()),
             )
         })
         .child(controls)
 }
 
+#[derive(Clone, Copy)]
+enum LegendControl {
+    Visibility(bool),
+    Remove,
+}
+
 fn legend_control(
     chart: &Entity<NucleusChartView>,
     item: LegendItem,
-    label: &'static str,
-    visible: bool,
-    remove: bool,
+    control: LegendControl,
     palette: LegendPalette,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let action_chart = chart.clone();
+    let remove = matches!(control, LegendControl::Remove);
+    let (label, path, color) = match control {
+        LegendControl::Visibility(true) => ("Hide", LEGEND_VIEW_ICON, palette.text),
+        LegendControl::Visibility(false) => ("Show", LEGEND_VIEW_OFF_ICON, palette.muted),
+        LegendControl::Remove => ("Remove", LEGEND_REMOVE_ICON, palette.danger),
+    };
     let id = item.key() * 2 + u64::from(remove);
     div()
         .id(("chart_legend_control", id))
-        .h(px(20.0))
-        .px_1()
+        .size(px(20.0))
+        .flex_none()
         .flex()
         .items_center()
+        .justify_center()
         .rounded(px(3.0))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.control)
-        .text_color(if remove { palette.danger } else { palette.text })
+        .text_color(color)
         .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(label)
         .hover(|style| style.bg(palette.hover))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
@@ -2936,7 +3064,10 @@ fn legend_control(
                 let changed = if remove {
                     chart.remove_legend_indicator(item)
                 } else {
-                    chart.set_legend_item_visible(item, visible)
+                    let LegendControl::Visibility(visible) = control else {
+                        return;
+                    };
+                    chart.set_legend_item_visible(item, !visible)
                 };
                 if changed {
                     chart_cx.notify();
@@ -2944,11 +3075,11 @@ fn legend_control(
             });
             cx.stop_propagation();
         })
-        .child(label)
+        .child(svg().path(path).size(px(14.0)).text_color(color))
 }
 
 impl Render for NucleusChartView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mutation = self.apply_pending_data();
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
@@ -2959,6 +3090,7 @@ impl Render for NucleusChartView {
             .clone();
         let legends =
             chart_legend_layers(&entity, &self.legend_rows(), &self.legend_panes, self.theme);
+        let text_caret = self.text_caret_overlay(window);
 
         div()
             .id(("nucleus_chart_surface", cx.entity_id()))
@@ -3002,6 +3134,7 @@ impl Render for NucleusChartView {
                 )
                 .size_full(),
             )
+            .children(text_caret)
             .children(legends)
     }
 }
@@ -3078,6 +3211,8 @@ mod tests {
             .expect("embedded replay validates");
         chart.load_replay(&replay).expect("first snapshot installs");
         assert!(chart.has_market_data());
+        assert_eq!(series_entry(&chart, 0).title, "AXF");
+        assert_eq!(chart.legend_rows()[0].title, "AXF · 1m · XNAS");
         assert_eq!(
             chart.expected_replay_sequence(),
             replay.stream().last_sequence().checked_add(1)
@@ -3188,6 +3323,8 @@ mod tests {
         .expect("calendar snapshot validates");
 
         let chart = NucleusChartView::with_replay(&replay);
+        assert_eq!(series_entry(&chart, 0).title, "AXF");
+        assert_eq!(chart.legend_rows()[0].title, "AXF · 1M · XNAS");
         let installed_times = chart
             .engine
             .series_data(0)
@@ -4192,6 +4329,31 @@ mod tests {
         assert!(!chart.is_editing_text());
         assert_eq!(chart.drawing_count(), 1);
         assert_eq!(chart.engine.drawings()[0].text, "NQ");
+    }
+
+    #[test]
+    fn pointer_exit_keeps_the_active_text_edit_session() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::Text);
+        assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+
+        chart.cancel_pointer_gesture();
+
+        assert!(chart.is_editing_text());
+        assert!(chart.set_editing_text_value("ES"));
+        assert_eq!(chart.editing_text_value().as_deref(), Some("ES"));
+    }
+
+    #[test]
+    fn text_caret_tracks_the_end_of_centered_and_empty_labels() {
+        assert_eq!(
+            text_caret_geometry(100.0, 100.0, 40.0, 20.0, "center", "middle", false,),
+            (120.0, 88.0, 24.0)
+        );
+        assert_eq!(
+            text_caret_geometry(100.0, 100.0, 0.0, 20.0, "center", "middle", true,),
+            (90.0, 88.0, 24.0)
+        );
     }
 
     #[test]

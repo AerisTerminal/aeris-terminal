@@ -152,6 +152,8 @@ const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIMEFRAME_FLYOUT_WIDTH: f32 = 136.0;
 const TIMEFRAME_FLYOUT_GAP: f32 = 5.0;
+const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
+const QUICK_TIMEFRAME_POPUP_TOP: f32 = 64.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
@@ -3472,10 +3474,12 @@ fn chrome_overlay_layer(
     cx: &App,
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
-    let compact_menu = matches!(
+    let compact_panel = matches!(
         overlay,
         ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe | ChromeOverlay::ChartType
     );
+    let anchored_menu = matches!(overlay, ChromeOverlay::Timeframe | ChromeOverlay::ChartType);
+    let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
     let dual_container = overlay == ChromeOverlay::Timeframe;
     let menu_left = compact_menu_left(overlay, app_state);
     let phase = app_state.chrome_overlay_phase;
@@ -3483,7 +3487,6 @@ fn chrome_overlay_layer(
     let closing = phase == ChromeOverlayPhase::Closing;
     let panel = chrome_overlay_content(app_state, app, overlay, theme, cx);
     let close_app = app.clone();
-    let overlay_focus = app_state.chrome_focus.clone();
     Some(
         div()
             .id("chrome_overlay_scrim")
@@ -3493,12 +3496,19 @@ fn chrome_overlay_layer(
             .right_0()
             .bottom_0()
             .occlude()
-            .track_focus(&overlay_focus)
             .flex()
-            .when(compact_menu, |scrim| {
+            .when(anchored_menu, |scrim| {
                 scrim.items_start().justify_start().pl(menu_left)
             })
-            .when(!compact_menu, |scrim| scrim.items_center().justify_center())
+            .when(quick_timeframe, |scrim| {
+                scrim
+                    .items_start()
+                    .justify_center()
+                    .pt(px(QUICK_TIMEFRAME_POPUP_TOP))
+            })
+            .when(!anchored_menu && !quick_timeframe, |scrim| {
+                scrim.items_center().justify_center()
+            })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 close_app.update(cx, |app, app_cx| {
                     app.close_chrome_overlay(window, app_cx);
@@ -3508,8 +3518,9 @@ fn chrome_overlay_layer(
             .child(chrome_overlay_panel(
                 panel,
                 theme,
-                compact_menu,
+                compact_panel,
                 dual_container,
+                quick_timeframe,
                 closing,
                 generation,
                 phase,
@@ -3577,16 +3588,9 @@ fn chrome_overlay_content(
             theme,
         )
         .into_any_element(),
-        ChromeOverlay::QuickTimeframe => quick_timeframe_overlay_content(
-            app,
-            &app_state.timeframe_input,
-            &app_state.quick_timeframe_matches(cx),
-            app_state.selected_interval(),
-            app_state.chrome_selection,
-            pending,
-            theme,
-        )
-        .into_any_element(),
+        ChromeOverlay::QuickTimeframe => {
+            quick_timeframe_overlay_content(&app_state.timeframe_input, theme).into_any_element()
+        }
         ChromeOverlay::ChartType => chart_type_overlay_content(
             app,
             app_state.chart_type(cx),
@@ -3602,6 +3606,7 @@ fn chrome_overlay_panel(
     theme: &AxiusflowTheme,
     interval_popup: bool,
     dual_container: bool,
+    primary_surface: bool,
     closing: bool,
     generation: u64,
     phase: ChromeOverlayPhase,
@@ -3615,12 +3620,16 @@ fn chrome_overlay_panel(
             panel
                 .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                 .border_1()
-                .border_color(gpui_color(if interval_popup {
+                .border_color(gpui_color(if primary_surface {
+                    colors.border
+                } else if interval_popup {
                     colors.border_secondary
                 } else {
                     colors.border
                 }))
-                .bg(gpui_color(if interval_popup {
+                .bg(gpui_color(if primary_surface {
+                    colors.surface
+                } else if interval_popup {
                     colors.surface_secondary
                 } else {
                     colors.surface
@@ -3899,59 +3908,42 @@ fn chart_type_overlay_content(
 }
 
 fn quick_timeframe_overlay_content(
-    app: &Entity<WorkspaceSurface>,
     input: &Entity<InputState>,
-    intervals: &[ChartInterval],
-    selected: ChartInterval,
-    keyboard_selection: usize,
-    pending: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let mut panel = div()
-        .w(px(TIMEFRAME_MENU_WIDTH))
+    div()
+        .w(px(QUICK_TIMEFRAME_POPUP_WIDTH))
         .flex()
         .flex_col()
-        .text_color(gpui_color(colors.text_primary))
+        .gap_2()
+        .p_3()
         .child(
             div()
-                .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-                .px(px(12.0))
-                .flex()
-                .items_center()
+                .w_full()
+                .text_center()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("Time frame"),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(58.0))
+                .text_size(px(18.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(
                     Input::new(input)
                         .appearance(true)
                         .bordered(true)
                         .focus_bordered(true)
+                        .thick_border(true)
+                        .fill(gpui_color(colors.input_fill))
+                        .border_color(gpui_color(colors.input_border))
+                        .focus_border_color(gpui_color(colors.ring))
                         .flex_1(),
                 ),
-        );
-    if intervals.is_empty() {
-        return panel.child(
-            MenuRow::compact("quick_timeframe_empty", "No matching interval", theme)
-                .resting_fill(colors.surface_secondary)
-                .disabled(true)
-                .flush_in_panel(false, true),
-        );
-    }
-    panel = panel.child(menu_separator(theme));
-    let last = intervals.len().saturating_sub(1);
-    for (index, interval) in intervals.iter().copied().enumerate() {
-        panel = panel.child(timeframe_overlay_row(
-            app,
-            interval,
-            index,
-            selected == interval || keyboard_selection == index,
-            pending,
-            colors.surface_secondary,
-            false,
-            false,
-            index == last,
-            theme,
-        ));
-    }
-    panel
+        )
 }
 
 const fn timeframe_interval_group(interval: ChartInterval) -> TimeframeMenuGroup {
@@ -7503,7 +7495,11 @@ fn workspace_surface_entity(
     let indicator_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
     let indicator_search_input = indicator_input.clone();
-    let timeframe_input = cx.new(|cx| InputState::new(window, cx).placeholder("1m, 5, 1H, 1D"));
+    let timeframe_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("1m, 5, 1H, 1D")
+            .centered()
+    });
     let timeframe_search_input = timeframe_input.clone();
     let workspace_lifecycle = lifecycle.clone();
     let workspace = cx.new(move |cx| {
@@ -9350,6 +9346,7 @@ fn workspace_market_area(
     let surface = active_surface.read(cx);
     let drawing_state = surface.drawing_toolbar_state(cx);
     let drawing_scroll = surface.scrolls.drawing.clone();
+    let chrome_focus = surface.chrome_focus.clone();
     let grid = div()
         .h_full()
         .flex_1()
@@ -9363,6 +9360,7 @@ fn workspace_market_area(
         .flex()
         .size_full()
         .overflow_hidden()
+        .track_focus(&chrome_focus)
         .child(grid)
         .when(drawing_toolbar_collapsed, |market| {
             market.child(drawing_toolbar_expander(terminal.clone(), theme))

@@ -292,6 +292,44 @@ fn apply_price_series_chrome(engine: &mut ChartEngine, title: &str) {
     }
 }
 
+pub(crate) fn replay_legend_title(replay: &ReplaySnapshot) -> String {
+    let instrument = replay.instrument();
+    format!(
+        "{} · {} · {}",
+        instrument.symbol,
+        replay_timeframe_label(replay),
+        replay_venue_label(&instrument.venue_id)
+    )
+}
+
+fn replay_timeframe_label(replay: &ReplaySnapshot) -> String {
+    let definition = replay.bar_definition();
+    if let Some(trades) = definition.trades_per_bar {
+        return format!("{trades}t");
+    }
+    if let Some(months) = definition.calendar_months {
+        return format!("{months}M");
+    }
+    let seconds = definition.interval_seconds;
+    if seconds.is_multiple_of(86_400) {
+        format!("{}D", seconds / 86_400)
+    } else if seconds.is_multiple_of(3_600) {
+        format!("{}h", seconds / 3_600)
+    } else if seconds.is_multiple_of(60) {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn replay_venue_label(venue: &str) -> &str {
+    if venue.eq_ignore_ascii_case("coinbase") {
+        "Coinbase"
+    } else {
+        venue
+    }
+}
+
 fn volume_row(volume: i64, time: f64) -> (f64, [f64; 4]) {
     let volume = volume.to_f64().unwrap_or_default();
     (time, [volume; 4])

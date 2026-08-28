@@ -29,6 +29,8 @@ pub enum UiIcon {
     SplitSideBySide,
     SplitStacked,
     SunIcon03,
+    View,
+    ViewOff,
     WindowClose,
     WindowMaximize,
     WindowMinimize,
@@ -37,7 +39,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::AddIcon01,
         Self::AiEraser,
         Self::AiLock,
@@ -58,6 +60,8 @@ impl UiIcon {
         Self::SplitSideBySide,
         Self::SplitStacked,
         Self::SunIcon03,
+        Self::View,
+        Self::ViewOff,
         Self::WindowClose,
         Self::WindowMaximize,
         Self::WindowMinimize,
@@ -88,6 +92,8 @@ impl UiIcon {
             Self::SplitSideBySide => "split-side-by-side.svg",
             Self::SplitStacked => "split-stacked.svg",
             Self::SunIcon03 => "sun-03.svg",
+            Self::View => "view.svg",
+            Self::ViewOff => "view-off.svg",
             Self::WindowClose => "window-close.svg",
             Self::WindowMaximize => "window-maximize.svg",
             Self::WindowMinimize => "window-minimize.svg",
@@ -298,6 +304,8 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "split-side-by-side.svg" => include_bytes!("../assets/icons/ui/split-side-by-side.svg"),
         "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),
         "sun-03.svg" => include_bytes!("../assets/icons/ui/sun-03.svg"),
+        "view.svg" => include_bytes!("../assets/icons/ui/view.svg"),
+        "view-off.svg" => include_bytes!("../assets/icons/ui/view-off.svg"),
         "window-close.svg" => include_bytes!("../assets/icons/ui/window-close.svg"),
         "window-maximize.svg" => include_bytes!("../assets/icons/ui/window-maximize.svg"),
         "window-minimize.svg" => include_bytes!("../assets/icons/ui/window-minimize.svg"),

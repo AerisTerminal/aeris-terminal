@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, Role, ShapedLine, SharedString,
     Style, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill,
@@ -188,6 +188,7 @@ pub(crate) struct InputState {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     scroll_x: Pixels,
+    centered: bool,
     selecting: bool,
     _focus_subscriptions: Vec<Subscription>,
 }
@@ -213,6 +214,7 @@ impl InputState {
             last_layout: None,
             last_bounds: None,
             scroll_x: px(0.0),
+            centered: false,
             selecting: false,
             _focus_subscriptions: vec![focused, blurred],
         }
@@ -220,6 +222,11 @@ impl InputState {
 
     pub(crate) fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    pub(crate) fn centered(mut self) -> Self {
+        self.centered = true;
         self
     }
 
@@ -284,7 +291,10 @@ impl InputState {
         }
         clamp_byte_offset(
             &self.buffer.text,
-            line.closest_index_for_x(position.x - bounds.left() + self.scroll_x),
+            line.closest_index_for_x(
+                position.x - bounds.left() + self.scroll_x
+                    - centered_text_offset(self.centered, bounds.size.width, line.width()),
+            ),
         )
     }
 
@@ -492,13 +502,15 @@ impl EntityInputHandler for InputState {
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
         let range = range_from_utf16(&self.buffer.text, &range_utf16);
+        let text_offset =
+            centered_text_offset(self.centered, element_bounds.size.width, line.width());
         Some(Bounds::from_corners(
             point(
-                element_bounds.left() - self.scroll_x + line.x_for_index(range.start),
+                element_bounds.left() - self.scroll_x + text_offset + line.x_for_index(range.start),
                 element_bounds.top(),
             ),
             point(
-                element_bounds.left() - self.scroll_x + line.x_for_index(range.end),
+                element_bounds.left() - self.scroll_x + text_offset + line.x_for_index(range.end),
                 element_bounds.bottom(),
             ),
         ))
@@ -572,6 +584,9 @@ impl Render for InputState {
 pub(crate) struct Input {
     state: Entity<InputState>,
     presentation: u8,
+    fill: Option<Hsla>,
+    border_color: Option<Hsla>,
+    focus_border_color: Option<Hsla>,
 }
 
 impl Input {
@@ -579,11 +594,15 @@ impl Input {
     const BORDERED: u8 = 1 << 1;
     const FOCUS_BORDERED: u8 = 1 << 2;
     const GROW: u8 = 1 << 3;
+    const THICK_BORDER: u8 = 1 << 4;
 
     pub(crate) fn new(state: &Entity<InputState>) -> Self {
         Self {
             state: state.clone(),
             presentation: Self::APPEARANCE | Self::BORDERED | Self::FOCUS_BORDERED,
+            fill: None,
+            border_color: None,
+            focus_border_color: None,
         }
     }
 
@@ -599,6 +618,26 @@ impl Input {
 
     pub(crate) fn focus_bordered(mut self, focus_bordered: bool) -> Self {
         self.set_presentation(Self::FOCUS_BORDERED, focus_bordered);
+        self
+    }
+
+    pub(crate) fn thick_border(mut self, thick_border: bool) -> Self {
+        self.set_presentation(Self::THICK_BORDER, thick_border);
+        self
+    }
+
+    pub(crate) fn fill(mut self, fill: Hsla) -> Self {
+        self.fill = Some(fill);
+        self
+    }
+
+    pub(crate) fn border_color(mut self, border_color: Hsla) -> Self {
+        self.border_color = Some(border_color);
+        self
+    }
+
+    pub(crate) fn focus_border_color(mut self, focus_border_color: Hsla) -> Self {
+        self.focus_border_color = Some(focus_border_color);
         self
     }
 
@@ -624,6 +663,10 @@ impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let focused = self.state.read(cx).focus_handle.is_focused(window);
         let color = window.text_style().color;
+        let border_color = self.border_color.unwrap_or_else(|| color.opacity(0.25));
+        let focus_border_color = self
+            .focus_border_color
+            .unwrap_or_else(|| color.opacity(0.65));
         div()
             .h_full()
             .min_w(px(0.0))
@@ -631,15 +674,23 @@ impl RenderOnce for Input {
             .items_center()
             .when(self.has_presentation(Self::GROW), gpui::Styled::flex_1)
             .when(self.has_presentation(Self::APPEARANCE), gpui::Styled::px_2)
+            .when_some(self.fill, |element, fill| element.bg(fill))
             .when(self.has_presentation(Self::BORDERED), |element| {
                 element
-                    .border_1()
+                    .when(
+                        self.has_presentation(Self::THICK_BORDER),
+                        gpui::Styled::border_2,
+                    )
+                    .when(
+                        !self.has_presentation(Self::THICK_BORDER),
+                        gpui::Styled::border_1,
+                    )
                     .rounded(px(4.0))
-                    .border_color(color.opacity(0.25))
+                    .border_color(border_color)
             })
             .when(
                 self.has_presentation(Self::FOCUS_BORDERED) && focused,
-                |element| element.border_color(color.opacity(0.65)),
+                |element| element.border_color(focus_border_color),
             )
             .child(self.state)
     }
@@ -721,8 +772,13 @@ impl Element for InputTextElement {
             .shape_line(display_text, font_size, &runs, None);
 
         let caret_x = line.x_for_index(input.buffer.cursor());
-        let scroll_x = horizontal_scroll_for_caret(caret_x, bounds.size.width, input.scroll_x);
-        let text_origin = point(bounds.left() - scroll_x, bounds.top());
+        let text_offset = centered_text_offset(input.centered, bounds.size.width, line.width());
+        let scroll_x = if text_offset > px(0.0) {
+            px(0.0)
+        } else {
+            horizontal_scroll_for_caret(caret_x, bounds.size.width, input.scroll_x)
+        };
+        let text_origin = point(bounds.left() + text_offset - scroll_x, bounds.top());
 
         let selection = (!input.buffer.selection.is_empty()).then(|| {
             fill(
@@ -845,6 +901,14 @@ fn horizontal_scroll_for_caret(caret_x: Pixels, width: Pixels, current: Pixels) 
         px(0.0)
     } else {
         scroll_x
+    }
+}
+
+fn centered_text_offset(centered: bool, width: Pixels, text_width: Pixels) -> Pixels {
+    if centered && text_width < width {
+        (width - text_width) / 2.0
+    } else {
+        px(0.0)
     }
 }
 
@@ -996,5 +1060,12 @@ mod tests {
             horizontal_scroll_for_caret(px(1.0), px(1.0), px(0.0)),
             px(2.0)
         );
+    }
+
+    #[test]
+    fn centered_input_offsets_only_text_that_fits() {
+        assert_eq!(centered_text_offset(true, px(100.0), px(40.0)), px(30.0));
+        assert_eq!(centered_text_offset(true, px(100.0), px(120.0)), px(0.0));
+        assert_eq!(centered_text_offset(false, px(100.0), px(40.0)), px(0.0));
     }
 }
