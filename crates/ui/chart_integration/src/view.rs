@@ -42,6 +42,7 @@ const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
+const LEGEND_MAX_WIDTH: f32 = 640.0;
 const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
 const TEXT_EDIT_PAD: f32 = 4.0;
 
@@ -476,7 +477,9 @@ struct LegendRow {
     item: LegendItem,
     pane: usize,
     title: String,
-    values: String,
+    /// One entry per readout (`O 77,876.69`, `%K 36.95`, …) so a legend that outgrows its pane
+    /// wraps value by value instead of spilling over the price axis.
+    values: Vec<String>,
     values_tone: LegendValueTone,
     visible: bool,
 }
@@ -493,6 +496,7 @@ enum LegendValueTone {
 struct LegendPaneLayout {
     left: f32,
     top: f32,
+    width: f32,
     height: f32,
 }
 
@@ -522,6 +526,20 @@ fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], 
         })
         .cloned()
         .unwrap_or_default()
+}
+
+/// One legend readout for a single-output series, or nothing when the series has no value at the
+/// crosshair.
+fn legend_series_values(
+    snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
+    id: u32,
+) -> Vec<String> {
+    let value = legend_series_value(snapshots, id);
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        vec![value]
+    }
 }
 
 fn asset_legend_value_tone(
@@ -1471,19 +1489,18 @@ impl NucleusChartView {
                             let value = |label: &str, value: &Option<String>| {
                                 format!("{label} {}", value.as_deref().unwrap_or("--"))
                             };
-                            [
+                            vec![
                                 value("O", &snapshot.formatted_open),
                                 value("H", &snapshot.formatted_high),
                                 value("L", &snapshot.formatted_low),
                                 value("C", &snapshot.formatted_close),
                             ]
-                            .join("  ")
                         })
                         .unwrap_or_default(),
                     snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
                 )
             } else {
-                (String::new(), LegendValueTone::Neutral)
+                (Vec::new(), LegendValueTone::Neutral)
             };
             rows.push(LegendRow {
                 item: LegendItem::Asset,
@@ -1510,9 +1527,9 @@ impl NucleusChartView {
                 pane: volume.pane_index,
                 title: "Volume".to_string(),
                 values: if volume.visible {
-                    legend_series_value(&snapshots, self.volume_series)
+                    legend_series_values(&snapshots, self.volume_series)
                 } else {
-                    String::new()
+                    Vec::new()
                 },
                 values_tone: LegendValueTone::Neutral,
                 visible: volume.visible,
@@ -1557,9 +1574,8 @@ impl NucleusChartView {
                         }
                     })
                     .collect::<Vec<_>>()
-                    .join("  ")
             } else {
-                String::new()
+                Vec::new()
             };
             rows.push(LegendRow {
                 item: LegendItem::Indicator(info.binding_id),
@@ -2959,6 +2975,7 @@ impl NucleusChartView {
 
     fn sync_legend_pane_layout(&mut self) -> bool {
         let left = self.engine.pane_left.to_f32().unwrap_or_default();
+        let width = self.engine.pane_w.to_f32().unwrap_or_default();
         let panes = self
             .engine
             .panes
@@ -2966,6 +2983,7 @@ impl NucleusChartView {
             .map(|pane| LegendPaneLayout {
                 left,
                 top: pane.top.to_f32().unwrap_or_default(),
+                width,
                 height: pane.height.to_f32().unwrap_or_default(),
             })
             .collect::<Vec<_>>();
@@ -3067,12 +3085,15 @@ fn chart_legend_layers(
         .enumerate()
         .filter_map(|(pane_index, pane)| {
             let pane_rows = rows.iter().filter(|row| row.pane == pane_index);
+            // Cap the legend at the plot area so it wraps inside the pane instead of running
+            // under the price axis.
+            let available_width = (pane.width - LEGEND_INSET * 2.0).clamp(0.0, LEGEND_MAX_WIDTH);
             let mut layer = div()
                 .id(("chart_legend_pane", pane_index))
                 .absolute()
                 .left(px(pane.left + LEGEND_INSET))
                 .top(px(pane.top + LEGEND_INSET))
-                .max_w(px(640.0))
+                .max_w(px(available_width))
                 .max_h(px((pane.height - LEGEND_INSET * 2.0).max(0.0)))
                 .overflow_hidden()
                 .flex()
@@ -3108,6 +3129,7 @@ fn chart_legend_row(
     });
     let mut controls = div()
         .flex_none()
+        .h(px(LEGEND_ROW_HEIGHT))
         .flex()
         .items_center()
         .gap_1()
@@ -3119,14 +3141,35 @@ fn chart_legend_row(
                 .group_hover(group.clone(), gpui::Styled::visible),
         );
     }
+    let values_color = match row.values_tone {
+        LegendValueTone::Neutral => palette.muted,
+        LegendValueTone::Bullish => palette.bullish,
+        LegendValueTone::Bearish => palette.bearish,
+    };
+    let values = if row.visible {
+        row.values.clone()
+    } else {
+        Vec::new()
+    };
+    let values = values.into_iter().map(|value| {
+        div()
+            .flex_none()
+            .h(px(LEGEND_ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .text_color(values_color)
+            .child(value)
+            .into_any_element()
+    });
     div()
         .id(("chart_legend_row", row.item.key()))
         .group(group)
-        .h(px(LEGEND_ROW_HEIGHT))
+        .min_h(px(LEGEND_ROW_HEIGHT))
         .max_w_full()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap_2()
+        .gap_x_2()
         .px_1()
         .rounded(px(3.0))
         .text_xs()
@@ -3140,22 +3183,13 @@ fn chart_legend_row(
         .child(
             div()
                 .flex_none()
+                .h(px(LEGEND_ROW_HEIGHT))
+                .flex()
+                .items_center()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(row.title.clone()),
         )
-        .when(row.visible && !row.values.is_empty(), |legend| {
-            legend.child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(match row.values_tone {
-                        LegendValueTone::Neutral => palette.muted,
-                        LegendValueTone::Bullish => palette.bullish,
-                        LegendValueTone::Bearish => palette.bearish,
-                    })
-                    .child(row.values.clone()),
-            )
-        })
+        .children(values)
         .child(controls)
 }
 
@@ -4185,6 +4219,35 @@ mod tests {
     }
 
     #[test]
+    fn legend_pane_layout_tracks_the_plot_width_so_legends_stay_off_the_price_axis() {
+        let mut chart = interactive_chart();
+        chart
+            .add_indicator(ChartIndicator::Macd)
+            .expect("MACD binds to nucleus");
+        for width in [1280.0_f32, 420.0] {
+            chart.engine.css_width = f64::from(width);
+            chart.engine.css_height = 720.0;
+            chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+            assert!(chart.sync_legend_pane_layout() || !chart.legend_panes.is_empty());
+            let plot_width = chart.engine.pane_w.to_f32().expect("plot width");
+            assert!(
+                chart.legend_panes.len() > 1,
+                "MACD adds its own pane at {width}"
+            );
+            for pane in &chart.legend_panes {
+                assert!(
+                    (pane.width - plot_width).abs() < f32::EPSILON,
+                    "legend width follows the plot"
+                );
+                assert!(
+                    pane.left + pane.width <= width,
+                    "legend stays left of the price axis at {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn chart_legends_group_outputs_and_follow_native_indicator_panes() {
         let mut chart = interactive_chart();
         let bollinger = chart
@@ -4199,8 +4262,8 @@ mod tests {
         let asset = rows.first().expect("asset legend is always first");
         assert_eq!(asset.item, LegendItem::Asset);
         assert_eq!(asset.pane, 0);
-        assert!(asset.values.contains("O "));
-        assert!(asset.values.contains("C "));
+        assert!(asset.values.iter().any(|value| value.starts_with("O ")));
+        assert!(asset.values.iter().any(|value| value.starts_with("C ")));
         assert_eq!(
             rows.iter()
                 .filter(|row| row.item == LegendItem::Indicator(bollinger[0]))
@@ -4212,9 +4275,10 @@ mod tests {
             .find(|row| row.item == LegendItem::Indicator(macd[0]))
             .expect("grouped MACD legend");
         assert!(macd_row.pane > 0);
-        assert!(macd_row.values.contains("MACD"));
-        assert!(macd_row.values.contains("Signal"));
-        assert!(macd_row.values.contains("Histogram"));
+        let macd_values = macd_row.values.join(" ");
+        assert!(macd_values.contains("MACD"));
+        assert!(macd_values.contains("Signal"));
+        assert!(macd_values.contains("Histogram"));
     }
 
     #[test]
@@ -4227,6 +4291,7 @@ mod tests {
                 .find(|row| row.item == LegendItem::Asset)
                 .expect("asset legend")
                 .values
+                .join(" ")
         };
         assert!(asset_values(&chart).contains("O "));
         assert!(asset_values(&chart).contains("C "));
