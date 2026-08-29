@@ -13,12 +13,7 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "target",
     "third_party",
 ];
-const REPOSITORY_MARKDOWN_FILES: &[&str] = &[
-    "Agents.md",
-    "Architecture.md",
-    "Axiusflow Local Engine Architecture Migration Specification.md",
-    "Readme.md",
-];
+const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md"];
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     ".gitignore",
     ".gitmodules",

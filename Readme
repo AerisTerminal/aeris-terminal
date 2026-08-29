@@ -33,9 +33,7 @@ The desktop starts or reconnects to the per-user local engine. Use `--workspace-
 
 ## Documentation
 
-- [Architecture.md](Architecture.md) — current implemented architecture
-- [Agents.md](Agents.md) — engineering and delivery rules for work in this repository
-- [Axiusflow Local Engine Architecture Migration Specification.md](Axiusflow%20Local%20Engine%20Architecture%20Migration%20Specification.md) — approved target-state contract
+- [AGENTS.md](AGENTS.md) — engineering and delivery rules for work in this repository
 
 ## License
 
