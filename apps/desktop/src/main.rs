@@ -41,11 +41,11 @@ use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, Context, Div, Entity,
-    FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit, Orientation,
-    Pixels, QuitMode, Render, RenderOnce, Role, ScrollHandle, SharedString, Stateful, Task,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, actions,
-    canvas, div, ease_out_quint, img, point, prelude::*, px, relative, size,
+    Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
+    Entity, FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit,
+    Orientation, Pixels, QuitMode, Render, RenderOnce, Role, ScrollHandle, SharedString, Stateful,
+    Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions,
+    actions, canvas, div, ease_out_quint, img, point, prelude::*, px, relative, size,
 };
 use gpui_platform::application;
 use native_ui::{
@@ -5215,7 +5215,7 @@ fn clamp_chart_context_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 7.0, 4.0)
+    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 8.0, 5.0)
 }
 
 /// Prefer opening the Y-axis menu into the chart, then keep an edge margin so it
@@ -5320,14 +5320,14 @@ fn chart_context_menu_panel(
     let items = chart_context_menu_items(state);
     let last = items.len().saturating_sub(1);
     for (index, item) in items.into_iter().enumerate() {
-        if matches!(index, 1 | 3 | 5 | 6) {
+        if matches!(index, 1 | 2 | 4 | 6 | 7) {
             panel = panel.child(menu_separator(theme));
         }
         panel = panel.child(chart_context_menu_item(
             terminal,
             item,
             theme,
-            menu,
+            menu.clone(),
             index == 0,
             index == last,
         ));
@@ -5335,7 +5335,7 @@ fn chart_context_menu_panel(
     panel
 }
 
-fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 7] {
+fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 8] {
     [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
@@ -5343,6 +5343,13 @@ fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuIt
             label: "Reset view",
             enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::Reset,
+        },
+        ChartContextMenuItem {
+            id: "chart_context_copy_price",
+            icon: HugeIcon::Copy01Icon,
+            label: "Copy price",
+            enabled: state.enabled(ChartContextMenuState::COPY_PRICE),
+            action: ChartContextAction::CopyPrice,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
@@ -5417,18 +5424,45 @@ fn chart_context_menu_item(
         enabled,
         action,
     } = item;
-    MenuRow::compact(id, label, theme)
+    let mut row = MenuRow::compact(id, label, theme)
         .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .disabled(!enabled)
         .destructive(destructive)
-        .flush_in_panel(first, last)
-        .on_click(move |_, window, cx| {
-            if enabled {
-                action_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.finish_chart_context_menu(menu, action, window, terminal_cx);
-                });
-            }
-        })
+        .flush_in_panel(first, last);
+    if action == ChartContextAction::CopyPrice
+        && let Some(price) = menu.copy_price.clone()
+    {
+        row = row.trailing(copy_price_chip(price, enabled, theme));
+    }
+    row.on_click(move |_, window, cx| {
+        if enabled {
+            action_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.finish_chart_context_menu(menu.clone(), action, window, terminal_cx);
+            });
+        }
+    })
+}
+
+fn copy_price_chip(price: SharedString, enabled: bool, theme: &AxiusflowTheme) -> impl IntoElement {
+    let colors = theme.colors;
+    let ink = if enabled {
+        colors.text_muted
+    } else {
+        colors.text_muted.with_alpha(0.55)
+    };
+    div()
+        .flex_none()
+        .h(px(18.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
+        .text_xs()
+        .text_color(gpui_color(ink))
+        .child(price)
 }
 
 fn price_axis_menu_layer(
@@ -5454,11 +5488,17 @@ fn price_axis_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(price_axis_menu_panel(terminal, menu, state, origin, theme));
+        .child(price_axis_menu_panel(
+            terminal,
+            menu.clone(),
+            state,
+            origin,
+            theme,
+        ));
     if menu.flyout != PriceAxisMenuFlyout::None {
         layer = layer.child(price_axis_flyout_panel(
             terminal,
-            menu,
+            menu.clone(),
             state,
             clamp_price_axis_flyout_origin(origin, viewport, menu.flyout),
             viewport,
@@ -5489,7 +5529,7 @@ fn price_axis_menu_panel(
         }
         panel = panel.child(price_axis_menu_item(
             terminal,
-            menu,
+            menu.clone(),
             row,
             theme,
             index == 0,
@@ -5523,7 +5563,7 @@ fn price_axis_flyout_panel(
         }
         panel = panel.child(price_axis_menu_item(
             terminal,
-            menu,
+            menu.clone(),
             row,
             theme,
             index == 0,
@@ -5746,7 +5786,7 @@ fn price_axis_menu_item(
         .on_click(move |_, _, cx| match row {
             PriceAxisMenuRow::Toggle { action, .. } => {
                 action_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.apply_price_axis_menu(menu, action, terminal_cx);
+                    terminal.apply_price_axis_menu(menu.clone(), action, terminal_cx);
                 });
             }
             PriceAxisMenuRow::Flyout { flyout, .. } => {
@@ -7752,6 +7792,7 @@ impl ChartContextMenuState {
     const SPLIT: u8 = 2;
     const DRAWINGS: u8 = 4;
     const INDICATORS: u8 = 8;
+    const COPY_PRICE: u8 = 16;
 
     const fn enabled(self, flag: u8) -> bool {
         self.flags & flag != 0
@@ -7767,8 +7808,9 @@ struct ChartContextMenuItem {
     action: ChartContextAction,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartContextAction {
+    CopyPrice,
     Reset,
     ClearDrawings,
     ClearIndicators,
@@ -7807,13 +7849,14 @@ impl PriceAxisMenuFlyout {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ChartContextMenu {
     workspace_id: u64,
     pane_id: u64,
     position: gpui::Point<Pixels>,
     kind: ChartContextKind,
     flyout: PriceAxisMenuFlyout,
+    copy_price: Option<SharedString>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8262,6 +8305,7 @@ impl TerminalApp {
                         position: request.position,
                         kind: request.kind,
                         flyout: PriceAxisMenuFlyout::None,
+                        copy_price: request.copy_price,
                     });
                 }
             }
@@ -8300,6 +8344,11 @@ impl TerminalApp {
         self.chart_context_menu = None;
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         match action {
+            ChartContextAction::CopyPrice => {
+                if let Some(price) = menu.copy_price.as_deref() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(price.to_string()));
+                }
+            }
             ChartContextAction::Reset => {
                 self.update_context_menu_pane(menu, WorkspaceSurface::reset_chart_view, cx);
             }
@@ -8376,7 +8425,7 @@ impl TerminalApp {
         };
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         self.update_context_menu_pane(
-            menu,
+            menu.clone(),
             |surface, surface_cx| {
                 if let Some(chart) = &surface.chart {
                     chart.update(surface_cx, |chart, chart_cx| {
@@ -9526,6 +9575,7 @@ fn workspace_pane_element(
                         position: event.position,
                         kind: ChartContextKind::Pane,
                         flyout: PriceAxisMenuFlyout::None,
+                        copy_price: None,
                     },
                     terminal_cx,
                 );
@@ -9609,10 +9659,10 @@ impl TerminalApp {
         viewport: gpui::Size<Pixels>,
         cx: &App,
     ) -> (Option<AnyElement>, Option<AnyElement>) {
-        let context_menu = self.chart_context_menu.map(|menu| {
+        let context_menu = self.chart_context_menu.clone().map(|menu| {
             if let ChartContextKind::PriceAxis { pane, left } = menu.kind {
                 let state = self
-                    .context_menu_price_axis_state(menu, pane, left, cx)
+                    .context_menu_price_axis_state(menu.clone(), pane, left, cx)
                     .unwrap_or(PriceAxisMenuState {
                         flags: PriceAxisMenuState::PRICE_LINE
                             | PriceAxisMenuState::LAST_VALUE
@@ -9629,8 +9679,11 @@ impl TerminalApp {
                     });
                 return price_axis_menu_layer(terminal, menu, state, viewport, &self.theme);
             }
-            let (has_drawings, has_indicators) = self.context_menu_chart_objects(menu, cx);
+            let (has_drawings, has_indicators) = self.context_menu_chart_objects(menu.clone(), cx);
             let mut flags = 0;
+            if menu.copy_price.is_some() {
+                flags |= ChartContextMenuState::COPY_PRICE;
+            }
             if chart_has_market_data {
                 flags |= ChartContextMenuState::READY;
             }
@@ -9652,7 +9705,7 @@ impl TerminalApp {
             )
         });
         let preference_error = self.lifecycle.preference_error();
-        let settings_menu = self.chart_settings_menu.map(|menu| {
+        let settings_menu = self.chart_settings_menu.clone().map(|menu| {
             chart_settings_menu_layer(
                 terminal,
                 menu,
@@ -11720,6 +11773,7 @@ mod tests {
     fn chart_context_remove_actions_use_destructive_color() {
         assert!(super::ChartContextAction::ClearDrawings.is_destructive());
         assert!(super::ChartContextAction::ClearIndicators.is_destructive());
+        assert!(!super::ChartContextAction::CopyPrice.is_destructive());
         assert!(!super::ChartContextAction::Reset.is_destructive());
         assert!(!super::ChartContextAction::Close.is_destructive());
         assert!(!super::ChartContextAction::Settings.is_destructive());
@@ -11728,6 +11782,15 @@ mod tests {
             flags: 0,
         });
         assert_eq!(items[0].icon, super::HugeIcon::Refresh01Icon);
+        assert_eq!(items[1].icon, super::HugeIcon::Copy01Icon);
+        assert_eq!(items[1].label, "Copy price");
+        assert!(!items[1].enabled);
+        assert_eq!(items[1].action, super::ChartContextAction::CopyPrice);
+        let copy_ready = super::chart_context_menu_items(super::ChartContextMenuState {
+            pane_count: 1,
+            flags: super::ChartContextMenuState::COPY_PRICE,
+        });
+        assert!(copy_ready[1].enabled);
         let trash = items
             .into_iter()
             .filter(|item| item.action.is_destructive())

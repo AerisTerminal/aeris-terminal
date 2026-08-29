@@ -17,6 +17,7 @@ pub enum UiIcon {
     CancelIcon01,
     CheckIcon,
     ChevronDown,
+    Copy01Icon,
     DeleteIcon02,
     EraserIcon,
     LayoutAlignLeftIcon,
@@ -41,7 +42,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::AddIcon01,
         Self::AnalyticsUpIcon,
         Self::ArrowLeftIcon01,
@@ -50,6 +51,7 @@ impl UiIcon {
         Self::CancelIcon01,
         Self::CheckIcon,
         Self::ChevronDown,
+        Self::Copy01Icon,
         Self::DeleteIcon02,
         Self::EraserIcon,
         Self::LayoutAlignLeftIcon,
@@ -84,6 +86,7 @@ impl UiIcon {
             Self::CancelIcon01 => "cancel-01.svg",
             Self::CheckIcon => "check.svg",
             Self::ChevronDown => "chevron-down.svg",
+            Self::Copy01Icon => "copy-01.svg",
             Self::DeleteIcon02 => "delete-02.svg",
             Self::EraserIcon => "eraser.svg",
             Self::LayoutAlignLeftIcon => "layout-align-left.svg",
@@ -294,6 +297,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "cancel-01.svg" => include_bytes!("../assets/icons/ui/cancel-01.svg"),
         "check.svg" => include_bytes!("../assets/icons/ui/check.svg"),
         "chevron-down.svg" => include_bytes!("../assets/icons/ui/chevron-down.svg"),
+        "copy-01.svg" => include_bytes!("../assets/icons/ui/copy-01.svg"),
         "delete-02.svg" => include_bytes!("../assets/icons/ui/delete-02.svg"),
         "eraser.svg" => include_bytes!("../assets/icons/ui/eraser.svg"),
         "layout-align-left.svg" => include_bytes!("../assets/icons/ui/layout-align-left.svg"),

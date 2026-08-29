@@ -259,10 +259,12 @@ pub enum ChartContextKind {
 }
 
 /// A chart-surface right-click waiting for the shell to present a menu.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChartContextRequest {
     pub position: Point<Pixels>,
     pub kind: ChartContextKind,
+    /// Nucleus-formatted price at the right-click, when the click was on the pane.
+    pub copy_price: Option<SharedString>,
 }
 
 /// Nucleus-owned price-axis chrome the Y-axis menu presents.
@@ -796,6 +798,40 @@ impl NucleusChartView {
     /// Takes a pending chart right-click request in window coordinates.
     pub fn take_context_menu_request(&mut self) -> Option<ChartContextRequest> {
         self.pending_context_menu.take()
+    }
+
+    /// Nucleus-formatted price at pane coordinates, using the engine's secondary-click context.
+    fn formatted_copy_price(&self, pane_x: f64, y: f64) -> Option<SharedString> {
+        let context = self.engine.chart_context_at(pane_x, y)?;
+        let series = context.series.unwrap_or(0);
+        self.engine
+            .series_format_price(series, context.price)
+            .map(SharedString::from)
+    }
+
+    fn context_menu_request(
+        &self,
+        position: Point<Pixels>,
+        pane_x: f64,
+        y: f64,
+    ) -> ChartContextRequest {
+        let kind = match self.price_axis_at(pane_x, y) {
+            Some((pane, PriceScaleTarget::Left)) => {
+                ChartContextKind::PriceAxis { pane, left: true }
+            }
+            Some((pane, PriceScaleTarget::Right)) => {
+                ChartContextKind::PriceAxis { pane, left: false }
+            }
+            _ => ChartContextKind::Pane,
+        };
+        let copy_price = matches!(kind, ChartContextKind::Pane)
+            .then(|| self.formatted_copy_price(pane_x, y))
+            .flatten();
+        ChartContextRequest {
+            position,
+            kind,
+            copy_price,
+        }
     }
 
     /// Takes a pending request to make this chart's workspace pane active.
@@ -2746,19 +2782,7 @@ impl NucleusChartView {
         let _ = self.finish_text_edit();
         self.cancel_pointer_gesture();
         let (pane_x, y) = self.local_position(event.position);
-        let kind = match self.price_axis_at(pane_x, y) {
-            Some((pane, PriceScaleTarget::Left)) => {
-                ChartContextKind::PriceAxis { pane, left: true }
-            }
-            Some((pane, PriceScaleTarget::Right)) => {
-                ChartContextKind::PriceAxis { pane, left: false }
-            }
-            _ => ChartContextKind::Pane,
-        };
-        self.pending_context_menu = Some(ChartContextRequest {
-            position: event.position,
-            kind,
-        });
+        self.pending_context_menu = Some(self.context_menu_request(event.position, pane_x, y));
         cx.stop_propagation();
         cx.notify();
     }
@@ -3953,6 +3977,49 @@ mod tests {
         assert!(chart.drag.is_none());
         chart.update_crosshair(-1.0, 200.0);
         assert!(chart.engine.crosshair.is_none());
+    }
+
+    #[test]
+    fn pane_copy_price_uses_nucleus_chart_context() {
+        let chart = interactive_chart();
+        let (x, y) = visible_series_point(&chart, 0);
+        let context = chart
+            .engine
+            .chart_context_at(x, y)
+            .expect("pane click has Nucleus context");
+        let expected = chart
+            .engine
+            .series_format_price(0, context.price)
+            .expect("asset price format");
+        let request = chart.context_menu_request(gpui::point(gpui::px(0.0), gpui::px(0.0)), x, y);
+        assert_eq!(request.kind, ChartContextKind::Pane);
+        assert_eq!(request.copy_price.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            chart.formatted_copy_price(x, y).as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn price_axis_context_menu_does_not_copy_price() {
+        let chart = interactive_chart();
+        let axis_x = chart.engine.pane_w + 1.0;
+        let request =
+            chart.context_menu_request(gpui::point(gpui::px(0.0), gpui::px(0.0)), axis_x, 200.0);
+        assert!(matches!(
+            request.kind,
+            ChartContextKind::PriceAxis {
+                pane: 0,
+                left: false
+            }
+        ));
+        assert!(request.copy_price.is_none());
+    }
+
+    #[test]
+    fn empty_chart_has_no_copy_price() {
+        let chart = NucleusChartView::empty();
+        assert!(chart.formatted_copy_price(100.0, 200.0).is_none());
     }
 
     #[test]
