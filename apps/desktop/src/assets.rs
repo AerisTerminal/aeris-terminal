@@ -10,8 +10,6 @@ const EXCHANGE_ASSET_PREFIX: &str = "axiusflow/exchange_logo/";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiIcon {
     AddIcon01,
-    AiEraser,
-    AiLock,
     AnalyticsUpIcon,
     ArrowLeftIcon01,
     ArrowRightDouble,
@@ -20,7 +18,9 @@ pub enum UiIcon {
     CheckIcon,
     ChevronDown,
     DeleteIcon02,
-    Lock,
+    EraserIcon,
+    LayoutAlignLeftIcon,
+    LockKeyholeIcon,
     MoonIcon02,
     Redo01,
     Refresh01Icon,
@@ -43,8 +43,6 @@ pub enum UiIcon {
 impl UiIcon {
     pub const ALL: [Self; 29] = [
         Self::AddIcon01,
-        Self::AiEraser,
-        Self::AiLock,
         Self::AnalyticsUpIcon,
         Self::ArrowLeftIcon01,
         Self::ArrowRightDouble,
@@ -53,7 +51,9 @@ impl UiIcon {
         Self::CheckIcon,
         Self::ChevronDown,
         Self::DeleteIcon02,
-        Self::Lock,
+        Self::EraserIcon,
+        Self::LayoutAlignLeftIcon,
+        Self::LockKeyholeIcon,
         Self::MoonIcon02,
         Self::Redo01,
         Self::Refresh01Icon,
@@ -77,8 +77,6 @@ impl UiIcon {
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::AddIcon01 => "add-01.svg",
-            Self::AiEraser => "ai-eraser.svg",
-            Self::AiLock => "ai-lock.svg",
             Self::AnalyticsUpIcon => "analytics-up.svg",
             Self::ArrowLeftIcon01 => "arrow-left-01.svg",
             Self::ArrowRightDouble => "arrow-right-double.svg",
@@ -87,7 +85,9 @@ impl UiIcon {
             Self::CheckIcon => "check.svg",
             Self::ChevronDown => "chevron-down.svg",
             Self::DeleteIcon02 => "delete-02.svg",
-            Self::Lock => "lock.svg",
+            Self::EraserIcon => "eraser.svg",
+            Self::LayoutAlignLeftIcon => "layout-align-left.svg",
+            Self::LockKeyholeIcon => "lock-keyhole.svg",
             Self::MoonIcon02 => "moon-02.svg",
             Self::Redo01 => "redo-01.svg",
             Self::Refresh01Icon => "refresh-01.svg",
@@ -150,7 +150,7 @@ impl DrawingIcon {
                 concat!("axiusflow/icons/drawing/", "horizontal-line.svg")
             }
             Self::VerticalLine => concat!("axiusflow/icons/drawing/", "vertical-line.svg"),
-            Self::Ray => concat!("axiusflow/icons/drawing/", "ray.svg"),
+            Self::Ray => concat!("axiusflow/icons/drawing/", "horizontal-ray.svg"),
             Self::Rectangle => concat!("axiusflow/icons/drawing/", "rectangle.svg"),
             Self::Cursor => concat!("axiusflow/icons/drawing/", "cursor.svg"),
             Self::Brush => concat!("axiusflow/icons/drawing/", "brush.svg"),
@@ -273,7 +273,7 @@ fn drawing_asset(path: &str) -> Option<&'static [u8]> {
         "trend-line.svg" => include_bytes!("../assets/icons/drawing/trend-line.svg"),
         "horizontal-line.svg" => include_bytes!("../assets/icons/drawing/horizontal-line.svg"),
         "vertical-line.svg" => include_bytes!("../assets/icons/drawing/vertical-line.svg"),
-        "ray.svg" => include_bytes!("../assets/icons/drawing/ray.svg"),
+        "horizontal-ray.svg" => include_bytes!("../assets/icons/drawing/horizontal-ray.svg"),
         "rectangle.svg" => include_bytes!("../assets/icons/drawing/rectangle.svg"),
         "cursor.svg" => include_bytes!("../assets/icons/drawing/cursor.svg"),
         "brush.svg" => include_bytes!("../assets/icons/drawing/brush.svg"),
@@ -285,8 +285,6 @@ fn drawing_asset(path: &str) -> Option<&'static [u8]> {
 fn ui_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(UI_ASSET_PREFIX)? {
         "add-01.svg" => include_bytes!("../assets/icons/ui/add-01.svg"),
-        "ai-eraser.svg" => include_bytes!("../assets/icons/ui/ai-eraser.svg"),
-        "ai-lock.svg" => include_bytes!("../assets/icons/ui/ai-lock.svg"),
         "analytics-up.svg" => include_bytes!("../assets/icons/ui/analytics-up.svg"),
         "arrow-left-01.svg" => include_bytes!("../assets/icons/ui/arrow-left-01.svg"),
         "arrow-right-double.svg" => {
@@ -297,7 +295,9 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "check.svg" => include_bytes!("../assets/icons/ui/check.svg"),
         "chevron-down.svg" => include_bytes!("../assets/icons/ui/chevron-down.svg"),
         "delete-02.svg" => include_bytes!("../assets/icons/ui/delete-02.svg"),
-        "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
+        "eraser.svg" => include_bytes!("../assets/icons/ui/eraser.svg"),
+        "layout-align-left.svg" => include_bytes!("../assets/icons/ui/layout-align-left.svg"),
+        "lock-keyhole.svg" => include_bytes!("../assets/icons/ui/lock-keyhole.svg"),
         "moon-02.svg" => include_bytes!("../assets/icons/ui/moon-02.svg"),
         "redo-01.svg" => include_bytes!("../assets/icons/ui/redo-01.svg"),
         "refresh-01.svg" => include_bytes!("../assets/icons/ui/refresh-01.svg"),
@@ -393,6 +393,18 @@ mod tests {
             assert!(!normalized.contains('#'), "hard-coded hex color: {path}");
             assert!(!normalized.contains("rgb("), "hard-coded RGB color: {path}");
         }
+    }
+
+    #[test]
+    fn horizontal_line_uses_the_horizontal_line_glyph_not_the_diagonal_ray() {
+        assert_eq!(
+            DrawingIcon::HorizontalLine.path().as_ref(),
+            "axiusflow/icons/drawing/horizontal-line.svg"
+        );
+        assert_eq!(
+            DrawingIcon::Ray.path().as_ref(),
+            "axiusflow/icons/drawing/horizontal-ray.svg"
+        );
     }
 
     #[test]

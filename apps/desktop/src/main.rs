@@ -3403,18 +3403,6 @@ impl WorkspaceSurface {
         }
     }
 
-    fn toggle_all_drawings_lock(&mut self, cx: &mut Context<Self>) {
-        if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, chart_cx| {
-                let all_locked = chart.drawings_lock_summary().all_locked;
-                if chart.set_all_drawings_locked(!all_locked) {
-                    chart_cx.notify();
-                }
-            });
-            cx.notify();
-        }
-    }
-
     fn undo_drawing(&mut self, cx: &mut Context<Self>) {
         self.step_drawing_history(true, cx);
     }
@@ -4364,7 +4352,6 @@ struct DrawingToolbarState {
     drawing_count: usize,
     selection: DrawingToolbarSelection,
     selected_locked: bool,
-    all_locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -4397,7 +4384,6 @@ impl DrawingToolbarState {
             drawing_count: chart.drawing_count(),
             selection,
             selected_locked: chart.selected_drawing_locked(),
-            all_locked: chart.drawings_lock_summary().all_locked,
         }
     }
 }
@@ -4581,7 +4567,7 @@ fn drawing_toolbar_actions(
             DrawingActionSpec::new(
                 "drawing_lock_selected",
                 "Lock or unlock selected drawing",
-                HugeIcon::Lock,
+                HugeIcon::LockKeyholeIcon,
                 20.0,
                 state.selected_locked,
                 state.selection == DrawingToolbarSelection::Drawing,
@@ -4592,22 +4578,9 @@ fn drawing_toolbar_actions(
         ))
         .child(drawing_action_control(
             DrawingActionSpec::new(
-                "drawing_lock_all",
-                "Lock or unlock all drawings",
-                HugeIcon::AiLock,
-                20.0,
-                state.all_locked,
-                state.drawing_count > 0,
-                WorkspaceSurface::toggle_all_drawings_lock,
-            ),
-            app.clone(),
-            theme,
-        ))
-        .child(drawing_action_control(
-            DrawingActionSpec::new(
                 "drawing_clear_all",
                 "Clear all drawings",
-                HugeIcon::AiEraser,
+                HugeIcon::EraserIcon,
                 24.0,
                 false,
                 state.drawing_count > 0,
@@ -4618,36 +4591,26 @@ fn drawing_toolbar_actions(
         ))
 }
 
+const DRAWING_TOOLBAR_TOGGLE_HEIGHT: f32 = 28.0;
+const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
+
 fn drawing_toolbar_collapse(
     terminal: Entity<TerminalApp>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    div()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .items_center()
-        .py_2()
-        .w_full()
-        .border_t_1()
-        .border_color(gpui_color(theme.colors.border))
-        .child(chrome_tooltip(
-            "drawing_toolbar_collapse",
-            "Collapse drawing toolbar",
-            button_activation(
-                drawing_toolbar_button(
-                    "drawing_toolbar_collapse",
-                    DrawingToolIcon::Huge(HugeIcon::ArrowLeftIcon01),
-                    "Collapse drawing toolbar",
-                    24.0,
-                    theme,
-                    false,
-                ),
-                true,
-                move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
-            ),
-            theme,
-        ))
+    let colors = theme.colors;
+    drawing_toolbar_toggle_hit(
+        "drawing_toolbar_collapse",
+        HugeIcon::LayoutAlignLeftIcon,
+        "Collapse drawing toolbar",
+        theme,
+        move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
+    )
+    .flex_none()
+    .w_full()
+    .h(px(DRAWING_TOOLBAR_TOGGLE_HEIGHT))
+    .border_t_1()
+    .border_color(gpui_color(colors.border))
 }
 
 #[derive(Clone, Copy)]
@@ -4708,35 +4671,52 @@ fn drawing_toolbar_expander(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    drawing_toolbar_toggle_hit(
+        "drawing_toolbar_expand",
+        HugeIcon::LayoutAlignLeftIcon,
+        "Expand drawing toolbar",
+        theme,
+        move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
+    )
+    .absolute()
+    .left_0()
+    .bottom_0()
+    .w(px(chart_chrome::CHART_CHROME_HEIGHT))
+    .h(px(DRAWING_TOOLBAR_TOGGLE_HEIGHT))
+    .border_t_1()
+    .border_r_1()
+    .border_color(gpui_color(colors.border))
+    .bg(gpui_color(colors.surface))
+}
+
+fn drawing_toolbar_toggle_hit(
+    id: &'static str,
+    icon: HugeIcon,
+    tooltip: &'static str,
+    theme: &AxiusflowTheme,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let spec = TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY);
     div()
-        .absolute()
-        .left_0()
-        .bottom_0()
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .child(chrome_tooltip(
-            "drawing_toolbar_expand",
-            "Expand drawing toolbar",
-            button_activation(
-                drawing_toolbar_button(
-                    "drawing_toolbar_expand",
-                    DrawingToolIcon::Huge(HugeIcon::ArrowRightIcon01),
-                    "Expand drawing toolbar",
-                    14.0,
-                    theme,
-                    false,
-                )
-                .w(px(24.0))
-                .h(px(28.0))
-                .cursor_pointer(),
-                true,
-                move |_, cx| {
-                    terminal.update(cx, TerminalApp::toggle_drawing_toolbar);
-                },
-            ),
-            theme,
-        ))
+        .id(id)
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(0.0))
+        .text_color(gpui_color(colors.icon))
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(tooltip)
+        .hover(move |hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            on_activate(window, cx);
+            cx.stop_propagation();
+        })
+        .tooltip(spec.builder())
+        .tooltip_show_delay(spec.delay())
+        .child(header_icon(icon).with_size(px(DRAWING_TOOLBAR_TOGGLE_ICON)))
 }
 
 fn drawing_toolbar_button(

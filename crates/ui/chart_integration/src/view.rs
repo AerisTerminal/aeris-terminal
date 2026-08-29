@@ -14,9 +14,9 @@ use axiusflow_application::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
-    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Window, canvas, div, prelude::*, px,
-    rgba, svg,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Window,
+    canvas, div, prelude::*, px, rgba, svg,
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
@@ -1083,16 +1083,16 @@ impl NucleusChartView {
     }
 
     /// Arms a drawing tool, replacing any unfinished drawing gesture.
+    ///
+    /// Creation stays idle until the first click. Starting it on arm would paint a
+    /// pre-click handle that magnet-snaps instead of the OHLC crosshair.
     pub fn set_drawing_tool(&mut self, tool: ChartDrawingTool) {
         self.end_drag(-1.0, -1.0);
         let _ = self.finish_text_edit();
         self.cancel_drawing_gesture();
         self.drawing_tool = tool;
-        if let Some(kind) = tool.drawing_kind()
-            && kind != DrawingKind::Brush
-        {
-            let armed = self.engine.drawing_create_begin(kind, None);
-            debug_assert!(armed, "an empty drawing-options template is valid");
+        if tool.drawing_kind().is_none() {
+            self.engine.crosshair_ohlc_magnet = false;
         }
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
@@ -1622,9 +1622,10 @@ impl NucleusChartView {
     /// Steps the engine's chart-local drawing history one command in either direction.
     ///
     /// An in-flight gesture is settled first: the engine drops its own pending creation and brush
-    /// capture on a step, so the host mirrors that and re-arms the active tool afterwards, leaving
-    /// the toolbar selection usable. Locks are keyed by drawing id and are host state, so a
-    /// tombstoned id is dropped and a restored drawing comes back unlocked.
+    /// capture on a step. The toolbar selection stays armed; the next click starts a fresh
+    /// placement so Ctrl magnet can still snap the crosshair instead of a leftover handle.
+    /// Locks are keyed by drawing id and are host state, so a tombstoned id is dropped and a
+    /// restored drawing comes back unlocked.
     fn step_drawing_history(&mut self, undo: bool) -> bool {
         let _ = self.finish_text_edit();
         self.cancel_drawing_gesture();
@@ -1642,12 +1643,6 @@ impl NucleusChartView {
                 .iter()
                 .any(|drawing| drawing.id == *locked)
         });
-        if let Some(kind) = self.drawing_tool.drawing_kind()
-            && kind != DrawingKind::Brush
-        {
-            let armed = self.engine.drawing_create_begin(kind, None);
-            debug_assert!(armed, "an empty drawing-options template is valid");
-        }
         self.invalidate_series_frame();
         true
     }
@@ -2212,6 +2207,28 @@ impl NucleusChartView {
         }
     }
 
+    fn update_crosshair_magnet(&mut self, magnet: bool) {
+        let enabled = magnet && self.drawing_tool.drawing_kind().is_some();
+        if self.engine.crosshair_ohlc_magnet != enabled {
+            self.engine.crosshair_ohlc_magnet = enabled;
+            self.invalidate_series_frame();
+        }
+    }
+
+    fn place_drawing_anchor(&mut self, x: f64, y: f64, modifiers: DrawingModifiers) -> i64 {
+        let Some(kind) = self
+            .drawing_tool
+            .drawing_kind()
+            .filter(|kind| *kind != DrawingKind::Brush)
+        else {
+            return 0;
+        };
+        if !self.engine.drawing_create_active() && !self.engine.drawing_create_begin(kind, None) {
+            return 0;
+        }
+        self.engine.drawing_create_click(x, y, modifiers)
+    }
+
     fn cancel_drawing_gesture(&mut self) {
         self.engine.drawing_drag_end();
         self.engine.drawing_create_cancel();
@@ -2289,10 +2306,11 @@ impl NucleusChartView {
             ChartDrawingTool::Brush => self.engine.brush_create_start(None, pane_x, y),
             tool => {
                 let placing_text = tool == ChartDrawingTool::Text;
-                let result = self.engine.drawing_create_click(pane_x, y, modifiers);
+                let result = self.place_drawing_anchor(pane_x, y, modifiers);
                 if result > 0 {
                     self.drawing_tool = ChartDrawingTool::Cursor;
                     self.cursor_style = CursorStyle::Crosshair;
+                    self.engine.crosshair_ohlc_magnet = false;
                     if placing_text && let Ok(id) = DrawingId::try_from(result) {
                         self.begin_text_edit(id);
                     }
@@ -2347,6 +2365,7 @@ impl NucleusChartView {
             self.engine.brush_create_end();
             self.drawing_tool = ChartDrawingTool::Cursor;
             self.cursor_style = CursorStyle::Crosshair;
+            self.engine.crosshair_ohlc_magnet = false;
             return true;
         }
         if self.engine.drawing_drag_active() {
@@ -2609,6 +2628,7 @@ impl NucleusChartView {
         self.engine.drawing_drag_end();
         self.engine.brush_create_cancel();
         self.pending_brush_point = None;
+        self.engine.crosshair_ohlc_magnet = false;
         self.engine.crosshair = None;
         self.engine.set_separator_hover(None);
         self.engine.set_hovered_series(None);
@@ -2684,6 +2704,7 @@ impl NucleusChartView {
             window.focus(focus_handle, cx);
         }
         self.pending_activate = ActivationRequest::Pending;
+        self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
         if self.separator_at(y).is_some() {
             self.begin_drag(pane_x, y, event.click_count);
@@ -2759,12 +2780,23 @@ impl NucleusChartView {
         }
     }
 
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
+        cx.notify();
+    }
+
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
         self.move_pointer(
             pane_x,
@@ -3187,6 +3219,7 @@ impl Render for NucleusChartView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
@@ -4432,6 +4465,10 @@ mod tests {
         for (index, (tool, anchors, y)) in tools.into_iter().enumerate() {
             chart.set_drawing_tool(tool);
             assert_eq!(chart.drawing_tool(), tool);
+            assert!(
+                !chart.engine.drawing_create_active(),
+                "arming must not start a pre-click handle"
+            );
             for &x in anchor_x.iter().take(anchors) {
                 let handled = chart.drawing_pointer_down(x, y, DrawingModifiers::default(), 1);
                 assert!(handled);
@@ -4440,6 +4477,40 @@ mod tests {
             assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
             assert!(!chart.engine.drawing_create_active());
         }
+    }
+
+    #[test]
+    fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::TrendLine);
+        assert!(!chart.engine.drawing_create_active());
+
+        let x = chart.engine.time_scale.logical_to_coordinate(32.0);
+        let y = 200.0;
+        chart.update_crosshair(x, y);
+        let free = chart.engine.build_frame();
+        chart.update_crosshair_magnet(true);
+        let snapped = chart.engine.build_frame();
+        let crosshair_color =
+            Color::parse_css(&chart.engine.options.get().crosshair.horz_line.color)
+                .expect("the package crosshair color is valid");
+        let crosshair_y = |frame: &ChartFrame| {
+            frame.panes[0].main.iter().find_map(|prim| match prim {
+                Prim::HLine { y, color, .. } if *color == crosshair_color => Some(*y),
+                _ => None,
+            })
+        };
+
+        assert_ne!(crosshair_y(&free), crosshair_y(&snapped));
+        assert_eq!(
+            snapped.panes[0]
+                .main
+                .iter()
+                .filter(|prim| matches!(prim, Prim::Circle { .. }))
+                .count(),
+            0,
+            "arming a tool must not create a pre-click anchor handle"
+        );
     }
 
     #[test]
@@ -4624,8 +4695,8 @@ mod tests {
         assert!(chart.can_redo_drawing());
         assert_eq!(chart.drawing_tool(), ChartDrawingTool::HorizontalLine);
         assert!(
-            chart.engine.drawing_create_active(),
-            "stepping history must leave the selected tool armed for the next placement"
+            !chart.engine.drawing_create_active(),
+            "stepping history must keep the tool selected without a pre-click handle"
         );
 
         assert!(chart.redo_drawing());
