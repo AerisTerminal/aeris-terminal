@@ -3519,6 +3519,7 @@ fn chrome_overlay_layer(
     app: &Entity<WorkspaceSurface>,
     theme: &AxiusflowTheme,
     chrome_height: f32,
+    viewport: gpui::Size<Pixels>,
     cx: &App,
 ) -> Option<AnyElement> {
     let overlay = app_state.chrome_overlay?;
@@ -3529,11 +3530,11 @@ fn chrome_overlay_layer(
     let anchored_menu = matches!(overlay, ChromeOverlay::Timeframe | ChromeOverlay::ChartType);
     let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
     let dual_container = overlay == ChromeOverlay::Timeframe;
-    let menu_left = compact_menu_left(overlay, app_state);
+    let menu_left = compact_menu_left(overlay, app_state, viewport);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
-    let panel = chrome_overlay_content(app_state, app, overlay, theme, cx);
+    let panel = chrome_overlay_content(app_state, app, overlay, chrome_height, viewport, theme, cx);
     let close_app = app.clone();
     Some(
         div()
@@ -3577,20 +3578,48 @@ fn chrome_overlay_layer(
     )
 }
 
-fn compact_menu_left(overlay: ChromeOverlay, app_state: &WorkspaceSurface) -> Pixels {
-    match overlay {
-        ChromeOverlay::ChartType => timeframe_overlay_left(app_state.chart_type_trigger_bounds),
-        ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe => {
-            timeframe_overlay_left(app_state.timeframe_trigger_bounds)
+fn compact_menu_left(
+    overlay: ChromeOverlay,
+    app_state: &WorkspaceSurface,
+    viewport: gpui::Size<Pixels>,
+) -> Pixels {
+    let (trigger, width) = match overlay {
+        ChromeOverlay::ChartType => (app_state.chart_type_trigger_bounds, TIMEFRAME_MENU_WIDTH),
+        ChromeOverlay::Timeframe => {
+            let intervals = app_state.available_intervals();
+            let groups = timeframe_menu_groups(intervals);
+            let flyout = app_state.timeframe_menu_flyout.and_then(|group| {
+                let index = groups.iter().position(|item| *item == group)?;
+                Some((index, timeframe_group_intervals(group, intervals).len()))
+            });
+            (
+                app_state.timeframe_trigger_bounds,
+                timeframe_overlay_extent(groups.len(), flyout).0,
+            )
         }
-        ChromeOverlay::Instrument | ChromeOverlay::Indicator => px(0.0),
-    }
+        ChromeOverlay::QuickTimeframe => (
+            app_state.timeframe_trigger_bounds,
+            QUICK_TIMEFRAME_POPUP_WIDTH,
+        ),
+        ChromeOverlay::Instrument | ChromeOverlay::Indicator => return px(0.0),
+    };
+    clamp_anchored_menu_left(timeframe_overlay_left(trigger), viewport, width)
+}
+
+/// Anchored menus open under their header trigger, so a trigger near the right edge would run a
+/// wide panel off-screen. Slide the panel back inside the window instead of clipping it.
+fn clamp_anchored_menu_left(left: Pixels, viewport: gpui::Size<Pixels>, width: f32) -> Pixels {
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let max_left = (viewport.width - px(width) - margin).max(px(0.0));
+    left.min(max_left).max(px(0.0))
 }
 
 fn chrome_overlay_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     overlay: ChromeOverlay,
+    chrome_height: f32,
+    viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> AnyElement {
@@ -3599,6 +3628,7 @@ fn chrome_overlay_content(
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
+            chrome_menu_extent(viewport, chrome_height, CHROME_MENU_SEARCH_HEIGHT),
             &InstrumentSelectorState {
                 label: terminal_instrument_label(app_state),
                 instruments: app_state.instrument_entries(cx),
@@ -3617,6 +3647,7 @@ fn chrome_overlay_content(
         .into_any_element(),
         ChromeOverlay::Indicator => indicator_dialog_content(
             app,
+            chrome_menu_extent(viewport, chrome_height, CHROME_MENU_INDICATOR_SEARCH_HEIGHT),
             &app_state.indicator_input,
             app_state.indicator_message.as_deref(),
             app_state.chrome_selection,
@@ -6313,6 +6344,7 @@ fn indicator_selector(
 
 fn indicator_dialog_content(
     app: &Entity<WorkspaceSurface>,
+    extent: ChromeMenuExtent,
     input: &Entity<InputState>,
     message: Option<&str>,
     keyboard_selection: usize,
@@ -6376,7 +6408,7 @@ fn indicator_dialog_content(
                     }),
             )
     };
-    chrome_menu_surface(&colors)
+    chrome_menu_surface(&colors, extent)
         .child(chrome_menu_search_header(
             input,
             theme,
@@ -6384,7 +6416,12 @@ fn indicator_dialog_content(
             hint,
             CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
         ))
-        .child(scrollable_menu_body(list, scroll, colors.text_secondary))
+        .child(scrollable_menu_body(
+            list,
+            scroll,
+            colors.text_secondary,
+            extent,
+        ))
         .child(chrome_menu_footer(&colors, "Add", "Publisher: Native"))
 }
 
@@ -6419,6 +6456,7 @@ struct InstrumentSelectorState {
 
 fn instrument_dialog_content(
     app: &Entity<WorkspaceSurface>,
+    extent: ChromeMenuExtent,
     state: &InstrumentSelectorState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
@@ -6481,7 +6519,7 @@ fn instrument_dialog_content(
                 }));
         }
     }
-    chrome_menu_surface(&colors)
+    chrome_menu_surface(&colors, extent)
         .child(state.input.as_ref().map_or_else(
             || div().into_any_element(),
             |input| {
@@ -6493,6 +6531,7 @@ fn instrument_dialog_content(
             list,
             &state.scroll,
             colors.text_secondary,
+            extent,
         ))
         .child(chrome_menu_footer(&colors, "Select", trailing))
         .when(state.exchange_menu_open, |surface| {
@@ -6544,6 +6583,7 @@ fn instrument_dialog_row(
 }
 
 const CHROME_MENU_WIDTH: f32 = 896.0;
+const CHROME_MENU_MIN_WIDTH: f32 = 320.0;
 const CHROME_MENU_SEARCH_HEIGHT: f32 = 44.0;
 const CHROME_MENU_INDICATOR_SEARCH_HEIGHT: f32 = 40.0;
 const CHROME_MENU_LIST_HEIGHT: f32 = 480.0;
@@ -6552,12 +6592,43 @@ const CHROME_MENU_MAX_HEIGHT: f32 = 704.0;
 const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
 const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
 
-fn chrome_menu_surface(colors: &axiusflow_design_system::ThemeColors) -> Div {
+/// Outer width and scrolling-list height the symbol and indicator menus are drawn at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChromeMenuExtent {
+    width: f32,
+    list_height: f32,
+}
+
+/// Size the symbol and indicator menus to the surface they open over rather than to a fixed
+/// design width. Both keep the 896x704 ceiling on a roomy window and shrink from there, so a
+/// narrow or short viewport gets a smaller menu instead of a clipped one: the search header and
+/// the footer are fixed chrome, so the scrolling list absorbs whatever height is left.
+fn chrome_menu_extent(
+    viewport: gpui::Size<Pixels>,
+    chrome_height: f32,
+    search_height: f32,
+) -> ChromeMenuExtent {
+    let viewport_width = f32::from(viewport.width).max(0.0);
+    let width = (viewport_width - OVERLAY_EDGE_MARGIN * 2.0)
+        .clamp(CHROME_MENU_MIN_WIDTH, CHROME_MENU_WIDTH)
+        .min(viewport_width);
+    let available =
+        (f32::from(viewport.height) - chrome_height - OVERLAY_EDGE_MARGIN * 2.0).max(0.0);
+    let list_height =
+        (available.min(CHROME_MENU_MAX_HEIGHT) - search_height - CHROME_MENU_FOOTER_HEIGHT)
+            .clamp(0.0, CHROME_MENU_LIST_HEIGHT);
+    ChromeMenuExtent { width, list_height }
+}
+
+fn chrome_menu_surface(
+    colors: &axiusflow_design_system::ThemeColors,
+    extent: ChromeMenuExtent,
+) -> Div {
     div()
         .relative()
         .flex()
         .flex_col()
-        .w(px(CHROME_MENU_WIDTH))
+        .w(px(extent.width))
         .max_h(px(CHROME_MENU_MAX_HEIGHT))
         .max_h_full()
         .overflow_hidden()
@@ -6829,17 +6900,18 @@ fn scrollable_menu_body(
     body: Div,
     scroll: &ScrollHandle,
     color: ThemeColor,
+    extent: ChromeMenuExtent,
 ) -> impl IntoElement + use<> {
     div()
         .relative()
         .flex_none()
         .w_full()
-        .max_h(px(CHROME_MENU_LIST_HEIGHT))
+        .max_h(px(extent.list_height))
         .overflow_hidden()
         .child(
             tracked_overflow_y_scrollbar(body, scroll)
                 .w_full()
-                .max_h(px(CHROME_MENU_LIST_HEIGHT)),
+                .max_h(px(extent.list_height)),
         )
         .child(ThinScrollbar::new(scroll, gpui_color(color)))
 }
@@ -9643,6 +9715,7 @@ impl Render for TerminalApp {
                 } else {
                     WORKSPACE_TITLE_BAR_HEIGHT
                 },
+            window.viewport_size(),
             cx,
         );
         let (context_menu, settings_menu) = self.chart_surface_menus(
@@ -10481,20 +10554,22 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, COINBASE_CALENDAR_HISTORY_STATUS,
-        COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS, CaptionPlatform, CaptionPointerOwner,
-        ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode,
-        HeaderControls, InputEvent, InstrumentMenuEntry, InstrumentMenuSelection,
-        OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow,
-        ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+        CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_FOOTER_HEIGHT,
+        CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT,
+        CHROME_MENU_WIDTH, COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID,
+        COINBASE_INTERVALS, CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement,
+        ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
+        InputEvent, InstrumentMenuEntry, InstrumentMenuSelection, OVERLAY_EDGE_MARGIN,
+        PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
+        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
         RithmicSessionRetirement, SidePanel, SidePanelResize, SymbolInputAction,
         SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
         TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
         WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
         WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
         caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-        chart_status_detail, chart_surface_notice, chrome_control_foreground,
-        chrome_overlay_progress, chrome_typeahead_char_from, claim_once,
+        chart_status_detail, chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
+        chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
         clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
         current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
         finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
@@ -11685,6 +11760,41 @@ mod tests {
     }
 
     #[test]
+    fn chrome_menus_shrink_to_fit_a_small_viewport() {
+        let chrome_height = 44.0;
+        let roomy = chrome_menu_extent(
+            size(px(1920.0), px(1200.0)),
+            chrome_height,
+            CHROME_MENU_SEARCH_HEIGHT,
+        );
+        assert!((roomy.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
+        assert!((roomy.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
+
+        let cramped = chrome_menu_extent(
+            size(px(800.0), px(600.0)),
+            chrome_height,
+            CHROME_MENU_SEARCH_HEIGHT,
+        );
+        assert!(cramped.width < CHROME_MENU_WIDTH);
+        assert!(cramped.width + OVERLAY_EDGE_MARGIN * 2.0 <= 800.0);
+        assert!(cramped.list_height < CHROME_MENU_LIST_HEIGHT);
+        let drawn = CHROME_MENU_SEARCH_HEIGHT + cramped.list_height + CHROME_MENU_FOOTER_HEIGHT;
+        assert!(drawn + chrome_height + OVERLAY_EDGE_MARGIN * 2.0 <= 600.0);
+        assert!(drawn <= CHROME_MENU_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn chrome_menus_never_exceed_a_tiny_viewport() {
+        let tiny = chrome_menu_extent(size(px(240.0), px(180.0)), 44.0, CHROME_MENU_SEARCH_HEIGHT);
+        assert!(tiny.width <= 240.0);
+        assert!(tiny.list_height >= 0.0);
+        assert!(
+            CHROME_MENU_SEARCH_HEIGHT + tiny.list_height + CHROME_MENU_FOOTER_HEIGHT
+                <= 180.0 - 44.0
+        );
+    }
+
+    #[test]
     fn header_history_controls_gate_on_their_own_half_of_the_stack() {
         use super::{DrawingHistoryControl, DrawingHistoryState};
 
@@ -11708,6 +11818,26 @@ mod tests {
         );
         assert_eq!(DrawingHistoryControl::Undo.icon(), super::HugeIcon::Undo03);
         assert_eq!(DrawingHistoryControl::Redo.icon(), super::HugeIcon::Redo01);
+    }
+
+    #[test]
+    fn anchored_menus_slide_back_inside_the_window() {
+        let viewport = size(px(800.0), px(600.0));
+        let flush_right = clamp_anchored_menu_left(px(760.0), viewport, TIMEFRAME_MENU_WIDTH);
+        assert!(
+            flush_right + px(TIMEFRAME_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN),
+            "a trigger near the right edge must not push the panel off-screen"
+        );
+        assert_eq!(
+            clamp_anchored_menu_left(px(120.0), viewport, TIMEFRAME_MENU_WIDTH),
+            px(120.0),
+            "a panel that already fits keeps its anchored position"
+        );
+        assert_eq!(
+            clamp_anchored_menu_left(px(40.0), size(px(100.0), px(600.0)), TIMEFRAME_MENU_WIDTH),
+            px(0.0),
+            "a panel wider than the window pins to the left edge rather than going negative"
+        );
     }
 
     #[test]
