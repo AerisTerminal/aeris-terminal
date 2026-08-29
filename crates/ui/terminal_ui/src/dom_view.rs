@@ -73,8 +73,6 @@ impl Render for ReadOnlyDomView {
             .overflow_hidden()
             .bg(gpui_color(colors.surface))
             .text_color(gpui_color(colors.text_primary))
-            .border_l_1()
-            .border_color(gpui_color(colors.border))
             .child(
                 div()
                     .h(px(HEADER_HEIGHT))
@@ -86,7 +84,8 @@ impl Render for ReadOnlyDomView {
                     .text_xs()
                     .text_color(gpui_color(colors.text_secondary))
                     .child(div().flex_1().px_2().text_right().child("BID SIZE"))
-                    .child(div().w(px(PRICE_WIDTH)).text_center().child("PRICE"))
+                    .child(div().w(px(PRICE_WIDTH)).px_1().text_right().child("BID"))
+                    .child(div().w(px(PRICE_WIDTH)).px_1().child("ASK"))
                     .child(div().flex_1().px_2().child("ASK SIZE")),
             )
             .children(state.and_then(|state| status_banner(state, watermark, &self.theme)))
@@ -129,7 +128,7 @@ fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoEl
         .flex()
         .items_center()
         .border_b_1()
-        .border_color(gpui_color(colors.border.with_alpha(0.55)))
+        .border_color(gpui_color(colors.border))
         .text_sm()
         .child(quantity_cell(row.bid.as_ref(), colors.bullish, true))
         .child(

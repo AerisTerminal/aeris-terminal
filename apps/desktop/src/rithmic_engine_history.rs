@@ -375,9 +375,18 @@ impl EngineHistorySession {
                 if snapshot.provider_generation < request.instrument.session_generation {
                     return Ok(None);
                 }
-                dom_from_snapshot(request, &snapshot)
-                    .map(EngineUpdate::Dom)
-                    .map(Some)
+                dom_from_snapshot(
+                    &DomIdentity {
+                        instrument: &request.instrument,
+                        series_generation: u64::try_from(request.series_generation.get())
+                            .unwrap_or(u64::MAX),
+                        selection_generation: u64::try_from(request.selection_generation.get())
+                            .unwrap_or(u64::MAX),
+                    },
+                    &snapshot,
+                )
+                .map(EngineUpdate::Dom)
+                .map(Some)
             }
             envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => {
                 Ok(None)
@@ -728,29 +737,35 @@ fn tail_from_update(
         .map_err(|error| error.to_string())
 }
 
-fn dom_from_snapshot(
-    request: &HistoryFetchRequest,
+/// Identity one engine order-book snapshot must match before it reaches the DOM.
+pub(crate) struct DomIdentity<'a> {
+    pub instrument: &'a InstallProviderInstrument,
+    pub series_generation: u64,
+    pub selection_generation: u64,
+}
+
+pub(crate) fn dom_from_snapshot(
+    identity: &DomIdentity<'_>,
     snapshot: &IpcOrderBookSnapshot,
 ) -> Result<DomFrame, String> {
-    let expected_generation = u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX);
-    let expected_selection = u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX);
+    let instrument = identity.instrument;
     if snapshot.consumer_id == 0
-        || snapshot.generation != expected_generation
-        || snapshot.provider != "rithmic"
-        || snapshot.instrument_id != request.instrument.instrument_id
-        || snapshot.entitlement_id != request.instrument.entitlement_id
-        || snapshot.provider_generation < request.instrument.session_generation
-        || snapshot.selection_generation != expected_selection
+        || snapshot.generation != identity.series_generation
+        || snapshot.provider != instrument.provider
+        || snapshot.instrument_id != instrument.instrument_id
+        || snapshot.entitlement_id != instrument.entitlement_id
+        || snapshot.provider_generation < instrument.session_generation
+        || snapshot.selection_generation != identity.selection_generation
         || snapshot.bids.len() > MAXIMUM_DOM_LEVELS
         || snapshot.asks.len() > MAXIMUM_DOM_LEVELS
     {
-        return Err("Rithmic engine order-book identity is invalid".to_string());
+        return Err("Engine order-book identity is invalid".to_string());
     }
     let state = match IpcOrderBookState::try_from(snapshot.state)
-        .map_err(|_| "Rithmic engine order-book state is invalid".to_string())?
+        .map_err(|_| "Engine order-book state is invalid".to_string())?
     {
         IpcOrderBookState::Unspecified => {
-            return Err("Rithmic engine order-book state is unspecified".to_string());
+            return Err("Engine order-book state is unspecified".to_string());
         }
         IpcOrderBookState::AwaitingSnapshot => {
             OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot)
@@ -774,7 +789,7 @@ fn dom_from_snapshot(
         .zip(asks.first())
         .is_some_and(|(bid, ask)| bid.price >= ask.price)
     {
-        return Err("Rithmic engine order book is crossed".to_string());
+        return Err("Engine order book is crossed".to_string());
     }
     let publication = OrderBookPublication {
         provider_id: snapshot.provider.clone(),
@@ -794,15 +809,15 @@ fn dom_from_snapshot(
         session_generation: snapshot.provider_generation,
         selection_generation: snapshot.selection_generation,
         precision: InstrumentPrecision::try_new(
-            u8::try_from(request.instrument.price_scale)
-                .map_err(|_| "Rithmic engine price scale is invalid".to_string())?,
-            u8::try_from(request.instrument.quantity_scale)
-                .map_err(|_| "Rithmic engine quantity scale is invalid".to_string())?,
+            u8::try_from(instrument.price_scale)
+                .map_err(|_| "Engine price scale is invalid".to_string())?,
+            u8::try_from(instrument.quantity_scale)
+                .map_err(|_| "Engine quantity scale is invalid".to_string())?,
         )
         .map_err(|error| error.to_string())?,
     };
     ReadOnlyDom::project_publication(&selection, &publication)
-        .ok_or_else(|| "Rithmic engine order-book publication is stale".to_string())
+        .ok_or_else(|| "Engine order-book publication is stale".to_string())
 }
 
 fn ipc_depth_levels(
@@ -813,7 +828,7 @@ fn ipc_depth_levels(
     let mut converted = Vec::with_capacity(levels.len());
     for level in levels {
         if level.price <= 0 || level.quantity <= 0 {
-            return Err("Rithmic engine order-book level is invalid".to_string());
+            return Err("Engine order-book level is invalid".to_string());
         }
         if previous.is_some_and(|previous| {
             if bids {
@@ -822,7 +837,7 @@ fn ipc_depth_levels(
                 level.price <= previous
             }
         }) {
-            return Err("Rithmic engine order-book levels are unordered".to_string());
+            return Err("Engine order-book levels are unordered".to_string());
         }
         previous = Some(level.price);
         converted.push(DepthLevel {
@@ -1020,7 +1035,13 @@ mod tests {
     fn engine_order_book_projects_without_desktop_reconstruction() {
         let request = request(RithmicSeries::Minute1);
         let frame = dom_from_snapshot(
-            &request,
+            &DomIdentity {
+                instrument: &request.instrument,
+                series_generation: u64::try_from(request.series_generation.get())
+                    .unwrap_or(u64::MAX),
+                selection_generation: u64::try_from(request.selection_generation.get())
+                    .unwrap_or(u64::MAX),
+            },
             &IpcOrderBookSnapshot {
                 consumer_id: 5,
                 generation: 3,

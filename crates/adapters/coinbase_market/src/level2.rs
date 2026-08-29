@@ -137,9 +137,14 @@ impl CoinbaseLevel2Book {
         if message.channel != "l2_data" {
             return Ok(CoinbaseLevel2Outcome::Ignored);
         }
+        // Coinbase numbers every message on the connection, not per channel, so
+        // heartbeats and trades consume sequence numbers this book never sees.
+        // A gap is therefore normal; only a replayed or reordered message is a
+        // real fault. Level 2 updates carry absolute quantities per price level,
+        // so a dropped message leaves one stale level the next update corrects.
         if self
             .next_provider_sequence
-            .is_some_and(|expected| expected != message.sequence_num)
+            .is_some_and(|expected| message.sequence_num < expected)
         {
             self.require_recovery();
             self.diagnostics.sequence_gaps = self.diagnostics.sequence_gaps.saturating_add(1);
@@ -365,21 +370,34 @@ mod tests {
         assert_eq!(book.bids.len(), 1);
     }
 
+    /// Live Coinbase interleaves heartbeats and trades on the same sequence, so
+    /// the Level 2 book sees non-contiguous numbers constantly. Treating that as
+    /// loss wedged the book after the first update and emptied the DOM.
     #[test]
-    fn sequence_gap_clears_book_until_a_covering_snapshot() {
+    fn skipped_sequence_numbers_from_other_channels_keep_the_book_live() {
         let mut book = CoinbaseLevel2Book::try_new("BTC-USD", 2, 8, 1).expect("book");
         let snapshot = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:20Z","sequence_num":0,"events":[{"type":"snapshot","product_id":"BTC-USD","updates":[{"side":"bid","event_time":"2023-11-14T22:13:20Z","price_level":"100.00","new_quantity":"1.00000000"},{"side":"offer","event_time":"2023-11-14T22:13:20Z","price_level":"101.00","new_quantity":"1.00000000"}]}]}"#;
         book.apply_message(snapshot, RECEIVED).expect("snapshot");
-        let gap = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:22Z","sequence_num":2,"events":[{"type":"update","product_id":"BTC-USD","updates":[]}]}"#;
-        assert_eq!(
-            book.apply_message(gap, RECEIVED + 2)
-                .expect("gap classified"),
-            CoinbaseLevel2Outcome::RecoveryRequired
+        let skipped = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:22Z","sequence_num":9,"events":[{"type":"update","product_id":"BTC-USD","updates":[{"side":"bid","event_time":"2023-11-14T22:13:22Z","price_level":"99.00","new_quantity":"2.00000000"}]}]}"#;
+        let outcome = book
+            .apply_message(skipped, RECEIVED + 2)
+            .expect("skipped sequence applies");
+        assert!(
+            matches!(outcome, CoinbaseLevel2Outcome::Deltas { .. }),
+            "a gap left by another channel must not wedge the book: {outcome:?}"
         );
-        let update = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:23Z","sequence_num":3,"events":[{"type":"update","product_id":"BTC-USD","updates":[]}]}"#;
+    }
+
+    /// A replayed or reordered message is a real fault and must clear the book.
+    #[test]
+    fn replayed_sequence_number_requires_recovery() {
+        let mut book = CoinbaseLevel2Book::try_new("BTC-USD", 2, 8, 1).expect("book");
+        let snapshot = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:20Z","sequence_num":5,"events":[{"type":"snapshot","product_id":"BTC-USD","updates":[{"side":"bid","event_time":"2023-11-14T22:13:20Z","price_level":"100.00","new_quantity":"1.00000000"},{"side":"offer","event_time":"2023-11-14T22:13:20Z","price_level":"101.00","new_quantity":"1.00000000"}]}]}"#;
+        book.apply_message(snapshot, RECEIVED).expect("snapshot");
+        let replayed = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:22Z","sequence_num":4,"events":[{"type":"update","product_id":"BTC-USD","updates":[]}]}"#;
         assert_eq!(
-            book.apply_message(update, RECEIVED + 3)
-                .expect("recovering update"),
+            book.apply_message(replayed, RECEIVED + 2)
+                .expect("replay classified"),
             CoinbaseLevel2Outcome::RecoveryRequired
         );
     }

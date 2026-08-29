@@ -29,6 +29,7 @@ use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 
 use crate::engine_supervisor::EngineSupervisor;
+use crate::rithmic_engine_history::{DomIdentity, dom_from_snapshot};
 #[cfg(test)]
 use axiusflow_desktop::market_worker::ProviderCatalogEvent;
 use axiusflow_desktop::market_worker::{
@@ -529,9 +530,12 @@ fn poll_endpoint(client: &mut EngineSupervisor, record: &mut EndpointRecord) -> 
     let Some(event) = event else { return Ok(()) };
     let outcome = apply_polled_event(
         event,
-        endpoint.consumer_id,
-        endpoint.active_generation,
-        interval_supports_realtime(record.interval),
+        &PolledEventContext {
+            consumer_id: endpoint.consumer_id,
+            active_generation: endpoint.active_generation,
+            realtime: interval_supports_realtime(record.interval),
+            instrument: &record.product,
+        },
         &mut endpoint.model,
         &mut endpoint.publication,
         &endpoint.messages,
@@ -740,15 +744,27 @@ enum PolledEventOutcome {
     ResnapshotRequired,
 }
 
-fn apply_polled_event(
-    event: envelope::Payload,
+/// Identity every polled engine event is checked against.
+struct PolledEventContext<'a> {
     consumer_id: u64,
     active_generation: u64,
     realtime: bool,
+    instrument: &'a InstallProviderInstrument,
+}
+
+fn apply_polled_event(
+    event: envelope::Payload,
+    context: &PolledEventContext<'_>,
     model: &mut MarketBarClientModel,
     publication: &mut Option<MarketPublicationGeneration>,
     messages: &MarketWorkerSender,
 ) -> Result<PolledEventOutcome, String> {
+    let &PolledEventContext {
+        consumer_id,
+        active_generation,
+        realtime,
+        instrument,
+    } = context;
     match event {
         envelope::Payload::SeriesSnapshot(snapshot) => {
             if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
@@ -825,6 +841,26 @@ fn apply_polled_event(
             }
         }
         envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+        envelope::Payload::OrderBookSnapshot(snapshot) => {
+            if snapshot.consumer_id != consumer_id {
+                return Err("engine order-book consumer mismatched".to_string());
+            }
+            if snapshot.provider_generation < instrument.session_generation {
+                return Ok(PolledEventOutcome::Applied);
+            }
+            let frame = dom_from_snapshot(
+                &DomIdentity {
+                    instrument,
+                    series_generation: active_generation,
+                    selection_generation: instrument.selection_generation,
+                },
+                &snapshot,
+            )?;
+            messages
+                .send(MarketWorkerMessage::CoinbaseDom(frame))
+                .map_err(|error| error.to_string())?;
+            Ok(PolledEventOutcome::Applied)
+        }
         envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => {
             Ok(PolledEventOutcome::Applied)
         }
@@ -1371,8 +1407,10 @@ fn random_identity() -> Result<u64, String> {
 mod tests {
     use super::*;
     use axiusflow_engine_protocol::{
-        MarketBar as IpcMarketBar, ProviderInstrumentSearchResult, ProviderInstrumentSelection,
-        ProviderInstrumentSummary, SeriesState,
+        MarketBar as IpcMarketBar, OrderBookLevel as IpcOrderBookLevel,
+        OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState,
+        ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
+        SeriesState,
     };
 
     fn handle_coinbase_catalog_event(
@@ -1608,9 +1646,12 @@ mod tests {
         assert_eq!(
             apply_polled_event(
                 envelope::Payload::SeriesSnapshot(snapshot),
-                1,
-                1,
-                true,
+                &PolledEventContext {
+                    consumer_id: 1,
+                    active_generation: 1,
+                    realtime: true,
+                    instrument: &default_coinbase_product("BTC-USD"),
+                },
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1638,9 +1679,12 @@ mod tests {
         assert_eq!(
             apply_polled_event(
                 envelope::Payload::SeriesUpdate(skipped_tail),
-                1,
-                1,
-                true,
+                &PolledEventContext {
+                    consumer_id: 1,
+                    active_generation: 1,
+                    realtime: true,
+                    instrument: &default_coinbase_product("BTC-USD"),
+                },
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1666,9 +1710,12 @@ mod tests {
                 state: SeriesLoadState::Live as i32,
                 ..SeriesState::default()
             }),
-            1,
-            7,
-            true,
+            &PolledEventContext {
+                consumer_id: 1,
+                active_generation: 7,
+                realtime: true,
+                instrument: &default_coinbase_product("BTC-USD"),
+            },
             &mut model,
             &mut publication,
             &sender,
@@ -1814,9 +1861,12 @@ mod tests {
         let mut publication = None;
         apply_polled_event(
             envelope::Payload::SeriesSnapshot(snapshot),
-            1,
-            7,
-            false,
+            &PolledEventContext {
+                consumer_id: 1,
+                active_generation: 7,
+                realtime: false,
+                instrument: &default_coinbase_product("BTC-USD"),
+            },
             &mut model,
             &mut publication,
             &sender,
@@ -1831,9 +1881,12 @@ mod tests {
                     state: SeriesLoadState::Live as i32,
                     ..SeriesState::default()
                 }),
-                1,
-                7,
-                false,
+                &PolledEventContext {
+                    consumer_id: 1,
+                    active_generation: 7,
+                    realtime: false,
+                    instrument: &default_coinbase_product("BTC-USD"),
+                },
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1876,9 +1929,12 @@ mod tests {
         assert_eq!(
             apply_polled_event(
                 snapshot(9, 12, 12),
-                1,
-                1,
-                true,
+                &PolledEventContext {
+                    consumer_id: 1,
+                    active_generation: 1,
+                    realtime: true,
+                    instrument: &default_coinbase_product("BTC-USD"),
+                },
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1891,9 +1947,12 @@ mod tests {
         assert_eq!(
             apply_polled_event(
                 snapshot(1, 1, 1),
-                1,
-                1,
-                true,
+                &PolledEventContext {
+                    consumer_id: 1,
+                    active_generation: 1,
+                    realtime: true,
+                    instrument: &default_coinbase_product("BTC-USD"),
+                },
                 &mut model,
                 &mut publication,
                 &sender,
@@ -1935,6 +1994,80 @@ mod tests {
         assert_eq!(
             demand_error(&error),
             "history/live handoff failed (retryable) after 17 ms: history/live handoff failed"
+        );
+    }
+
+    /// The Coinbase DOM panel stayed empty because the engine's order-book
+    /// snapshot had no arm here: `CoinbaseDom` was declared, coalesced, and
+    /// rendered, but never constructed. Levels are real BTC-USD top-of-book.
+    #[test]
+    fn coinbase_order_book_snapshot_reaches_the_dom_panel() {
+        let product = default_coinbase_product("BTC-USD");
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+        let mut model = empty_model();
+        let mut publication = None;
+
+        let outcome = apply_polled_event(
+            envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
+                consumer_id: 1,
+                generation: 1,
+                provider: "coinbase".to_string(),
+                instrument_id: product.instrument_id.clone(),
+                entitlement_id: product.entitlement_id.clone(),
+                provider_generation: 1,
+                selection_generation: 1,
+                revision: 1,
+                source_watermark: 1,
+                state: IpcOrderBookState::Ready as i32,
+                bids: vec![
+                    IpcOrderBookLevel {
+                        price: 7_798_670,
+                        quantity: 653_408,
+                        order_count: None,
+                    },
+                    IpcOrderBookLevel {
+                        price: 7_798_514,
+                        quantity: 2_564_592,
+                        order_count: None,
+                    },
+                ],
+                asks: vec![
+                    IpcOrderBookLevel {
+                        price: 7_798_671,
+                        quantity: 22_517_771,
+                        order_count: None,
+                    },
+                    IpcOrderBookLevel {
+                        price: 7_798_727,
+                        quantity: 4_582_685,
+                        order_count: None,
+                    },
+                ],
+            }),
+            &PolledEventContext {
+                consumer_id: 1,
+                active_generation: 1,
+                realtime: true,
+                instrument: &product,
+            },
+            &mut model,
+            &mut publication,
+            &sender,
+        );
+
+        assert_eq!(outcome, Ok(PolledEventOutcome::Applied));
+        let (messages, _) = receiver.drain();
+        let frame = messages
+            .into_iter()
+            .find_map(|message| match message {
+                MarketWorkerMessage::CoinbaseDom(frame) => Some(frame),
+                _ => None,
+            })
+            .expect("Coinbase depth must reach the DOM panel");
+        assert!(
+            !frame.rows.is_empty(),
+            "a projected Coinbase DOM frame must carry price rows"
         );
     }
 }

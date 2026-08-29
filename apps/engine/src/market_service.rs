@@ -15,9 +15,9 @@ use std::{
 
 use axiusflow_coinbase_market_adapter::{
     COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
-    CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseInterval, CoinbaseSession,
-    CoinbaseSpotProduct, ENTITLEMENT_CLASS, aggregate_coinbase_bars, coinbase_instrument_id,
-    decode_history_bar,
+    CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseInterval, CoinbaseLevel2Book,
+    CoinbaseLevel2Outcome, CoinbaseSession, CoinbaseSpotProduct, ENTITLEMENT_CLASS,
+    aggregate_coinbase_bars, coinbase_instrument_id, decode_history_bar,
 };
 use axiusflow_engine_protocol::{
     DemandError, EngineFaultCode, FailureStage, HotSeries, InstallProviderInstrument,
@@ -222,13 +222,22 @@ struct DemandWaiter {
 }
 
 enum RealtimeControl {
-    Start(Vec<String>),
+    Start(Vec<RealtimeProduct>),
+}
+
+/// One realtime product plus the precision Level 2 decoding needs.
+#[derive(Clone, Eq, PartialEq)]
+struct RealtimeProduct {
+    symbol: String,
+    price_scale: u8,
+    quantity_scale: u8,
 }
 
 enum RealtimeEvent {
     Connecting(ProviderGeneration),
     Connected(ProviderGeneration),
     Trade(ProviderGeneration, CanonicalTrade),
+    Depth(ProviderGeneration, Box<DepthSnapshot>),
     Heartbeat(ProviderGeneration),
     Disconnected(ProviderGeneration),
 }
@@ -286,12 +295,12 @@ impl ConsumerEvents {
     }
 }
 
-struct RithmicOrderBook {
+struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
 }
 
-impl RithmicOrderBook {
+impl ProviderOrderBook {
     fn new(instrument: InstallProviderInstrument) -> Self {
         Self {
             instrument,
@@ -682,7 +691,7 @@ trait HistorySource: Send + 'static {
 }
 
 trait RealtimeSource: Send + 'static {
-    fn configure(&mut self, _products: Vec<String>) -> Result<(), String> {
+    fn configure(&mut self, _products: Vec<RealtimeProduct>) -> Result<(), String> {
         Ok(())
     }
 
@@ -712,6 +721,7 @@ enum HistorySources {
 
 struct LiveCoinbaseRealtime {
     config: Option<CoinbaseConfig>,
+    products: Vec<RealtimeProduct>,
 }
 
 impl LiveCoinbaseHistory {
@@ -850,17 +860,21 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
 
 impl LiveCoinbaseRealtime {
     fn try_new() -> Self {
-        Self { config: None }
+        Self {
+            config: None,
+            products: Vec::new(),
+        }
     }
 }
 
 impl RealtimeSource for LiveCoinbaseRealtime {
-    fn configure(&mut self, products: Vec<String>) -> Result<(), String> {
-        self.config = Some(
-            CoinbaseConfig::try_new(products)
-                .map_err(|error| error.to_string())?
-                .with_level2(false),
-        );
+    fn configure(&mut self, products: Vec<RealtimeProduct>) -> Result<(), String> {
+        let symbols = products
+            .iter()
+            .map(|product| product.symbol.clone())
+            .collect::<Vec<_>>();
+        self.config = Some(CoinbaseConfig::try_new(symbols).map_err(|error| error.to_string())?);
+        self.products = products;
         Ok(())
     }
 
@@ -882,6 +896,19 @@ impl RealtimeSource for LiveCoinbaseRealtime {
             return;
         }
         let queue_failed = Cell::new(false);
+        let mut books = self
+            .products
+            .iter()
+            .filter_map(|product| {
+                CoinbaseLevel2Book::try_new(
+                    product.symbol.clone(),
+                    product.price_scale,
+                    product.quantity_scale,
+                    generation.0.get(),
+                )
+                .ok()
+            })
+            .collect::<Vec<_>>();
         let _ = connection.collect_until_stopped_with_market_events(
             &mut || queue_failed.get() || stop.load(Ordering::Acquire),
             &mut |trade| {
@@ -898,7 +925,32 @@ impl RealtimeSource for LiveCoinbaseRealtime {
                     queue_failed.set(true);
                 }
             },
-            &mut |_| {},
+            &mut |bytes| {
+                let Ok(received) = current_unix_nanos() else {
+                    return;
+                };
+                for book in &mut books {
+                    let Ok(outcome) = book.apply_message(bytes, received) else {
+                        continue;
+                    };
+                    let mut book = match outcome {
+                        CoinbaseLevel2Outcome::Snapshot(book)
+                        | CoinbaseLevel2Outcome::Deltas { book, .. } => book,
+                        CoinbaseLevel2Outcome::RecoveryRequired
+                        | CoinbaseLevel2Outcome::Ignored => continue,
+                    };
+                    // Coinbase retains far more depth than the engine publishes.
+                    book.bids.truncate(MAXIMUM_PUBLISHED_DEPTH_LEVELS);
+                    book.asks.truncate(MAXIMUM_PUBLISHED_DEPTH_LEVELS);
+                    if !try_emit_realtime(
+                        events,
+                        overflow,
+                        RealtimeEvent::Depth(generation, Box::new(book)),
+                    ) {
+                        queue_failed.set(true);
+                    }
+                }
+            },
         );
     }
 }
@@ -1883,7 +1935,7 @@ fn run_coordinator(
         events: BTreeMap::new(),
         live: BTreeMap::new(),
         rithmic_live: BTreeMap::new(),
-        rithmic_order_books: BTreeMap::new(),
+        order_books: BTreeMap::new(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
@@ -1989,7 +2041,7 @@ struct Coordinator<'a> {
     events: BTreeMap<ConsumerId, ConsumerEvents>,
     live: BTreeMap<BarSeriesKey, LiveHandoff>,
     rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
-    rithmic_order_books: BTreeMap<String, RithmicOrderBook>,
+    order_books: BTreeMap<(String, String), ProviderOrderBook>,
     catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     catalog_sessions: BTreeMap<String, u64>,
     catalog_selections: BTreeMap<String, u64>,
@@ -2124,7 +2176,7 @@ impl Coordinator<'_> {
                         }
                         Ok(())
                     });
-                self.reconcile_rithmic_order_books();
+                self.reconcile_order_books();
                 self.release_unused_live_market_data();
                 let _ = reply.send(result);
             }
@@ -2398,10 +2450,10 @@ impl Coordinator<'_> {
             maximum_decoded_bars,
             &protected,
         );
-        self.reconcile_rithmic_order_books();
+        self.reconcile_order_books();
     }
 
-    fn reconcile_rithmic_order_books(&mut self) {
+    fn reconcile_order_books(&mut self) {
         let mut required_identities = BTreeSet::new();
         if self.resource_mode != ResourceMode::OfflineSuspended {
             for consumer_id in self.events.keys() {
@@ -2411,15 +2463,16 @@ impl Coordinator<'_> {
                 let Some(series) = demand.series.as_ref() else {
                     continue;
                 };
-                if series.provider_id == "rithmic"
-                    && demand.streams.is_some_and(|streams| {
-                        streams.contains(MarketStream::Depth)
-                            && (demand.resource_class == ConsumerResourceClass::Foreground
-                                || self.resource_policy.retain_hidden_depth)
-                    })
-                {
-                    required_identities
-                        .insert((series.instrument_id.clone(), series.entitlement_id.clone()));
+                if demand.streams.is_some_and(|streams| {
+                    streams.contains(MarketStream::Depth)
+                        && (demand.resource_class == ConsumerResourceClass::Foreground
+                            || self.resource_policy.retain_hidden_depth)
+                }) {
+                    required_identities.insert((
+                        series.provider_id.clone(),
+                        series.instrument_id.clone(),
+                        series.entitlement_id.clone(),
+                    ));
                 }
             }
             if self.resource_mode == ResourceMode::MarketsLive {
@@ -2427,11 +2480,14 @@ impl Coordinator<'_> {
                     self.retained_live
                         .iter()
                         .filter(|series| {
-                            series.provider_id == "rithmic"
-                                && chart_stream_requirements(series).contains(MarketStream::Depth)
+                            chart_stream_requirements(series).contains(MarketStream::Depth)
                         })
                         .map(|series| {
-                            (series.instrument_id.clone(), series.entitlement_id.clone())
+                            (
+                                series.provider_id.clone(),
+                                series.instrument_id.clone(),
+                                series.entitlement_id.clone(),
+                            )
                         }),
                 );
             }
@@ -2440,29 +2496,35 @@ impl Coordinator<'_> {
             .catalog
             .values()
             .filter(|instrument| {
-                instrument.provider == "rithmic"
-                    && required_identities.contains(&(
-                        instrument.instrument_id.clone(),
-                        instrument.entitlement_id.clone(),
-                    ))
+                required_identities.contains(&(
+                    instrument.provider.clone(),
+                    instrument.instrument_id.clone(),
+                    instrument.entitlement_id.clone(),
+                ))
             })
             .cloned()
             .collect::<Vec<_>>();
-        self.rithmic_order_books.retain(|instrument_id, book| {
+        self.order_books.retain(|identity, book| {
             required.iter().any(|instrument| {
-                instrument.instrument_id == *instrument_id && instrument == &book.instrument
+                (
+                    instrument.provider.clone(),
+                    instrument.instrument_id.clone(),
+                ) == *identity
+                    && instrument == &book.instrument
             })
         });
         for instrument in required {
+            let identity = (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            );
             let replace = self
-                .rithmic_order_books
-                .get(&instrument.instrument_id)
+                .order_books
+                .get(&identity)
                 .is_none_or(|book| book.instrument != instrument);
             if replace {
-                self.rithmic_order_books.insert(
-                    instrument.instrument_id.clone(),
-                    RithmicOrderBook::new(instrument),
-                );
+                self.order_books
+                    .insert(identity, ProviderOrderBook::new(instrument));
             }
         }
     }
@@ -2481,7 +2543,7 @@ impl Coordinator<'_> {
         self.realtime_products.clear();
         self.live.clear();
         self.rithmic_live.clear();
-        self.rithmic_order_books.clear();
+        self.order_books.clear();
     }
 
     fn status(&self) -> MarketServiceStatus {
@@ -2627,7 +2689,7 @@ impl Coordinator<'_> {
         }
         let instrument_id = instrument.instrument_id.clone();
         self.catalog.insert(key, instrument.clone());
-        self.reconcile_rithmic_order_books();
+        self.reconcile_order_books();
         self.activate_retained_instrument(instrument, provider_generation);
         if self.resource_mode == ResourceMode::MarketsLive
             && let Some(series) = self
@@ -2705,7 +2767,7 @@ impl Coordinator<'_> {
             .engine
             .set_series_demand_with_streams(waiter.consumer_id, waiter.generation, series, streams)
             .map_err(|error| error.to_string())?;
-        self.reconcile_rithmic_order_books();
+        self.reconcile_order_books();
         self.remove_waiter(waiter.consumer_id);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             events.snapshot = None;
@@ -4553,6 +4615,9 @@ impl Coordinator<'_> {
             RealtimeEvent::Connecting(generation) => self.realtime_connecting(generation),
             RealtimeEvent::Connected(generation) => self.realtime_connected(generation),
             RealtimeEvent::Trade(generation, trade) => self.realtime_trade(generation, &trade),
+            RealtimeEvent::Depth(generation, snapshot) => {
+                self.provider_depth("coinbase", generation.0.get(), &snapshot);
+            }
             RealtimeEvent::Heartbeat(generation) => self.realtime_heartbeat(generation),
             RealtimeEvent::Disconnected(generation) => {
                 if generation == self.coinbase_provider_generation() {
@@ -4574,7 +4639,7 @@ impl Coordinator<'_> {
                 self.rithmic_trade(generation, &trade);
             }
             RithmicRealtimeEvent::Depth(generation, snapshot) => {
-                self.rithmic_depth(generation, &snapshot);
+                self.provider_depth("rithmic", generation, &snapshot);
             }
             RithmicRealtimeEvent::Recovering(generation) => {
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
@@ -4959,24 +5024,24 @@ impl Coordinator<'_> {
         }
     }
 
-    fn rithmic_depth(&mut self, generation: u64, snapshot: &DepthSnapshot) {
+    fn provider_depth(&mut self, provider: &str, generation: u64, snapshot: &DepthSnapshot) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
         if self
             .engine
-            .provider_status("rithmic")
+            .provider_status(provider)
             .and_then(|status| status.generation)
             != Some(generation)
-            || snapshot.metadata.provider_id != "rithmic"
+            || snapshot.metadata.provider_id != provider
             || snapshot.metadata.session_generation != generation.0.get()
         {
             return;
         }
         let instrument_id = snapshot.metadata.instrument_id.clone();
         let should_publish = self
-            .rithmic_order_books
-            .get_mut(&instrument_id)
+            .order_books
+            .get_mut(&(provider.to_string(), instrument_id.clone()))
             .filter(|order_book| {
                 order_book.instrument.entitlement_id == snapshot.metadata.entitlement_id
             })
@@ -4991,7 +5056,7 @@ impl Coordinator<'_> {
                 )
             });
         if should_publish {
-            self.broadcast_rithmic_order_book(&instrument_id);
+            self.broadcast_order_book(provider, &instrument_id);
         }
     }
 
@@ -5020,16 +5085,17 @@ impl Coordinator<'_> {
             live.connected = false;
         }
         let stale_books = self
-            .rithmic_order_books
+            .order_books
             .iter_mut()
-            .filter_map(|(instrument_id, order_book)| {
+            .filter(|((provider, _), _)| provider == "rithmic")
+            .filter_map(|(identity, order_book)| {
                 order_book.book.mark_stale();
                 matches!(order_book.book.state(), CanonicalOrderBookState::Stale)
-                    .then(|| instrument_id.clone())
+                    .then(|| identity.clone())
             })
             .collect::<Vec<_>>();
-        for instrument_id in stale_books {
-            self.broadcast_rithmic_order_book(&instrument_id);
+        for (provider, instrument_id) in stale_books {
+            self.broadcast_order_book(&provider, &instrument_id);
         }
     }
 
@@ -5043,10 +5109,10 @@ impl Coordinator<'_> {
         let Some(generation) = demand.generation else {
             return;
         };
-        if series.provider_id != "rithmic" {
-            return;
-        }
-        let Some(order_book) = self.rithmic_order_books.get(&series.instrument_id) else {
+        let Some(order_book) = self
+            .order_books
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+        else {
             return;
         };
         if order_book.instrument.entitlement_id != series.entitlement_id {
@@ -5057,7 +5123,7 @@ impl Coordinator<'_> {
         }
     }
 
-    fn broadcast_rithmic_order_book(&mut self, instrument_id: &str) {
+    fn broadcast_order_book(&mut self, provider: &str, instrument_id: &str) {
         let consumers = self
             .events
             .keys()
@@ -5065,11 +5131,14 @@ impl Coordinator<'_> {
                 let demand = self.engine.current_demand(*consumer_id)?;
                 let generation = demand.generation?;
                 let series = demand.series.as_ref()?;
-                (series.provider_id == "rithmic" && series.instrument_id == instrument_id)
+                (series.provider_id == provider && series.instrument_id == instrument_id)
                     .then_some((*consumer_id, generation))
             })
             .collect::<Vec<_>>();
-        let Some(order_book) = self.rithmic_order_books.get(instrument_id) else {
+        let Some(order_book) = self
+            .order_books
+            .get(&(provider.to_string(), instrument_id.to_string()))
+        else {
             return;
         };
         for (consumer_id, generation) in consumers {
@@ -5649,11 +5718,25 @@ impl Coordinator<'_> {
     }
 
     fn sync_coinbase_realtime(&mut self) -> Result<(), String> {
-        let mut products = BTreeSet::new();
+        let mut subscriptions = BTreeMap::new();
         for series in self.live.keys() {
             let instrument = self.coinbase_instrument(series)?;
-            products.insert(instrument.provider_symbol.clone());
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            ) else {
+                return Err("Coinbase instrument precision is invalid".to_string());
+            };
+            subscriptions.insert(
+                instrument.provider_symbol.clone(),
+                RealtimeProduct {
+                    symbol: instrument.provider_symbol.clone(),
+                    price_scale,
+                    quantity_scale,
+                },
+            );
         }
+        let products = subscriptions.keys().cloned().collect::<BTreeSet<_>>();
         if products.is_empty()
             || products.len() > axiusflow_coinbase_market_adapter::MAXIMUM_PRODUCTS
         {
@@ -5665,10 +5748,9 @@ impl Coordinator<'_> {
             self.realtime_connected = false;
         }
         if !self.realtime_started {
-            match self
-                .realtime_control
-                .try_send(RealtimeControl::Start(products.iter().cloned().collect()))
-            {
+            match self.realtime_control.try_send(RealtimeControl::Start(
+                subscriptions.into_values().collect(),
+            )) {
                 Ok(()) => {
                     self.realtime_products = products;
                     self.realtime_started = true;
@@ -5768,7 +5850,9 @@ fn configured_engine() -> Result<MarketEngine, String> {
                 capabilities: ProviderCapabilities {
                     historical_bars: true,
                     realtime_bars: true,
-                    streams: StreamRequirements::BARS.with(MarketStream::Trades),
+                    streams: StreamRequirements::BARS
+                        .with(MarketStream::Trades)
+                        .with(MarketStream::Depth),
                 },
                 reconnect_delay: PROVIDER_RECONNECT_DELAY,
             },
@@ -6037,7 +6121,7 @@ fn ipc_order_flow_trade(trade: axiusflow_market_engine::OrderFlowTrade) -> IpcOr
 fn order_book_snapshot(
     consumer_id: ConsumerId,
     generation: GenerationId,
-    order_book: &RithmicOrderBook,
+    order_book: &ProviderOrderBook,
 ) -> envelope::Payload {
     let publication = order_book.book.publication();
     let provider_generation = if publication.session_generation == 0 {
@@ -6190,10 +6274,7 @@ fn chart_stream_requirements(series: &BarSeriesKey) -> StreamRequirements {
         );
     let mut streams = StreamRequirements::BARS;
     if live_bars {
-        streams = streams.with(MarketStream::Trades);
-    }
-    if series.provider_id == "rithmic" {
-        streams = streams.with(MarketStream::Depth);
+        streams = streams.with(MarketStream::Trades).with(MarketStream::Depth);
     }
     streams
 }
@@ -6931,10 +7012,15 @@ mod tests {
     }
 
     impl RealtimeSource for FixtureRealtime {
-        fn configure(&mut self, products: Vec<String>) -> Result<(), String> {
+        fn configure(&mut self, products: Vec<RealtimeProduct>) -> Result<(), String> {
             if let Some(configured_products) = &self.configured_products {
                 configured_products
-                    .send(products)
+                    .send(
+                        products
+                            .iter()
+                            .map(|product| product.symbol.clone())
+                            .collect(),
+                    )
                     .map_err(|_| "configured-product observer disconnected".to_string())?;
             }
             Ok(())
@@ -7140,7 +7226,7 @@ mod tests {
             events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
             live: BTreeMap::new(),
             rithmic_live: BTreeMap::new(),
-            rithmic_order_books: BTreeMap::new(),
+            order_books: BTreeMap::new(),
             catalog: if series.provider_id == "coinbase" {
                 BTreeMap::from([(
                     ("coinbase".to_string(), series.instrument_id.clone()),
@@ -7806,7 +7892,8 @@ mod tests {
         coordinator
             .install_provider_instrument(&provider_instrument(7, 2))
             .expect("instrument installs");
-        coordinator.rithmic_depth(
+        coordinator.provider_depth(
+            "rithmic",
             7,
             &DepthSnapshot {
                 metadata: EventMetadata {
@@ -7898,7 +7985,7 @@ mod tests {
         coordinator
             .install_provider_instrument(&provider_instrument(7, 2))
             .expect("instrument installs");
-        coordinator.rithmic_depth(7, &rithmic_depth_snapshot(&series, 11, 7));
+        coordinator.provider_depth("rithmic", 7, &rithmic_depth_snapshot(&series, 11, 7));
         let first = pop_order_book(&mut coordinator, depth_consumer);
         assert_eq!(first.source_watermark, 11);
         assert_eq!(first.bids[0].quantity, 7);
@@ -7910,10 +7997,10 @@ mod tests {
         coordinator.refresh_resource_policy();
         assert!(
             coordinator
-                .rithmic_order_books
-                .contains_key(&series.instrument_id)
+                .order_books
+                .contains_key(&("rithmic".to_string(), series.instrument_id.clone()))
         );
-        coordinator.rithmic_depth(7, &rithmic_depth_snapshot(&series, 12, 9));
+        coordinator.provider_depth("rithmic", 7, &rithmic_depth_snapshot(&series, 12, 9));
         let advanced = pop_order_book(&mut coordinator, depth_consumer);
         assert_eq!(advanced.source_watermark, 12);
         assert_eq!(advanced.bids[0].quantity, 9);
@@ -7923,16 +8010,16 @@ mod tests {
             .set_visibility(depth_consumer, false)
             .expect("final visible depth reference hides");
         coordinator.refresh_resource_policy();
-        assert!(coordinator.rithmic_order_books.is_empty());
+        assert!(coordinator.order_books.is_empty());
 
         coordinator.apply_resource_mode(ResourceMode::MarketsLive);
         assert!(
             coordinator
-                .rithmic_order_books
-                .contains_key(&series.instrument_id)
+                .order_books
+                .contains_key(&("rithmic".to_string(), series.instrument_id.clone()))
         );
         coordinator.apply_resource_mode(ResourceMode::Warm);
-        assert!(coordinator.rithmic_order_books.is_empty());
+        assert!(coordinator.order_books.is_empty());
 
         coordinator
             .engine
@@ -7941,14 +8028,14 @@ mod tests {
         coordinator.refresh_resource_policy();
         assert!(matches!(
             coordinator
-                .rithmic_order_books
-                .get(&series.instrument_id)
+                .order_books
+                .get(&("rithmic".to_string(), series.instrument_id.clone()))
                 .map(|book| book.book.state()),
             Some(CanonicalOrderBookState::Recovering(
                 OrderBookRecoveryReason::AwaitingSnapshot
             ))
         ));
-        coordinator.rithmic_depth(7, &rithmic_depth_snapshot(&series, 20, 12));
+        coordinator.provider_depth("rithmic", 7, &rithmic_depth_snapshot(&series, 20, 12));
         let recovered = pop_order_book(&mut coordinator, depth_consumer);
         assert_eq!(recovered.source_watermark, 20);
         assert_eq!(recovered.state, IpcOrderBookState::Ready as i32);
@@ -7956,7 +8043,7 @@ mod tests {
         assert!(coordinator.engine.remove_consumer(depth_consumer));
         coordinator.events.remove(&depth_consumer);
         coordinator.refresh_resource_policy();
-        assert!(coordinator.rithmic_order_books.is_empty());
+        assert!(coordinator.order_books.is_empty());
     }
 
     #[test]
@@ -11881,7 +11968,11 @@ mod tests {
         });
 
         control_tx
-            .send(RealtimeControl::Start(vec!["BTC-USD".to_string()]))
+            .send(RealtimeControl::Start(vec![RealtimeProduct {
+                symbol: "BTC-USD".to_string(),
+                price_scale: 2,
+                quantity_scale: 8,
+            }]))
             .expect("start realtime worker");
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_secs(1)),

@@ -136,7 +136,7 @@ impl std::future::Future for UiWakeNotified {
 const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
-const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
+const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
@@ -3313,8 +3313,14 @@ impl WorkspaceSurface {
         });
     }
 
+    /// Whether a market is selected. The header enables the DOM toggle on this
+    /// and `toggle_dom` opens on it, so the two cannot drift apart again.
+    fn has_market_selection(&self) -> bool {
+        self.symbol_browser.selected().is_some() || self.coinbase_product.is_some()
+    }
+
     fn toggle_dom(&mut self, cx: &mut Context<Self>) {
-        if self.symbol_browser.selected().is_some() {
+        if self.has_market_selection() {
             self.side_panel = (self.side_panel != Some(SidePanel::Dom)).then_some(SidePanel::Dom);
             cx.notify();
         }
@@ -4283,6 +4289,8 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
                 .flex_col()
                 .overflow_hidden()
                 .bg(gpui_color(colors.surface))
+                .border_l_1()
+                .border_color(gpui_color(colors.border))
                 .child(side_panel_header(side_panel, app, theme))
                 .child(
                     div()
@@ -4294,16 +4302,20 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         div()
             .id(("market_workspace", pane_id))
             .size_full()
+            .relative()
             .flex()
             .child(chart_surface)
+            .child(side_panel_content)
             .child(
                 div()
                     .id(("side_panel_resize", pane_id))
+                    .absolute()
+                    .occlude()
+                    .top_0()
+                    .right(px(side_panel_width - SIDE_PANEL_RESIZE_HANDLE_WIDTH / 2.0))
                     .h_full()
                     .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
-                    .flex_none()
                     .cursor_col_resize()
-                    .bg(gpui_color(colors.border_secondary))
                     .on_mouse_down(MouseButton::Left, move |event, _, cx| {
                         resize_app.update(cx, |surface, _| {
                             surface.begin_side_panel_resize(f32::from(event.position.x));
@@ -4311,7 +4323,6 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
                         cx.stop_propagation();
                     }),
             )
-            .child(side_panel_content)
             .on_mouse_move(move |event, _, cx| {
                 move_app.update(cx, |surface, surface_cx| {
                     surface.update_side_panel_resize(
@@ -4760,7 +4771,6 @@ fn side_panel_header(
         .flex()
         .items_center()
         .px_2()
-        .border_l_1()
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.surface))
@@ -4770,24 +4780,9 @@ fn side_panel_header(
         .child(chrome_tooltip(
             "close_side_panel",
             "Close side panel",
-            button_activation(
-                chrome_button_style(
-                    Button::new("close_side_panel")
-                        .icon(header_icon(HugeIcon::CancelIcon01))
-                        .compact()
-                        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-                        .size(px(chart_chrome::CHART_CONTROL_SIZE))
-                        .border_0()
-                        .cursor_pointer(),
-                    theme,
-                    false,
-                    true,
-                ),
-                true,
-                move |_, cx| {
-                    app.update(cx, WorkspaceSurface::close_side_panel);
-                },
-            ),
+            chrome_close_button("close_side_panel", theme, move |_, cx| {
+                app.update(cx, WorkspaceSurface::close_side_panel);
+            }),
             theme,
         ))
 }
@@ -6740,14 +6735,16 @@ fn chrome_menu_search_header(
 /// Compact 24px close control matching the workspace tab add button: a circular
 /// hit with a 13px glyph, flex-centered. The standard chrome `Button` is a 32px
 /// control whose 75% icon scaling and inner wrapper throw the X off-center.
-fn chrome_menu_close_button(
-    app: &Entity<WorkspaceSurface>,
+///
+/// Every close control in the chrome shares this so they stay identical.
+fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
+    id: &'static str,
     theme: &AxiusflowTheme,
-) -> impl IntoElement {
+    on_close: F,
+) -> impl IntoElement + use<F> {
     let colors = theme.colors;
-    let close_app = app.clone();
     div()
-        .id("chrome_menu_close")
+        .id(id)
         .occlude()
         .size(px(WORKSPACE_TAB_ICON_HIT))
         .flex_none()
@@ -6765,12 +6762,22 @@ fn chrome_menu_close_button(
                 .text_color(gpui_color(colors.text_primary))
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            close_app.update(cx, |app, app_cx| {
-                app.close_chrome_overlay(window, app_cx);
-            });
+            on_close(window, cx);
             cx.stop_propagation();
         })
         .child(header_icon(HugeIcon::CancelIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
+}
+
+fn chrome_menu_close_button(
+    app: &Entity<WorkspaceSurface>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let close_app = app.clone();
+    chrome_close_button("chrome_menu_close", theme, move |window, cx| {
+        close_app.update(cx, |app, app_cx| {
+            app.close_chrome_overlay(window, app_cx);
+        });
+    })
 }
 
 fn instrument_search_header(
@@ -9287,10 +9294,8 @@ fn active_header_state(
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(
-            workspace.symbol_input.is_some()
-                || !workspace.symbol_browser.results().is_empty()
-                || !workspace.symbol_browser.results().is_empty(),
-            workspace.symbol_browser.selected().is_some() || workspace.coinbase_product.is_some(),
+            workspace.symbol_input.is_some() || !workspace.symbol_browser.results().is_empty(),
+            workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
         dom_visible: workspace.side_panel == Some(SidePanel::Dom),

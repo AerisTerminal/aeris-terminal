@@ -94,11 +94,7 @@ impl CoinbaseSession {
         let (mut socket, _response) =
             tungstenite::client_tls_with_config(WEBSOCKET_ENDPOINT, tcp, None, Some(connector))
                 .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
-        let channels = if self.config.include_level2 {
-            &["heartbeats", "market_trades", "level2"][..]
-        } else {
-            &["heartbeats", "market_trades"][..]
-        };
+        let channels = ["heartbeats", "market_trades", "level2"];
         for channel in channels {
             socket
                 .send(Message::Text(
