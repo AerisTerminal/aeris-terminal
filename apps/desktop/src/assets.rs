@@ -22,6 +22,7 @@ pub enum UiIcon {
     DeleteIcon02,
     Lock,
     MoonIcon02,
+    Redo01,
     Refresh01Icon,
     SearchIcon01,
     Settings01,
@@ -29,6 +30,7 @@ pub enum UiIcon {
     SplitSideBySide,
     SplitStacked,
     SunIcon03,
+    Undo03,
     View,
     ViewOff,
     WindowClose,
@@ -39,7 +41,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 29] = [
         Self::AddIcon01,
         Self::AiEraser,
         Self::AiLock,
@@ -53,6 +55,7 @@ impl UiIcon {
         Self::DeleteIcon02,
         Self::Lock,
         Self::MoonIcon02,
+        Self::Redo01,
         Self::Refresh01Icon,
         Self::SearchIcon01,
         Self::Settings01,
@@ -60,6 +63,7 @@ impl UiIcon {
         Self::SplitSideBySide,
         Self::SplitStacked,
         Self::SunIcon03,
+        Self::Undo03,
         Self::View,
         Self::ViewOff,
         Self::WindowClose,
@@ -85,6 +89,7 @@ impl UiIcon {
             Self::DeleteIcon02 => "delete-02.svg",
             Self::Lock => "lock.svg",
             Self::MoonIcon02 => "moon-02.svg",
+            Self::Redo01 => "redo-01.svg",
             Self::Refresh01Icon => "refresh-01.svg",
             Self::SearchIcon01 => "search-01.svg",
             Self::Settings01 => "settings-01.svg",
@@ -92,6 +97,7 @@ impl UiIcon {
             Self::SplitSideBySide => "split-side-by-side.svg",
             Self::SplitStacked => "split-stacked.svg",
             Self::SunIcon03 => "sun-03.svg",
+            Self::Undo03 => "undo-03.svg",
             Self::View => "view.svg",
             Self::ViewOff => "view-off.svg",
             Self::WindowClose => "window-close.svg",
@@ -293,6 +299,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "delete-02.svg" => include_bytes!("../assets/icons/ui/delete-02.svg"),
         "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
         "moon-02.svg" => include_bytes!("../assets/icons/ui/moon-02.svg"),
+        "redo-01.svg" => include_bytes!("../assets/icons/ui/redo-01.svg"),
         "refresh-01.svg" => include_bytes!("../assets/icons/ui/refresh-01.svg"),
         "search-01.svg" => include_bytes!("../assets/icons/ui/search-01.svg"),
         "settings-01.svg" => include_bytes!("../assets/icons/ui/settings-01.svg"),
@@ -300,6 +307,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "split-side-by-side.svg" => include_bytes!("../assets/icons/ui/split-side-by-side.svg"),
         "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),
         "sun-03.svg" => include_bytes!("../assets/icons/ui/sun-03.svg"),
+        "undo-03.svg" => include_bytes!("../assets/icons/ui/undo-03.svg"),
         "view.svg" => include_bytes!("../assets/icons/ui/view.svg"),
         "view-off.svg" => include_bytes!("../assets/icons/ui/view-off.svg"),
         "window-close.svg" => include_bytes!("../assets/icons/ui/window-close.svg"),

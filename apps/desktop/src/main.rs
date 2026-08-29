@@ -1129,6 +1129,7 @@ struct HeaderState {
     indicator_message: Option<String>,
     series_message: String,
     pending: HeaderPendingState,
+    drawing_history: DrawingHistoryState,
     controls: HeaderControls,
     dom_visible: bool,
     connection_state: FeedConnectionState,
@@ -1136,6 +1137,13 @@ struct HeaderState {
     delayed: bool,
     history_only: bool,
     instrument_scroll: ScrollHandle,
+}
+
+/// Whether the active chart's drawing history has an edit to step back to or forward to.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DrawingHistoryState {
+    can_undo: bool,
+    can_redo: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -3407,6 +3415,33 @@ impl WorkspaceSurface {
         }
     }
 
+    fn undo_drawing(&mut self, cx: &mut Context<Self>) {
+        self.step_drawing_history(true, cx);
+    }
+
+    fn redo_drawing(&mut self, cx: &mut Context<Self>) {
+        self.step_drawing_history(false, cx);
+    }
+
+    fn step_drawing_history(&mut self, undo: bool, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            let stepped = chart.update(cx, |chart, chart_cx| {
+                let stepped = if undo {
+                    chart.undo_drawing()
+                } else {
+                    chart.redo_drawing()
+                };
+                if stepped {
+                    chart_cx.notify();
+                }
+                stepped
+            });
+            if stepped {
+                cx.notify();
+            }
+        }
+    }
+
     fn clear_drawings(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -3455,6 +3490,19 @@ impl WorkspaceSurface {
                 false
             }
         }
+    }
+
+    /// Reports what the header's undo and redo controls may offer for the active chart.
+    fn drawing_history_state(&self, cx: &App) -> DrawingHistoryState {
+        self.chart
+            .as_ref()
+            .map_or_else(DrawingHistoryState::default, |chart| {
+                let chart = chart.read(cx);
+                DrawingHistoryState {
+                    can_undo: chart.can_undo_drawing(),
+                    can_redo: chart.can_redo_drawing(),
+                }
+            })
     }
 
     fn drawing_toolbar_state(&self, cx: &App) -> DrawingToolbarState {
@@ -6107,6 +6155,18 @@ fn header_controls(
             state.controls.enabled(HeaderControls::INDICATOR),
             &state.theme,
         ))
+        .child(drawing_history_control(
+            app.clone(),
+            DrawingHistoryControl::Undo,
+            state.drawing_history,
+            &state.theme,
+        ))
+        .child(drawing_history_control(
+            app.clone(),
+            DrawingHistoryControl::Redo,
+            state.drawing_history,
+            &state.theme,
+        ))
         .child(dom_toggle)
         .child(theme_toggle(terminal.clone(), &state.theme))
 }
@@ -6841,6 +6901,74 @@ fn panel_toggle(
         app.update(cx, state.toggle);
     });
     chrome_button_style(button, theme, state.selected, state.enabled)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DrawingHistoryControl {
+    Undo,
+    Redo,
+}
+
+impl DrawingHistoryControl {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Undo => "drawing_undo",
+            Self::Redo => "drawing_redo",
+        }
+    }
+
+    const fn tooltip(self) -> &'static str {
+        match self {
+            Self::Undo => "Undo drawing edit",
+            Self::Redo => "Redo drawing edit",
+        }
+    }
+
+    const fn icon(self) -> HugeIcon {
+        match self {
+            Self::Undo => HugeIcon::Undo03,
+            Self::Redo => HugeIcon::Redo01,
+        }
+    }
+
+    const fn enabled(self, history: DrawingHistoryState) -> bool {
+        match self {
+            Self::Undo => history.can_undo,
+            Self::Redo => history.can_redo,
+        }
+    }
+
+    const fn step(self) -> fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>) {
+        match self {
+            Self::Undo => WorkspaceSurface::undo_drawing,
+            Self::Redo => WorkspaceSurface::redo_drawing,
+        }
+    }
+}
+
+/// Steps the active chart's drawing history from the header toolbar. The control greys out when
+/// its side of the history is empty, so the header never offers an edit the chart cannot make.
+fn drawing_history_control(
+    app: Entity<WorkspaceSurface>,
+    control: DrawingHistoryControl,
+    history: DrawingHistoryState,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let enabled = control.enabled(history);
+    let button = Button::new(control.id())
+        .icon(header_icon(control.icon()))
+        .aria_label(control.tooltip())
+        .tooltip(TooltipSpec::new(control.tooltip(), theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+        .w(px(chart_chrome::CHART_CONTROL_SIZE))
+        .disabled(!enabled)
+        .when(enabled, Button::cursor_pointer)
+        .when(!enabled, Button::cursor_not_allowed);
+    let step = control.step();
+    let button = button_activation(button, enabled, move |_, cx| {
+        app.update(cx, step);
+    });
+    chrome_button_style(button, theme, false, enabled)
 }
 
 fn theme_toggle(terminal: Entity<TerminalApp>, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -9058,6 +9186,7 @@ fn active_header_state(
             series: workspace.series_browser.pending().is_some()
                 || workspace.coinbase_switch.is_pending(),
         },
+        drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(
             workspace.symbol_input.is_some()
                 || !workspace.symbol_browser.results().is_empty()
@@ -11553,6 +11682,32 @@ mod tests {
             trash,
             [super::HugeIcon::DeleteIcon02, super::HugeIcon::DeleteIcon02]
         );
+    }
+
+    #[test]
+    fn header_history_controls_gate_on_their_own_half_of_the_stack() {
+        use super::{DrawingHistoryControl, DrawingHistoryState};
+
+        let empty = DrawingHistoryState::default();
+        assert!(!DrawingHistoryControl::Undo.enabled(empty));
+        assert!(!DrawingHistoryControl::Redo.enabled(empty));
+
+        let undo_only = DrawingHistoryState {
+            can_undo: true,
+            can_redo: false,
+        };
+        assert!(DrawingHistoryControl::Undo.enabled(undo_only));
+        assert!(
+            !DrawingHistoryControl::Redo.enabled(undo_only),
+            "redo must stay disabled while nothing has been reversed"
+        );
+
+        assert_ne!(
+            DrawingHistoryControl::Undo.id(),
+            DrawingHistoryControl::Redo.id()
+        );
+        assert_eq!(DrawingHistoryControl::Undo.icon(), super::HugeIcon::Undo03);
+        assert_eq!(DrawingHistoryControl::Redo.icon(), super::HugeIcon::Redo01);
     }
 
     #[test]

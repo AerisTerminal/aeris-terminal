@@ -1597,6 +1597,61 @@ impl NucleusChartView {
         self.invalidate_series_frame();
     }
 
+    /// Returns whether a committed drawing edit can be reversed.
+    #[must_use]
+    pub fn can_undo_drawing(&self) -> bool {
+        self.engine.can_undo_drawing()
+    }
+
+    /// Returns whether a reversed drawing edit can be reapplied.
+    #[must_use]
+    pub fn can_redo_drawing(&self) -> bool {
+        self.engine.can_redo_drawing()
+    }
+
+    /// Reverses the newest committed drawing edit.
+    pub fn undo_drawing(&mut self) -> bool {
+        self.step_drawing_history(true)
+    }
+
+    /// Reapplies the newest reversed drawing edit.
+    pub fn redo_drawing(&mut self) -> bool {
+        self.step_drawing_history(false)
+    }
+
+    /// Steps the engine's chart-local drawing history one command in either direction.
+    ///
+    /// An in-flight gesture is settled first: the engine drops its own pending creation and brush
+    /// capture on a step, so the host mirrors that and re-arms the active tool afterwards, leaving
+    /// the toolbar selection usable. Locks are keyed by drawing id and are host state, so a
+    /// tombstoned id is dropped and a restored drawing comes back unlocked.
+    fn step_drawing_history(&mut self, undo: bool) -> bool {
+        let _ = self.finish_text_edit();
+        self.cancel_drawing_gesture();
+        let stepped = if undo {
+            self.engine.undo_drawing()
+        } else {
+            self.engine.redo_drawing()
+        };
+        if !stepped {
+            return false;
+        }
+        self.locked_drawings.retain(|locked| {
+            self.engine
+                .drawings()
+                .iter()
+                .any(|drawing| drawing.id == *locked)
+        });
+        if let Some(kind) = self.drawing_tool.drawing_kind()
+            && kind != DrawingKind::Brush
+        {
+            let armed = self.engine.drawing_create_begin(kind, None);
+            debug_assert!(armed, "an empty drawing-options template is valid");
+        }
+        self.invalidate_series_frame();
+        true
+    }
+
     /// Returns whether the newest bar is aligned to the real-time edge.
     #[must_use]
     pub fn is_at_latest(&self) -> bool {
@@ -4547,6 +4602,36 @@ mod tests {
             DrawingsLockSummary::default()
         );
         assert!(!chart.apply_key("backspace", false));
+    }
+
+    #[test]
+    fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
+        let mut chart = interactive_chart();
+        assert!(!chart.can_undo_drawing());
+        assert!(!chart.can_redo_drawing());
+        assert!(!chart.undo_drawing());
+
+        chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+        assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default(), 1));
+        chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+        assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default(), 1));
+        assert_eq!(chart.drawing_count(), 2);
+        assert!(chart.can_undo_drawing());
+
+        chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+        assert!(chart.undo_drawing());
+        assert_eq!(chart.drawing_count(), 1);
+        assert!(chart.can_redo_drawing());
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::HorizontalLine);
+        assert!(
+            chart.engine.drawing_create_active(),
+            "stepping history must leave the selected tool armed for the next placement"
+        );
+
+        assert!(chart.redo_drawing());
+        assert_eq!(chart.drawing_count(), 2);
+        assert!(!chart.can_redo_drawing());
+        assert!(!chart.redo_drawing());
     }
 
     #[test]
