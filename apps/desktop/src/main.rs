@@ -12,8 +12,6 @@ mod rithmic_engine_client;
 mod rithmic_engine_history;
 mod rithmic_history;
 mod rithmic_shell;
-#[cfg(feature = "diagnostics")]
-mod windowed_benchmark;
 
 use assets::UiIcon as HugeIcon;
 #[cfg(feature = "diagnostics")]
@@ -10395,15 +10393,6 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
     let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
-        #[cfg(feature = "diagnostics")]
-        if argument == "--windowed-benchmark" {
-            let report_path = arguments.next().ok_or_else(|| {
-                "usage: axiusflow_desktop --windowed-benchmark <report-path>".to_string()
-            })?;
-            windowed_benchmark::run(std::path::Path::new(&report_path))
-                .map_err(|error| format!("windowed benchmark failed: {error}"))?;
-            return Ok(None);
-        }
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-readiness" {
             run_desktop_readiness_command(arguments).expect("desktop readiness conformance passes");
