@@ -15,8 +15,8 @@ use axiusflow_application::{
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
     KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task, Window,
-    canvas, div, prelude::*, px, rgba, svg,
+    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task,
+    Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
@@ -517,6 +517,9 @@ struct LegendPalette {
 const LEGEND_VIEW_ICON: &str = "axiusflow/icons/ui/view.svg";
 const LEGEND_VIEW_OFF_ICON: &str = "axiusflow/icons/ui/view-off.svg";
 const LEGEND_REMOVE_ICON: &str = "axiusflow/icons/ui/cancel-01.svg";
+const LEGEND_LOADING_ICON: &str = "axiusflow/icons/ui/loader.svg";
+/// One rotation of the legend's loading glyph.
+const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
 
 fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], id: u32) -> String {
     snapshots
@@ -583,6 +586,9 @@ pub struct NucleusChartView {
     volume_series: u32,
     volume_legend: LegendPresence,
     asset_legend_title: String,
+    /// A load the trader is waiting on, shown by the symbol legend itself so the
+    /// notice sits where they are already reading the symbol.
+    asset_loading: LegendPresence,
     legend_panes: Vec<LegendPaneLayout>,
     frame: ChartFrame,
     axis_prims: Vec<Prim>,
@@ -647,6 +653,7 @@ impl NucleusChartView {
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: String::new(),
+            asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
@@ -737,6 +744,7 @@ impl NucleusChartView {
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: replay_legend_title(replay),
+            asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
             axis_prims: Vec::new(),
@@ -1724,6 +1732,20 @@ impl NucleusChartView {
     #[must_use]
     pub const fn has_market_data(&self) -> bool {
         self.data_bridge.is_some()
+    }
+
+    /// Marks a load the trader is waiting on, so the symbol legend can carry it.
+    ///
+    /// Returns whether the surface changed, so a caller polling the host's
+    /// lifecycle only repaints on a transition.
+    pub const fn set_asset_loading(&mut self, loading: bool) -> bool {
+        let changed = self.asset_loading.is_present() != loading;
+        self.asset_loading = if loading {
+            LegendPresence::Present
+        } else {
+            LegendPresence::Absent
+        };
+        changed
     }
 
     /// Enqueues one replay update for the next chart frame.
@@ -3177,6 +3199,7 @@ fn chart_legend_layers(
     rows: &[LegendRow],
     panes: &[LegendPaneLayout],
     theme: ChartTheme,
+    loading: bool,
 ) -> Vec<AnyElement> {
     let palette = legend_palette(theme);
     panes
@@ -3203,7 +3226,7 @@ fn chart_legend_layers(
             let mut row_count = 0;
             for row in pane_rows {
                 row_count += 1;
-                layer = layer.child(chart_legend_row(chart, row, palette));
+                layer = layer.child(chart_legend_row(chart, row, palette, loading));
             }
             (row_count > 0).then(|| layer.into_any_element())
         })
@@ -3214,6 +3237,7 @@ fn chart_legend_row(
     chart: &Entity<NucleusChartView>,
     row: &LegendRow,
     palette: LegendPalette,
+    loading: bool,
 ) -> impl IntoElement {
     let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
     let visibility = legend_control(
@@ -3280,6 +3304,7 @@ fn chart_legend_row(
         })
         .cursor(CursorStyle::Arrow)
         .hover(|style| style.bg(palette.hover))
+        .children((loading && row.item == LegendItem::Asset).then(|| legend_loading_glyph(palette)))
         .child(
             div()
                 .flex_none()
@@ -3291,6 +3316,35 @@ fn chart_legend_row(
         )
         .children(values)
         .child(controls)
+}
+
+/// The symbol row's own load indicator, sized to the legend text and placed ahead
+/// of the title: a load in flight belongs to the symbol the trader is reading, not
+/// to a second notice sitting over the plot.
+fn legend_loading_glyph(palette: LegendPalette) -> AnyElement {
+    div()
+        .id("chart_legend_loading")
+        .flex_none()
+        .h(px(LEGEND_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .role(Role::Status)
+        .aria_label("Loading")
+        .child(
+            svg()
+                .path(LEGEND_LOADING_ICON)
+                .size(px(11.0))
+                .flex_none()
+                .text_color(palette.muted)
+                .with_animation(
+                    "chart_legend_loading",
+                    Animation::new(LEGEND_LOADING_PERIOD).repeat(),
+                    |glyph, delta| {
+                        glyph.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
+                ),
+        )
+        .into_any_element()
 }
 
 #[derive(Clone, Copy)]
@@ -3357,8 +3411,13 @@ impl Render for NucleusChartView {
             .focus_handle
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
-        let legends =
-            chart_legend_layers(&entity, &self.legend_rows(), &self.legend_panes, self.theme);
+        let legends = chart_legend_layers(
+            &entity,
+            &self.legend_rows(),
+            &self.legend_panes,
+            self.theme,
+            self.asset_loading.is_present(),
+        );
         let text_caret = self.text_caret_overlay(window);
 
         div()
@@ -3787,6 +3846,36 @@ mod tests {
             texts.iter().any(|text| text == "00:50"),
             "countdown missing from last-value cluster: {texts:?}"
         );
+    }
+
+    #[test]
+    fn the_symbol_legend_reports_a_load_only_when_it_turns_over() {
+        let mut chart = NucleusChartView::empty();
+        assert!(!chart.asset_loading.is_present());
+        assert!(chart.set_asset_loading(true));
+        assert!(chart.asset_loading.is_present());
+        // The host mirrors its lifecycle on every poll, so a repeat must not ask
+        // for a repaint the surface does not need.
+        assert!(!chart.set_asset_loading(true));
+        assert!(chart.set_asset_loading(false));
+        assert!(!chart.asset_loading.is_present());
+    }
+
+    #[test]
+    fn indicator_clusters_never_carry_the_candle_close_countdown() {
+        let mut chart = interactive_chart();
+        for indicator in ChartIndicator::ALL {
+            let ids = chart
+                .add_indicator(indicator)
+                .expect("catalog indicator is available");
+            for id in ids {
+                assert!(
+                    !series_entry(&chart, id).countdown_visible,
+                    "{indicator:?} output {id} counts down to a bar close it does not own"
+                );
+            }
+        }
+        assert!(series_entry(&chart, 0).countdown_visible);
     }
 
     #[test]

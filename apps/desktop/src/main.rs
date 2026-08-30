@@ -2787,6 +2787,14 @@ impl WorkspaceSurface {
             self.bridge_label = status;
             cx.notify();
         }
+        let loading = self.chart_state == ChartState::Loading;
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.set_asset_loading(loading) {
+                    chart_cx.notify();
+                }
+            });
+        }
         if applied > 0 {
             if chart_was_missing && self.chart.is_some() {
                 cx.notify();
@@ -4931,12 +4939,14 @@ fn side_panel_header(
 fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
     let colors = theme.colors;
     if notice.label == ChartState::Loading.label() {
+        if notice.placement != ChartNoticePlacement::Center {
+            // A repair behind the chart the trader is still reading is announced by
+            // the symbol legend's own spinner, beside the symbol it belongs to. A
+            // second one in the corner lands on top of that legend.
+            return div().into_any_element();
+        }
         let spinner = Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
-            .with_size(if notice.placement == ChartNoticePlacement::Center {
-                px(40.0)
-            } else {
-                px(28.0)
-            })
+            .with_size(px(40.0))
             .color(gpui_color(colors.icon));
         let overlay = div()
             .id("chart_loading_status")
@@ -4967,17 +4977,13 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
                             .child(detail)
                     }))
             });
-        return if notice.placement == ChartNoticePlacement::Center {
-            overlay
-                .inset_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-        } else {
-            overlay.top_3().left_3()
-        }
-        .into_any_element();
+        return overlay
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .into_any_element();
     }
     let tone = match notice.tone {
         ChartNoticeTone::Muted => colors.text_secondary,

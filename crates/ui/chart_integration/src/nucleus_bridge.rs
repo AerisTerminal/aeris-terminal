@@ -90,6 +90,10 @@ pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
         series.histogram_updown = true;
         series.title = "Volume".to_string();
         series.title_visible = true;
+        // Volume is the one catalog indicator built here rather than by Nucleus's indicator
+        // factory, so it has to opt out of the price-series countdown default itself: the bar
+        // close it would count down to is the price series' own, already shown under the price.
+        series.countdown_visible = false;
     } else {
         debug_assert!(false, "new Nucleus series identity must resolve");
     }
