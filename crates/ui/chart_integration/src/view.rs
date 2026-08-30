@@ -15,7 +15,7 @@ use axiusflow_application::{
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
     KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Window,
+    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task, Window,
     canvas, div, prelude::*, px, rgba, svg,
 };
 use nucleuscharts_engine::{
@@ -34,6 +34,8 @@ use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
+/// How often the surface wakes itself so the candle countdown keeps moving.
+const CHART_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
 const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
 const PANE_SEPARATOR_HIT: f64 = 4.0;
@@ -604,6 +606,8 @@ pub struct NucleusChartView {
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
+    /// The pending one-second self-wake. Held so only one is ever in flight.
+    clock_tick: Option<Task<()>>,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -666,6 +670,7 @@ impl NucleusChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            clock_tick: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -755,6 +760,7 @@ impl NucleusChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            clock_tick: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -1915,6 +1921,36 @@ impl NucleusChartView {
     fn invalidate_series_frame(&mut self) {
         self.frame = ChartFrame::default();
         self.axis_prims.clear();
+    }
+
+    /// Wakes the surface once a second so the countdown to the next bar moves on
+    /// the clock instead of on market activity.
+    ///
+    /// Every other repaint here happens because a message arrived. On a quiet
+    /// market the countdown simply held its last value and then jumped by
+    /// however many seconds had passed when the next trade landed, which reads
+    /// as a frozen feed on a connection that is perfectly healthy. The wake is
+    /// aligned to the second boundary being counted down to, and the engine only
+    /// rebuilds when that second actually changes.
+    fn schedule_clock_tick(&mut self, cx: &mut Context<Self>) {
+        if self.clock_tick.is_some() {
+            return;
+        }
+        let delay = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|since_epoch| {
+                CHART_CLOCK_INTERVAL
+                    .checked_sub(Duration::from_nanos(u64::from(since_epoch.subsec_nanos())))
+            })
+            .unwrap_or(CHART_CLOCK_INTERVAL);
+        self.clock_tick = Some(cx.spawn(async move |chart, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = chart.update(cx, |chart, chart_cx| {
+                chart.clock_tick = None;
+                chart_cx.notify();
+            });
+        }));
     }
 
     fn pin_host_clock(&mut self) {
@@ -3312,6 +3348,7 @@ fn legend_control(
 
 impl Render for NucleusChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.schedule_clock_tick(cx);
         let mutation = self.apply_pending_data();
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();

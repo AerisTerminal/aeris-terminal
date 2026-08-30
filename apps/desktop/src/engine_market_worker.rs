@@ -270,6 +270,9 @@ struct WorkerEndpoint {
     shutdown: mpsc::SyncSender<()>,
     model: MarketBarClientModel,
     publication: Option<MarketPublicationGeneration>,
+    /// Set once the engine has reported this demand generation live. After that
+    /// a `Partial` state is a background history repair, not a loading chart.
+    live: bool,
     active_generation: u64,
     resource_class: ConsumerResourceClass,
     last_market_poll: std::time::Instant,
@@ -372,6 +375,7 @@ fn worker_endpoint(
             shutdown: shutdown_tx,
             model: empty_model(),
             publication: None,
+            live: false,
             active_generation: initial_generation,
             resource_class: ConsumerResourceClass::Foreground,
             last_market_poll: std::time::Instant::now()
@@ -561,6 +565,7 @@ fn poll_one_market_event(
         },
         &mut endpoint.model,
         &mut endpoint.publication,
+        &mut endpoint.live,
         &endpoint.messages,
     );
     let result = match outcome {
@@ -696,6 +701,7 @@ fn process_command(
             });
             endpoint.model = empty_model();
             endpoint.publication = None;
+            endpoint.live = false;
             endpoint.active_generation = request.sequence;
             product.clone_from(&request.product);
             *interval = request.interval;
@@ -776,15 +782,32 @@ struct PolledEventContext<'a> {
 }
 
 /// Applies one series-readiness transition, reporting a live handoff to the UI.
+/// Turns the engine's load state into the state the chart presents.
+///
+/// The engine is explicit that a series serving retained local history is
+/// `Partial`, not ready. Dropping that on the floor is what showed a stale chart
+/// as current for the seconds before provider coverage landed, and then jumped.
+/// Once the series has gone live the same `Partial` means something else — a
+/// backfill repairing history behind a chart that is streaming — so it stops
+/// being a loading state at that point.
 fn apply_series_state(
     state: SeriesState,
     realtime: bool,
     published: bool,
+    live: &mut bool,
     messages: &MarketWorkerSender,
 ) -> Result<PolledEventOutcome, String> {
-    match SeriesLoadState::try_from(state.state)
-        .map_err(|_| "engine returned an invalid realtime state".to_string())?
-    {
+    let load_state = SeriesLoadState::try_from(state.state)
+        .map_err(|_| "engine returned an invalid realtime state".to_string())?;
+    let announce = |chart_state: ChartState, message: String| {
+        messages
+            .send(MarketWorkerMessage::State {
+                state: chart_state,
+                message,
+            })
+            .map_err(|error| error.to_string())
+    };
+    match load_state {
         SeriesLoadState::Live => {
             if !realtime {
                 return Err("engine marked a Coinbase calendar-history series live".to_string());
@@ -792,12 +815,11 @@ fn apply_series_state(
             if !published {
                 return Err("engine marked history live without a covering snapshot".to_string());
             }
-            messages
-                .send(MarketWorkerMessage::State {
-                    state: ChartState::Ready,
-                    message: "Coinbase history/live handoff is current".to_string(),
-                })
-                .map_err(|error| error.to_string())?;
+            *live = true;
+            announce(
+                ChartState::Ready,
+                "Coinbase history/live handoff is current".to_string(),
+            )?;
             Ok(PolledEventOutcome::Applied)
         }
         SeriesLoadState::Failed => Err(state
@@ -806,8 +828,25 @@ fn apply_series_state(
         SeriesLoadState::Ready if !published => {
             Err("engine marked history ready without a covering snapshot".to_string())
         }
-        SeriesLoadState::Ready
-        | SeriesLoadState::Empty
+        // Provider history is installed. A calendar series never goes live, so
+        // this is the only readiness it will ever report.
+        SeriesLoadState::Ready => {
+            announce(
+                ChartState::Ready,
+                "Coinbase provider history is current".to_string(),
+            )?;
+            Ok(PolledEventOutcome::Applied)
+        }
+        SeriesLoadState::Resolving | SeriesLoadState::Partial if !*live => {
+            announce(
+                ChartState::Loading,
+                state.detail.unwrap_or_else(|| {
+                    "Resident engine is loading current Coinbase coverage".to_string()
+                }),
+            )?;
+            Ok(PolledEventOutcome::Applied)
+        }
+        SeriesLoadState::Empty
         | SeriesLoadState::Resolving
         | SeriesLoadState::Partial
         | SeriesLoadState::Superseded => Ok(PolledEventOutcome::Applied),
@@ -819,6 +858,7 @@ fn apply_polled_event(
     context: &PolledEventContext<'_>,
     model: &mut MarketBarClientModel,
     publication: &mut Option<MarketPublicationGeneration>,
+    live: &mut bool,
     messages: &MarketWorkerSender,
 ) -> Result<PolledEventOutcome, String> {
     let &PolledEventContext {
@@ -869,7 +909,7 @@ fn apply_polled_event(
             if state.consumer_id != consumer_id || state.generation != active_generation {
                 return Err("engine realtime state identity mismatched".to_string());
             }
-            apply_series_state(state, realtime, publication.is_some(), messages)
+            apply_series_state(state, realtime, publication.is_some(), live, messages)
         }
         envelope::Payload::DemandError(error) => Err(demand_error(&error)),
         envelope::Payload::OrderBookSnapshot(snapshot) => {
@@ -1677,6 +1717,90 @@ mod tests {
         assert!(update.forming());
     }
 
+    fn drained_states(
+        receiver: &axiusflow_desktop::market_worker::MarketWorkerReceiver,
+    ) -> Vec<(ChartState, String)> {
+        receiver
+            .drain()
+            .0
+            .into_iter()
+            .filter_map(|message| match message {
+                MarketWorkerMessage::State { state, message } => Some((state, message)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The engine says outright that a series serving retained local history is
+    /// not ready. Swallowing that is what showed a stale chart as current.
+    #[test]
+    fn retained_partial_history_presents_as_loading_until_the_series_goes_live() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
+        let mut live = false;
+        let state = |load_state: SeriesLoadState, detail: Option<&str>| SeriesState {
+            consumer_id: 1,
+            generation: 1,
+            series: None,
+            state: load_state as i32,
+            persistence: 0,
+            detail: detail.map(str::to_string),
+        };
+
+        apply_series_state(
+            state(
+                SeriesLoadState::Partial,
+                Some("Showing retained local history while provider coverage repairs"),
+            ),
+            true,
+            true,
+            &mut live,
+            &sender,
+        )
+        .expect("a partial series is not a failure");
+        assert_eq!(
+            drained_states(&receiver),
+            vec![(
+                ChartState::Loading,
+                "Showing retained local history while provider coverage repairs".to_string()
+            )],
+            "retained history has to read as loading, with the engine's own reason"
+        );
+
+        apply_series_state(
+            state(SeriesLoadState::Live, None),
+            true,
+            true,
+            &mut live,
+            &sender,
+        )
+        .expect("the handoff completes");
+        assert!(live, "the series is live from here on");
+        assert_eq!(
+            drained_states(&receiver)
+                .into_iter()
+                .map(|(state, _)| state)
+                .collect::<Vec<_>>(),
+            vec![ChartState::Ready]
+        );
+
+        // The same state now means a backfill repairing history behind a chart
+        // that is streaming. Reporting that as loading would flap the surface on
+        // every viewport repair.
+        apply_series_state(
+            state(SeriesLoadState::Partial, Some("visible coverage repairs")),
+            true,
+            true,
+            &mut live,
+            &sender,
+        )
+        .expect("a backfill is not a failure");
+        assert!(
+            drained_states(&receiver).is_empty(),
+            "a repair behind a live chart must not put it back into loading"
+        );
+    }
+
     /// The engine republishes a covering snapshot whenever it repairs coverage,
     /// so the client is routinely handed one it is already past. That is not a
     /// failure, and failing on it put an error over a chart that was streaming.
@@ -1691,6 +1815,7 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
         let snapshot = |publication_generation: u64, sequence: u64| SeriesSnapshot {
             consumer_id: 1,
             generation: 1,
@@ -1725,6 +1850,7 @@ mod tests {
                 &context,
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Ok(PolledEventOutcome::Applied)
@@ -1740,6 +1866,7 @@ mod tests {
                     &context,
                     &mut model,
                     &mut publication,
+                    &mut live,
                     &sender,
                 ),
                 Ok(PolledEventOutcome::Applied),
@@ -1763,6 +1890,7 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
         let snapshot = SeriesSnapshot {
             consumer_id: 1,
             generation: 1,
@@ -1794,6 +1922,7 @@ mod tests {
                 },
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Ok(PolledEventOutcome::Applied)
@@ -1827,6 +1956,7 @@ mod tests {
                 },
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Ok(PolledEventOutcome::ResnapshotRequired)
@@ -1858,6 +1988,7 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
         let context = PolledEventContext {
             consumer_id: 1,
             active_generation: 1,
@@ -1881,6 +2012,7 @@ mod tests {
                 &context,
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Ok(PolledEventOutcome::Applied)
@@ -1900,6 +2032,7 @@ mod tests {
                     &context,
                     &mut model,
                     &mut publication,
+                    &mut live,
                     &sender,
                 ),
                 Ok(PolledEventOutcome::Applied),
@@ -1994,6 +2127,7 @@ mod tests {
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
 
         let result = apply_polled_event(
             envelope::Payload::SeriesState(SeriesState {
@@ -2010,6 +2144,7 @@ mod tests {
             },
             &mut model,
             &mut publication,
+            &mut live,
             &sender,
         );
 
@@ -2151,6 +2286,7 @@ mod tests {
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
         apply_polled_event(
             envelope::Payload::SeriesSnapshot(snapshot),
             &PolledEventContext {
@@ -2161,6 +2297,7 @@ mod tests {
             },
             &mut model,
             &mut publication,
+            &mut live,
             &sender,
         )
         .expect("completed calendar snapshot applies");
@@ -2181,6 +2318,7 @@ mod tests {
                 },
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Err("engine marked a Coinbase calendar-history series live".to_string())
@@ -2218,6 +2356,7 @@ mod tests {
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
         assert_eq!(
             apply_polled_event(
                 snapshot(9, 12, 12),
@@ -2229,6 +2368,7 @@ mod tests {
                 },
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Ok(PolledEventOutcome::Applied)
@@ -2247,6 +2387,7 @@ mod tests {
                 },
                 &mut model,
                 &mut publication,
+                &mut live,
                 &sender,
             ),
             Ok(PolledEventOutcome::Applied)
@@ -2299,6 +2440,7 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let mut model = empty_model();
         let mut publication = None;
+        let mut live = false;
 
         let outcome = apply_polled_event(
             envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
@@ -2345,6 +2487,7 @@ mod tests {
             },
             &mut model,
             &mut publication,
+            &mut live,
             &sender,
         );
 

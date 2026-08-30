@@ -1236,18 +1236,24 @@ struct ChartSurfaceNotice {
     detail: Option<String>,
     placement: ChartNoticePlacement,
     tone: ChartNoticeTone,
+    /// Covers the surface underneath. Set when what is drawn belongs to the
+    /// selection the trader just left: it is real market data, but it is not the
+    /// data they asked for, and a corner spinner over it reads as current.
+    scrim: bool,
 }
 
 fn chart_surface_notice(
     state: ChartState,
     has_market_data: bool,
+    superseded: bool,
     detail: &str,
 ) -> Option<ChartSurfaceNotice> {
-    let placement = if has_market_data {
+    let placement = if has_market_data && !superseded {
         ChartNoticePlacement::BottomRight
     } else {
         ChartNoticePlacement::Center
     };
+    let scrim = superseded && has_market_data;
     let detail = bounded_status_detail(detail, state.label());
     match state {
         ChartState::Loading => Some(ChartSurfaceNotice {
@@ -1255,6 +1261,7 @@ fn chart_surface_notice(
             detail,
             placement,
             tone: ChartNoticeTone::Muted,
+            scrim,
         }),
         ChartState::Ready => None,
         ChartState::Stale | ChartState::Recovering => Some(ChartSurfaceNotice {
@@ -1262,12 +1269,14 @@ fn chart_surface_notice(
             detail,
             placement,
             tone: ChartNoticeTone::Warning,
+            scrim,
         }),
         ChartState::Error => Some(ChartSurfaceNotice {
             label: state.label(),
             detail,
             placement,
             tone: ChartNoticeTone::Loss,
+            scrim,
         }),
     }
 }
@@ -2358,7 +2367,14 @@ impl WorkspaceSurface {
                     generation: replaced.generation(),
                 });
         }
-        if next_state == ChartState::Ready {
+        // A publication says bars arrived, not that they are current. The engine
+        // reports readiness separately, and while it is still loading current
+        // coverage the chart is showing retained history — promoting it here is
+        // what presented a stale chart as ready for the seconds before the
+        // provider page and the live handoff landed.
+        if next_state == ChartState::Ready && self.chart_state == ChartState::Loading {
+            cx.notify();
+        } else if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = if self.provider == TerminalProvider::Coinbase
                 && coinbase_interval_is_history_only(self.coinbase_interval)
@@ -2479,6 +2495,20 @@ impl WorkspaceSurface {
         eprintln!("market worker invalidated the stream: {message}");
     }
 
+    /// Reports whether the chart on screen belongs to the selection the trader
+    /// just left.
+    ///
+    /// A switch keeps the previous chart up rather than blanking the surface, so
+    /// for as long as the replacement has not arrived the pixels are real market
+    /// data from the wrong series. The surface has to say so.
+    fn showing_superseded_series(&self) -> bool {
+        self.chart.is_some()
+            && match self.provider {
+                TerminalProvider::Coinbase => self.coinbase_switch.is_swapping(),
+                TerminalProvider::Rithmic => self.series_browser.pending().is_some(),
+            }
+    }
+
     fn set_chart_state(&mut self, state: ChartState, message: String, cx: &mut Context<Self>) {
         if matches!(state, ChartState::Stale | ChartState::Recovering) {
             self.mark_market_stream_invalid(&message, cx);
@@ -2548,7 +2578,7 @@ impl WorkspaceSurface {
                         self.restore_coinbase_selection_after_failure(&message, cx);
                     }
                 } else if self.provider == TerminalProvider::Coinbase
-                    && matches!(state, ChartState::Loading | ChartState::Recovering)
+                    && state == ChartState::Recovering
                 {
                     self.connection_state = Some(FeedConnectionState::Recovering);
                     self.connection_message = Some(message.clone());
@@ -4348,6 +4378,7 @@ struct MarketWorkspaceState<'a> {
     pane_id: u64,
     chart: Option<&'a Entity<NucleusChartView>>,
     chart_has_market_data: bool,
+    chart_is_superseded: bool,
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     side_panel_width: f32,
@@ -4362,6 +4393,7 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         pane_id,
         chart,
         chart_has_market_data,
+        chart_is_superseded,
         dom,
         side_panel,
         side_panel_width,
@@ -4370,7 +4402,12 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         theme,
     } = state;
     let colors = theme.colors;
-    let notice = chart_surface_notice(chart_state, chart_has_market_data, &chart_status_detail);
+    let notice = chart_surface_notice(
+        chart_state,
+        chart_has_market_data,
+        chart_is_superseded,
+        &chart_status_detail,
+    );
     let chart_surface = chart_pane_host(chart)
         .id(("primary_chart", pane_id))
         .bg(gpui_color(colors.surface))
@@ -4906,9 +4943,37 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
             .absolute()
             .role(Role::Status)
             .aria_label(notice.label)
-            .child(spinner);
+            .when(notice.scrim, |overlay| {
+                // The chart underneath belongs to the selection the trader left.
+                // It stays on screen so the surface never goes blank, but it is
+                // covered and named, because reading prices off it would be
+                // reading the wrong market.
+                overlay.bg(gpui_color(colors.surface.with_alpha(0.82)))
+            })
+            .child(spinner)
+            .when(notice.scrim, |overlay| {
+                overlay
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(gpui_color(colors.text_primary))
+                            .child(notice.label),
+                    )
+                    .children(notice.detail.clone().map(|detail| {
+                        div()
+                            .text_xs()
+                            .text_color(gpui_color(colors.text_secondary))
+                            .child(detail)
+                    }))
+            });
         return if notice.placement == ChartNoticePlacement::Center {
-            overlay.inset_0().flex().items_center().justify_center()
+            overlay
+                .inset_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
         } else {
             overlay.top_3().left_3()
         }
@@ -7558,6 +7623,20 @@ fn connection_presentation(
             theme.colors.bearish
         });
     }
+    // A switch or a first load is in flight. The trader is waiting on this
+    // chart, not watching a feed fail, and calling that "Reconnecting" is what
+    // made an ordinary switch look like an outage. A real outage still outranks
+    // it, because then the load is not going to finish.
+    if chart_state == ChartState::Loading
+        && !matches!(
+            state,
+            FeedConnectionState::Disconnected | FeedConnectionState::Stopped
+        )
+    {
+        return (format!("{provider} · Loading"), |theme| {
+            theme.colors.primary
+        });
+    }
     if chart_state == ChartState::Error && state == FeedConnectionState::Streaming {
         return (format!("{provider} · Data error"), |theme| {
             theme.colors.danger
@@ -9642,6 +9721,7 @@ fn workspace_pane_element(
         pane_id,
         chart: surface.chart.as_ref(),
         chart_has_market_data,
+        chart_is_superseded: surface.showing_superseded_series(),
         dom: surface.dom.clone(),
         side_panel: surface.side_panel,
         side_panel_width: surface.side_panel_width,
@@ -11653,6 +11733,7 @@ mod tests {
             chart_surface_notice(
                 stopped.chart_state(true).expect("stopped chart state"),
                 true,
+                false,
                 "Rithmic market worker stopped",
             )
             .expect("retained chart error notice")
@@ -11662,6 +11743,7 @@ mod tests {
         assert_eq!(
             chart_surface_notice(
                 stopped.chart_state(false).expect("stopped chart state"),
+                false,
                 false,
                 "Rithmic market worker stopped",
             )
@@ -11748,8 +11830,63 @@ mod tests {
         assert!((attached.a - 19.0 / 255.0).abs() < f32::EPSILON);
     }
 
+    /// A switch leaves the previous chart on screen so the surface never goes
+    /// blank. That chart is real market data from the market the trader just
+    /// left, so it has to be covered and named — a corner spinner over live
+    /// candles reads as the new selection already streaming.
     #[test]
-    fn header_lifecycle_values_are_truthfully_labeled() {
+    fn a_superseded_chart_is_covered_and_named_not_left_looking_current() {
+        let switching =
+            chart_surface_notice(ChartState::Loading, true, true, "Loading 5m market history")
+                .expect("a switch in flight is announced");
+        assert_eq!(switching.placement, ChartNoticePlacement::Center);
+        assert!(
+            switching.scrim,
+            "the market the trader left must not be readable as the one they chose"
+        );
+        assert_eq!(
+            switching.detail.as_deref(),
+            Some("Loading 5m market history")
+        );
+
+        // A repair behind the chart the trader is actually looking at is
+        // different: it stays out of the way.
+        let repairing =
+            chart_surface_notice(ChartState::Loading, true, false, "repairing coverage")
+                .expect("a repair is announced");
+        assert_eq!(repairing.placement, ChartNoticePlacement::BottomRight);
+        assert!(!repairing.scrim);
+    }
+
+    /// A load in flight is not an outage, and labelling it as one is what made
+    /// an ordinary switch look like the feed had dropped.
+    #[test]
+    fn a_load_in_flight_reads_as_loading_unless_the_feed_is_actually_down() {
+        assert_eq!(
+            connection_presentation(
+                TerminalProvider::Coinbase,
+                FeedConnectionState::Streaming,
+                ChartState::Loading,
+                false,
+                false,
+            )
+            .0,
+            "Coinbase · Loading"
+        );
+        // It outranks a recovering feed: the trader is waiting on this chart.
+        assert_eq!(
+            connection_presentation(
+                TerminalProvider::Rithmic,
+                FeedConnectionState::Recovering,
+                ChartState::Loading,
+                false,
+                false,
+            )
+            .0,
+            "Test · Loading"
+        );
+        // It never outranks a feed that is down, because then the load is not
+        // going to finish.
         assert_eq!(
             connection_presentation(
                 TerminalProvider::Rithmic,
@@ -11765,12 +11902,27 @@ mod tests {
             connection_presentation(
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Recovering,
-                ChartState::Loading,
+                ChartState::Recovering,
                 false,
                 false,
             )
             .0,
             "Test · Reconnecting"
+        );
+    }
+
+    #[test]
+    fn header_lifecycle_values_are_truthfully_labeled() {
+        assert_eq!(
+            connection_presentation(
+                TerminalProvider::Rithmic,
+                FeedConnectionState::Disconnected,
+                ChartState::Loading,
+                false,
+                false,
+            )
+            .0,
+            "Offline"
         );
         assert_eq!(
             connection_presentation(
@@ -12112,6 +12264,7 @@ mod tests {
         let loading = chart_surface_notice(
             ChartState::Loading,
             false,
+            false,
             "discovering Rithmic Test systems",
         )
         .expect("loading notice");
@@ -12126,24 +12279,26 @@ mod tests {
         let recovery = chart_surface_notice(
             ChartState::Recovering,
             true,
+            false,
             "Rithmic Test session will retry",
         )
         .expect("recovery notice");
         assert_eq!(recovery.label, "Reconnecting chart");
         assert_eq!(recovery.placement, ChartNoticePlacement::BottomRight);
         assert_eq!(recovery.tone, ChartNoticeTone::Warning);
-        assert!(chart_surface_notice(ChartState::Ready, true, "current").is_none());
+        assert!(chart_surface_notice(ChartState::Ready, true, false, "current").is_none());
     }
 
     #[test]
     fn chart_error_and_stale_notices_use_truthful_severity() {
-        let stale = chart_surface_notice(ChartState::Stale, true, "trade stream is silent")
+        let stale = chart_surface_notice(ChartState::Stale, true, false, "trade stream is silent")
             .expect("stale notice");
         assert_eq!(stale.label, "Chart stale");
         assert_eq!(stale.tone, ChartNoticeTone::Warning);
 
         let error = chart_surface_notice(
             ChartState::Error,
+            false,
             false,
             "Rithmic Test authentication was rejected",
         )
