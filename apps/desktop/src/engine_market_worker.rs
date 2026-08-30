@@ -12,15 +12,14 @@ use std::{
 };
 
 use axiusflow_application::{
-    MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
-    ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
-    ReplayValidationError,
+    MarketEventProvenance, Provenanced, ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot,
+    ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
 };
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, DemandError, EngineFaultCode, FailureStage, InstallProviderInstrument,
     ProviderConnectionState, ProviderState, SearchProviderInstruments, SeriesCadence, SeriesKey,
-    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, WorkspacePaneKind, WorkspaceState,
-    envelope,
+    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SeriesUpdateOperation,
+    WorkspacePaneKind, WorkspaceState, envelope,
 };
 #[cfg(test)]
 use axiusflow_engine_protocol::{WorkspacePaneState, WorkspaceTabState};
@@ -45,11 +44,10 @@ const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
-const MODEL_CAPACITY: usize = 32_768;
+const RETAINED_BAR_CAPACITY: usize = 32_768;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
-const POLL_INTERVAL: Duration = Duration::from_millis(16);
-const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const EVENT_WAIT: Duration = Duration::from_millis(8);
 /// Engine events one chart drains per tick before yielding to the other charts.
 const MARKET_EVENTS_PER_POLL: usize = 512;
 const WORKSPACE_ADDITION_CAPACITY: usize = 8;
@@ -268,14 +266,12 @@ struct WorkerEndpoint {
     commands: mpsc::Receiver<MarketWorkerCommand>,
     pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
     shutdown: mpsc::SyncSender<()>,
-    model: MarketBarClientModel,
     publication: Option<MarketPublicationGeneration>,
     /// Set once the engine has reported this demand generation live. After that
     /// a `Partial` state is a background history repair, not a loading chart.
     live: bool,
     active_generation: u64,
     resource_class: ConsumerResourceClass,
-    last_market_poll: std::time::Instant,
     active: bool,
 }
 
@@ -373,14 +369,10 @@ fn worker_endpoint(
             commands: command_rx,
             pending_resource_class,
             shutdown: shutdown_tx,
-            model: empty_model(),
             publication: None,
             live: false,
             active_generation: initial_generation,
             resource_class: ConsumerResourceClass::Foreground,
-            last_market_poll: std::time::Instant::now()
-                .checked_sub(BACKGROUND_POLL_INTERVAL)
-                .unwrap_or_else(std::time::Instant::now),
             active: true,
         },
     };
@@ -496,54 +488,68 @@ fn run_attached_workers(
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     retire_endpoint(client, &mut record.endpoint);
-                    continue;
                 }
             }
-            poll_endpoint(client, record)?;
         }
         endpoints.retain(|record| record.endpoint.active);
-        thread::sleep(POLL_INTERVAL);
-    }
-    Ok(())
-}
-
-/// Drains every event the engine has for this chart, up to a per-tick bound.
-///
-/// One event per tick capped the whole feed at 62 events a second per chart,
-/// shared between bars, the order book, order flow, and the catalog. Anything
-/// above that backed up in the engine and was coalesced away, which is exactly
-/// what the strict bar-sequence contract cannot survive.
-fn poll_endpoint(client: &mut EngineSupervisor, record: &mut EndpointRecord) -> Result<(), String> {
-    let now = std::time::Instant::now();
-    if !record.endpoint.active || !record.endpoint.market_poll_due(now) {
-        return Ok(());
-    }
-    record.endpoint.last_market_poll = now;
-    for _ in 0..MARKET_EVENTS_PER_POLL {
-        if !record.endpoint.active || !poll_one_market_event(client, record)? {
-            break;
+        if receive_and_apply_event(client, endpoints, EVENT_WAIT)? {
+            for _ in 1..MARKET_EVENTS_PER_POLL {
+                if !receive_and_apply_event(client, endpoints, Duration::ZERO)? {
+                    break;
+                }
+            }
         }
     }
     Ok(())
 }
 
-/// Polls and applies at most one engine event. Returns whether one arrived.
-fn poll_one_market_event(
+/// Receives and applies one pushed engine event. Returns whether one arrived.
+fn receive_and_apply_event(
     client: &mut EngineSupervisor,
-    record: &mut EndpointRecord,
+    endpoints: &mut [EndpointRecord],
+    timeout: Duration,
 ) -> Result<bool, String> {
-    let endpoint = &mut record.endpoint;
-    let poll = client.poll_market_event(endpoint.consumer_id)?;
-    if poll.reconnected {
-        reset_application_model(&mut endpoint.model, &mut endpoint.publication);
-        let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-            state: FeedConnectionState::Recovering,
-            message: "Resident engine restarted; restoring chart demand".to_string(),
-        });
+    let received = client.receive_market_event(timeout)?;
+    if received.reconnected {
+        for endpoint in endpoints
+            .iter_mut()
+            .filter(|record| record.endpoint.active)
+            .map(|record| &mut record.endpoint)
+        {
+            endpoint.publication = None;
+            let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Recovering,
+                message: "Resident engine restarted; restoring chart demand".to_string(),
+            });
+        }
+        return Ok(true);
     }
-    let Some(event) = poll.event else {
+    let (Some(consumer_id), Some(event)) = (received.consumer_id, received.event) else {
         return Ok(false);
     };
+    if consumer_id == 0 {
+        let envelope::Payload::Fault(fault) = event else {
+            return Err("engine pushed an unrouted market message".to_string());
+        };
+        for endpoint in endpoints
+            .iter()
+            .filter(|record| record.endpoint.active)
+            .map(|record| &record.endpoint)
+        {
+            let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: fault.redacted_detail.clone(),
+            });
+        }
+        return Ok(true);
+    }
+    let Some(record) = endpoints
+        .iter_mut()
+        .find(|record| record.endpoint.active && record.endpoint.consumer_id == consumer_id)
+    else {
+        return Ok(true);
+    };
+    let endpoint = &mut record.endpoint;
     let (catalog, event) = classify_provider_catalog_event(event, "coinbase", endpoint.consumer_id);
     let event = match catalog {
         Some(event) => {
@@ -555,26 +561,18 @@ fn poll_one_market_event(
         None => event,
     };
     let Some(event) = event else { return Ok(true) };
-    let outcome = apply_polled_event(
+    let result = apply_pushed_event(
         event,
-        &PolledEventContext {
+        &PushedEventContext {
             consumer_id: endpoint.consumer_id,
             active_generation: endpoint.active_generation,
             realtime: interval_supports_realtime(record.interval),
             instrument: &record.product,
         },
-        &mut endpoint.model,
         &mut endpoint.publication,
         &mut endpoint.live,
         &endpoint.messages,
     );
-    let result = match outcome {
-        Ok(PolledEventOutcome::Applied) => return Ok(true),
-        Ok(PolledEventOutcome::ResnapshotRequired) => {
-            recover_sequence_gap(client, &record.product, record.interval, endpoint)
-        }
-        Err(error) => Err(error),
-    };
     if let Err(error) = result {
         let _ = endpoint.messages.send(MarketWorkerMessage::State {
             state: ChartState::Error,
@@ -618,7 +616,6 @@ fn initialize_endpoint(
         endpoint.consumer_id,
         endpoint.active_generation,
         series_key(product, interval)?,
-        &mut endpoint.model,
         &endpoint.messages,
     ) {
         Ok((snapshot, generation)) => {
@@ -699,7 +696,6 @@ fn process_command(
                 state: ChartState::Loading,
                 message: "Loading Coinbase history through the resident engine".to_string(),
             });
-            endpoint.model = empty_model();
             endpoint.publication = None;
             endpoint.live = false;
             endpoint.active_generation = request.sequence;
@@ -744,37 +740,14 @@ fn set_resource_class(
     Ok(())
 }
 
-impl WorkerEndpoint {
-    fn market_poll_due(&self, now: std::time::Instant) -> bool {
-        consumer_market_poll_due(
-            self.resource_class,
-            now.duration_since(self.last_market_poll),
-        )
-    }
-}
-
-fn consumer_market_poll_due(resource_class: ConsumerResourceClass, elapsed: Duration) -> bool {
-    match resource_class {
-        ConsumerResourceClass::Foreground => true,
-        ConsumerResourceClass::Background => elapsed >= BACKGROUND_POLL_INTERVAL,
-        ConsumerResourceClass::Warm | ConsumerResourceClass::Detached => false,
-    }
-}
-
 fn retire_endpoint(client: &mut EngineSupervisor, endpoint: &mut WorkerEndpoint) {
     let _ = client.remove_market_consumer(endpoint.consumer_id);
     endpoint.active = false;
     let _ = endpoint.shutdown.try_send(());
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PolledEventOutcome {
-    Applied,
-    ResnapshotRequired,
-}
-
-/// Identity every polled engine event is checked against.
-struct PolledEventContext<'a> {
+/// Identity every pushed engine event is checked against.
+struct PushedEventContext<'a> {
     consumer_id: u64,
     active_generation: u64,
     realtime: bool,
@@ -796,7 +769,7 @@ fn apply_series_state(
     published: bool,
     live: &mut bool,
     messages: &MarketWorkerSender,
-) -> Result<PolledEventOutcome, String> {
+) -> Result<(), String> {
     let load_state = SeriesLoadState::try_from(state.state)
         .map_err(|_| "engine returned an invalid realtime state".to_string())?;
     let announce = |chart_state: ChartState, message: String| {
@@ -820,7 +793,7 @@ fn apply_series_state(
                 ChartState::Ready,
                 "Coinbase history/live handoff is current".to_string(),
             )?;
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         }
         SeriesLoadState::Failed => Err(state
             .detail
@@ -835,7 +808,7 @@ fn apply_series_state(
                 ChartState::Ready,
                 "Coinbase provider history is current".to_string(),
             )?;
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         }
         SeriesLoadState::Resolving | SeriesLoadState::Partial if !*live => {
             announce(
@@ -844,24 +817,23 @@ fn apply_series_state(
                     "Resident engine is loading current Coinbase coverage".to_string()
                 }),
             )?;
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         }
         SeriesLoadState::Empty
         | SeriesLoadState::Resolving
         | SeriesLoadState::Partial
-        | SeriesLoadState::Superseded => Ok(PolledEventOutcome::Applied),
+        | SeriesLoadState::Superseded => Ok(()),
     }
 }
 
-fn apply_polled_event(
+fn apply_pushed_event(
     event: envelope::Payload,
-    context: &PolledEventContext<'_>,
-    model: &mut MarketBarClientModel,
+    context: &PushedEventContext<'_>,
     publication: &mut Option<MarketPublicationGeneration>,
     live: &mut bool,
     messages: &MarketWorkerSender,
-) -> Result<PolledEventOutcome, String> {
-    let &PolledEventContext {
+) -> Result<(), String> {
+    let &PushedEventContext {
         consumer_id,
         active_generation,
         realtime,
@@ -872,38 +844,30 @@ fn apply_polled_event(
             if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
                 return Err("engine realtime snapshot identity mismatched".to_string());
             }
-            let Some((replay, generation)) = apply_snapshot(model, &snapshot)? else {
-                return Ok(PolledEventOutcome::Applied);
-            };
+            let replay = replay_snapshot(&snapshot)?;
+            let generation = generation_from_snapshot(&snapshot, &replay)?;
             let status = MarketPublicationGeneration::from_generation(&generation);
             *publication = Some(status);
             send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)?;
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         }
         envelope::Payload::SeriesUpdate(update) => {
             if update.consumer_id != consumer_id || update.generation != active_generation {
                 return Err("engine realtime update identity mismatched".to_string());
             }
             let tail = replay_tail_update(&update)?;
-            match model
-                .apply_update(ReplayStreamUpdate::Tail(tail.clone()))
-                .map_err(|error| error.to_string())?
-            {
-                MarketBarModelOutcome::Published(generation) => {
-                    let status = MarketPublicationGeneration::from_generation(&generation);
-                    *publication = Some(status);
-                    send_publication(messages, ReplayStreamUpdate::Tail(tail), status)?;
-                    Ok(PolledEventOutcome::Applied)
-                }
-                MarketBarModelOutcome::Duplicate => Ok(PolledEventOutcome::Applied),
-                MarketBarModelOutcome::ResnapshotRequired(_) => {
-                    Ok(PolledEventOutcome::ResnapshotRequired)
-                }
-            }
+            let status = tail_publication(
+                publication.ok_or_else(|| {
+                    "engine sent a Coinbase update before a covering snapshot".to_string()
+                })?,
+                &tail,
+            );
+            *publication = Some(status);
+            send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
         }
         envelope::Payload::ProviderState(state) => {
             apply_provider_state(&state, realtime, messages)?;
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         }
         envelope::Payload::SeriesState(state) => {
             if state.consumer_id != consumer_id || state.generation != active_generation {
@@ -917,7 +881,7 @@ fn apply_polled_event(
                 return Err("engine order-book consumer mismatched".to_string());
             }
             if snapshot.provider_generation < instrument.session_generation {
-                return Ok(PolledEventOutcome::Applied);
+                return Ok(());
             }
             let frame = dom_from_snapshot(
                 &DomIdentity {
@@ -930,13 +894,11 @@ fn apply_polled_event(
             messages
                 .send(MarketWorkerMessage::CoinbaseDom(frame))
                 .map_err(|error| error.to_string())?;
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         }
-        envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => {
-            Ok(PolledEventOutcome::Applied)
-        }
+        envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => Ok(()),
         envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
-        _ => Err("engine returned an unexpected polled market event".to_string()),
+        _ => Err("engine returned an unexpected pushed market event".to_string()),
     }
 }
 
@@ -987,22 +949,19 @@ fn request_snapshot(
     consumer_id: u64,
     generation: u64,
     series: SeriesKey,
-    model: &mut MarketBarClientModel,
     messages: &MarketWorkerSender,
 ) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
     let realtime = series_supports_realtime(&series);
     client.set_series_demand(consumer_id, generation, series)?;
     loop {
-        let poll = client.poll_market_event(consumer_id)?;
+        let poll = client.receive_market_event_for(consumer_id, Duration::from_millis(250))?;
         if poll.reconnected {
-            *model = empty_model();
             let _ = messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message: "Resident engine restarted; restoring chart demand".to_string(),
             });
         }
         let Some(event) = poll.event else {
-            thread::sleep(POLL_INTERVAL);
             continue;
         };
         // Catalog results are delivered once, so they are forwarded rather than
@@ -1044,12 +1003,12 @@ fn request_snapshot(
                 apply_provider_state(&state, realtime, messages)?;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
-                // A snapshot the model is already past says nothing about the one
-                // this request is waiting for, so it keeps waiting.
-                let Some((replay, generation)) = apply_snapshot(model, &snapshot)? else {
+                if snapshot.consumer_id != consumer_id || snapshot.generation != generation {
                     continue;
-                };
-                return Ok((replay, generation));
+                }
+                let replay = replay_snapshot(&snapshot)?;
+                let publication = generation_from_snapshot(&snapshot, &replay)?;
+                return Ok((replay, publication));
             }
             envelope::Payload::DemandError(error) => return Err(demand_error(&error)),
             envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
@@ -1068,32 +1027,6 @@ fn request_snapshot(
     }
 }
 
-/// Applies one engine snapshot, or reports that the client is already past it.
-///
-/// A covering snapshot the model already holds is not a failure: the engine
-/// republishes one whenever it repairs coverage, and the client can legitimately
-/// be ahead of it. Failing on that is what put "Chart unavailable" over a chart
-/// that was streaming, and left the launch series stuck until it was switched
-/// away and back.
-fn apply_snapshot(
-    model: &mut MarketBarClientModel,
-    snapshot: &SeriesSnapshot,
-) -> Result<Option<(ReplaySnapshot, DesktopMarketGeneration)>, String> {
-    let replay = replay_snapshot(snapshot)?;
-    let outcome = match model.apply_update(ReplayStreamUpdate::Snapshot(replay.clone())) {
-        Ok(outcome) => outcome,
-        Err(
-            ReplayValidationError::StaleSnapshot { .. }
-            | ReplayValidationError::SnapshotSessionGenerationRegression { .. },
-        ) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    let MarketBarModelOutcome::Published(generation) = outcome else {
-        return Err("engine snapshot did not publish a client generation".to_string());
-    };
-    Ok(Some((replay, generation)))
-}
-
 fn send_recovery(
     client: &mut EngineSupervisor,
     product: &InstallProviderInstrument,
@@ -1106,7 +1039,6 @@ fn send_recovery(
         endpoint.consumer_id,
         endpoint.active_generation,
         series_key(product, interval)?,
-        &mut endpoint.model,
         &endpoint.messages,
     )
     .map(|(snapshot, generation)| {
@@ -1125,34 +1057,6 @@ fn send_recovery(
             result,
         })
         .map_err(|error| error.to_string())
-}
-
-fn recover_sequence_gap(
-    client: &mut EngineSupervisor,
-    product: &InstallProviderInstrument,
-    interval: ChartInterval,
-    endpoint: &mut WorkerEndpoint,
-) -> Result<(), String> {
-    let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-        state: FeedConnectionState::Recovering,
-        message: "Realtime updates were coalesced; requesting a covering snapshot".to_string(),
-    });
-    let (snapshot, generation) = request_snapshot(
-        client,
-        endpoint.consumer_id,
-        endpoint.active_generation,
-        series_key(product, interval)?,
-        &mut endpoint.model,
-        &endpoint.messages,
-    )?;
-    let publication = MarketPublicationGeneration::from_generation(&generation);
-    send_publication(
-        &endpoint.messages,
-        ReplayStreamUpdate::Snapshot(snapshot),
-        publication,
-    )?;
-    endpoint.publication = Some(publication);
-    Ok(())
 }
 
 fn send_publication(
@@ -1240,6 +1144,52 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
     .map_err(|error| error.to_string())
 }
 
+fn generation_from_snapshot(
+    snapshot: &SeriesSnapshot,
+    replay: &ReplaySnapshot,
+) -> Result<DesktopMarketGeneration, String> {
+    let first_sequence = replay
+        .bars()
+        .first()
+        .map(|bar| bar.value().source_sequence)
+        .ok_or_else(|| "engine snapshot is empty".to_string())?;
+    let last_sequence = replay
+        .bars()
+        .last()
+        .map(|bar| bar.value().source_sequence)
+        .ok_or_else(|| "engine snapshot is empty".to_string())?;
+    DesktopMarketGeneration::try_new(
+        snapshot.provider_generation,
+        snapshot.publication_generation,
+        first_sequence,
+        last_sequence,
+        replay.bars().to_vec(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn tail_publication(
+    current: MarketPublicationGeneration,
+    tail: &ReplayTailUpdate,
+) -> MarketPublicationGeneration {
+    let sequence = tail.item().value().source_sequence;
+    let (mut first, _) = current.sequence_range();
+    let retained = match tail.operation() {
+        ReplayTailOperation::Revise => current.retained_items(),
+        ReplayTailOperation::Append => {
+            let retained = current
+                .retained_items()
+                .saturating_add(1)
+                .min(RETAINED_BAR_CAPACITY);
+            if retained == RETAINED_BAR_CAPACITY && current.retained_items() == retained {
+                first = first.saturating_add(1);
+            }
+            retained
+        }
+    };
+    MarketPublicationGeneration::from_tail(tail.publication_generation(), retained, first, sequence)
+}
+
 fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String> {
     let series = update
         .series
@@ -1262,8 +1212,20 @@ fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String>
         bar,
         now_unix_nanos(),
     );
-    ReplayTailUpdate::try_new(item, update.publication_generation, update.forming)
-        .map_err(|error| error.to_string())
+    let operation = match SeriesUpdateOperation::try_from(update.operation) {
+        Ok(SeriesUpdateOperation::ReviseTail) => ReplayTailOperation::Revise,
+        Ok(SeriesUpdateOperation::AppendTail) => ReplayTailOperation::Append,
+        Ok(SeriesUpdateOperation::Unspecified) | Err(_) => {
+            return Err("engine update operation is invalid".to_string());
+        }
+    };
+    ReplayTailUpdate::try_new(
+        item,
+        update.publication_generation,
+        update.forming,
+        operation,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn provenanced_engine_bar(
@@ -1410,14 +1372,6 @@ const fn snapshot_connection_state(interval: ChartInterval) -> (FeedConnectionSt
     }
 }
 
-fn reset_application_model(
-    model: &mut MarketBarClientModel,
-    publication: &mut Option<MarketPublicationGeneration>,
-) {
-    *model = empty_model();
-    *publication = None;
-}
-
 fn default_coinbase_product(product_id: &str) -> InstallProviderInstrument {
     let (base, quote) = product_id.split_once('-').unwrap_or(("BTC", "USD"));
     InstallProviderInstrument {
@@ -1444,10 +1398,6 @@ fn coinbase_products() -> Vec<InstallProviderInstrument> {
         .into_iter()
         .map(default_coinbase_product)
         .collect()
-}
-
-fn empty_model() -> MarketBarClientModel {
-    MarketBarClientModel::new(NonZeroUsize::new(MODEL_CAPACITY).unwrap_or(NonZeroUsize::MIN))
 }
 
 fn demand_error(error: &DemandError) -> String {
@@ -1709,6 +1659,7 @@ mod tests {
             }),
             forming: true,
             publication_generation: 8,
+            operation: SeriesUpdateOperation::AppendTail as i32,
         })
         .expect("tail converts");
         assert_eq!(update.item().value().source_sequence, 3);
@@ -1805,7 +1756,7 @@ mod tests {
     /// so the client is routinely handed one it is already past. That is not a
     /// failure, and failing on it put an error over a chart that was streaming.
     #[test]
-    fn a_covering_snapshot_the_client_is_already_past_is_ignored_not_fatal() {
+    fn covering_snapshots_are_forwarded_to_the_chart_validator() {
         let series = series_key(
             coinbase_products().first().expect("BTC product"),
             ChartInterval::Minute1,
@@ -1813,7 +1764,6 @@ mod tests {
         .expect("series");
         let (sender, _receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
         let snapshot = |publication_generation: u64, sequence: u64| SeriesSnapshot {
@@ -1837,7 +1787,7 @@ mod tests {
             publication_generation,
             forming: false,
         };
-        let context = PolledEventContext {
+        let context = PushedEventContext {
             consumer_id: 1,
             active_generation: 1,
             realtime: true,
@@ -1845,42 +1795,38 @@ mod tests {
         };
 
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 envelope::Payload::SeriesSnapshot(snapshot(4, 2)),
                 &context,
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
             ),
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         );
-        let published = publication;
-
-        // A repair that restarted the publication counter, and one carrying bars
-        // the client already holds: both are behind, and neither is an error.
+        // The thin client forwards covering images. The chart bridge owns stale
+        // publication rejection rather than a second model in this worker.
         for superseded in [snapshot(1, 2), snapshot(4, 1)] {
             assert_eq!(
-                apply_polled_event(
+                apply_pushed_event(
                     envelope::Payload::SeriesSnapshot(superseded),
                     &context,
-                    &mut model,
                     &mut publication,
                     &mut live,
                     &sender,
                 ),
-                Ok(PolledEventOutcome::Applied),
+                Ok(()),
                 "a superseded covering snapshot must not take the chart down"
             );
         }
         assert_eq!(
-            publication, published,
-            "and it must not move the client's published generation backwards"
+            publication.map(MarketPublicationGeneration::sequence_range),
+            Some((1, 1))
         );
     }
 
     #[test]
-    fn non_contiguous_engine_tail_requests_a_covering_snapshot_without_erroring_chart() {
+    fn non_contiguous_engine_tail_is_left_for_the_chart_validator() {
         let series = series_key(
             coinbase_products().first().expect("BTC product"),
             ChartInterval::Minute1,
@@ -1888,7 +1834,6 @@ mod tests {
         .expect("series");
         let (sender, _receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
         let snapshot = SeriesSnapshot {
@@ -1912,20 +1857,19 @@ mod tests {
             forming: false,
         };
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 envelope::Payload::SeriesSnapshot(snapshot),
-                &PolledEventContext {
+                &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_coinbase_product("BTC-USD"),
                 },
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
             ),
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         );
         let skipped_tail = SeriesUpdate {
             consumer_id: 1,
@@ -1944,32 +1888,31 @@ mod tests {
             }),
             forming: true,
             publication_generation: 2,
+            operation: SeriesUpdateOperation::AppendTail as i32,
         };
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 envelope::Payload::SeriesUpdate(skipped_tail),
-                &PolledEventContext {
+                &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_coinbase_product("BTC-USD"),
                 },
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
             ),
-            Ok(PolledEventOutcome::ResnapshotRequired)
+            Ok(())
         );
         assert_eq!(
             publication.map(MarketPublicationGeneration::sequence_range),
-            Some((1, 1))
+            Some((1, 3))
         );
     }
 
-    /// The whole desktop path, driven deterministically: the worker's own polling
-    /// application, the real application replay model, the real bounded mailbox,
-    /// and a real chart bridge.
+    /// The whole desktop path, driven deterministically: the worker's pushed-event translation
+    /// the real bounded mailbox, and a real chart bridge.
     ///
     /// The desktop used to poll one engine event per 16ms frame, so anything the
     /// engine produced faster than 62 events a second backed up and was coalesced
@@ -1986,10 +1929,9 @@ mod tests {
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
-        let context = PolledEventContext {
+        let context = PushedEventContext {
             consumer_id: 1,
             active_generation: 1,
             realtime: true,
@@ -1997,7 +1939,7 @@ mod tests {
         };
 
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 envelope::Payload::SeriesSnapshot(SeriesSnapshot {
                     consumer_id: 1,
                     generation: 1,
@@ -2010,16 +1952,15 @@ mod tests {
                     forming: false,
                 }),
                 &context,
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
             ),
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         );
         for sequence in 2..=BURST {
             assert_eq!(
-                apply_polled_event(
+                apply_pushed_event(
                     envelope::Payload::SeriesUpdate(SeriesUpdate {
                         consumer_id: 1,
                         generation: 1,
@@ -2028,14 +1969,14 @@ mod tests {
                         bar: Some(burst_bar(sequence)),
                         forming: sequence == BURST,
                         publication_generation: sequence,
+                        operation: SeriesUpdateOperation::AppendTail as i32,
                     }),
                     &context,
-                    &mut model,
                     &mut publication,
                     &mut live,
                     &sender,
                 ),
-                Ok(PolledEventOutcome::Applied),
+                Ok(()),
                 "bar {sequence} must apply without a resnapshot"
             );
         }
@@ -2125,24 +2066,22 @@ mod tests {
     #[test]
     fn live_state_without_covering_snapshot_is_rejected() {
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
 
-        let result = apply_polled_event(
+        let result = apply_pushed_event(
             envelope::Payload::SeriesState(SeriesState {
                 consumer_id: 1,
                 generation: 7,
                 state: SeriesLoadState::Live as i32,
                 ..SeriesState::default()
             }),
-            &PolledEventContext {
+            &PushedEventContext {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
                 instrument: &default_coinbase_product("BTC-USD"),
             },
-            &mut model,
             &mut publication,
             &mut live,
             &sender,
@@ -2284,18 +2223,16 @@ mod tests {
             forming: false,
         };
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
-        apply_polled_event(
+        apply_pushed_event(
             envelope::Payload::SeriesSnapshot(snapshot),
-            &PolledEventContext {
+            &PushedEventContext {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: false,
                 instrument: &default_coinbase_product("BTC-USD"),
             },
-            &mut model,
             &mut publication,
             &mut live,
             &sender,
@@ -2303,20 +2240,19 @@ mod tests {
         .expect("completed calendar snapshot applies");
 
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 envelope::Payload::SeriesState(SeriesState {
                     consumer_id: 1,
                     generation: 7,
                     state: SeriesLoadState::Live as i32,
                     ..SeriesState::default()
                 }),
-                &PolledEventContext {
+                &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 7,
                     realtime: false,
                     instrument: &default_coinbase_product("BTC-USD"),
                 },
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
@@ -2354,49 +2290,40 @@ mod tests {
             })
         };
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 snapshot(9, 12, 12),
-                &PolledEventContext {
+                &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_coinbase_product("BTC-USD"),
                 },
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
             ),
-            Ok(PolledEventOutcome::Applied)
+            Ok(())
         );
 
-        reset_application_model(&mut model, &mut publication);
+        publication = None;
 
         assert_eq!(
-            apply_polled_event(
+            apply_pushed_event(
                 snapshot(1, 1, 1),
-                &PolledEventContext {
+                &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_coinbase_product("BTC-USD"),
                 },
-                &mut model,
                 &mut publication,
                 &mut live,
                 &sender,
             ),
-            Ok(PolledEventOutcome::Applied)
-        );
-        assert_eq!(
-            model
-                .current_generation()
-                .map(axiusflow_application::MarketGeneration::session_generation),
-            Some(1)
+            Ok(())
         );
         assert_eq!(
             publication.map(MarketPublicationGeneration::publication_generation),
@@ -2438,11 +2365,10 @@ mod tests {
         let product = default_coinbase_product("BTC-USD");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut model = empty_model();
         let mut publication = None;
         let mut live = false;
 
-        let outcome = apply_polled_event(
+        let outcome = apply_pushed_event(
             envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
                 consumer_id: 1,
                 generation: 1,
@@ -2479,19 +2405,18 @@ mod tests {
                     },
                 ],
             }),
-            &PolledEventContext {
+            &PushedEventContext {
                 consumer_id: 1,
                 active_generation: 1,
                 realtime: true,
                 instrument: &product,
             },
-            &mut model,
             &mut publication,
             &mut live,
             &sender,
         );
 
-        assert_eq!(outcome, Ok(PolledEventOutcome::Applied));
+        assert_eq!(outcome, Ok(()));
         let (messages, _) = receiver.drain();
         let frame = messages
             .into_iter()

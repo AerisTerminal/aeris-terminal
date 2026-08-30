@@ -1,7 +1,7 @@
 //! Desktop-owned recovery for authenticated resident-engine IPC sessions.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
     thread,
     time::{Duration, Instant},
@@ -17,6 +17,7 @@ use axiusflow_local_engine_client::{
 
 const RESTORE_DEADLINE: Duration = Duration::from_secs(4);
 const RESTORE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_PENDING_EVENTS: usize = 256;
 
 #[derive(Clone)]
 struct ConsumerRestore {
@@ -28,8 +29,9 @@ struct ConsumerRestore {
     pending_selection: Option<SelectProviderInstrument>,
 }
 
-/// Result of one supervised market-event poll.
-pub(super) struct SupervisedPoll {
+/// Result of one supervised pushed market event.
+pub(super) struct SupervisedEvent {
+    pub consumer_id: Option<u64>,
     pub event: Option<envelope::Payload>,
     pub reconnected: bool,
 }
@@ -42,6 +44,7 @@ pub(super) struct EngineSupervisor {
     consumers: BTreeMap<u64, ConsumerRestore>,
     instruments: BTreeMap<(String, String), InstallProviderInstrument>,
     pending_instruments: BTreeSet<(String, String)>,
+    pending_events: VecDeque<(u64, envelope::Payload)>,
     #[cfg(test)]
     reconnect_fixture: Option<Box<dyn FnMut() -> Result<EngineClient, String>>>,
 }
@@ -58,6 +61,7 @@ impl EngineSupervisor {
             consumers: BTreeMap::new(),
             instruments: BTreeMap::new(),
             pending_instruments: BTreeSet::new(),
+            pending_events: VecDeque::new(),
             #[cfg(test)]
             reconnect_fixture: None,
         })
@@ -134,17 +138,6 @@ impl EngineSupervisor {
         Ok(())
     }
 
-    pub fn set_market_visibility(&mut self, consumer_id: u64, visible: bool) -> Result<(), String> {
-        self.set_market_resource_class(
-            consumer_id,
-            if visible {
-                ConsumerResourceClass::Foreground
-            } else {
-                ConsumerResourceClass::Background
-            },
-        )
-    }
-
     pub fn set_market_resource_class(
         &mut self,
         consumer_id: u64,
@@ -176,36 +169,103 @@ impl EngineSupervisor {
         Ok(())
     }
 
-    pub fn poll_market_event(&mut self, consumer_id: u64) -> Result<SupervisedPoll, String> {
-        match self.client.poll_market_event(consumer_id) {
-            Ok(event) => {
-                if let Some(event) = &event {
-                    if !self.complete_catalog_command(consumer_id, event) {
-                        return Ok(SupervisedPoll {
-                            event: None,
-                            reconnected: false,
-                        });
-                    }
-                    if let envelope::Payload::ProviderInstrumentSelection(selection) = event
-                        && let Some(instrument) = selection.instrument.clone()
-                    {
-                        self.record_provider_instrument(instrument);
-                    }
-                }
-                Ok(SupervisedPoll {
-                    event,
-                    reconnected: false,
-                })
-            }
+    pub fn receive_market_event(&mut self, timeout: Duration) -> Result<SupervisedEvent, String> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(self.finish_event(event));
+        }
+        match self.client.receive_market_event_timeout(timeout) {
+            Ok(Some(event)) => Ok(self.finish_event(event)),
+            Ok(None) => Ok(SupervisedEvent {
+                consumer_id: None,
+                event: None,
+                reconnected: false,
+            }),
             Err(disconnected) => {
                 self.reconnect_and_restore().map_err(|restore| {
                     format!("resident engine connection failed: {disconnected}; recovery failed: {restore}")
                 })?;
-                Ok(SupervisedPoll {
+                Ok(SupervisedEvent {
+                    consumer_id: None,
                     event: None,
                     reconnected: true,
                 })
             }
+        }
+    }
+
+    pub fn receive_market_event_for(
+        &mut self,
+        consumer_id: u64,
+        timeout: Duration,
+    ) -> Result<SupervisedEvent, String> {
+        if let Some(index) = self
+            .pending_events
+            .iter()
+            .position(|(target, _)| *target == consumer_id)
+            && let Some(event) = self.pending_events.remove(index)
+        {
+            return Ok(self.finish_event(event));
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "market receive deadline overflowed".to_string())?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.client.receive_market_event_timeout(remaining) {
+                Ok(Some(event)) if event.0 == consumer_id || event.0 == 0 => {
+                    return Ok(self.finish_event(event));
+                }
+                Ok(Some(event)) => {
+                    if self.pending_events.len() >= MAX_PENDING_EVENTS {
+                        return Err("desktop market event buffer exceeded its bound".to_string());
+                    }
+                    self.pending_events.push_back(event);
+                }
+                Ok(None) => {
+                    return Ok(SupervisedEvent {
+                        consumer_id: None,
+                        event: None,
+                        reconnected: false,
+                    });
+                }
+                Err(disconnected) => {
+                    self.reconnect_and_restore().map_err(|restore| {
+                        format!("resident engine connection failed: {disconnected}; recovery failed: {restore}")
+                    })?;
+                    return Ok(SupervisedEvent {
+                        consumer_id: None,
+                        event: None,
+                        reconnected: true,
+                    });
+                }
+            }
+        }
+    }
+
+    fn finish_event(&mut self, (consumer_id, event): (u64, envelope::Payload)) -> SupervisedEvent {
+        if consumer_id == 0 {
+            return SupervisedEvent {
+                consumer_id: Some(0),
+                event: Some(event),
+                reconnected: false,
+            };
+        }
+        if !self.complete_catalog_command(consumer_id, &event) {
+            return SupervisedEvent {
+                consumer_id: Some(consumer_id),
+                event: None,
+                reconnected: false,
+            };
+        }
+        if let envelope::Payload::ProviderInstrumentSelection(selection) = &event
+            && let Some(instrument) = selection.instrument.clone()
+        {
+            self.record_provider_instrument(instrument);
+        }
+        SupervisedEvent {
+            consumer_id: Some(consumer_id),
+            event: Some(event),
+            reconnected: false,
         }
     }
 
@@ -223,6 +283,7 @@ impl EngineSupervisor {
         self.consumers.clear();
         self.instruments.clear();
         self.pending_instruments.clear();
+        self.pending_events.clear();
         self.client.detach_client(self.client_id)
     }
 
@@ -421,6 +482,7 @@ impl EngineSupervisor {
             {
                 Ok(client) => {
                     self.client = client;
+                    self.pending_events.clear();
                     return Ok(());
                 }
                 Err(error) => last_error = error,
@@ -485,6 +547,7 @@ mod tests {
             atomic::{AtomicU64, AtomicUsize, Ordering},
         },
         thread,
+        time::Duration,
     };
 
     use axiusflow_engine_protocol::{
@@ -499,6 +562,7 @@ mod tests {
     };
 
     use super::EngineSupervisor;
+    use axiusflow_engine_protocol::ConsumerResourceClass;
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
@@ -526,8 +590,13 @@ mod tests {
         }
 
         fn send(&mut self, payload: envelope::Payload) {
+            self.send_to(0, payload);
+        }
+
+        fn send_to(&mut self, target_consumer_id: u64, payload: envelope::Payload) {
             let frame = encode_envelope(&Envelope {
                 protocol_version: PROTOCOL_VERSION,
+                target_consumer_id,
                 payload: Some(payload),
             })
             .expect("encode fixture frame");
@@ -576,37 +645,15 @@ mod tests {
                 workspace_revision: 0,
                 lifecycle_contract_revision: axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
             }));
+            let mut registered_consumers = 0_usize;
+            let mut visibility_demands = 0_usize;
             loop {
                 let payload = server.receive();
-                if matches!(payload, envelope::Payload::PollMarketEvent(_)) {
-                    if disconnect_on_poll {
-                        return;
-                    }
-                    recorded
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(payload);
-                    server.send(envelope::Payload::SeriesSnapshot(SeriesSnapshot {
-                        consumer_id: 11,
-                        generation: 7,
-                        series: Some(snapshot_series),
-                        provider_generation: 2,
-                        price_scale: 2,
-                        quantity_scale: 8,
-                        bars: vec![MarketBar {
-                            source_sequence: 1,
-                            exchange_timestamp_seconds: 60,
-                            open: 100,
-                            high: 110,
-                            low: 90,
-                            close: 105,
-                            volume: 7,
-                            exchange_timestamp_unix_nanos: 60_000_000_000,
-                        }],
-                        publication_generation: 1,
-                        forming: false,
-                    }));
-                    return;
+                if matches!(payload, envelope::Payload::RegisterConsumer(_)) {
+                    registered_consumers = registered_consumers.saturating_add(1);
+                }
+                if matches!(payload, envelope::Payload::VisibilityDemand(_)) {
+                    visibility_demands = visibility_demands.saturating_add(1);
                 }
                 if let envelope::Payload::InstallProviderInstrument(instrument) = &payload {
                     server.send(envelope::Payload::ProviderInstrumentInstalled(
@@ -618,10 +665,46 @@ mod tests {
                         },
                     ));
                 }
+                let generation_restore_complete = matches!(
+                    &payload,
+                    envelope::Payload::SeriesDemand(demand)
+                        if registered_consumers >= 4
+                            && demand.consumer_id == 14
+                            && demand.generation == 9
+                );
                 recorded
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(payload);
+                if disconnect_on_poll && (visibility_demands > 0 || generation_restore_complete) {
+                    return;
+                }
+                if registered_consumers > 0 && visibility_demands == registered_consumers {
+                    server.send_to(
+                        11,
+                        envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+                            consumer_id: 11,
+                            generation: 7,
+                            series: Some(snapshot_series),
+                            provider_generation: 2,
+                            price_scale: 2,
+                            quantity_scale: 8,
+                            bars: vec![MarketBar {
+                                source_sequence: 1,
+                                exchange_timestamp_seconds: 60,
+                                open: 100,
+                                high: 110,
+                                low: 90,
+                                close: 105,
+                                volume: 7,
+                                exchange_timestamp_unix_nanos: 60_000_000_000,
+                            }],
+                            publication_generation: 1,
+                            forming: false,
+                        }),
+                    );
+                    return;
+                }
             }
         });
         (name, commands, worker)
@@ -723,7 +806,7 @@ mod tests {
                 .expect("set viewport");
         }
         supervisor
-            .set_market_visibility(12, false)
+            .set_market_resource_class(12, ConsumerResourceClass::Background)
             .expect("hide second consumer");
     }
 
@@ -861,6 +944,7 @@ mod tests {
             consumers: BTreeMap::default(),
             instruments: BTreeMap::default(),
             pending_instruments: BTreeSet::default(),
+            pending_events: VecDeque::default(),
             reconnect_fixture: Some(Box::new(move || {
                 EngineClient::connect(&replacement_name, &token)
             })),
@@ -871,11 +955,13 @@ mod tests {
             .expect("attach first client");
         configure_restore_state(&mut supervisor, &requested);
 
-        let recovered = supervisor.poll_market_event(11).expect("recover engine");
+        let recovered = supervisor
+            .receive_market_event_for(11, Duration::from_secs(1))
+            .expect("recover engine");
         assert!(recovered.reconnected);
         assert_eq!(supervisor.client.ready().engine_epoch, 2);
         let resumed = supervisor
-            .poll_market_event(11)
+            .receive_market_event_for(11, Duration::from_secs(1))
             .expect("poll restored engine");
         assert!(matches!(
             resumed.event,
@@ -950,6 +1036,7 @@ mod tests {
             consumers: BTreeMap::default(),
             instruments: BTreeMap::default(),
             pending_instruments: BTreeSet::default(),
+            pending_events: VecDeque::default(),
             reconnect_fixture: Some(Box::new(move || {
                 reconnect_count.fetch_add(1, Ordering::Relaxed);
                 EngineClient::connect(&replacement_name, &token)
@@ -961,11 +1048,13 @@ mod tests {
             .expect("attach first client");
         configure_generation_ordered_restore(&mut supervisor);
 
-        let recovered = supervisor.poll_market_event(11).expect("recover engine");
+        let recovered = supervisor
+            .receive_market_event_for(11, Duration::from_secs(1))
+            .expect("recover engine");
         assert!(recovered.reconnected);
         assert_eq!(reconnects.load(Ordering::Relaxed), 1);
         let _ = supervisor
-            .poll_market_event(11)
+            .receive_market_event_for(11, Duration::from_secs(1))
             .expect("poll restored current demand");
         first_server.join().expect("join first fixture");
         second_server.join().expect("join second fixture");

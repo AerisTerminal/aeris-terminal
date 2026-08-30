@@ -17,7 +17,9 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -26,11 +28,11 @@ use axiusflow_engine_protocol::{
     ClientKind, ConsumerResourceClass as IpcConsumerResourceClass, EngineFaultCode,
     EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder,
     Fault, Goodbye, HotSeries, InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION,
-    MarketEventIdle, PROTOCOL_VERSION, PollMarketEvent, ProviderInstrumentInstalled,
-    RegisterConsumer, RemoveConsumer, ResourceMode, SeriesCadence, SeriesDemand, SeriesKey,
-    SetEngineLifecycle, SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout,
-    ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, ProviderInstrumentInstalled, RegisterConsumer,
+    RemoveConsumer, ResourceMode, SeriesCadence, SeriesDemand, SeriesKey, SetEngineLifecycle,
+    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ViewportDemand, VisibilityDemand,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
 use axiusflow_market_data::{BarPeriod, BarSeriesKey};
@@ -44,6 +46,9 @@ const MAXIMUM_HOT_SERIES: usize = 32;
 const COINBASE_PRICE_SCALE: u32 = 2;
 const COINBASE_QUANTITY_SCALE: u32 = 8;
 const WORKSPACE_SHUTTING_DOWN: &str = "engine workspace is shutting down";
+const IPC_OUTBOX_CAPACITY: usize = 256;
+const IPC_WRITE_BATCH_MESSAGES: usize = 64;
+const IPC_WRITE_BATCH_BYTES: usize = 4 * 1_048_576;
 
 /// Process-wide resident-engine shutdown state shared with authenticated sessions.
 #[derive(Clone, Default)]
@@ -312,7 +317,7 @@ impl EngineState {
         Ok(())
     }
 
-    fn record_polled_market_event(&self, payload: &envelope::Payload) -> Result<(), String> {
+    fn record_published_market_event(&self, payload: &envelope::Payload) -> Result<(), String> {
         if let envelope::Payload::ProviderInstrumentSelection(selection) = payload {
             if let Some(instrument) = selection.instrument.as_ref() {
                 self.record_installed_instrument(instrument);
@@ -1316,6 +1321,7 @@ fn persist_workspace(root: &Path, workspace: &WorkspaceState) -> Result<(), Stri
     }
     let bytes = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::WorkspaceState(workspace.clone())),
     })
     .map_err(|_| "workspace state could not be encoded".to_string())?;
@@ -1357,6 +1363,7 @@ fn persist_hot_set(root: &Path, workspace: &WorkspaceState) -> Result<(), String
     let path = root.join(hot_set_filename(workspace.cache_manifest_revision));
     let bytes = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::WorkspaceState(workspace.clone())),
     })
     .map_err(|_| "workspace hot set could not be encoded".to_string())?;
@@ -1460,32 +1467,36 @@ pub fn default_engine_state_root() -> Result<PathBuf, String> {
 }
 
 struct FramedConnection {
-    stream: LocalSocketStream,
+    stream: interprocess::local_socket::RecvHalf,
+    outgoing: SyncSender<(u64, envelope::Payload)>,
     decoder: EnvelopeDecoder,
     pending: VecDeque<Envelope>,
 }
 
 impl FramedConnection {
-    fn new(stream: LocalSocketStream) -> Result<Self, String> {
+    fn new(stream: LocalSocketStream, state: EngineState) -> Result<Self, String> {
+        let (stream, writer) = stream.split();
+        let (outgoing, messages) = mpsc::sync_channel(IPC_OUTBOX_CAPACITY);
+        thread::Builder::new()
+            .name("axiusflow-engine-ipc-writer".to_string())
+            .spawn(move || write_ipc_messages(writer, &messages, &state))
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             stream,
+            outgoing,
             decoder: EnvelopeDecoder::try_new().map_err(|error| error.to_string())?,
             pending: VecDeque::new(),
         })
     }
 
     fn send(&mut self, payload: envelope::Payload) -> Result<(), String> {
-        let frame = encode_envelope(&Envelope {
-            protocol_version: PROTOCOL_VERSION,
-            payload: Some(payload),
-        })
-        .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
-        self.stream
-            .write_all(&frame)
-            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())?;
-        self.stream
-            .flush()
+        self.outgoing
+            .send((0, payload))
             .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
+    }
+
+    fn event_sender(&self) -> SyncSender<(u64, envelope::Payload)> {
+        self.outgoing.clone()
     }
 
     fn receive(&mut self) -> Result<envelope::Payload, String> {
@@ -1508,6 +1519,51 @@ impl FramedConnection {
                     .push(&chunk[..count])
                     .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?,
             );
+        }
+    }
+}
+
+fn write_ipc_messages(
+    mut writer: interprocess::local_socket::SendHalf,
+    messages: &Receiver<(u64, envelope::Payload)>,
+    state: &EngineState,
+) {
+    while let Ok(first) = messages.recv() {
+        let mut pending = VecDeque::from([first]);
+        for _ in 1..IPC_WRITE_BATCH_MESSAGES {
+            match messages.try_recv() {
+                Ok(message) => pending.push_back(message),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        let mut bytes = Vec::new();
+        while let Some((target_consumer_id, payload)) = pending.pop_front() {
+            if target_consumer_id != 0
+                && let Err(error) = state.record_published_market_event(&payload)
+            {
+                eprintln!("Axiusflow engine hot-set coverage update degraded: {error}");
+            }
+            let Ok(frame) = encode_envelope(&Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                target_consumer_id,
+                payload: Some(payload),
+            }) else {
+                return;
+            };
+            if !bytes.is_empty() && bytes.len().saturating_add(frame.len()) > IPC_WRITE_BATCH_BYTES
+            {
+                if writer.write_all(&bytes).is_err() {
+                    return;
+                }
+                bytes.clear();
+            }
+            if frame.len() > MAX_FRAME_BYTES.saturating_add(4) {
+                return;
+            }
+            bytes.extend_from_slice(&frame);
+        }
+        if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+            return;
         }
     }
 }
@@ -1605,7 +1661,7 @@ fn serve_client_with_services(
     if installation_token.len() != INSTALLATION_TOKEN_BYTES {
         return Err("installation credential has an invalid length".to_string());
     }
-    let mut connection = FramedConnection::new(stream)?;
+    let mut connection = FramedConnection::new(stream, state.clone())?;
     let envelope::Payload::ClientHello(hello) = connection.receive()? else {
         return Err("client hello must be the first engine message".to_string());
     };
@@ -1833,7 +1889,9 @@ fn handle_market_message(
             let market = require_market(market)?;
             if attached_client.is_some() {
                 send_market_fault(connection, "client is already attached")?;
-            } else if let Err(error) = market.attach(attachment.client_id) {
+            } else if let Err(error) =
+                market.attach_stream(attachment.client_id, connection.event_sender())
+            {
                 send_market_fault(connection, error)?;
             } else {
                 *attached_client = Some(attachment.client_id);
@@ -1858,8 +1916,7 @@ fn handle_market_message(
         | envelope::Payload::VisibilityDemand(_)
         | envelope::Payload::RemoveConsumer(_)
         | envelope::Payload::SearchProviderInstruments(_)
-        | envelope::Payload::SelectProviderInstrument(_)
-        | envelope::Payload::PollMarketEvent(_)) => (require_market(market)?, payload),
+        | envelope::Payload::SelectProviderInstrument(_)) => (require_market(market)?, payload),
         _ => return Ok(false),
     };
     dispatch_market_command(connection, state, market.0, *attached_client, market.1)?;
@@ -1895,9 +1952,6 @@ fn dispatch_market_command(
         }
         envelope::Payload::RemoveConsumer(removal) => {
             dispatch_remove_consumer(connection, state, market, attached_client, removal)?;
-        }
-        envelope::Payload::PollMarketEvent(poll) => {
-            dispatch_poll_market_event(connection, state, market, attached_client, poll)?;
         }
         _ => unreachable!("market payloads were filtered above"),
     }
@@ -2025,33 +2079,6 @@ fn dispatch_remove_consumer(
         state.record_consumer_removal(removal.consumer_id);
     }
     Ok(())
-}
-
-fn dispatch_poll_market_event(
-    connection: &mut FramedConnection,
-    state: &EngineState,
-    market: &MarketService,
-    attached_client: Option<u64>,
-    poll: PollMarketEvent,
-) -> Result<(), String> {
-    let Some(client_id) = attached_client else {
-        return send_market_fault(
-            connection,
-            "client must attach before polling market events",
-        );
-    };
-    match market.poll_event(client_id, poll.consumer_id) {
-        Ok(Some(event)) => {
-            if let Err(error) = state.record_polled_market_event(&event) {
-                eprintln!("Axiusflow engine hot-set coverage update degraded: {error}");
-            }
-            connection.send(event)
-        }
-        Ok(None) => connection.send(envelope::Payload::MarketEventIdle(MarketEventIdle {
-            consumer_id: poll.consumer_id,
-        })),
-        Err(error) => send_market_fault(connection, error),
-    }
 }
 
 fn dispatch_provider_catalog_command(
@@ -2367,9 +2394,8 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = client
-                .poll_market_event(consumer_id)
-                .expect("IPC market poll succeeds")
+            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) =
+                receive_ipc_event(client, consumer_id, Duration::from_millis(50))
                 && snapshot.generation == generation
             {
                 assert_eq!(snapshot.consumer_id, consumer_id);
@@ -2379,6 +2405,25 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "IPC snapshot timed out");
             thread::yield_now();
+        }
+    }
+
+    fn receive_ipc_event(
+        client: &mut EngineClient,
+        consumer_id: u64,
+        timeout: Duration,
+    ) -> Option<envelope::Payload> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = client
+                .receive_market_event_timeout(remaining)
+                .expect("receive pushed IPC market event");
+            match event {
+                Some((target, payload)) if target == consumer_id => return Some(payload),
+                Some(_) if Instant::now() < deadline => {}
+                Some(_) | None => return None,
+            }
         }
     }
 
@@ -2415,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn polled_catalog_selection_records_metadata_before_following_demand() {
+    fn published_catalog_selection_records_metadata_before_following_demand() {
         let state = EngineState::default();
         state.record_consumer(51, 1, 61);
         let instrument = InstallProviderInstrument {
@@ -2432,7 +2477,7 @@ mod tests {
         };
 
         state
-            .record_polled_market_event(&envelope::Payload::ProviderInstrumentSelection(
+            .record_published_market_event(&envelope::Payload::ProviderInstrumentSelection(
                 ProviderInstrumentSelection {
                     consumer_id: 61,
                     instrument: Some(instrument.clone()),
@@ -2882,7 +2927,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_multi_consumer_polling_realigns_after_a_command_fault() {
+    fn authenticated_multi_consumer_push_stays_aligned_after_a_command_fault() {
         let socket_name = socket_name("market-response-realignment");
         let listener = bind_listener(&socket_name).expect("bind realignment endpoint");
         let token = [31_u8; 32];
@@ -2907,32 +2952,22 @@ mod tests {
                 .set_series_demand(consumer_id, 1, series.clone())
                 .expect("consumer demand succeeds");
             poll_ipc_snapshot(&mut client, consumer_id, 1, &series);
-            while client
-                .poll_market_event(consumer_id)
-                .expect("consumer drains initial publications")
-                .is_some()
-            {}
+            while receive_ipc_event(&mut client, consumer_id, Duration::from_millis(5)).is_some() {}
         }
 
         client
             .set_market_visibility(999, false)
             .expect("unknown-consumer visibility command crosses IPC");
-        assert!(matches!(
-            client
-                .poll_market_event(101)
-                .expect("command fault is delivered"),
-            Some(envelope::Payload::Fault(_))
-        ));
         assert_eq!(
-            client
-                .poll_market_event(102)
-                .expect("second consumer remains aligned"),
+            receive_ipc_event(&mut client, 101, Duration::from_millis(50)),
             None
         );
         assert_eq!(
-            client
-                .poll_market_event(101)
-                .expect("first consumer receives its buffered idle"),
+            receive_ipc_event(&mut client, 102, Duration::from_millis(5)),
+            None
+        );
+        assert_eq!(
+            receive_ipc_event(&mut client, 101, Duration::from_millis(5)),
             None
         );
 
@@ -3098,7 +3133,7 @@ mod tests {
         let mut ready_received = false;
         let mut order_book_received = false;
         while !snapshot_received || !ready_received || !order_book_received {
-            if let Some(event) = client.poll_market_event(1).expect("poll market event") {
+            if let Some(event) = receive_ipc_event(&mut client, 1, Duration::from_millis(50)) {
                 match event {
                     envelope::Payload::SeriesSnapshot(snapshot) => {
                         snapshot_received = snapshot.bars.len() == 1
@@ -3127,13 +3162,9 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "market snapshot polling timed out"
+                "market snapshot receive timed out"
             );
         }
-        assert_eq!(
-            client.poll_market_event(1).expect("poll market event"),
-            None
-        );
         drop(client);
         server.join().expect("join market server");
         assert_rithmic_hot_metadata(&state);

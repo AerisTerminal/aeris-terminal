@@ -8,9 +8,10 @@ use crate::config::CoinbaseConfig;
 use crate::decoder::{CanonicalTrade, CoinbaseDecoder, DecoderMetrics};
 use crate::errors::CoinbaseError;
 use crate::history::{coinbase_tls_config, connect_coinbase_endpoint_cancellable};
-use crate::messages::subscribe_frame;
+use crate::messages::{subscribe_frame, unsubscribe_frame};
 use crate::review::{WEBSOCKET_ENDPOINT, WEBSOCKET_HOST};
 use std::{
+    collections::BTreeSet,
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -106,6 +107,7 @@ impl CoinbaseSession {
             socket,
             maximum_message_bytes: self.config.maximum_message_bytes,
             decoder: CoinbaseDecoder::new(),
+            subscribed_products: self.config.products.iter().cloned().collect(),
         })
     }
 
@@ -130,6 +132,7 @@ pub struct CoinbaseConnection {
     socket: WebSocket<MaybeTlsStream<crate::history::DeadlineTcpStream>>,
     maximum_message_bytes: usize,
     decoder: CoinbaseDecoder,
+    subscribed_products: BTreeSet<String>,
 }
 
 impl CoinbaseConnection {
@@ -166,7 +169,36 @@ impl CoinbaseConnection {
         on_heartbeat: &mut impl FnMut(),
         on_level2: &mut impl FnMut(&[u8]),
     ) -> Result<SessionHealth, CoinbaseError> {
-        self.collect_with_deadline_and_level2(None, should_stop, on_trade, on_heartbeat, on_level2)
+        self.collect_with_deadline_and_level2(
+            None,
+            should_stop,
+            &mut || None,
+            on_trade,
+            on_heartbeat,
+            on_level2,
+        )
+    }
+
+    /// Collects market events while updating products on the same provider socket.
+    ///
+    /// # Errors
+    /// Returns a transport, protocol, decoding, sequence, or inactivity failure.
+    pub fn collect_until_stopped_with_subscription_updates(
+        self,
+        should_stop: &mut impl FnMut() -> bool,
+        next_products: &mut impl FnMut() -> Option<Vec<String>>,
+        on_trade: &mut impl FnMut(&CanonicalTrade),
+        on_heartbeat: &mut impl FnMut(),
+        on_level2: &mut impl FnMut(&[u8]),
+    ) -> Result<SessionHealth, CoinbaseError> {
+        self.collect_with_deadline_and_level2(
+            None,
+            should_stop,
+            next_products,
+            on_trade,
+            on_heartbeat,
+            on_level2,
+        )
     }
 
     fn collect_with_deadline(
@@ -179,6 +211,7 @@ impl CoinbaseConnection {
         self.collect_with_deadline_and_level2(
             deadline,
             should_stop,
+            &mut || None,
             on_trade,
             on_heartbeat,
             &mut |_| {},
@@ -189,14 +222,15 @@ impl CoinbaseConnection {
         mut self,
         deadline: Option<Instant>,
         should_stop: &mut impl FnMut() -> bool,
+        next_products: &mut impl FnMut() -> Option<Vec<String>>,
         on_trade: &mut impl FnMut(&CanonicalTrade),
         on_heartbeat: &mut impl FnMut(),
         on_level2: &mut impl FnMut(&[u8]),
     ) -> Result<SessionHealth, CoinbaseError> {
         self.collect_with_limits(
-            deadline,
-            INACTIVITY_TIMEOUT,
+            (deadline, INACTIVITY_TIMEOUT),
             should_stop,
+            next_products,
             on_trade,
             on_heartbeat,
             on_level2,
@@ -205,19 +239,23 @@ impl CoinbaseConnection {
 
     fn collect_with_limits(
         &mut self,
-        deadline: Option<Instant>,
-        inactivity_timeout: Duration,
+        limits: (Option<Instant>, Duration),
         should_stop: &mut impl FnMut() -> bool,
+        next_products: &mut impl FnMut() -> Option<Vec<String>>,
         on_trade: &mut impl FnMut(&CanonicalTrade),
         on_heartbeat: &mut impl FnMut(),
         on_level2: &mut impl FnMut(&[u8]),
     ) -> Result<SessionHealth, CoinbaseError> {
+        let (deadline, inactivity_timeout) = limits;
         let mut outcome = SessionOutcome::Completed;
         let mut last_message = Instant::now();
         loop {
             let now = Instant::now();
             if should_stop() || deadline.is_some_and(|limit| now >= limit) {
                 break;
+            }
+            if let Some(products) = next_products() {
+                self.update_products(products)?;
             }
             let inactivity_remaining =
                 inactivity_timeout.saturating_sub(now.duration_since(last_message));
@@ -305,6 +343,36 @@ impl CoinbaseConnection {
         })
     }
 
+    fn update_products(&mut self, products: Vec<String>) -> Result<(), CoinbaseError> {
+        let desired = products.into_iter().collect::<BTreeSet<_>>();
+        let removals = self
+            .subscribed_products
+            .difference(&desired)
+            .cloned()
+            .collect::<Vec<_>>();
+        let additions = desired
+            .difference(&self.subscribed_products)
+            .cloned()
+            .collect::<Vec<_>>();
+        if removals.is_empty() && additions.is_empty() {
+            return Ok(());
+        }
+        for channel in ["heartbeats", "market_trades", "level2"] {
+            if !removals.is_empty() {
+                self.socket
+                    .send(Message::Text(unsubscribe_frame(&removals, channel).into()))
+                    .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
+            }
+            if !additions.is_empty() {
+                self.socket
+                    .send(Message::Text(subscribe_frame(&additions, channel).into()))
+                    .map_err(|error| CoinbaseError::Transport(error.to_string()))?;
+            }
+        }
+        self.subscribed_products = desired;
+        Ok(())
+    }
+
     fn set_socket_deadline(&mut self, deadline: Instant) {
         match self.socket.get_mut() {
             MaybeTlsStream::Plain(stream) => stream.set_deadline(deadline),
@@ -319,6 +387,7 @@ mod tests {
     use super::{CoinbaseConnection, CoinbaseDecoder, SessionOutcome};
     use crate::history::connect_coinbase_endpoint_cancellable;
     use std::{
+        collections::BTreeSet,
         net::TcpListener,
         thread,
         time::{Duration, Instant},
@@ -345,13 +414,14 @@ mod tests {
             socket: WebSocket::from_raw_socket(MaybeTlsStream::Plain(stream), Role::Client, None),
             maximum_message_bytes: 1024,
             decoder: CoinbaseDecoder::new(),
+            subscribed_products: BTreeSet::new(),
         };
         let started = Instant::now();
         let health = connection
             .collect_with_limits(
-                None,
-                Duration::from_millis(100),
+                (None, Duration::from_millis(100)),
                 &mut || false,
+                &mut || None,
                 &mut |_| {},
                 &mut || {},
                 &mut |_| {},
@@ -391,13 +461,14 @@ mod tests {
             socket: WebSocket::from_raw_socket(MaybeTlsStream::Plain(stream), Role::Client, None),
             maximum_message_bytes: 1024,
             decoder: CoinbaseDecoder::new(),
+            subscribed_products: BTreeSet::new(),
         };
         let started = Instant::now();
         let health = connection
             .collect_with_limits(
-                None,
-                Duration::from_millis(100),
+                (None, Duration::from_millis(100)),
                 &mut || false,
+                &mut || None,
                 &mut |_| {},
                 &mut || {},
                 &mut |_| {},

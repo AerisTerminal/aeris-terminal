@@ -9,6 +9,7 @@ use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
+    ReplayTailOperation,
 };
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, InstallProviderInstrument, ProviderCatalogRejected,
@@ -464,8 +465,11 @@ impl MarketWorkerSender {
     ) {
         let incoming_generation = market_publication_generation(&message);
         let incoming_sequence = live_tail_sequence(&message);
+        let incoming_operation = tail_operation(&message);
         if let Some(index) = queue.iter().position(|queued| {
-            live_tail_sequence(queued).is_some() && live_tail_sequence(queued) == incoming_sequence
+            live_tail_sequence(queued).is_some()
+                && live_tail_sequence(queued) == incoming_sequence
+                && tail_operation(queued) == incoming_operation
         }) {
             if market_publication_generation(&queue[index]) <= incoming_generation {
                 self.record_coalesced_message(&queue[index]);
@@ -517,10 +521,12 @@ impl MarketWorkerSender {
     ) {
         let incoming_generation = rithmic_message_generation(&message);
         let incoming_sequence = rithmic_live_tail_sequence(&message);
+        let incoming_operation = tail_operation(&message);
         let replaceable = |queued: &MarketWorkerMessage| match queued {
             MarketWorkerMessage::RithmicLive { .. } => {
                 incoming_sequence.is_none()
-                    || rithmic_live_tail_sequence(queued) == incoming_sequence
+                    || (rithmic_live_tail_sequence(queued) == incoming_sequence
+                        && tail_operation(queued) == incoming_operation)
             }
             _ => false,
         };
@@ -808,6 +814,20 @@ fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
             update: ReplayStreamUpdate::Tail(tail),
             ..
         }) => Some(tail.item().value().source_sequence),
+        _ => None,
+    }
+}
+
+fn tail_operation(message: &MarketWorkerMessage) -> Option<ReplayTailOperation> {
+    match message {
+        MarketWorkerMessage::Update(MarketWorkerPublication {
+            update: ReplayStreamUpdate::Tail(tail),
+            ..
+        })
+        | MarketWorkerMessage::RithmicLive {
+            update: ReplayStreamUpdate::Tail(tail),
+            ..
+        } => Some(tail.operation()),
         _ => None,
     }
 }
@@ -1722,7 +1742,9 @@ mod tests {
         MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
-    use axiusflow_application::{Provenanced, ReplayStreamUpdate, ReplayTailUpdate};
+    use axiusflow_application::{
+        Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
+    };
     use axiusflow_engine_protocol::{
         ConsumerResourceClass, ProviderCatalogRejected, ProviderCatalogRejectionReason,
         SearchProviderInstruments, SelectProviderInstrument,
@@ -2197,6 +2219,7 @@ mod tests {
                 Provenanced::new(bar, source.provenance().clone()),
                 publication_generation,
                 true,
+                ReplayTailOperation::Revise,
             )
             .expect("tail validates");
             sender
@@ -2222,6 +2245,67 @@ mod tests {
             panic!("latest tail remains queued");
         };
         assert_eq!(publication.generation.publication_generation(), 64);
+    }
+
+    #[test]
+    fn queued_append_is_delivered_before_its_same_candle_revision() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
+        let source = bootstrap
+            .snapshot
+            .bars()
+            .last()
+            .cloned()
+            .expect("tail exists");
+        let mut bar = *source.value();
+        bar.source_sequence = bar.source_sequence.saturating_add(1);
+        bar.exchange_timestamp_seconds = bar.exchange_timestamp_seconds.saturating_add(60);
+        bar.exchange_timestamp_unix_nanos =
+            bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
+        let mut provenance = source.provenance().clone();
+        provenance.source_sequence = bar.source_sequence;
+        provenance.exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
+        for (generation, close, operation) in [
+            (3, bar.close, ReplayTailOperation::Append),
+            (4, bar.close.saturating_add(1), ReplayTailOperation::Revise),
+        ] {
+            bar.close = close;
+            bar.high = bar.high.max(close);
+            let tail = ReplayTailUpdate::try_new(
+                Provenanced::new(bar, provenance.clone()),
+                generation,
+                true,
+                operation,
+            )
+            .expect("tail validates");
+            sender
+                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Tail(tail),
+                    generation: MarketPublicationGeneration::from_tail(
+                        generation,
+                        3,
+                        1,
+                        bar.source_sequence,
+                    ),
+                    subscription_id: "tail".to_string(),
+                    worker_label: "tail".to_string(),
+                    ui_diagnostics: None,
+                }))
+                .expect("tail sends");
+        }
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        let operations = messages
+            .iter()
+            .filter_map(super::tail_operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            [ReplayTailOperation::Append, ReplayTailOperation::Revise]
+        );
     }
 
     /// Tails carrying different bars must all reach the UI.
@@ -2258,6 +2342,7 @@ mod tests {
                 Provenanced::new(bar, provenance),
                 offset.saturating_add(2),
                 true,
+                ReplayTailOperation::Append,
             )
             .expect("tail validates");
             sender
@@ -2335,6 +2420,7 @@ mod tests {
                 Provenanced::new(bar, provenance),
                 offset.saturating_add(2),
                 true,
+                ReplayTailOperation::Append,
             )
             .expect("tail validates");
             sender

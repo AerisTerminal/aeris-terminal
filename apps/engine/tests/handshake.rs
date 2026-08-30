@@ -67,6 +67,7 @@ fn unique_name() -> String {
 fn hello(token: &[u8]) -> Vec<u8> {
     encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::ClientHello(ClientHello {
             protocol_version: PROTOCOL_VERSION,
             installation_token: token.to_vec(),
@@ -191,6 +192,7 @@ fn schema_four_coinbase_precision_is_repaired_before_workspace_restore() {
     instrument.quantity_scale = 0;
     let bytes = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::WorkspaceState(stale)),
     })
     .expect("encode stale schema-four workspace");
@@ -463,6 +465,7 @@ fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
     };
     let bytes = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::WorkspaceState(legacy)),
     })
     .expect("encode legacy workspace");
@@ -546,6 +549,7 @@ fn schema_two_migration_keeps_supported_coinbase_and_discards_incomplete_rithmic
     };
     let bytes = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::WorkspaceState(legacy)),
     })
     .expect("encode schema-two workspace");

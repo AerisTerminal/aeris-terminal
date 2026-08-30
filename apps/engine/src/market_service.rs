@@ -29,7 +29,7 @@ use axiusflow_engine_protocol::{
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSelection,
     ProviderState, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
     SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
-    WorkspaceState, envelope,
+    SeriesUpdateOperation, WorkspaceState, envelope,
 };
 use axiusflow_local_history::{
     HistoryScope, LocalHistoryError, LocalHistoryStore, RetainedRange, StoredHistory,
@@ -43,7 +43,7 @@ use axiusflow_market_engine::{
     GenerationId, HotSetManager, HotSetTier, MarketEngine, MarketEngineConfig, MarketStream,
     OrderFlowPublicationKind, ProviderCapabilities, ProviderConfig, ProviderGeneration,
     ProviderHealth, ProviderRequest, ResourcePolicyDecision, ResourcePolicyInput, SeriesSnapshot,
-    StreamRequirements, Viewport, WorkspaceId, decide_resource_policy,
+    SeriesTailOperation, StreamRequirements, Viewport, WorkspaceId, decide_resource_policy,
 };
 use axiusflow_provider_history::{CoverageSnapshot, DataClass, HistoryPageRequest, HistoryRange};
 use axiusflow_rithmic_protocol_adapter::{
@@ -119,7 +119,11 @@ enum Command {
     RestoreHotSet(Vec<WarmSeries>, Reply<()>),
     SetResourceMode(ResourceMode, Reply<()>),
     Status(Reply<MarketServiceStatus>),
-    Attach(ClientId, Reply<()>),
+    Attach(
+        ClientId,
+        Option<SyncSender<(u64, envelope::Payload)>>,
+        Reply<()>,
+    ),
     Detach(ClientId, Reply<()>),
     Register(ConsumerIdentity, Reply<()>),
     Remove(ClientId, ConsumerId, Reply<()>),
@@ -300,6 +304,18 @@ struct ConsumerEvents {
 }
 
 impl ConsumerEvents {
+    fn front(&self) -> Option<&envelope::Payload> {
+        self.provider
+            .as_ref()
+            .or_else(|| self.series.front())
+            .or(self.series_state.as_ref())
+            .or(self.demand_error.as_ref())
+            .or(self.order_book.as_ref())
+            .or(self.order_flow.as_ref())
+            .or(self.catalog_selection.as_ref())
+            .or(self.catalog_search.as_ref())
+    }
+
     fn pop(&mut self) -> Option<envelope::Payload> {
         self.provider
             .take()
@@ -344,10 +360,13 @@ impl ConsumerEvents {
                 if queued.consumer_id == next.consumer_id
                     && queued.generation == next.generation
                     && queued.series == next.series
+                    && next.operation == SeriesUpdateOperation::ReviseTail as i32
                     && queued.bar.map(|bar| bar.source_sequence)
                         == next.bar.map(|bar| bar.source_sequence) =>
             {
+                let operation = queued.operation;
                 *queued = next;
+                queued.operation = operation;
                 return;
             }
             Some(envelope::Payload::SeriesSnapshot(snapshot))
@@ -357,13 +376,17 @@ impl ConsumerEvents {
             {
                 if let Some(bar) = next.bar.as_ref() {
                     let folded = match snapshot.bars.last_mut() {
-                        Some(current) if current.source_sequence == bar.source_sequence => {
+                        Some(current)
+                            if next.operation == SeriesUpdateOperation::ReviseTail as i32
+                                && current.source_sequence == bar.source_sequence =>
+                        {
                             *current = *bar;
                             true
                         }
                         Some(current)
-                            if current.source_sequence.checked_add(1)
-                                == Some(bar.source_sequence) =>
+                            if next.operation == SeriesUpdateOperation::AppendTail as i32
+                                && current.source_sequence.checked_add(1)
+                                    == Some(bar.source_sequence) =>
                         {
                             snapshot.bars.push(*bar);
                             true
@@ -850,10 +873,11 @@ trait RealtimeSource: Send + 'static {
     fn run_generation(
         &mut self,
         generation: ProviderGeneration,
+        controls: &Receiver<RealtimeControl>,
         events: &SyncSender<RealtimeEvent>,
         overflow: &AtomicBool,
         stop: &Arc<AtomicBool>,
-    );
+    ) -> bool;
 }
 
 struct LiveCoinbaseHistory {
@@ -1083,6 +1107,38 @@ impl LiveCoinbaseRealtime {
             products: Vec::new(),
         }
     }
+
+    fn take_product_update(
+        &mut self,
+        controls: &Receiver<RealtimeControl>,
+        generation: ProviderGeneration,
+        books: &std::cell::RefCell<Vec<CoinbaseLevel2Book>>,
+    ) -> Option<Vec<String>> {
+        let mut newest = None;
+        while let Ok(RealtimeControl::Start(products)) = controls.try_recv() {
+            newest = Some(products);
+        }
+        let products = newest?;
+        let symbols = products
+            .iter()
+            .map(|product| product.symbol.clone())
+            .collect::<Vec<_>>();
+        CoinbaseConfig::try_new(symbols.clone()).ok()?;
+        *books.borrow_mut() = products
+            .iter()
+            .filter_map(|product| {
+                CoinbaseLevel2Book::try_new(
+                    product.symbol.clone(),
+                    product.price_scale,
+                    product.quantity_scale,
+                    generation.0.get(),
+                )
+                .ok()
+            })
+            .collect();
+        self.products = products;
+        Some(symbols)
+    }
 }
 
 impl RealtimeSource for LiveCoinbaseRealtime {
@@ -1099,36 +1155,39 @@ impl RealtimeSource for LiveCoinbaseRealtime {
     fn run_generation(
         &mut self,
         generation: ProviderGeneration,
+        controls: &Receiver<RealtimeControl>,
         events: &SyncSender<RealtimeEvent>,
         overflow: &AtomicBool,
         stop: &Arc<AtomicBool>,
-    ) {
+    ) -> bool {
         let Some(config) = self.config.clone() else {
-            return;
+            return false;
         };
         let Ok(connection) = CoinbaseSession::new(config).connect_cancellable(Arc::clone(stop))
         else {
-            return;
+            return false;
         };
         if events.send(RealtimeEvent::Connected(generation)).is_err() {
-            return;
+            return false;
         }
         let queue_failed = Cell::new(false);
-        let mut books = self
-            .products
-            .iter()
-            .filter_map(|product| {
-                CoinbaseLevel2Book::try_new(
-                    product.symbol.clone(),
-                    product.price_scale,
-                    product.quantity_scale,
-                    generation.0.get(),
-                )
-                .ok()
-            })
-            .collect::<Vec<_>>();
-        let _ = connection.collect_until_stopped_with_market_events(
+        let books = std::cell::RefCell::new(
+            self.products
+                .iter()
+                .filter_map(|product| {
+                    CoinbaseLevel2Book::try_new(
+                        product.symbol.clone(),
+                        product.price_scale,
+                        product.quantity_scale,
+                        generation.0.get(),
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let _ = connection.collect_until_stopped_with_subscription_updates(
             &mut || queue_failed.get() || stop.load(Ordering::Acquire),
+            &mut || self.take_product_update(controls, generation, &books),
             &mut |trade| {
                 if !try_emit_realtime(
                     events,
@@ -1147,7 +1206,7 @@ impl RealtimeSource for LiveCoinbaseRealtime {
                 let Ok(received) = current_unix_nanos() else {
                     return;
                 };
-                for book in &mut books {
+                for book in books.borrow_mut().iter_mut() {
                     let Ok(outcome) = book.apply_message(bytes, received) else {
                         continue;
                     };
@@ -1170,6 +1229,7 @@ impl RealtimeSource for LiveCoinbaseRealtime {
                 }
             },
         );
+        true
     }
 }
 
@@ -1382,7 +1442,21 @@ impl MarketService {
     /// # Errors
     /// Returns an error for zero identity or coordinator failure.
     pub fn attach(&self, client_id: u64) -> Result<(), String> {
-        self.request(|reply| Ok(Command::Attach(id(client_id).map(ClientId)?, reply)))
+        self.request(|reply| Ok(Command::Attach(id(client_id).map(ClientId)?, None, reply)))
+    }
+
+    pub(crate) fn attach_stream(
+        &self,
+        client_id: u64,
+        events: SyncSender<(u64, envelope::Payload)>,
+    ) -> Result<(), String> {
+        self.request(|reply| {
+            Ok(Command::Attach(
+                id(client_id).map(ClientId)?,
+                Some(events),
+                reply,
+            ))
+        })
     }
 
     /// Detaches a client and all of its consumers.
@@ -1994,7 +2068,7 @@ fn run_realtime_worker(
             if events.send(RealtimeEvent::Connecting(generation)).is_err() {
                 return;
             }
-            source.run_generation(generation, events, overflow, stop);
+            let connected = source.run_generation(generation, control, events, overflow, stop);
             let stopped = stop.load(Ordering::Acquire);
             if events
                 .send(RealtimeEvent::Disconnected(generation))
@@ -2002,10 +2076,12 @@ fn run_realtime_worker(
             {
                 return;
             }
-            let Some(next) = generation.0.get().checked_add(1).and_then(NonZeroU64::new) else {
-                return;
-            };
-            generation = ProviderGeneration(next);
+            if connected {
+                let Some(next) = generation.0.get().checked_add(1).and_then(NonZeroU64::new) else {
+                    return;
+                };
+                generation = ProviderGeneration(next);
+            }
             if stopped {
                 break;
             }
@@ -2136,6 +2212,8 @@ fn run_coordinator(
         hot_set_priority_count,
         last_consumer_activity: Instant::now(),
         attached: BTreeSet::new(),
+        attached_sinks: BTreeMap::new(),
+        consumer_clients: BTreeMap::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
@@ -2181,6 +2259,7 @@ fn run_coordinator(
         coordinator.publish_live();
         coordinator.publish_rithmic_live();
         coordinator.recover_overflowed_series_queues();
+        coordinator.flush_attached_events();
         coordinator.flush_rithmic_selection();
         if !coordinator.live.is_empty() {
             let _ = coordinator.sync_coinbase_realtime();
@@ -2245,6 +2324,8 @@ struct Coordinator<'a> {
     hot_set_priority_count: usize,
     last_consumer_activity: Instant,
     attached: BTreeSet<ClientId>,
+    attached_sinks: BTreeMap<ClientId, SyncSender<(u64, envelope::Payload)>>,
+    consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
     history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
@@ -2305,6 +2386,7 @@ impl Coordinator<'_> {
                 control.release_consumer(consumer_id.0.get());
             }
             self.events.remove(&consumer_id);
+            self.consumer_clients.remove(&consumer_id);
             self.remove_waiter(consumer_id);
             self.active_viewports.remove(&consumer_id);
         }
@@ -2375,11 +2457,12 @@ impl Coordinator<'_> {
             Command::Status(reply) => {
                 let _ = reply.send(Ok(self.status()));
             }
-            Command::Attach(client_id, reply) => {
-                self.handle_attach(client_id, &reply);
+            Command::Attach(client_id, events, reply) => {
+                self.handle_attach(client_id, events, &reply);
             }
             Command::Detach(client_id, reply) => {
                 self.attached.remove(&client_id);
+                self.attached_sinks.remove(&client_id);
                 self.detach_client(client_id);
                 self.release_unused_live_market_data();
                 let _ = reply.send(Ok(()));
@@ -2480,6 +2563,8 @@ impl Coordinator<'_> {
         }
         self.events
             .insert(identity.consumer_id, ConsumerEvents::default());
+        self.consumer_clients
+            .insert(identity.consumer_id, identity.client_id);
         Ok(())
     }
 
@@ -2490,6 +2575,7 @@ impl Coordinator<'_> {
     ) -> Result<(), String> {
         authorize_consumer(&self.engine, client_id, consumer_id)?;
         self.events.remove(&consumer_id);
+        self.consumer_clients.remove(&consumer_id);
         self.remove_waiter(consumer_id);
         self.active_viewports.remove(&consumer_id);
         self.engine.remove_consumer(consumer_id);
@@ -2552,13 +2638,64 @@ impl Coordinator<'_> {
         let _ = reply.send(result);
     }
 
-    fn handle_attach(&mut self, client_id: ClientId, reply: &Reply<()>) {
+    fn handle_attach(
+        &mut self,
+        client_id: ClientId,
+        events: Option<SyncSender<(u64, envelope::Payload)>>,
+        reply: &Reply<()>,
+    ) {
         let result = self
             .attached
             .insert(client_id)
             .then_some(())
             .ok_or_else(|| "client identity is already attached".to_string());
+        if result.is_ok()
+            && let Some(events) = events
+        {
+            self.attached_sinks.insert(client_id, events);
+        }
         let _ = reply.send(result);
+    }
+
+    fn flush_attached_events(&mut self) {
+        let consumers = self.events.keys().copied().collect::<Vec<_>>();
+        let mut disconnected = BTreeSet::new();
+        let mut remaining = REALTIME_DRAIN_BUDGET;
+        for consumer_id in consumers {
+            if remaining == 0 {
+                break;
+            }
+            let Some(&client_id) = self.consumer_clients.get(&consumer_id) else {
+                continue;
+            };
+            let Some(sender) = self.attached_sinks.get(&client_id).cloned() else {
+                continue;
+            };
+            let Some(events) = self.events.get_mut(&consumer_id) else {
+                continue;
+            };
+            while remaining > 0 {
+                let Some(event) = events.front().cloned() else {
+                    break;
+                };
+                match sender.try_send((consumer_id.0.get(), event)) {
+                    Ok(()) => {
+                        let _ = events.pop();
+                        remaining -= 1;
+                    }
+                    Err(TrySendError::Full(_)) => break,
+                    Err(TrySendError::Disconnected(_)) => {
+                        disconnected.insert(client_id);
+                        break;
+                    }
+                }
+            }
+        }
+        for client_id in disconnected {
+            self.attached.remove(&client_id);
+            self.attached_sinks.remove(&client_id);
+            self.detach_client(client_id);
+        }
     }
 
     fn apply_resource_mode(&mut self, mode: ResourceMode) {
@@ -6125,11 +6262,6 @@ impl Coordinator<'_> {
             return Err("Coinbase realtime subscription set is invalid".to_string());
         }
         if products != self.realtime_products {
-            self.realtime_stop.store(true, Ordering::Release);
-            self.realtime_started = false;
-            self.realtime_connected = false;
-        }
-        if !self.realtime_started {
             match self.realtime_control.try_send(RealtimeControl::Start(
                 subscriptions.into_values().collect(),
             )) {
@@ -6447,6 +6579,10 @@ fn series_update_message(
         bar: Some(ipc_bar(publication.bar)),
         forming: publication.forming,
         publication_generation: publication.publication_generation,
+        operation: match publication.operation {
+            SeriesTailOperation::Revise => SeriesUpdateOperation::ReviseTail,
+            SeriesTailOperation::Append => SeriesUpdateOperation::AppendTail,
+        } as i32,
     })
 }
 
@@ -7462,35 +7598,42 @@ mod tests {
         fn run_generation(
             &mut self,
             generation: ProviderGeneration,
+            controls: &Receiver<RealtimeControl>,
             events: &SyncSender<RealtimeEvent>,
             overflow: &AtomicBool,
             stop: &Arc<AtomicBool>,
-        ) {
+        ) -> bool {
             if self.generations.send(generation).is_err() {
-                return;
+                return false;
             }
+            let mut connected = false;
             while !stop.load(Ordering::Acquire) {
+                while let Ok(RealtimeControl::Start(products)) = controls.try_recv() {
+                    let _ = self.configure(products);
+                }
                 let action = match self.actions.recv_timeout(Duration::from_millis(10)) {
                     Ok(action) => action,
                     Err(RecvTimeoutError::Timeout) => continue,
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) => return connected,
                 };
                 let event = match action {
                     FixtureRealtimeAction::Connected => {
                         if events.send(RealtimeEvent::Connected(generation)).is_err() {
-                            return;
+                            return false;
                         }
+                        connected = true;
                         continue;
                     }
                     FixtureRealtimeAction::Trade(trade) => RealtimeEvent::Trade(generation, trade),
                     FixtureRealtimeAction::Heartbeat => RealtimeEvent::Heartbeat(generation),
-                    FixtureRealtimeAction::Disconnect => return,
+                    FixtureRealtimeAction::Disconnect => return connected,
                 };
                 if !try_emit_realtime(events, overflow, event) {
-                    return;
+                    return connected;
                 }
             }
             let _ = self.stops.send(generation);
+            connected
         }
     }
 
@@ -7630,6 +7773,8 @@ mod tests {
             hot_set_priority_count: 1,
             last_consumer_activity: Instant::now(),
             attached: BTreeSet::new(),
+            attached_sinks: BTreeMap::new(),
+            consumer_clients: BTreeMap::new(),
             pending: BTreeMap::from([(
                 series.clone(),
                 vec![DemandWaiter {
@@ -8113,6 +8258,7 @@ mod tests {
                 bar: Some(ipc_bar(stale)),
                 forming: true,
                 publication_generation: 5,
+                operation: SeriesUpdateOperation::ReviseTail.into(),
             },
         ));
 
@@ -10425,14 +10571,12 @@ mod tests {
                 .expect("initial product set configures"),
             ["BTC-USD"]
         );
-        assert_eq!(
+        assert!(
             harness
                 .generations
-                .recv_timeout(Duration::from_secs(1))
-                .expect("product-set change reconnects the provider")
-                .0
-                .get(),
-            2
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "product-set changes reuse the provider generation"
         );
         assert_eq!(
             harness
@@ -10463,9 +10607,9 @@ mod tests {
             .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
             .expect("shared BTC trade");
         let live = poll_until(&harness.service, client_id, 9, |event| {
-            is_live_update(event, 1, 2, 200)
+            is_live_update(event, 1, 1, 200)
         });
-        assert!(is_live_update(&live, 1, 2, 200));
+        assert!(is_live_update(&live, 1, 1, 200));
 
         harness
             .service
@@ -10476,13 +10620,13 @@ mod tests {
             .send(FixtureRealtimeAction::Trade(trade(2, "2.10", 2)))
             .expect("remaining chart trade");
         let live = poll_until(&harness.service, client_id, 9, |event| {
-            is_live_update(event, 1, 2, 210)
+            is_live_update(event, 1, 1, 210)
         });
-        assert!(is_live_update(&live, 1, 2, 210));
+        assert!(is_live_update(&live, 1, 1, 210));
         assert!(harness.service.poll_event(client_id, 1).is_err());
         assert_eq!(
             harness.history_fetches.load(Ordering::Acquire),
-            series.len() * 2
+            series.len()
         );
         assert!(matches!(
             harness.generations.try_recv(),
@@ -12321,6 +12465,9 @@ mod tests {
         );
 
         action_tx
+            .send(FixtureRealtimeAction::Connected)
+            .expect("generation-one realtime connects");
+        action_tx
             .send(FixtureRealtimeAction::Disconnect)
             .expect("realtime disconnects");
         assert_eq!(
@@ -12654,6 +12801,40 @@ mod tests {
         assert_eq!(live.published_completed, Some(10));
     }
 
+    /// A not-yet-delivered append remains an append after same-candle coalescing.
+    #[test]
+    fn queued_append_keeps_its_operation_when_the_same_candle_is_revised() {
+        let mut events = ConsumerEvents::default();
+        let series = btc();
+        for (close, operation) in [
+            (105, SeriesUpdateOperation::AppendTail),
+            (108, SeriesUpdateOperation::ReviseTail),
+        ] {
+            events.publish_series_update(envelope::Payload::SeriesUpdate(
+                axiusflow_engine_protocol::SeriesUpdate {
+                    consumer_id: 1,
+                    generation: 1,
+                    series: Some(series.clone()),
+                    provider_generation: 1,
+                    bar: Some(ipc_bar(MarketBar {
+                        close,
+                        ..history_bar()
+                    })),
+                    publication_generation: u64::try_from(close).expect("positive close"),
+                    forming: true,
+                    operation: operation.into(),
+                },
+            ));
+        }
+
+        let Some(envelope::Payload::SeriesUpdate(update)) = events.queued_series() else {
+            panic!("coalesced update remains queued");
+        };
+        assert_eq!(update.operation, SeriesUpdateOperation::AppendTail as i32);
+        assert_eq!(update.bar.expect("revised bar remains").close, 108);
+        assert_eq!(events.series.len(), 1);
+    }
+
     /// The consumer outbox may lose bars only by announcing it.
     #[test]
     fn an_overflowed_series_queue_is_replaced_by_a_covering_snapshot() {
@@ -12681,6 +12862,7 @@ mod tests {
                     })),
                     publication_generation: 1,
                     forming: true,
+                    operation: SeriesUpdateOperation::AppendTail.into(),
                 },
             ));
         }
@@ -13252,12 +13434,14 @@ mod tests {
                         && series.cadence_value == 300
                 })
         ));
-        expect_realtime_generation(&harness, "product-set change reconnects the provider", 2);
-        expect_configured_products(&harness, "ETH product set replaces BTC", &["ETH-USD"]);
-        harness
-            .actions
-            .send(FixtureRealtimeAction::Connected)
-            .expect("reconnected realtime session connects");
+        assert!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "symbol changes keep the provider session alive"
+        );
+        expect_configured_products(&harness, "ETH joins the live socket", &["ETH-USD"]);
         harness
             .actions
             .send(FixtureRealtimeAction::Trade(trade_for(
@@ -13265,9 +13449,9 @@ mod tests {
             )))
             .expect("ETH live trade");
         let live = poll_until(&harness.service, 1, 1, |event| {
-            is_live_update(event, 2, 2, 200_000)
+            is_live_update(event, 2, 1, 200_000)
         });
-        assert!(is_live_update(&live, 2, 2, 200_000));
+        assert!(is_live_update(&live, 2, 1, 200_000));
 
         let eth_fifteen = selected_series("instrument:coinbase:eth:usd", 900);
         harness

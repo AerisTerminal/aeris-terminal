@@ -162,6 +162,15 @@ pub enum SeriesLoadState {
     Superseded = 6,
 }
 
+/// Engine-decided mutation carried by one incremental series publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum SeriesUpdateOperation {
+    Unspecified = 0,
+    ReviseTail = 1,
+    AppendTail = 2,
+}
+
 /// Persistence state reported independently from in-memory market readiness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
@@ -586,22 +595,6 @@ pub struct RemoveConsumer {
     pub consumer_id: u64,
 }
 
-/// Requests at most one pending covering market event for a consumer.
-#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
-pub struct PollMarketEvent {
-    /// Consumer whose conflated event slots should be drained.
-    #[prost(uint64, tag = "1")]
-    pub consumer_id: u64,
-}
-
-/// Indicates that a market-event poll found no pending publication.
-#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
-pub struct MarketEventIdle {
-    /// Consumer that was polled.
-    #[prost(uint64, tag = "1")]
-    pub consumer_id: u64,
-}
-
 /// Changes engine resource policy without changing user market demand.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct SetEngineResourceMode {
@@ -935,6 +928,9 @@ pub struct SeriesUpdate {
     /// Monotonic publication generation within the provider session.
     #[prost(uint64, tag = "7")]
     pub publication_generation: u64,
+    /// Exact mutation already decided by the canonical engine owner.
+    #[prost(enumeration = "SeriesUpdateOperation", tag = "8")]
+    pub operation: i32,
 }
 
 /// Engine-owned provider health publication.
@@ -1152,10 +1148,13 @@ pub struct Envelope {
     /// Protocol version.
     #[prost(uint32, tag = "1")]
     pub protocol_version: u32,
+    /// Target market consumer for pushed publications; zero for commands and replies.
+    #[prost(uint64, tag = "8")]
+    pub target_consumer_id: u64,
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54"
+        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1237,12 +1236,6 @@ pub mod envelope {
         /// Demand-specific error. Tag 38.
         #[prost(message, tag = "38")]
         DemandError(super::DemandError),
-        /// Polls one consumer's bounded event slots. Tag 39.
-        #[prost(message, tag = "39")]
-        PollMarketEvent(super::PollMarketEvent),
-        /// No market event was pending. Tag 40.
-        #[prost(message, tag = "40")]
-        MarketEventIdle(super::MarketEventIdle),
         /// Provider-neutral instrument install. Tag 41.
         #[prost(message, tag = "41")]
         InstallProviderInstrument(super::InstallProviderInstrument),

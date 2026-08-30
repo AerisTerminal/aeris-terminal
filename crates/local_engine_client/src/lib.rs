@@ -8,6 +8,11 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -15,7 +20,7 @@ use std::{
 use axiusflow_engine_protocol::{
     AttachClient, ClientHello, ClientKind, ConsumerResourceClass, DetachClient, EngineLifetimeMode,
     EngineReady, EngineStatus, Envelope, EnvelopeDecoder, GetEngineStatus,
-    InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION, PROTOCOL_VERSION, PollMarketEvent,
+    InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION, PROTOCOL_VERSION,
     ProviderInstrumentInstalled, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
     SearchProviderInstruments, SelectProviderInstrument, SeriesDemand, SeriesKey,
     SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWorkspaceLayout,
@@ -34,7 +39,8 @@ pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
-const MAX_PENDING_MARKET_RESPONSES: usize = 128;
+const IPC_INBOX_CAPACITY: usize = 256;
+const MAX_PENDING_MARKET_RESPONSES: usize = IPC_INBOX_CAPACITY;
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
 
 /// Loads the installation credential from the native vault, creating it once.
@@ -165,7 +171,7 @@ impl EngineClient {
         self.connection.send(envelope::Payload::RestoreWorkspace(
             RestoreWorkspace::default(),
         ))?;
-        match self.connection.receive()? {
+        match self.receive_reply()? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected workspace reply".to_string()),
@@ -217,7 +223,7 @@ impl EngineClient {
     pub fn engine_status(&mut self) -> Result<EngineStatus, String> {
         self.connection
             .send(envelope::Payload::GetEngineStatus(GetEngineStatus {}))?;
-        match self.connection.receive()? {
+        match self.receive_reply()? {
             envelope::Payload::EngineStatus(status) => Ok(status),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected status reply".to_string()),
@@ -231,7 +237,7 @@ impl EngineClient {
     pub fn shutdown_engine(mut self) -> Result<(), String> {
         self.connection
             .send(envelope::Payload::ShutdownEngine(ShutdownEngine {}))?;
-        match self.connection.receive()? {
+        match self.receive_reply()? {
             envelope::Payload::Goodbye(_) => Ok(()),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected shutdown reply".to_string()),
@@ -322,7 +328,7 @@ impl EngineClient {
     }
 
     fn receive_workspace(&mut self) -> Result<WorkspaceState, String> {
-        match self.connection.receive()? {
+        match self.receive_reply()? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected workspace reply".to_string()),
@@ -384,7 +390,7 @@ impl EngineClient {
     ) -> Result<ProviderInstrumentInstalled, String> {
         self.connection
             .send(envelope::Payload::InstallProviderInstrument(instrument))?;
-        match self.connection.receive()? {
+        match self.receive_reply()? {
             envelope::Payload::ProviderInstrumentInstalled(installed) => Ok(installed),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected instrument install reply".to_string()),
@@ -393,7 +399,7 @@ impl EngineClient {
 
     /// Schedules one bounded provider-neutral instrument search.
     ///
-    /// Results are returned through [`Self::poll_market_event`].
+    /// Results are delivered by [`Self::receive_market_event_timeout`].
     ///
     /// # Errors
     /// Returns an error when the authenticated local connection cannot send the command.
@@ -407,7 +413,7 @@ impl EngineClient {
 
     /// Schedules one exact provider-neutral instrument selection.
     ///
-    /// Results are returned through [`Self::poll_market_event`].
+    /// Results are delivered by [`Self::receive_market_event_timeout`].
     ///
     /// # Errors
     /// Returns an error when the authenticated local connection cannot send the command.
@@ -476,34 +482,38 @@ impl EngineClient {
     /// # Errors
     /// Returns an error for connection, framing, protocol-version, or payload failure.
     pub fn receive_market_event(&mut self) -> Result<envelope::Payload, String> {
-        self.connection.receive()
+        let (_, payload) = self.connection.receive_routed()?;
+        Ok(payload)
     }
 
-    /// Polls at most one bounded publication for an attached market consumer.
+    /// Receives the next pushed market event and its target consumer.
+    ///
+    /// A timeout means no publication arrived; it does not perform an IPC poll.
     ///
     /// # Errors
-    /// Returns an error when the authenticated exchange cannot complete.
-    pub fn poll_market_event(
+    /// Returns an error for connection, framing, protocol-version, or routing failure.
+    pub fn receive_market_event_timeout(
         &mut self,
-        consumer_id: u64,
-    ) -> Result<Option<envelope::Payload>, String> {
-        if let Some(payload) = self.take_pending_market_response(consumer_id) {
-            return market_poll_result(payload, consumer_id);
+        timeout: Duration,
+    ) -> Result<Option<(u64, envelope::Payload)>, String> {
+        if let Some((&consumer_id, _)) = self.pending_market_responses.first_key_value()
+            && let Some(payload) = self.take_pending_market_response(consumer_id)
+        {
+            return Ok(Some((consumer_id, payload)));
         }
-        self.connection
-            .send(envelope::Payload::PollMarketEvent(PollMarketEvent {
-                consumer_id,
-            }))?;
-        loop {
-            let payload = self.connection.receive()?;
-            if let Some(response_consumer_id) = market_response_consumer_id(&payload)
-                && response_consumer_id != consumer_id
-            {
-                self.buffer_market_response(response_consumer_id, payload)?;
-                continue;
-            }
-            return market_poll_result(payload, consumer_id);
+        let Some((consumer_id, payload)) = self.connection.receive_routed_timeout(timeout)? else {
+            return Ok(None);
+        };
+        if consumer_id == 0 {
+            return match payload {
+                payload @ envelope::Payload::Fault(_) => Ok(Some((0, payload))),
+                _ => Err("engine pushed an unrouted market event".to_string()),
+            };
         }
+        if market_response_consumer_id(&payload).is_some_and(|id| id != consumer_id) {
+            return Err("engine market event routing identity mismatched".to_string());
+        }
+        Ok(Some((consumer_id, payload)))
     }
 
     fn take_pending_market_response(&mut self, consumer_id: u64) -> Option<envelope::Payload> {
@@ -530,6 +540,19 @@ impl EngineClient {
             .push_back(payload);
         self.pending_market_response_count += 1;
         Ok(())
+    }
+
+    fn receive_reply(&mut self) -> Result<envelope::Payload, String> {
+        loop {
+            let (consumer_id, payload) = self.connection.receive_routed()?;
+            if consumer_id == 0 {
+                return Ok(payload);
+            }
+            if market_response_consumer_id(&payload).is_some_and(|id| id != consumer_id) {
+                return Err("engine market event routing identity mismatched".to_string());
+            }
+            self.buffer_market_response(consumer_id, payload)?;
+        }
     }
 
     /// Removes one consumer without affecting shared engine state.
@@ -559,7 +582,6 @@ fn market_response_consumer_id(payload: &envelope::Payload) -> Option<u64> {
         envelope::Payload::SeriesSnapshot(snapshot) => Some(snapshot.consumer_id),
         envelope::Payload::SeriesUpdate(update) => Some(update.consumer_id),
         envelope::Payload::DemandError(error) => Some(error.consumer_id),
-        envelope::Payload::MarketEventIdle(idle) => Some(idle.consumer_id),
         envelope::Payload::OrderBookSnapshot(snapshot) => Some(snapshot.consumer_id),
         envelope::Payload::OrderFlowSnapshot(snapshot) => Some(snapshot.consumer_id),
         envelope::Payload::OrderFlowUpdate(update) => Some(update.consumer_id),
@@ -567,20 +589,6 @@ fn market_response_consumer_id(payload: &envelope::Payload) -> Option<u64> {
         envelope::Payload::ProviderCatalogRejected(rejection) => Some(rejection.consumer_id),
         envelope::Payload::ProviderInstrumentSelection(selection) => Some(selection.consumer_id),
         _ => None,
-    }
-}
-
-fn market_poll_result(
-    payload: envelope::Payload,
-    consumer_id: u64,
-) -> Result<Option<envelope::Payload>, String> {
-    match payload {
-        envelope::Payload::MarketEventIdle(idle) if idle.consumer_id == consumer_id => Ok(None),
-        envelope::Payload::MarketEventIdle(idle) => Err(format!(
-            "engine returned market idle for consumer {} while polling consumer {consumer_id}",
-            idle.consumer_id
-        )),
-        payload => Ok(Some(payload)),
     }
 }
 
@@ -690,54 +698,180 @@ fn start_engine_process(engine_executable: &Path) -> Result<(), String> {
 }
 
 struct FramedConnection {
-    stream: LocalSocketStream,
-    decoder: EnvelopeDecoder,
-    pending: VecDeque<Envelope>,
+    writer: interprocess::local_socket::SendHalf,
+    incoming: Receiver<Result<Envelope, String>>,
+    stop: Arc<AtomicBool>,
+    nonblocking_writer: bool,
 }
 
 impl FramedConnection {
     fn new(stream: LocalSocketStream) -> Result<Self, String> {
+        let nonblocking_writer = if stream
+            .set_recv_timeout(Some(Duration::from_millis(100)))
+            .is_ok()
+        {
+            false
+        } else {
+            stream
+                .set_nonblocking(true)
+                .map_err(|error| error.to_string())?;
+            true
+        };
+        let (reader, writer) = stream.split();
+        let (incoming_tx, incoming) = mpsc::sync_channel(IPC_INBOX_CAPACITY);
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        thread::Builder::new()
+            .name("axiusflow-desktop-ipc-reader".to_string())
+            .spawn(move || read_ipc_messages(reader, &incoming_tx, &reader_stop))
+            .map_err(|error| error.to_string())?;
         Ok(Self {
-            stream,
-            decoder: EnvelopeDecoder::try_new().map_err(|error| error.to_string())?,
-            pending: VecDeque::new(),
+            writer,
+            incoming,
+            stop,
+            nonblocking_writer,
         })
     }
 
     fn send(&mut self, payload: envelope::Payload) -> Result<(), String> {
         let frame = encode_envelope(&Envelope {
             protocol_version: PROTOCOL_VERSION,
+            target_consumer_id: 0,
             payload: Some(payload),
         })
         .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
-        self.stream
-            .write_all(&frame)
-            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())?;
-        self.stream
-            .flush()
-            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
+        if self.nonblocking_writer {
+            write_nonblocking_frame(&mut self.writer, &frame)
+        } else {
+            self.writer
+                .write_all(&frame)
+                .and_then(|()| self.writer.flush())
+                .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
+        }
     }
 
     fn receive(&mut self) -> Result<envelope::Payload, String> {
-        loop {
-            if let Some(envelope) = self.pending.pop_front() {
-                return envelope.payload.ok_or_else(|| {
-                    "ipc_receive failed: engine message has no payload".to_string()
-                });
+        let (consumer_id, payload) = self.receive_routed()?;
+        if consumer_id == 0 {
+            Ok(payload)
+        } else {
+            Err(
+                "ipc_receive failed: market event arrived while awaiting a command reply"
+                    .to_string(),
+            )
+        }
+    }
+
+    fn receive_routed(&mut self) -> Result<(u64, envelope::Payload), String> {
+        self.incoming
+            .recv()
+            .map_err(|_| "ipc_receive failed: local engine connection closed".to_string())?
+            .and_then(routed_payload)
+    }
+
+    fn receive_routed_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<(u64, envelope::Payload)>, String> {
+        match self.incoming.recv_timeout(timeout) {
+            Ok(envelope) => envelope.and_then(routed_payload).map(Some),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err("ipc_receive failed: local engine connection closed".to_string())
             }
-            let mut chunk = [0_u8; 16 * 1024];
-            let count = self
-                .stream
-                .read(&mut chunk)
-                .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
-            if count == 0 {
-                return Err("ipc_receive failed: local engine connection closed".to_string());
+        }
+    }
+}
+
+impl Drop for FramedConnection {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+fn write_nonblocking_frame(
+    writer: &mut interprocess::local_socket::SendHalf,
+    frame: &[u8],
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut written = 0;
+    while written < frame.len() {
+        match writer.write(&frame[written..]) {
+            Ok(0) => return Err("ipc_send failed: local engine connection closed".to_string()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err("ipc_send failed: local transport is busy".to_string());
+                }
+                thread::sleep(Duration::from_millis(1));
             }
-            self.pending.extend(
-                self.decoder
-                    .push(&chunk[..count])
-                    .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?,
-            );
+            Err(_) => return Err("ipc_send failed: local transport is unavailable".to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn routed_payload(message: Envelope) -> Result<(u64, envelope::Payload), String> {
+    let payload = message
+        .payload
+        .ok_or_else(|| "ipc_receive failed: engine message has no payload".to_string())?;
+    Ok((message.target_consumer_id, payload))
+}
+
+fn read_ipc_messages(
+    mut reader: interprocess::local_socket::RecvHalf,
+    incoming: &mpsc::SyncSender<Result<Envelope, String>>,
+    stop: &AtomicBool,
+) {
+    let mut decoder = match EnvelopeDecoder::try_new() {
+        Ok(decoder) => decoder,
+        Err(error) => {
+            let _ = incoming.send(Err(error.to_string()));
+            return;
+        }
+    };
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let mut chunk = [0_u8; 16 * 1024];
+        let count = match reader.read(&mut chunk) {
+            Ok(0) => {
+                let _ = incoming.send(Err(
+                    "ipc_receive failed: local engine connection closed".to_string()
+                ));
+                return;
+            }
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(_) => {
+                let _ = incoming.send(Err(
+                    "ipc_receive failed: local transport is unavailable".to_string()
+                ));
+                return;
+            }
+        };
+        let Ok(envelopes) = decoder.push(&chunk[..count]) else {
+            let _ = incoming.send(Err(
+                "ipc_receive failed: local message is invalid".to_string()
+            ));
+            return;
+        };
+        for envelope in envelopes {
+            if incoming.send(Ok(envelope)).is_err() {
+                return;
+            }
         }
     }
 }
@@ -858,6 +992,7 @@ mod tests {
             ));
             let ready = encode_envelope(&Envelope {
                 protocol_version: PROTOCOL_VERSION,
+                target_consumer_id: 0,
                 payload: Some(envelope::Payload::EngineReady(EngineReady {
                     protocol_version: PROTOCOL_VERSION,
                     engine_epoch: 1,
@@ -878,6 +1013,7 @@ mod tests {
             server_shutdown.store(true, Ordering::Release);
             let goodbye = encode_envelope(&Envelope {
                 protocol_version: PROTOCOL_VERSION,
+                target_consumer_id: 0,
                 payload: Some(envelope::Payload::Goodbye(
                     axiusflow_engine_protocol::Goodbye {
                         reason: "legacy resident stopping".to_string(),
@@ -1150,9 +1286,9 @@ mod tests {
             .expect("demand native hot snapshot");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = client
-                .poll_market_event(consumer_id)
-                .expect("poll native market snapshot")
+            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) =
+                receive_native_event(&mut client, consumer_id)
+                    .expect("receive native market snapshot")
             {
                 let last = snapshot.bars.last().expect("snapshot contains bars");
                 println!(
@@ -1176,6 +1312,16 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn receive_native_event(
+        client: &mut EngineClient,
+        consumer_id: u64,
+    ) -> Result<Option<envelope::Payload>, String> {
+        Ok(client
+            .receive_market_event_timeout(Duration::from_millis(20))?
+            .and_then(|(target, event)| (target == consumer_id || target == 0).then_some(event)))
+    }
+
+    #[cfg(target_os = "windows")]
     fn select_native_rithmic_instrument(
         client: &mut EngineClient,
         consumer_id: u64,
@@ -1196,7 +1342,7 @@ mod tests {
                 return Err("Rithmic native search timed out".to_string());
             }
             if let Some(envelope::Payload::ProviderInstrumentSearchResult(result)) =
-                client.poll_market_event(consumer_id)?
+                receive_native_event(client, consumer_id)?
                 && result.search_generation == SEARCH_GENERATION
             {
                 break result
@@ -1224,7 +1370,7 @@ mod tests {
                 return Err("Rithmic native selection timed out".to_string());
             }
             if let Some(envelope::Payload::ProviderInstrumentSelection(selection)) =
-                client.poll_market_event(consumer_id)?
+                receive_native_event(client, consumer_id)?
                 && selection.consumer_id == consumer_id
             {
                 return selection
@@ -1248,7 +1394,7 @@ mod tests {
         let mut series_state = None;
         let mut demand_error = None;
         while Instant::now() < deadline && (bar_sequence.is_none() || book_watermark.is_none()) {
-            match client.poll_market_event(consumer_id)? {
+            match receive_native_event(client, consumer_id)? {
                 Some(envelope::Payload::SeriesSnapshot(snapshot))
                     if snapshot.generation == SERIES_GENERATION =>
                 {
@@ -1309,7 +1455,7 @@ mod tests {
             && (bar_sequence.is_none()
                 || book_watermark.is_none_or(|watermark| watermark <= baseline_book_watermark))
         {
-            match client.poll_market_event(consumer_id)? {
+            match receive_native_event(client, consumer_id)? {
                 Some(envelope::Payload::SeriesSnapshot(snapshot))
                     if snapshot.generation == SERIES_GENERATION =>
                 {

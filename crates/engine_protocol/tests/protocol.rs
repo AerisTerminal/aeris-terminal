@@ -4,18 +4,17 @@ use axiusflow_engine_protocol::{
     ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
     EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope,
     EnvelopeDecoder, Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument,
-    LIFECYCLE_CONTRACT_REVISION, MAX_FRAME_BYTES, MarketBar, MarketEventIdle, OrderBookLevel,
-    OrderBookSnapshot, OrderBookState, OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot,
-    OrderFlowTrade, OrderFlowUpdate, PROTOCOL_VERSION, PersistenceState, PollMarketEvent,
-    ProtocolError, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderConnectionState, ProviderInstrumentSearchResult, ProviderInstrumentSelection,
-    ProviderInstrumentSummary, ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode,
-    RestoreWorkspace, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesDemand, SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate,
-    SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist,
-    SetWorkspaceLayout, ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceLayoutState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
-    encode_envelope, envelope,
+    LIFECYCLE_CONTRACT_REVISION, MAX_FRAME_BYTES, MarketBar, OrderBookLevel, OrderBookSnapshot,
+    OrderBookState, OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot, OrderFlowTrade,
+    OrderFlowUpdate, PROTOCOL_VERSION, PersistenceState, ProtocolError, ProviderCatalogRejected,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
+    ProviderInstrumentSelection, ProviderInstrumentSummary, ProviderState, RegisterConsumer,
+    RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
+    SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineLifecycle, SetEngineResourceMode,
+    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ShutdownEngine, ViewportDemand,
+    VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -33,7 +32,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 13);
+    assert_eq!(PROTOCOL_VERSION, 14);
 }
 
 fn workspace_payloads() -> Vec<envelope::Payload> {
@@ -243,8 +242,6 @@ fn market_payloads() -> Vec<envelope::Payload> {
             resource_class: axiusflow_engine_protocol::ConsumerResourceClass::Foreground as i32,
         }),
         envelope::Payload::RemoveConsumer(RemoveConsumer { consumer_id: 13 }),
-        envelope::Payload::PollMarketEvent(PollMarketEvent { consumer_id: 13 }),
-        envelope::Payload::MarketEventIdle(MarketEventIdle { consumer_id: 13 }),
         envelope::Payload::SetEngineResourceMode(SetEngineResourceMode {
             resource_mode: ResourceMode::Warm as i32,
         }),
@@ -276,6 +273,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
             bar: Some(bar),
             forming: true,
             publication_generation: 2,
+            operation: axiusflow_engine_protocol::SeriesUpdateOperation::ReviseTail as i32,
         }),
         envelope::Payload::ProviderState(ProviderState {
             provider: "coinbase".into(),
@@ -435,6 +433,7 @@ fn order_book_payload() -> envelope::Payload {
 fn wrap(payload: envelope::Payload) -> Envelope {
     Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: Some(payload),
     }
 }
@@ -555,6 +554,7 @@ fn worst_case_working_window_snapshot_fits_one_bounded_frame() {
 fn version_missing_payload_and_malformed_protobuf_fail_closed() {
     let wrong = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION + 1,
+        target_consumer_id: 0,
         payload: Some(envelope::Payload::Goodbye(Goodbye { reason: "x".into() })),
     })
     .expect("frame encodes");
@@ -566,6 +566,7 @@ fn version_missing_payload_and_malformed_protobuf_fail_closed() {
 
     let missing = encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
         payload: None,
     })
     .expect("frame encodes");

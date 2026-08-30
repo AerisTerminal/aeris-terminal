@@ -2,6 +2,12 @@ use crate::{EngineError, ProviderGeneration, Viewport};
 use axiusflow_market_data::{BarPeriod, BarSeriesKey, MarketBar};
 use std::{collections::BTreeMap, mem::size_of, num::NonZeroUsize, sync::Arc};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeriesTailOperation {
+    Revise,
+    Append,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SeriesSnapshot {
     pub series: BarSeriesKey,
@@ -20,6 +26,7 @@ pub struct SeriesTail {
     pub price_scale: u8,
     pub quantity_scale: u8,
     pub forming: bool,
+    pub operation: SeriesTailOperation,
     pub bar: MarketBar,
 }
 
@@ -196,6 +203,7 @@ impl SeriesStore {
                     price_scale,
                     quantity_scale,
                     forming: tail.forming,
+                    operation: SeriesTailOperation::Revise,
                     bar: tail.bar,
                 }),
             }
@@ -281,7 +289,7 @@ impl SeriesStore {
             |tail| Some(tail.bar),
         );
         let previous = previous.ok_or(EngineError::EmptySeries)?;
-        if bar.source_sequence == previous.source_sequence {
+        let operation = if bar.source_sequence == previous.source_sequence {
             if current.tail.is_none()
                 || bar.exchange_timestamp_unix_nanos != previous.exchange_timestamp_unix_nanos
             {
@@ -289,6 +297,7 @@ impl SeriesStore {
                     provider_generation,
                 ));
             }
+            SeriesTailOperation::Revise
         } else {
             let expected = previous
                 .source_sequence
@@ -326,7 +335,8 @@ impl SeriesStore {
                     });
                 }
             }
-        }
+            SeriesTailOperation::Append
+        };
         let publication_generation = current
             .tail
             .map_or(current.covering.publication_generation, |tail| {
@@ -340,6 +350,7 @@ impl SeriesStore {
             price_scale,
             quantity_scale,
             forming,
+            operation,
             bar,
         };
         current.tail = Some(tail);
@@ -497,6 +508,7 @@ fn stored_series(
             price_scale: snapshot.price_scale,
             quantity_scale: snapshot.quantity_scale,
             forming: snapshot.forming,
+            operation: SeriesTailOperation::Revise,
             bar: *tail,
         }),
     })

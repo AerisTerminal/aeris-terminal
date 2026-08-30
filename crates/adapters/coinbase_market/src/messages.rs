@@ -65,17 +65,26 @@ pub(crate) struct TradeMessage<'a> {
 
 /// Builds one subscription frame for the public channels.
 pub(crate) fn subscribe_frame(products: &[String], channel: &str) -> String {
+    subscription_frame("subscribe", products, channel)
+}
+
+/// Builds one unsubscription frame for the public channels.
+pub(crate) fn unsubscribe_frame(products: &[String], channel: &str) -> String {
+    subscription_frame("unsubscribe", products, channel)
+}
+
+fn subscription_frame(kind: &str, products: &[String], channel: &str) -> String {
     let product_list = products
         .iter()
         .map(|product| format!("\"{product}\""))
         .collect::<Vec<_>>()
         .join(",");
-    format!("{{\"type\":\"subscribe\",\"product_ids\":[{product_list}],\"channel\":\"{channel}\"}}")
+    format!("{{\"type\":\"{kind}\",\"product_ids\":[{product_list}],\"channel\":\"{channel}\"}}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelMessage, subscribe_frame};
+    use super::{ChannelMessage, subscribe_frame, unsubscribe_frame};
 
     #[test]
     fn documented_market_trades_message_parses() {
@@ -111,6 +120,15 @@ mod tests {
         assert_eq!(
             frame,
             "{\"type\":\"subscribe\",\"product_ids\":[\"BTC-USD\",\"ETH-USD\"],\"channel\":\"market_trades\"}"
+        );
+    }
+
+    #[test]
+    fn unsubscription_frame_matches_protocol_shape() {
+        let frame = unsubscribe_frame(&["BTC-USD".to_string()], "level2");
+        assert_eq!(
+            frame,
+            "{\"type\":\"unsubscribe\",\"product_ids\":[\"BTC-USD\"],\"channel\":\"level2\"}"
         );
     }
 }

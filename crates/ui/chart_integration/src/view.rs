@@ -3471,7 +3471,7 @@ impl Render for NucleusChartView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_application::{Provenanced, ReplayTailUpdate};
+    use axiusflow_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
 
     fn interactive_chart() -> NucleusChartView {
         let mut chart = NucleusChartView::new();
@@ -3707,6 +3707,7 @@ mod tests {
             Provenanced::new(replacement_bar, replacement_provenance),
             replay.evidence().publication_generation + 1,
             true,
+            ReplayTailOperation::Revise,
         )
         .expect("replacement validates");
         chart
@@ -3731,6 +3732,7 @@ mod tests {
             appended.item().clone(),
             replay.evidence().publication_generation + 2,
             true,
+            ReplayTailOperation::Append,
         )
         .expect("append validates");
         chart

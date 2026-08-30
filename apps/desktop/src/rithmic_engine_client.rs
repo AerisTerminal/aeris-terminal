@@ -1,7 +1,11 @@
 use crate::{
-    rithmic_engine_history::{RithmicHistoryTask, history_message, validate_engine_instrument},
+    rithmic_engine_history::{
+        DomIdentity, demand_error_message, dom_from_snapshot, engine_series, live_tail,
+        snapshot_bootstrap, validate_engine_instrument,
+    },
     rithmic_history::{RithmicSeries, RithmicSeriesRequest},
 };
+use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_desktop::market_worker::{
     EngineSeriesRequest, MarketDataWorker, MarketWorkerCommand, MarketWorkerMessage,
     MarketWorkerSender, MarketWorkerStartup, ProviderCatalogCommand, ProviderCatalogEvent,
@@ -9,7 +13,8 @@ use axiusflow_desktop::market_worker::{
 };
 use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument, envelope,
+    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument, SeriesKey,
+    SeriesLoadState, envelope,
 };
 use axiusflow_observability::FeedConnectionState;
 use std::{
@@ -33,9 +38,14 @@ pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
 
 struct WorkerState {
     catalog: EngineCatalogSession,
-    history: RithmicHistoryTask,
     installed: Option<InstallProviderInstrument>,
-    pending_history: Option<RithmicSeriesRequest>,
+    active_series: Option<ActiveSeries>,
+}
+
+struct ActiveSeries {
+    request: RithmicSeriesRequest,
+    instrument: InstallProviderInstrument,
+    key: SeriesKey,
 }
 
 /// Starts the bounded Rithmic UI bridge backed exclusively by the resident engine.
@@ -72,13 +82,10 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
         FeedConnectionState::Discovering,
         "connecting to the resident Rithmic engine",
     );
-    let state = EngineCatalogSession::connect().and_then(|catalog| {
-        RithmicHistoryTask::start().map(|history| WorkerState {
-            catalog,
-            history,
-            installed: None,
-            pending_history: None,
-        })
+    let state = EngineCatalogSession::connect().map(|catalog| WorkerState {
+        catalog,
+        installed: None,
+        active_series: None,
     });
     let Ok(mut state) = state else {
         send_connection(
@@ -101,7 +108,7 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
             Ok(command) => process_command(messages, &mut state, command),
             Err(RecvTimeoutError::Timeout) => {}
         }
-        match state.catalog.poll() {
+        match state.catalog.receive(POLL_INTERVAL) {
             Ok(poll) if poll.reconnected => {
                 send_connection(
                     messages,
@@ -116,7 +123,7 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
             }
             Ok(poll) => {
                 if let Some(event) = poll.event {
-                    handle_catalog_event(messages, &mut state, event);
+                    handle_engine_event(messages, &mut state, event);
                 }
             }
             Err(_) => {
@@ -125,22 +132,6 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
                     FeedConnectionState::Recovering,
                     "resident Rithmic catalog connection is recovering",
                 );
-                break;
-            }
-        }
-        if let Some(frame) = state.history.try_recv_dom() {
-            let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
-        }
-        if let Some(result) = state.history.try_recv() {
-            let current = state.pending_history.is_some_and(|request| {
-                request.selection_generation == result.selection_generation
-                    && request.series_generation == result.series_generation
-            });
-            if current {
-                if result.result.is_err() {
-                    state.pending_history = None;
-                }
-                let _ = messages.send(history_message(result));
             }
         }
     }
@@ -165,8 +156,7 @@ fn process_command(
         }
         MarketWorkerCommand::ProviderSelect(selection) => {
             let generation = selection.selection_generation;
-            state.history.cancel();
-            state.pending_history = None;
+            state.active_series = None;
             if state.catalog.select(selection).is_err() {
                 publish_dispatch_rejection(messages, generation, ProviderCatalogCommand::Selection);
             }
@@ -185,24 +175,36 @@ fn process_command(
                 .installed
                 .clone()
                 .ok_or_else(|| "Rithmic instrument selection is unavailable".to_string())
-                .and_then(|instrument| state.history.request(request, instrument));
-            if result.is_ok() {
-                state.pending_history = Some(request);
-            } else {
+                .and_then(|instrument| {
+                    if u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX)
+                        != instrument.selection_generation
+                        || !request.series.supports_native_history()
+                    {
+                        return Err("Rithmic history series is unavailable".to_string());
+                    }
+                    let key = engine_series(request, &instrument)?;
+                    state.catalog.install_series(
+                        request.series_generation,
+                        instrument.clone(),
+                        key.clone(),
+                    )?;
+                    state.active_series = Some(ActiveSeries {
+                        request,
+                        instrument,
+                        key,
+                    });
+                    Ok(())
+                });
+            if let Err(error) = result {
                 let _ = messages.send(MarketWorkerMessage::RithmicHistory {
                     selection_generation: request.selection_generation,
                     series_generation: request.series_generation,
-                    result: Err(result
-                        .err()
-                        .unwrap_or_else(|| "Rithmic history is unavailable".to_string())),
+                    result: Err(error),
                 });
             }
         }
         MarketWorkerCommand::ResourceClass(resource_class) => {
-            let _ = state.history.set_visibility(matches!(
-                resource_class,
-                axiusflow_engine_protocol::ConsumerResourceClass::Foreground
-            ));
+            let _ = state.catalog.set_resource_class(resource_class);
         }
         MarketWorkerCommand::Shutdown
         | MarketWorkerCommand::Recovery(_)
@@ -211,11 +213,103 @@ fn process_command(
     }
 }
 
-fn handle_catalog_event(
+fn handle_engine_event(
     messages: &MarketWorkerSender,
     state: &mut WorkerState,
     event: envelope::Payload,
 ) {
+    let Some(event) = handle_catalog_event(messages, state, event) else {
+        return;
+    };
+    let Some(active) = state.active_series.as_ref() else {
+        if let envelope::Payload::Fault(fault) = event {
+            send_connection(
+                messages,
+                FeedConnectionState::Recovering,
+                &fault.redacted_detail,
+            );
+        }
+        return;
+    };
+    match event {
+        envelope::Payload::SeriesSnapshot(snapshot)
+            if series_identity_matches(state.catalog.consumer_id, active, &snapshot) =>
+        {
+            let result =
+                snapshot_bootstrap(active.request, &active.instrument, &snapshot).map(Box::new);
+            let _ = messages.send(MarketWorkerMessage::RithmicHistory {
+                selection_generation: active.request.selection_generation,
+                series_generation: active.request.series_generation,
+                result,
+            });
+        }
+        envelope::Payload::SeriesUpdate(update)
+            if update.consumer_id == state.catalog.consumer_id
+                && update.generation == series_generation(active.request)
+                && update.series.as_ref() == Some(&active.key)
+                && update.provider_generation >= active.instrument.session_generation =>
+        {
+            match live_tail(active.request, &active.instrument, &update) {
+                Ok(tail) => {
+                    let _ = messages.send(MarketWorkerMessage::RithmicLive {
+                        selection_generation: active.request.selection_generation,
+                        series_generation: active.request.series_generation,
+                        update: ReplayStreamUpdate::Tail(tail),
+                    });
+                }
+                Err(error) => publish_series_error(messages, active.request, error),
+            }
+        }
+        envelope::Payload::OrderBookSnapshot(snapshot)
+            if snapshot.consumer_id == state.catalog.consumer_id =>
+        {
+            if let Ok(frame) = dom_from_snapshot(
+                &DomIdentity {
+                    instrument: &active.instrument,
+                    series_generation: series_generation(active.request),
+                    selection_generation: selection_generation(active.request),
+                },
+                &snapshot,
+            ) {
+                let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+            }
+        }
+        envelope::Payload::SeriesState(series_state)
+            if series_state.consumer_id == state.catalog.consumer_id
+                && series_state.generation == series_generation(active.request) =>
+        {
+            if matches!(
+                SeriesLoadState::try_from(series_state.state),
+                Ok(SeriesLoadState::Failed | SeriesLoadState::Superseded)
+            ) {
+                publish_series_error(
+                    messages,
+                    active.request,
+                    series_state
+                        .detail
+                        .unwrap_or_else(|| "Rithmic series is unavailable".to_string()),
+                );
+            }
+        }
+        envelope::Payload::DemandError(error) => {
+            publish_series_error(messages, active.request, demand_error_message(&error));
+        }
+        envelope::Payload::Fault(fault) => {
+            send_connection(
+                messages,
+                FeedConnectionState::Recovering,
+                &fault.redacted_detail,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn handle_catalog_event(
+    messages: &MarketWorkerSender,
+    state: &mut WorkerState,
+    event: envelope::Payload,
+) -> Option<envelope::Payload> {
     let (catalog, passthrough) =
         classify_provider_catalog_event(event, "rithmic", state.catalog.consumer_id);
     match catalog {
@@ -233,16 +327,40 @@ fn handle_catalog_event(
                 "Rithmic catalog command was rejected",
             );
         }
-        None => {
-            if let Some(envelope::Payload::Fault(fault)) = passthrough {
-                send_connection(
-                    messages,
-                    FeedConnectionState::Recovering,
-                    &fault.redacted_detail,
-                );
-            }
-        }
+        None => {}
     }
+    passthrough
+}
+
+fn series_identity_matches(
+    consumer_id: u64,
+    active: &ActiveSeries,
+    snapshot: &axiusflow_engine_protocol::SeriesSnapshot,
+) -> bool {
+    snapshot.consumer_id == consumer_id
+        && snapshot.generation == series_generation(active.request)
+        && snapshot.series.as_ref() == Some(&active.key)
+        && snapshot.provider_generation >= active.instrument.session_generation
+}
+
+fn publish_series_error(
+    messages: &MarketWorkerSender,
+    request: RithmicSeriesRequest,
+    error: String,
+) {
+    let _ = messages.send(MarketWorkerMessage::RithmicHistory {
+        selection_generation: request.selection_generation,
+        series_generation: request.series_generation,
+        result: Err(error),
+    });
+}
+
+fn selection_generation(request: RithmicSeriesRequest) -> u64 {
+    u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX)
+}
+
+fn series_generation(request: RithmicSeriesRequest) -> u64 {
+    u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
 }
 
 fn publish_search_result(messages: &MarketWorkerSender, result: ProviderInstrumentSearchResult) {
@@ -274,8 +392,7 @@ fn publish_selection(
     if validate_engine_instrument(&instrument).is_err() {
         return;
     }
-    state.history.cancel();
-    state.pending_history = None;
+    state.active_series = None;
     state.installed = Some(instrument.clone());
     let _ = messages.send(MarketWorkerMessage::ProviderCatalog(
         ProviderCatalogEvent::SelectionInstalled(instrument),
@@ -336,8 +453,34 @@ impl EngineCatalogSession {
         self.client.select_provider_instrument(selection)
     }
 
-    fn poll(&mut self) -> Result<crate::engine_supervisor::SupervisedPoll, String> {
-        self.client.poll_market_event(self.consumer_id)
+    fn install_series(
+        &mut self,
+        generation: NonZeroUsize,
+        instrument: InstallProviderInstrument,
+        series: SeriesKey,
+    ) -> Result<(), String> {
+        self.client.install_provider_instrument(instrument)?;
+        self.client.set_series_demand(
+            self.consumer_id,
+            u64::try_from(generation.get()).unwrap_or(u64::MAX),
+            series,
+        )
+    }
+
+    fn set_resource_class(
+        &mut self,
+        resource_class: axiusflow_engine_protocol::ConsumerResourceClass,
+    ) -> Result<(), String> {
+        self.client
+            .set_market_resource_class(self.consumer_id, resource_class)
+    }
+
+    fn receive(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<crate::engine_supervisor::SupervisedEvent, String> {
+        self.client
+            .receive_market_event_for(self.consumer_id, timeout)
     }
 }
 

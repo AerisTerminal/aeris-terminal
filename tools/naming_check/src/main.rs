@@ -1101,7 +1101,7 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 13"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 14"),
             "incompatible IPC revisions require a deliberate protocol-version change"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");

@@ -1,4 +1,4 @@
-use crate::series_store::SeriesSnapshot;
+use crate::series_store::{SeriesSnapshot, SeriesTail, SeriesTailOperation};
 use crate::{ConsumerId, EngineError, GenerationId, ProviderGeneration};
 use axiusflow_market_data::{BarSeriesKey, MarketBar};
 use std::{collections::BTreeMap, sync::Arc};
@@ -19,6 +19,7 @@ pub struct ConsumerSeriesUpdate {
     pub series: BarSeriesKey,
     pub provider_generation: ProviderGeneration,
     pub forming: bool,
+    pub operation: SeriesTailOperation,
     pub bar: MarketBar,
 }
 
@@ -68,9 +69,7 @@ impl PublicationManager {
         consumer_id: ConsumerId,
         generation: GenerationId,
         series: &BarSeriesKey,
-        provider_generation: ProviderGeneration,
-        forming: bool,
-        bar: MarketBar,
+        tail: SeriesTail,
     ) -> Result<ConsumerSeriesUpdate, EngineError> {
         let publication_generation = self.next_generation(consumer_id)?;
         self.latest.insert(
@@ -86,9 +85,10 @@ impl PublicationManager {
             generation,
             publication_generation,
             series: series.clone(),
-            provider_generation,
-            forming,
-            bar,
+            provider_generation: tail.provider_generation,
+            forming: tail.forming,
+            operation: tail.operation,
+            bar: tail.bar,
         })
     }
 

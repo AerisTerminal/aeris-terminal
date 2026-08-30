@@ -252,12 +252,19 @@ pub enum ReplayStreamUpdate {
     Tail(ReplayTailUpdate),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayTailOperation {
+    Revise,
+    Append,
+}
+
 /// One incremental live bar that either replaces the forming tail or appends its successor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplayTailUpdate {
     item: ProvenancedMarketBar,
     publication_generation: u64,
     forming: bool,
+    operation: ReplayTailOperation,
 }
 
 impl ReplayTailUpdate {
@@ -269,6 +276,7 @@ impl ReplayTailUpdate {
         item: ProvenancedMarketBar,
         publication_generation: u64,
         forming: bool,
+        operation: ReplayTailOperation,
     ) -> Result<Self, ReplayValidationError> {
         validate_provenanced_market_bar(&item)?;
         if publication_generation == 0 {
@@ -280,6 +288,7 @@ impl ReplayTailUpdate {
             item,
             publication_generation,
             forming,
+            operation,
         })
     }
 
@@ -296,6 +305,11 @@ impl ReplayTailUpdate {
     #[must_use]
     pub const fn forming(&self) -> bool {
         self.forming
+    }
+
+    #[must_use]
+    pub const fn operation(&self) -> ReplayTailOperation {
+        self.operation
     }
 }
 
@@ -395,6 +409,11 @@ impl ReplaySession {
             return Ok(SequenceDecision::Duplicate);
         }
         if sequence == current {
+            if update.operation() != ReplayTailOperation::Revise {
+                return Err(ReplayValidationError::TailOperationMismatch {
+                    source_sequence: sequence,
+                });
+            }
             if update.item().provenance().exchange_timestamp_unix_nanos
                 != self.last_exchange_timestamp_unix_nanos
             {
@@ -403,6 +422,11 @@ impl ReplaySession {
                 });
             }
             return Ok(SequenceDecision::Accepted);
+        }
+        if update.operation() != ReplayTailOperation::Append {
+            return Err(ReplayValidationError::TailOperationMismatch {
+                source_sequence: sequence,
+            });
         }
         let delta =
             StreamDelta::try_new(sequence.saturating_sub(1), sequence, update.item().clone())?;
@@ -467,6 +491,7 @@ mod tests {
             Provenanced::new(replacement_bar, baseline.bars()[1].provenance().clone()),
             baseline.evidence().publication_generation + 1,
             true,
+            ReplayTailOperation::Revise,
         )
         .expect("replacement validates");
         assert_eq!(
@@ -486,6 +511,7 @@ mod tests {
             appended.item().clone(),
             baseline.evidence().publication_generation + 2,
             true,
+            ReplayTailOperation::Append,
         )
         .expect("append validates");
         assert_eq!(

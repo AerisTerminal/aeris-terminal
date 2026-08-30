@@ -29,7 +29,7 @@ pub use resource_policy::{
     EngineResourceMode, ResourcePolicyDecision, ResourcePolicyInput,
     decide as decide_resource_policy,
 };
-pub use series_store::SeriesSnapshot;
+pub use series_store::{SeriesSnapshot, SeriesTailOperation};
 pub use subscription_registry::SubscriptionStatus;
 
 use axiusflow_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError, MarketTrade};
@@ -761,14 +761,8 @@ impl MarketEngine {
             .matching(series)
             .into_iter()
             .map(|(consumer_id, generation)| {
-                self.publications.publish_update(
-                    consumer_id,
-                    generation,
-                    series,
-                    tail.provider_generation,
-                    tail.forming,
-                    tail.bar,
-                )
+                self.publications
+                    .publish_update(consumer_id, generation, series, tail)
             })
             .collect()
     }

@@ -1,13 +1,13 @@
-use crate::rithmic_history::{RithmicSeries, RithmicSeriesRequest};
+use crate::rithmic_history::RithmicSeriesRequest;
 
 use axiusflow_application::{
-    MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
-    ProvenancedMarketBar, ReplayProvenance, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
+    MarketEventProvenance, MarketGeneration, Provenanced, ProvenancedMarketBar, ReplayProvenance,
+    ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate,
 };
 use axiusflow_engine_protocol::{
     DemandError, FailureStage, InstallProviderInstrument,
     OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState, SeriesCadence,
-    SeriesKey, SeriesLoadState, SeriesSnapshot, SeriesUpdate, envelope,
+    SeriesKey, SeriesSnapshot, SeriesUpdate, SeriesUpdateOperation,
 };
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
@@ -17,563 +17,12 @@ use axiusflow_market_data::{
     OrderBookRecoveryReason, OrderBookState,
 };
 use axiusflow_terminal_ui::{DomFrame, DomSelection, ReadOnlyDom};
-use std::{
-    collections::VecDeque,
-    num::{NonZeroU64, NonZeroUsize},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
-    },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::engine_supervisor::EngineSupervisor;
-use axiusflow_desktop::market_worker::{MarketWorkerBootstrap, MarketWorkerMessage};
+use axiusflow_desktop::market_worker::MarketWorkerBootstrap;
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_DOM_LEVELS: usize = 20;
-const HISTORY_COMMAND_CAPACITY: usize = 2;
-/// Live bars this task may hold for a chart that has not drained them yet.
-const LIVE_RESULT_CAPACITY: usize = 256;
-const POLL_INTERVAL: Duration = Duration::from_millis(16);
-const HISTORY_TIMEOUT: Duration = Duration::from_secs(35);
-const ENGINE_WORKSPACE_ID: u64 = 1;
-
-struct HistoryFetchRequest {
-    selection_generation: NonZeroUsize,
-    series_generation: NonZeroUsize,
-    series: RithmicSeries,
-    instrument: InstallProviderInstrument,
-    stop: Arc<AtomicBool>,
-}
-
-pub(crate) struct RithmicHistoryResult {
-    pub(crate) selection_generation: NonZeroUsize,
-    pub(crate) series_generation: NonZeroUsize,
-    pub(crate) result: Result<RithmicSeriesPublication, String>,
-}
-
-pub(crate) enum RithmicSeriesPublication {
-    History(Box<MarketWorkerBootstrap>),
-    Live(Box<ReplayStreamUpdate>),
-}
-
-enum HistoryCommand {
-    Fetch(HistoryFetchRequest),
-    Visibility(bool),
-}
-
-#[derive(Default)]
-struct LatestHistoryResult {
-    value: Mutex<PendingHistoryResults>,
-}
-
-/// Bounded per-chart outbox for the Rithmic engine history task.
-///
-/// `live` is a queue, not a slot. Bar identity is a strict sequence, so
-/// replacing a pending update that carries a different bar loses that bar, and
-/// the chart's replay bridge reads the gap as corruption it can only clear with
-/// a covering snapshot. Successive revisions of one open period carry the same
-/// sequence and do supersede each other.
-#[derive(Default)]
-struct PendingHistoryResults {
-    history: Option<RithmicHistoryResult>,
-    live: VecDeque<RithmicHistoryResult>,
-}
-
-#[derive(Default)]
-struct LatestDomFrame {
-    value: Mutex<Option<DomFrame>>,
-}
-
-impl LatestDomFrame {
-    fn publish(&self, frame: DomFrame) {
-        *self
-            .value
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frame);
-    }
-
-    fn take(&self) -> Option<DomFrame> {
-        self.value
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-}
-
-impl LatestHistoryResult {
-    /// Queues one result. Returns `false` when a live bar could not be queued
-    /// without losing another, which the caller resolves by reloading history.
-    fn publish(&self, result: RithmicHistoryResult) -> bool {
-        let mut pending = self
-            .value
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(sequence) = live_publication_sequence(&result) else {
-            // A covering history bootstrap supersedes every live bar queued
-            // behind it, so the queue starts again from it.
-            pending.live.clear();
-            pending.history = Some(result);
-            return true;
-        };
-        if let Some(queued) = pending
-            .live
-            .iter_mut()
-            .find(|queued| live_publication_sequence(queued) == Some(sequence))
-        {
-            *queued = result;
-            return true;
-        }
-        if pending.live.len() >= LIVE_RESULT_CAPACITY {
-            pending.live.clear();
-            return false;
-        }
-        pending.live.push_back(result);
-        true
-    }
-
-    fn take(&self) -> Option<RithmicHistoryResult> {
-        let mut pending = self
-            .value
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pending.history.take().or_else(|| pending.live.pop_front())
-    }
-}
-
-/// The bar sequence carried by one live publication, if this is one.
-fn live_publication_sequence(result: &RithmicHistoryResult) -> Option<u64> {
-    match &result.result {
-        Ok(RithmicSeriesPublication::Live(update)) => match update.as_ref() {
-            ReplayStreamUpdate::Tail(tail) => Some(tail.item().value().source_sequence),
-            ReplayStreamUpdate::Snapshot(_) | ReplayStreamUpdate::Delta(_) => None,
-        },
-        _ => None,
-    }
-}
-
-pub(crate) struct RithmicHistoryTask {
-    commands: Option<SyncSender<HistoryCommand>>,
-    results: Arc<LatestHistoryResult>,
-    dom: Arc<LatestDomFrame>,
-    active: Option<(NonZeroUsize, NonZeroUsize, Arc<AtomicBool>)>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl RithmicHistoryTask {
-    pub(crate) fn start() -> Result<Self, String> {
-        let (command_tx, command_rx) = mpsc::sync_channel(HISTORY_COMMAND_CAPACITY);
-        let results = Arc::new(LatestHistoryResult::default());
-        let dom = Arc::new(LatestDomFrame::default());
-        let worker_results = Arc::clone(&results);
-        let worker_dom = Arc::clone(&dom);
-        let handle = thread::Builder::new()
-            .name("axiusflow-rithmic-engine-history-client".to_string())
-            .spawn(move || run_history_worker(&command_rx, &worker_results, &worker_dom))
-            .map_err(|_| "Rithmic engine history client is unavailable".to_string())?;
-        Ok(Self {
-            commands: Some(command_tx),
-            results,
-            dom,
-            active: None,
-            handle: Some(handle),
-        })
-    }
-
-    pub(crate) fn request(
-        &mut self,
-        request: RithmicSeriesRequest,
-        instrument: InstallProviderInstrument,
-    ) -> Result<(), String> {
-        if u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX)
-            != instrument.selection_generation
-        {
-            return Err("Rithmic history selection is stale".to_string());
-        }
-        if instrument.session_generation == 0
-            || validate_engine_instrument(&instrument).is_err()
-            || !request.series.supports_native_history()
-        {
-            return Err("Rithmic history series is unavailable".to_string());
-        }
-        self.cancel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let command = HistoryCommand::Fetch(HistoryFetchRequest {
-            selection_generation: request.selection_generation,
-            series_generation: request.series_generation,
-            series: request.series,
-            instrument,
-            stop: Arc::clone(&stop),
-        });
-        self.commands
-            .as_ref()
-            .ok_or_else(|| "Rithmic engine history client stopped".to_string())?
-            .try_send(command)
-            .map_err(|error| match error {
-                TrySendError::Full(_) => "Rithmic engine history client is busy".to_string(),
-                TrySendError::Disconnected(_) => {
-                    "Rithmic engine history client stopped".to_string()
-                }
-            })?;
-        self.active = Some((
-            request.selection_generation,
-            request.series_generation,
-            stop,
-        ));
-        Ok(())
-    }
-
-    pub(crate) fn try_recv(&mut self) -> Option<RithmicHistoryResult> {
-        let result = self.results.take()?;
-        if result.result.is_err()
-            && self
-                .active
-                .as_ref()
-                .is_some_and(|(selection_generation, series_generation, _)| {
-                    *selection_generation == result.selection_generation
-                        && *series_generation == result.series_generation
-                })
-        {
-            self.active = None;
-        }
-        Some(result)
-    }
-
-    pub(crate) fn try_recv_dom(&self) -> Option<DomFrame> {
-        self.dom.take()
-    }
-
-    pub(crate) fn set_visibility(&self, visible: bool) -> Result<(), String> {
-        self.commands
-            .as_ref()
-            .ok_or_else(|| "Rithmic engine history client stopped".to_string())?
-            .try_send(HistoryCommand::Visibility(visible))
-            .map_err(|error| match error {
-                TrySendError::Full(_) => "Rithmic engine history client is busy".to_string(),
-                TrySendError::Disconnected(_) => {
-                    "Rithmic engine history client stopped".to_string()
-                }
-            })
-    }
-
-    pub(crate) fn cancel(&mut self) {
-        if let Some((_, _, stop)) = self.active.take() {
-            stop.store(true, Ordering::Release);
-        }
-    }
-}
-
-impl Drop for RithmicHistoryTask {
-    fn drop(&mut self) {
-        self.cancel();
-        self.commands.take();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-struct EngineHistorySession {
-    client: EngineSupervisor,
-    consumer_id: u64,
-}
-
-enum EngineUpdate {
-    History(Box<MarketWorkerBootstrap>),
-    Live(Box<ReplayStreamUpdate>),
-    Dom(DomFrame),
-}
-
-impl EngineHistorySession {
-    fn connect() -> Result<Self, String> {
-        let client_id = random_identity()?;
-        let consumer_id = random_identity()?;
-        let mut client = EngineSupervisor::connect(client_id)?;
-        if let Err(error) = client.register_consumer(ENGINE_WORKSPACE_ID, consumer_id) {
-            let _ = client.detach_client();
-            return Err(error);
-        }
-        Ok(Self {
-            client,
-            consumer_id,
-        })
-    }
-
-    fn fetch(
-        &mut self,
-        request: &HistoryFetchRequest,
-        dom: &LatestDomFrame,
-        results: &LatestHistoryResult,
-    ) -> Result<MarketWorkerBootstrap, String> {
-        let series = engine_series_key(request)?;
-        self.client
-            .install_provider_instrument(request.instrument.clone())?;
-        self.client.set_series_demand(
-            self.consumer_id,
-            u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX),
-            series.clone(),
-        )?;
-        let deadline = Instant::now() + HISTORY_TIMEOUT;
-        loop {
-            if request.stop.load(Ordering::Acquire) {
-                self.reset_consumer()?;
-                return Err("Rithmic history request was cancelled".to_string());
-            }
-            if Instant::now() >= deadline {
-                self.reset_consumer()?;
-                return Err("Rithmic engine history request timed out".to_string());
-            }
-            let Some(update) = self.poll_update(request)? else {
-                thread::sleep(POLL_INTERVAL);
-                continue;
-            };
-            match update {
-                EngineUpdate::History(bootstrap) => return Ok(*bootstrap),
-                // A bar that arrives while the covering snapshot is still on its
-                // way is queued behind it, not dropped: `take` hands the
-                // bootstrap over first, so the chart still applies them in
-                // order, and the bar is not silently lost.
-                EngineUpdate::Live(update) => {
-                    publish_history_result(
-                        results,
-                        request,
-                        Ok(RithmicSeriesPublication::Live(update)),
-                    );
-                }
-                EngineUpdate::Dom(frame) => dom.publish(frame),
-            }
-        }
-    }
-
-    fn poll_update(
-        &mut self,
-        request: &HistoryFetchRequest,
-    ) -> Result<Option<EngineUpdate>, String> {
-        let series = engine_series_key(request)?;
-        let poll = self.client.poll_market_event(self.consumer_id)?;
-        let Some(event) = poll.event else {
-            return Ok(None);
-        };
-        match event {
-            envelope::Payload::SeriesSnapshot(snapshot) => {
-                if snapshot.consumer_id != self.consumer_id
-                    || snapshot.generation
-                        != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
-                    || snapshot.series.as_ref() != Some(&series)
-                {
-                    return Err("Rithmic engine snapshot identity mismatched".to_string());
-                }
-                // A warm engine can publish retained data tagged with an older
-                // provider session before the current-session repair lands, so
-                // stale generations are skipped instead of failing the fetch.
-                if snapshot.provider_generation < request.instrument.session_generation {
-                    return Ok(None);
-                }
-                bootstrap_from_snapshot(request, &snapshot)
-                    .map(Box::new)
-                    .map(EngineUpdate::History)
-                    .map(Some)
-            }
-            envelope::Payload::SeriesUpdate(update) => {
-                if update.consumer_id != self.consumer_id
-                    || update.generation
-                        != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
-                    || update.series.as_ref() != Some(&series)
-                {
-                    return Err("Rithmic engine update identity mismatched".to_string());
-                }
-                if update.provider_generation < request.instrument.session_generation {
-                    return Ok(None);
-                }
-                tail_from_update(request, &update)
-                    .map(ReplayStreamUpdate::Tail)
-                    .map(Box::new)
-                    .map(EngineUpdate::Live)
-                    .map(Some)
-            }
-            envelope::Payload::SeriesState(state) => {
-                if state.consumer_id != self.consumer_id
-                    || state.generation
-                        != u64::try_from(request.series_generation.get()).unwrap_or(u64::MAX)
-                {
-                    return Ok(None);
-                }
-                match SeriesLoadState::try_from(state.state)
-                    .map_err(|_| "Rithmic engine returned invalid history state".to_string())?
-                {
-                    SeriesLoadState::Failed => Err(state
-                        .detail
-                        .unwrap_or_else(|| "Rithmic engine history is unavailable".to_string())),
-                    SeriesLoadState::Superseded => {
-                        Err("Rithmic engine history demand was superseded".to_string())
-                    }
-                    SeriesLoadState::Empty
-                    | SeriesLoadState::Resolving
-                    | SeriesLoadState::Partial
-                    | SeriesLoadState::Ready
-                    | SeriesLoadState::Live => Ok(None),
-                }
-            }
-            envelope::Payload::DemandError(error) => Err(demand_error(&error)),
-            envelope::Payload::OrderBookSnapshot(snapshot) => {
-                if snapshot.consumer_id != self.consumer_id {
-                    return Err("Rithmic engine order-book consumer mismatched".to_string());
-                }
-                if snapshot.provider_generation < request.instrument.session_generation {
-                    return Ok(None);
-                }
-                dom_from_snapshot(
-                    &DomIdentity {
-                        instrument: &request.instrument,
-                        series_generation: u64::try_from(request.series_generation.get())
-                            .unwrap_or(u64::MAX),
-                        selection_generation: u64::try_from(request.selection_generation.get())
-                            .unwrap_or(u64::MAX),
-                    },
-                    &snapshot,
-                )
-                .map(EngineUpdate::Dom)
-                .map(Some)
-            }
-            envelope::Payload::OrderFlowSnapshot(_) | envelope::Payload::OrderFlowUpdate(_) => {
-                Ok(None)
-            }
-            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
-            envelope::Payload::ProviderState(_) | envelope::Payload::MarketEventIdle(_) => Ok(None),
-            _ => Err("Rithmic engine returned an unexpected history event".to_string()),
-        }
-    }
-
-    fn set_visibility(&mut self, visible: bool) -> Result<(), String> {
-        self.client.set_market_visibility(self.consumer_id, visible)
-    }
-
-    fn reset_consumer(&mut self) -> Result<(), String> {
-        self.client
-            .remove_market_consumer(self.consumer_id)
-            .and_then(|()| {
-                self.client
-                    .register_consumer(ENGINE_WORKSPACE_ID, self.consumer_id)
-            })
-    }
-}
-
-impl Drop for EngineHistorySession {
-    fn drop(&mut self) {
-        let _ = self.client.remove_market_consumer(self.consumer_id);
-        let _ = self.client.detach_client();
-    }
-}
-
-fn run_history_worker(
-    commands: &Receiver<HistoryCommand>,
-    results: &LatestHistoryResult,
-    dom: &LatestDomFrame,
-) {
-    let mut session: Option<EngineHistorySession> = None;
-    let mut active_request: Option<HistoryFetchRequest> = None;
-    loop {
-        match commands.recv_timeout(POLL_INTERVAL) {
-            Ok(HistoryCommand::Fetch(request)) => {
-                let result = if let Some(active) = session.as_mut() {
-                    active.fetch(&request, dom, results)
-                } else {
-                    EngineHistorySession::connect().and_then(|mut active| {
-                        let result = active.fetch(&request, dom, results);
-                        session = Some(active);
-                        result
-                    })
-                };
-                let succeeded = result.is_ok();
-                publish_history_result(
-                    results,
-                    &request,
-                    result.map(|history| RithmicSeriesPublication::History(Box::new(history))),
-                );
-                if succeeded {
-                    active_request = Some(request);
-                } else {
-                    active_request = None;
-                    session = None;
-                }
-            }
-            Ok(HistoryCommand::Visibility(visible)) => {
-                if let Some(active) = session.as_mut() {
-                    let _ = active.set_visibility(visible);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let Some(request) = active_request.as_ref() else {
-                    continue;
-                };
-                if request.stop.load(Ordering::Acquire) {
-                    if let Some(active) = session.as_mut() {
-                        let _ = active.reset_consumer();
-                    }
-                    active_request = None;
-                    continue;
-                }
-                let Some(active) = session.as_mut() else {
-                    active_request = None;
-                    continue;
-                };
-                match active.poll_update(request) {
-                    Ok(Some(EngineUpdate::History(bootstrap))) => {
-                        publish_history_result(
-                            results,
-                            request,
-                            Ok(RithmicSeriesPublication::History(bootstrap)),
-                        );
-                    }
-                    Ok(Some(EngineUpdate::Live(update))) => {
-                        if !publish_history_result(
-                            results,
-                            request,
-                            Ok(RithmicSeriesPublication::Live(update)),
-                        ) {
-                            // The chart has not drained a bounded run of bars,
-                            // so what is still queued can no longer be delivered
-                            // without a gap. Reloading covering history is the
-                            // recovery; dropping a bar is not.
-                            publish_history_result(
-                                results,
-                                request,
-                                Err("Rithmic live stream outran the chart;                                      covering history is reloading"
-                                    .to_string()),
-                            );
-                            active_request = None;
-                            session = None;
-                        }
-                    }
-                    Ok(Some(EngineUpdate::Dom(frame))) => dom.publish(frame),
-                    Ok(None) => {}
-                    Err(error) => {
-                        publish_history_result(results, request, Err(error));
-                        active_request = None;
-                        session = None;
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
-        }
-    }
-}
-
-/// Queues one result, reporting whether it displaced a bar the chart still needs.
-fn publish_history_result(
-    results: &LatestHistoryResult,
-    request: &HistoryFetchRequest,
-    result: Result<RithmicSeriesPublication, String>,
-) -> bool {
-    results.publish(RithmicHistoryResult {
-        selection_generation: request.selection_generation,
-        series_generation: request.series_generation,
-        result,
-    })
-}
 
 pub(crate) fn validate_engine_instrument(
     instrument: &InstallProviderInstrument,
@@ -592,7 +41,10 @@ pub(crate) fn validate_engine_instrument(
     Ok(())
 }
 
-fn engine_series_key(request: &HistoryFetchRequest) -> Result<SeriesKey, String> {
+pub(crate) fn engine_series(
+    request: RithmicSeriesRequest,
+    instrument: &InstallProviderInstrument,
+) -> Result<SeriesKey, String> {
     let (cadence, cadence_value) = match request.series.interval() {
         ChartInterval::Tick100 => (SeriesCadence::Trades, 100),
         ChartInterval::Day1 => (SeriesCadence::SessionDays, 1),
@@ -608,37 +60,38 @@ fn engine_series_key(request: &HistoryFetchRequest) -> Result<SeriesKey, String>
     };
     Ok(SeriesKey {
         provider: "rithmic".to_string(),
-        instrument_id: request.instrument.instrument_id.clone(),
+        instrument_id: instrument.instrument_id.clone(),
         cadence_value,
         definition_revision: 1,
-        entitlement_id: request.instrument.entitlement_id.clone(),
+        entitlement_id: instrument.entitlement_id.clone(),
         cadence: cadence as i32,
     })
 }
 
-fn bootstrap_from_snapshot(
-    request: &HistoryFetchRequest,
+pub(crate) fn snapshot_bootstrap(
+    request: RithmicSeriesRequest,
+    instrument: &InstallProviderInstrument,
     snapshot: &SeriesSnapshot,
 ) -> Result<MarketWorkerBootstrap, String> {
-    if snapshot.provider_generation < request.instrument.session_generation
+    if snapshot.provider_generation < instrument.session_generation
         || snapshot.bars.is_empty()
         || snapshot.bars.len() > MAXIMUM_VISIBLE_BARS
-        || snapshot.price_scale != request.instrument.price_scale
-        || snapshot.quantity_scale != request.instrument.quantity_scale
+        || snapshot.price_scale != instrument.price_scale
+        || snapshot.quantity_scale != instrument.quantity_scale
     {
         return Err("Rithmic engine snapshot is invalid".to_string());
     }
-    let price_scale = u8::try_from(request.instrument.price_scale)
+    let price_scale = u8::try_from(instrument.price_scale)
         .map_err(|_| "Rithmic engine price scale is invalid".to_string())?;
-    let quantity_scale = u8::try_from(request.instrument.quantity_scale)
+    let quantity_scale = u8::try_from(instrument.quantity_scale)
         .map_err(|_| "Rithmic engine quantity scale is invalid".to_string())?;
-    let instrument = InstrumentRevision {
-        instrument_id: InstrumentId::try_new(request.instrument.instrument_id.clone())
+    let revision = InstrumentRevision {
+        instrument_id: InstrumentId::try_new(instrument.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: 1,
         asset_class: AssetClass::Future,
-        symbol: request.instrument.display_symbol.clone(),
-        venue_id: request.instrument.venue_id.clone(),
+        symbol: instrument.display_symbol.clone(),
+        venue_id: instrument.venue_id.clone(),
         trading_currency: "USD".to_string(),
         precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
             .map_err(|error| error.to_string())?,
@@ -658,29 +111,36 @@ fn bootstrap_from_snapshot(
         calendar_months,
     };
     let received = unix_nanos_now()?;
-    let bars = provenanced_engine_bars(request, snapshot, received);
+    let bars = provenanced_engine_bars(request, instrument, snapshot, received);
+    let first_sequence = bars
+        .first()
+        .map(|bar| bar.value().source_sequence)
+        .ok_or_else(|| "Rithmic engine snapshot is empty".to_string())?;
+    let last_sequence = bars
+        .last()
+        .map(|bar| bar.value().source_sequence)
+        .ok_or_else(|| "Rithmic engine snapshot is empty".to_string())?;
+    let generation = MarketGeneration::try_new(
+        snapshot.provider_generation,
+        snapshot.publication_generation,
+        first_sequence,
+        last_sequence,
+        bars.clone(),
+    )
+    .map_err(|error| error.to_string())?;
     let replay = ReplaySnapshot::try_from_provenanced_values(
-        instrument,
+        revision,
         ReplayProvenance::LiveProvider,
         definition,
-        snapshot.provider_generation,
+        snapshot.publication_generation,
         bars,
     )
     .map_err(|error| error.to_string())?;
-    let mut model = MarketBarClientModel::new(
-        NonZeroUsize::new(MAXIMUM_VISIBLE_BARS).unwrap_or(NonZeroUsize::MIN),
-    );
-    let MarketBarModelOutcome::Published(generation) = model
-        .apply_update(ReplayStreamUpdate::Snapshot(replay.clone()))
-        .map_err(|error| error.to_string())?
-    else {
-        return Err("Rithmic engine snapshot was not publishable".to_string());
-    };
     Ok(MarketWorkerBootstrap {
         snapshot: replay,
         subscription_id: format!(
             "{}  ·  {}",
-            request.instrument.provider_symbol,
+            instrument.provider_symbol,
             request.series.label()
         ),
         generation,
@@ -689,7 +149,8 @@ fn bootstrap_from_snapshot(
 }
 
 fn provenanced_engine_bars(
-    request: &HistoryFetchRequest,
+    request: RithmicSeriesRequest,
+    instrument: &InstallProviderInstrument,
     snapshot: &SeriesSnapshot,
     received: i64,
 ) -> Vec<ProvenancedMarketBar> {
@@ -724,7 +185,7 @@ fn provenanced_engine_bars(
                         request.selection_generation, request.series_generation
                     ),
                     causation_id: "resident_engine_history".to_string(),
-                    entitlement_revision: request.instrument.entitlement_id.clone(),
+                    entitlement_revision: instrument.entitlement_id.clone(),
                     session_generation: snapshot.provider_generation,
                     source_id: "rithmic".to_string(),
                     source_sequence: bar.source_sequence,
@@ -744,27 +205,28 @@ fn provenanced_engine_bars(
         .collect()
 }
 
-fn tail_from_update(
-    request: &HistoryFetchRequest,
+pub(crate) fn live_tail(
+    request: RithmicSeriesRequest,
+    instrument: &InstallProviderInstrument,
     update: &SeriesUpdate,
 ) -> Result<ReplayTailUpdate, String> {
-    if update.provider_generation < request.instrument.session_generation {
+    if update.provider_generation < instrument.session_generation {
         return Err("Rithmic engine update provider generation is stale".to_string());
     }
-    let bar = update
+    let source = update
         .bar
         .as_ref()
         .ok_or_else(|| "Rithmic engine update has no bar".to_string())?;
     let received = unix_nanos_now()?;
     let bar = MarketBar {
-        source_sequence: bar.source_sequence,
-        exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
-        exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close,
-        volume: bar.volume,
+        source_sequence: source.source_sequence,
+        exchange_timestamp_seconds: source.exchange_timestamp_seconds,
+        exchange_timestamp_unix_nanos: source.exchange_timestamp_unix_nanos,
+        open: source.open,
+        high: source.high,
+        low: source.low,
+        close: source.close,
+        volume: source.volume,
     };
     let exchange = bar.exchange_timestamp_unix_nanos;
     let item = Provenanced::new(
@@ -783,7 +245,7 @@ fn tail_from_update(
                 request.selection_generation, request.series_generation
             ),
             causation_id: "resident_engine_live_tail".to_string(),
-            entitlement_revision: request.instrument.entitlement_id.clone(),
+            entitlement_revision: instrument.entitlement_id.clone(),
             session_generation: update.provider_generation,
             source_id: "rithmic".to_string(),
             source_sequence: bar.source_sequence,
@@ -799,11 +261,22 @@ fn tail_from_update(
             semantic_class: 2,
         },
     );
-    ReplayTailUpdate::try_new(item, update.publication_generation, update.forming)
-        .map_err(|error| error.to_string())
+    let operation = match SeriesUpdateOperation::try_from(update.operation) {
+        Ok(SeriesUpdateOperation::ReviseTail) => ReplayTailOperation::Revise,
+        Ok(SeriesUpdateOperation::AppendTail) => ReplayTailOperation::Append,
+        Ok(SeriesUpdateOperation::Unspecified) | Err(_) => {
+            return Err("Engine series update operation is invalid".to_string());
+        }
+    };
+    ReplayTailUpdate::try_new(
+        item,
+        update.publication_generation,
+        update.forming,
+        operation,
+    )
+    .map_err(|error| error.to_string())
 }
 
-/// Identity one engine order-book snapshot must match before it reaches the DOM.
 pub(crate) struct DomIdentity<'a> {
     pub instrument: &'a InstallProviderInstrument,
     pub series_generation: u64,
@@ -915,7 +388,7 @@ fn ipc_depth_levels(
     Ok(converted)
 }
 
-fn demand_error(error: &DemandError) -> String {
+pub(crate) fn demand_error_message(error: &DemandError) -> String {
     let stage = match FailureStage::try_from(error.stage_code) {
         Ok(stage) => failure_stage_label(stage),
         Err(_) => error.stage.as_str(),
@@ -953,41 +426,19 @@ fn unix_nanos_now() -> Result<i64, String> {
         .ok_or_else(|| "system clock is invalid".to_string())
 }
 
-fn random_identity() -> Result<u64, String> {
-    let mut bytes = [0_u8; 8];
-    getrandom::fill(&mut bytes).map_err(|_| "system CSPRNG is unavailable".to_string())?;
-    Ok(NonZeroU64::new(u64::from_le_bytes(bytes))
-        .unwrap_or(NonZeroU64::MIN)
-        .get())
-}
-
-pub(crate) fn history_message(result: RithmicHistoryResult) -> MarketWorkerMessage {
-    match result.result {
-        Ok(RithmicSeriesPublication::History(history)) => MarketWorkerMessage::RithmicHistory {
-            selection_generation: result.selection_generation,
-            series_generation: result.series_generation,
-            result: Ok(history),
-        },
-        Ok(RithmicSeriesPublication::Live(update)) => MarketWorkerMessage::RithmicLive {
-            selection_generation: result.selection_generation,
-            series_generation: result.series_generation,
-            update: *update,
-        },
-        Err(error) => MarketWorkerMessage::RithmicHistory {
-            selection_generation: result.selection_generation,
-            series_generation: result.series_generation,
-            result: Err(error),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_engine_protocol::{MarketBar as IpcMarketBar, OrderBookLevel};
+    use crate::rithmic_history::RithmicSeries;
+    use axiusflow_engine_protocol::MarketBar as IpcMarketBar;
+    use std::num::NonZeroUsize;
 
-    fn nonzero(value: usize) -> NonZeroUsize {
-        NonZeroUsize::new(value).expect("test generation is non-zero")
+    fn request(interval: ChartInterval) -> RithmicSeriesRequest {
+        RithmicSeriesRequest {
+            selection_generation: NonZeroUsize::new(2).expect("selection generation"),
+            series_generation: NonZeroUsize::new(3).expect("series generation"),
+            series: RithmicSeries::from(interval),
+        }
     }
 
     fn installed() -> InstallProviderInstrument {
@@ -1005,35 +456,24 @@ mod tests {
         }
     }
 
-    fn request(series: RithmicSeries) -> HistoryFetchRequest {
-        HistoryFetchRequest {
-            selection_generation: nonzero(2),
-            series_generation: nonzero(3),
-            series,
-            instrument: installed(),
-            stop: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
     #[test]
     fn engine_series_keys_cover_every_rithmic_interval() {
+        let instrument = installed();
         for interval in ChartInterval::ALL {
-            let series = RithmicSeries::from(interval);
-            let key = engine_series_key(&request(series)).expect("series key validates");
+            let key = engine_series(request(interval), &instrument).expect("series key validates");
             assert_eq!(key.provider, "rithmic");
-            assert_eq!(key.definition_revision, 1);
             assert_ne!(key.cadence, SeriesCadence::Unspecified as i32);
         }
     }
 
     #[test]
-    fn engine_snapshot_preserves_exact_time_and_provider_generation() {
-        let request = request(RithmicSeries::from(ChartInterval::Tick100));
-        let series = engine_series_key(&request).expect("series key");
+    fn engine_snapshot_preserves_exact_time_and_generation() {
+        let request = request(ChartInterval::Tick100);
+        let instrument = installed();
         let snapshot = SeriesSnapshot {
             consumer_id: 5,
             generation: 3,
-            series: Some(series),
+            series: Some(engine_series(request, &instrument).expect("series key")),
             provider_generation: 8,
             price_scale: 2,
             quantity_scale: 0,
@@ -1050,183 +490,14 @@ mod tests {
             publication_generation: 4,
             forming: false,
         };
-        let bootstrap = bootstrap_from_snapshot(&request, &snapshot).expect("bootstrap validates");
-        assert_eq!(
-            bootstrap.snapshot.bars()[0].provenance().session_generation,
-            8
-        );
+        let bootstrap = snapshot_bootstrap(request, &instrument, &snapshot).expect("bootstrap");
+        assert_eq!(bootstrap.generation.session_generation(), 8);
+        assert_eq!(bootstrap.generation.publication_generation(), 4);
         assert_eq!(
             bootstrap.snapshot.bars()[0]
                 .provenance()
                 .exchange_timestamp_unix_nanos,
             1_700_000_000_123_456_789
         );
-        assert_eq!(
-            bootstrap.snapshot.bars()[0].provenance().producer,
-            "axiusflow_engine"
-        );
-    }
-
-    #[test]
-    fn engine_live_update_projects_as_one_rithmic_tail() {
-        let request = request(RithmicSeries::from(ChartInterval::Tick100));
-        let update = tail_from_update(
-            &request,
-            &SeriesUpdate {
-                consumer_id: 5,
-                generation: 3,
-                series: Some(engine_series_key(&request).expect("series key")),
-                provider_generation: 8,
-                bar: Some(IpcMarketBar {
-                    source_sequence: 2,
-                    exchange_timestamp_seconds: 1_700_000_001,
-                    exchange_timestamp_unix_nanos: 1_700_000_001_123_456_789,
-                    open: 10_050,
-                    high: 10_200,
-                    low: 10_000,
-                    close: 10_150,
-                    volume: 5,
-                }),
-                forming: true,
-                publication_generation: 5,
-            },
-        )
-        .expect("tail converts");
-        assert_eq!(update.item().value().source_sequence, 2);
-        assert_eq!(update.item().value().close, 10_150);
-        assert_eq!(update.item().provenance().session_generation, 8);
-    }
-
-    #[test]
-    fn engine_order_book_projects_without_desktop_reconstruction() {
-        let request = request(RithmicSeries::Minute1);
-        let frame = dom_from_snapshot(
-            &DomIdentity {
-                instrument: &request.instrument,
-                series_generation: u64::try_from(request.series_generation.get())
-                    .unwrap_or(u64::MAX),
-                selection_generation: u64::try_from(request.selection_generation.get())
-                    .unwrap_or(u64::MAX),
-            },
-            &IpcOrderBookSnapshot {
-                consumer_id: 5,
-                generation: 3,
-                provider: "rithmic".to_string(),
-                instrument_id: request.instrument.instrument_id.clone(),
-                entitlement_id: request.instrument.entitlement_id.clone(),
-                provider_generation: 8,
-                selection_generation: 2,
-                revision: 4,
-                source_watermark: 11,
-                state: IpcOrderBookState::Ready as i32,
-                bids: vec![OrderBookLevel {
-                    price: 2_000_000,
-                    quantity: 7,
-                    order_count: Some(3),
-                }],
-                asks: vec![OrderBookLevel {
-                    price: 2_000_025,
-                    quantity: 4,
-                    order_count: Some(2),
-                }],
-            },
-        )
-        .expect("engine book projects");
-        assert_eq!(frame.session_generation, 8);
-        assert_eq!(frame.selection_generation, 2);
-        assert_eq!(frame.source_watermark, 11);
-        assert_eq!(
-            frame.rows[0]
-                .bid
-                .as_ref()
-                .map(|level| level.price_text.as_str()),
-            Some("20000.00")
-        );
-        assert_eq!(
-            frame.rows[0]
-                .ask
-                .as_ref()
-                .map(|level| level.relative_size_bps),
-            Some(5_714)
-        );
-    }
-
-    /// Distinct bars queue; revisions of one bar supersede each other.
-    ///
-    /// A single latest-value slot here dropped a completed bar whenever a second
-    /// one arrived before the chart drained the first, and the replay bridge read
-    /// the resulting gap as corruption it could only clear with a resnapshot.
-    #[test]
-    fn pending_live_results_keep_distinct_bars_and_report_overflow() {
-        let request = request(RithmicSeries::from(ChartInterval::Minute1));
-        let results = LatestHistoryResult::default();
-        let live = |sequence: u64, close: i64| RithmicHistoryResult {
-            selection_generation: request.selection_generation,
-            series_generation: request.series_generation,
-            result: Ok(RithmicSeriesPublication::Live(Box::new(
-                ReplayStreamUpdate::Tail(
-                    tail_from_update(
-                        &request,
-                        &SeriesUpdate {
-                            consumer_id: 5,
-                            generation: 3,
-                            series: Some(engine_series_key(&request).expect("series key")),
-                            provider_generation: 8,
-                            bar: Some(IpcMarketBar {
-                                source_sequence: sequence,
-                                exchange_timestamp_seconds: 1_700_000_000
-                                    + i64::try_from(sequence).unwrap_or(0) * 60,
-                                exchange_timestamp_unix_nanos: (1_700_000_000
-                                    + i64::try_from(sequence).unwrap_or(0) * 60)
-                                    * 1_000_000_000,
-                                open: 10_050,
-                                high: 10_500,
-                                low: 10_000,
-                                close,
-                                volume: 5,
-                            }),
-                            forming: true,
-                            publication_generation: sequence,
-                        },
-                    )
-                    .expect("tail converts"),
-                ),
-            ))),
-        };
-
-        assert!(results.publish(live(2, 10_100)));
-        assert!(results.publish(live(3, 10_200)));
-        // The same bar again is a revision, so it replaces rather than queues.
-        assert!(results.publish(live(3, 10_250)));
-
-        let first = results.take().expect("the first bar is delivered");
-        assert_eq!(live_publication_sequence(&first), Some(2));
-        let second = results.take().expect("the second bar is delivered");
-        assert_eq!(live_publication_sequence(&second), Some(3));
-        assert!(results.take().is_none(), "no third bar was ever queued");
-
-        // Falling further behind than the queue holds is reported, never hidden.
-        for sequence in 0..u64::try_from(LIVE_RESULT_CAPACITY).expect("capacity fits") {
-            assert!(results.publish(live(sequence + 10, 10_300)));
-        }
-        assert!(
-            !results.publish(live(10_000, 10_400)),
-            "an overflow has to be reported so covering history can be reloaded"
-        );
-    }
-
-    #[test]
-    fn latest_result_conflates_obsolete_generations() {
-        let results = LatestHistoryResult::default();
-        for generation in [1, 2] {
-            results.publish(RithmicHistoryResult {
-                selection_generation: nonzero(1),
-                series_generation: nonzero(generation),
-                result: Err(format!("generation {generation}")),
-            });
-        }
-        let result = results.take().expect("latest result remains");
-        assert_eq!(result.series_generation, nonzero(2));
-        assert!(results.take().is_none());
     }
 }

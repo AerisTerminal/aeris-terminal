@@ -18,6 +18,9 @@ pub enum ReplayValidationError {
     TailTimestampChanged {
         source_sequence: u64,
     },
+    TailOperationMismatch {
+        source_sequence: u64,
+    },
     ProvenanceSequenceMismatch {
         bar: u64,
         provenance: u64,
@@ -81,6 +84,10 @@ impl fmt::Display for ReplayValidationError {
             Self::TailTimestampChanged { source_sequence } => write!(
                 formatter,
                 "forming replay timestamp changed at source sequence {source_sequence}"
+            ),
+            Self::TailOperationMismatch { source_sequence } => write!(
+                formatter,
+                "engine tail operation does not match source sequence {source_sequence}"
             ),
             Self::ProvenanceSequenceMismatch { bar, provenance } => write!(
                 formatter,
@@ -152,6 +159,7 @@ impl Error for ReplayValidationError {
             Self::Stream(error) => Some(error),
             Self::NonIncreasingTimestamp { .. }
             | Self::TailTimestampChanged { .. }
+            | Self::TailOperationMismatch { .. }
             | Self::ProvenanceSequenceMismatch { .. }
             | Self::ExchangeTimestampOverflow { .. }
             | Self::ProvenanceExchangeTimestampMismatch { .. }

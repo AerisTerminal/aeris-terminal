@@ -419,7 +419,7 @@ fn open_bucket(interval_seconds: i64) -> Option<i64> {
     Some(now - now.rem_euclid(interval_seconds))
 }
 
-/// Applies one polled event to the fold, panicking on anything terminal.
+/// Applies one pushed event to the fold, panicking on anything terminal.
 fn absorb(fold: &mut SeriesFold, event: envelope::Payload) {
     if let Some(failure) = terminal_failure(&event) {
         panic!(
