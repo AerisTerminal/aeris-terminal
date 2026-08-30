@@ -120,29 +120,32 @@ pub enum DrawingIcon {
     VerticalLine,
     Ray,
     Rectangle,
+    Path,
     Cursor,
     Brush,
     Text,
 }
 
 impl DrawingIcon {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::TrendLine,
         Self::HorizontalLine,
         Self::VerticalLine,
         Self::Ray,
         Self::Rectangle,
+        Self::Path,
         Self::Cursor,
         Self::Brush,
         Self::Text,
     ];
     #[cfg(test)]
-    pub const GEOMETRIC: [Self; 5] = [
+    pub const GEOMETRIC: [Self; 6] = [
         Self::TrendLine,
         Self::HorizontalLine,
         Self::VerticalLine,
         Self::Ray,
         Self::Rectangle,
+        Self::Path,
     ];
 
     #[must_use]
@@ -155,6 +158,7 @@ impl DrawingIcon {
             Self::VerticalLine => concat!("axiusflow/icons/drawing/", "vertical-line.svg"),
             Self::Ray => concat!("axiusflow/icons/drawing/", "horizontal-ray.svg"),
             Self::Rectangle => concat!("axiusflow/icons/drawing/", "rectangle.svg"),
+            Self::Path => concat!("axiusflow/icons/drawing/", "path.svg"),
             Self::Cursor => concat!("axiusflow/icons/drawing/", "cursor.svg"),
             Self::Brush => concat!("axiusflow/icons/drawing/", "brush.svg"),
             Self::Text => concat!("axiusflow/icons/drawing/", "text.svg"),
@@ -278,6 +282,7 @@ fn drawing_asset(path: &str) -> Option<&'static [u8]> {
         "vertical-line.svg" => include_bytes!("../assets/icons/drawing/vertical-line.svg"),
         "horizontal-ray.svg" => include_bytes!("../assets/icons/drawing/horizontal-ray.svg"),
         "rectangle.svg" => include_bytes!("../assets/icons/drawing/rectangle.svg"),
+        "path.svg" => include_bytes!("../assets/icons/drawing/path.svg"),
         "cursor.svg" => include_bytes!("../assets/icons/drawing/cursor.svg"),
         "brush.svg" => include_bytes!("../assets/icons/drawing/brush.svg"),
         "text.svg" => include_bytes!("../assets/icons/drawing/text.svg"),

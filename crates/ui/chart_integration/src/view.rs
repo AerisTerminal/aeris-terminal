@@ -382,6 +382,7 @@ pub enum ChartDrawingTool {
     VerticalLine,
     Ray,
     Rectangle,
+    Path,
     Brush,
     Text,
 }
@@ -395,6 +396,7 @@ impl ChartDrawingTool {
             Self::VerticalLine => Some(DrawingKind::VerticalLine),
             Self::Ray => Some(DrawingKind::HorizontalRay),
             Self::Rectangle => Some(DrawingKind::Rectangle),
+            Self::Path => Some(DrawingKind::Path),
             Self::Brush => Some(DrawingKind::Brush),
             Self::Text => Some(DrawingKind::Text),
         }
@@ -2288,6 +2290,32 @@ impl NucleusChartView {
         self.pending_brush_point = None;
     }
 
+    fn finish_path_creation(&mut self) -> bool {
+        if self.drawing_tool != ChartDrawingTool::Path {
+            return false;
+        }
+        let id = self.engine.drawing_create_finish();
+        if id == 0 {
+            return false;
+        }
+        self.drawing_tool = ChartDrawingTool::Cursor;
+        self.cursor_style = CursorStyle::Crosshair;
+        self.engine.crosshair_ohlc_magnet = false;
+        self.invalidate_series_frame();
+        true
+    }
+
+    fn pop_path_anchor(&mut self) -> bool {
+        if self.drawing_tool != ChartDrawingTool::Path {
+            return false;
+        }
+        let changed = self.engine.drawing_create_pop_anchor();
+        if changed {
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
     /// Capture at most the newest brush sample per painted frame.
     ///
     /// Wayland delivers per-HID-report motion, often one axis per event. Adding
@@ -2356,6 +2384,11 @@ impl NucleusChartView {
                 false
             }
             ChartDrawingTool::Brush => self.engine.brush_create_start(None, pane_x, y),
+            ChartDrawingTool::Path if click_count >= 2 => {
+                let _ = self.place_drawing_anchor(pane_x, y, modifiers);
+                let _ = self.finish_path_creation();
+                true
+            }
             tool => {
                 let placing_text = tool == ChartDrawingTool::Text;
                 let result = self.place_drawing_anchor(pane_x, y, modifiers);
@@ -2727,6 +2760,19 @@ impl NucleusChartView {
             "-" | "_" => self.engine.time_scale.zoom(center, -0.5),
             "home" => self.reset_view(),
             "end" => self.scroll_to_latest(),
+            "enter" => {
+                if !self.finish_path_creation() {
+                    return false;
+                }
+            }
+            "backspace"
+                if self.drawing_tool == ChartDrawingTool::Path
+                    && self.engine.drawing_create_active() =>
+            {
+                if !self.pop_path_anchor() {
+                    return false;
+                }
+            }
             "delete" | "backspace" => {
                 if !self.remove_selected_chart_object() {
                     return false;
@@ -4748,6 +4794,36 @@ mod tests {
             3,
             "start + one coalesced move + release; intermediate staircase samples must not become knots"
         );
+    }
+
+    #[test]
+    fn path_stays_armed_until_enter_or_double_click_finishes() {
+        let mut chart = interactive_chart();
+        chart.set_drawing_tool(ChartDrawingTool::Path);
+        assert!(
+            !chart.engine.drawing_create_active(),
+            "arming must not start a pre-click handle"
+        );
+
+        assert!(chart.drawing_pointer_down(260.0, 180.0, DrawingModifiers::default(), 1));
+        assert!(chart.drawing_pointer_down(340.0, 220.0, DrawingModifiers::default(), 1));
+        assert!(chart.drawing_pointer_down(400.0, 200.0, DrawingModifiers::default(), 1));
+        assert_eq!(chart.drawing_count(), 0);
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Path);
+        assert!(chart.apply_key("backspace", false));
+        assert!(chart.apply_key("enter", false));
+        assert_eq!(chart.drawing_count(), 1);
+        assert_eq!(chart.engine.drawings()[0].kind, DrawingKind::Path);
+        assert_eq!(chart.engine.drawings()[0].points.len(), 2);
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+
+        chart.set_drawing_tool(ChartDrawingTool::Path);
+        assert!(chart.drawing_pointer_down(260.0, 200.0, DrawingModifiers::default(), 1));
+        assert!(chart.drawing_pointer_down(340.0, 240.0, DrawingModifiers::default(), 1));
+        assert!(chart.drawing_pointer_down(340.0, 240.0, DrawingModifiers::default(), 2));
+        assert_eq!(chart.drawing_count(), 2);
+        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+        assert!(!chart.engine.drawing_create_active());
     }
 
     #[test]

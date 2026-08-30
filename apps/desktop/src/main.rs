@@ -4412,7 +4412,7 @@ struct DrawingToolSpec {
     icon_size: f32,
 }
 
-const DRAWING_TOOLS: [DrawingToolSpec; 8] = [
+const DRAWING_TOOLS: [DrawingToolSpec; 9] = [
     DrawingToolSpec {
         id: "drawing_cursor",
         label: "Cursor",
@@ -4453,6 +4453,13 @@ const DRAWING_TOOLS: [DrawingToolSpec; 8] = [
         label: "Rectangle",
         tool: ChartDrawingTool::Rectangle,
         icon: DrawingToolIcon::Asset(assets::DrawingIcon::Rectangle),
+        icon_size: 28.0,
+    },
+    DrawingToolSpec {
+        id: "drawing_path",
+        label: "Path",
+        tool: ChartDrawingTool::Path,
+        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Path),
         icon_size: 28.0,
     },
     DrawingToolSpec {
