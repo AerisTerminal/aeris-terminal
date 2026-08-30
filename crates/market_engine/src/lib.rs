@@ -1238,6 +1238,40 @@ mod tests {
         assert_eq!(engine.metrics().stored_bars, 0);
     }
 
+    /// A covering repair invalidates the series it is about to replace. The
+    /// consumer's publication generation is its ordering contract with the
+    /// client, so it has to survive that: rewinding it made the repaired snapshot
+    /// read as stale, and the chart stopped on the snapshot that fixed it.
+    #[test]
+    fn a_series_invalidation_does_not_rewind_the_publication_generation() {
+        let mut engine = engine(1, 3, 8);
+        register(&mut engine, 1, 1);
+        let btc = series("coinbase:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        let first = engine
+            .set_series_demand(id(1), generation(1), &btc)
+            .expect("demand resolves")
+            .expect("the cached series publishes");
+
+        assert!(engine.invalidate_series(&btc));
+        let repaired = engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(3))
+            .expect("repaired history installs");
+
+        let repaired = repaired
+            .into_iter()
+            .find(|publication| publication.consumer_id == id(1))
+            .expect("the subscribed consumer is published to");
+        assert!(
+            repaired.publication_generation > first.publication_generation,
+            "the repair must advance the client past {}, not restart at {}",
+            first.publication_generation,
+            repaired.publication_generation
+        );
+    }
+
     #[test]
     fn resource_eviction_preserves_active_and_explicitly_retained_series() {
         let mut engine = engine(1, 3, 6);

@@ -217,10 +217,10 @@ current real count. It exists to make growth visible. **Lower it when code goes 
 it to make a growing codebase fit** — it had already been ratcheted up at least once before anyone
 noticed it was failing.
 
-It is currently over: 73,760 production lines against the 72,477 threshold. The overage is the
+It is currently over: 73,808 production lines against the 72,477 threshold. The overage is the
 market-data streaming repair — bar identity derived from the bucket, the bounded consumer series
 queue and its covering-snapshot recovery, contiguous history retention, stored-history
 canonicalisation, the per-series reseed path that replaced the unrecoverable global outage, the
 history/live forming-candle handoff on both providers, and the Rithmic selection identity that
 replaced a one-shot boolean. The threshold has deliberately **not** been raised. Raising it, or
-paying the 1,283 lines back elsewhere, is the maintainer's call.
+paying the 1,331 lines back elsewhere, is the maintainer's call.

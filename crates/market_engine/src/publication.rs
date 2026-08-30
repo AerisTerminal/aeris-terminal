@@ -108,9 +108,18 @@ impl PublicationManager {
         self.latest.remove(&consumer_id);
     }
 
+    /// Retires the publications bound to one series without rewinding anyone.
+    ///
+    /// The consumer's publication generation is its ordering contract with the
+    /// client: a client rejects a snapshot that does not advance it. Dropping the
+    /// entry restarted that counter at 1, so the covering snapshot that follows a
+    /// series invalidation read as stale and the chart stopped on it.
     pub(crate) fn invalidate_series(&mut self, series: &BarSeriesKey) {
-        self.latest
-            .retain(|_, publication| &publication.series != series);
+        for publication in self.latest.values_mut() {
+            if &publication.series == series {
+                publication.active = false;
+            }
+        }
     }
 
     fn next_generation(&self, consumer_id: ConsumerId) -> Result<u64, EngineError> {

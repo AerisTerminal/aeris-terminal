@@ -1802,6 +1802,7 @@ fn storage_completion(
                             range.end_unix_nanos,
                         )
                         .map_err(|error| error.to_string())?;
+                    let stored = canonical_local_range(&series, stored)?;
                     let confirmed_empty = storage
                         .confirmed_empty_ranges(&scope, &series)
                         .map_err(|error| error.to_string())?
@@ -6789,6 +6790,25 @@ fn retain_contiguous_tail(bars: &[MarketBar], maximum_bars: usize) -> Vec<Market
 /// — at the one place stored bars enter the engine — means a restart cannot
 /// reintroduce two numbering schemes into the same series. Rithmic history is
 /// returned untouched; it owns its own provider sequences.
+/// Restores bucket identity on a range read before anything installs it.
+///
+/// The store numbers what it hands back 1..N — it has no interval to derive
+/// identity from — and the exact read canonicalises that away on arrival. The
+/// range read did not, so a viewport repair republished the same bars under a
+/// second identity and the client read the covering snapshot as a stale one.
+fn canonical_local_range(
+    series: &BarSeriesKey,
+    stored: Option<StoredHistory>,
+) -> Result<Option<StoredHistory>, String> {
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    Ok(Some(StoredHistory {
+        bars: canonicalize_coinbase_history(series, stored.bars)?,
+        ..stored
+    }))
+}
+
 fn canonicalize_coinbase_history(
     series: &BarSeriesKey,
     bars: Vec<MarketBar>,
@@ -12472,6 +12492,59 @@ mod tests {
                 interval.id()
             );
         }
+    }
+
+    /// Both local reads have to agree about what a bar is called.
+    ///
+    /// The store renumbers every bar it returns 1..N. Publishing that as-is gave
+    /// the same minutes a second identity, and the client rejected the covering
+    /// snapshot that carried it as stale — which is what left a freshly launched
+    /// chart showing an error instead of streaming.
+    #[test]
+    fn a_local_range_read_keeps_bucket_identity() {
+        let series = BarSeriesKey {
+            provider_id: "coinbase".to_string(),
+            instrument_id: "instrument:coinbase:BTC-USD".to_string(),
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            period: BarPeriod::time(60).expect("period"),
+            definition_version: 1,
+        };
+        let renumbered = (0..4)
+            .map(|index| MarketBar {
+                source_sequence: index + 1,
+                exchange_timestamp_seconds: 29_801_760 * 60
+                    + i64::try_from(index).expect("index") * 60,
+                exchange_timestamp_unix_nanos: (29_801_760 * 60
+                    + i64::try_from(index).expect("index") * 60)
+                    * 1_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 3,
+            })
+            .collect::<Vec<_>>();
+
+        let canonical = canonical_local_range(
+            &series,
+            Some(StoredHistory {
+                bars: renumbered,
+                derived: false,
+                durable: true,
+            }),
+        )
+        .expect("range canonicalises")
+        .expect("the range has bars");
+
+        assert_eq!(
+            canonical
+                .bars
+                .iter()
+                .map(|bar| bar.source_sequence)
+                .collect::<Vec<_>>(),
+            vec![29_801_761, 29_801_762, 29_801_763, 29_801_764],
+            "identity comes from the bucket, never from the position in the page"
+        );
     }
 
     /// A bucket the source has not covered end to end is never closed history.

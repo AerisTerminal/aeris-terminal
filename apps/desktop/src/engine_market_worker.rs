@@ -14,6 +14,7 @@ use std::{
 use axiusflow_application::{
     MarketBarClientModel, MarketBarModelOutcome, MarketEventProvenance, Provenanced,
     ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate,
+    ReplayValidationError,
 };
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, DemandError, EngineFaultCode, FailureStage, InstallProviderInstrument,
@@ -831,7 +832,9 @@ fn apply_polled_event(
             if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
                 return Err("engine realtime snapshot identity mismatched".to_string());
             }
-            let (replay, generation) = apply_snapshot(model, &snapshot)?;
+            let Some((replay, generation)) = apply_snapshot(model, &snapshot)? else {
+                return Ok(PolledEventOutcome::Applied);
+            };
             let status = MarketPublicationGeneration::from_generation(&generation);
             *publication = Some(status);
             send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)?;
@@ -1001,7 +1004,11 @@ fn request_snapshot(
                 apply_provider_state(&state, realtime, messages)?;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
-                let (replay, generation) = apply_snapshot(model, &snapshot)?;
+                // A snapshot the model is already past says nothing about the one
+                // this request is waiting for, so it keeps waiting.
+                let Some((replay, generation)) = apply_snapshot(model, &snapshot)? else {
+                    continue;
+                };
                 return Ok((replay, generation));
             }
             envelope::Payload::DemandError(error) => return Err(demand_error(&error)),
@@ -1021,18 +1028,30 @@ fn request_snapshot(
     }
 }
 
+/// Applies one engine snapshot, or reports that the client is already past it.
+///
+/// A covering snapshot the model already holds is not a failure: the engine
+/// republishes one whenever it repairs coverage, and the client can legitimately
+/// be ahead of it. Failing on that is what put "Chart unavailable" over a chart
+/// that was streaming, and left the launch series stuck until it was switched
+/// away and back.
 fn apply_snapshot(
     model: &mut MarketBarClientModel,
     snapshot: &SeriesSnapshot,
-) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
+) -> Result<Option<(ReplaySnapshot, DesktopMarketGeneration)>, String> {
     let replay = replay_snapshot(snapshot)?;
-    let outcome = model
-        .apply_update(ReplayStreamUpdate::Snapshot(replay.clone()))
-        .map_err(|error| error.to_string())?;
+    let outcome = match model.apply_update(ReplayStreamUpdate::Snapshot(replay.clone())) {
+        Ok(outcome) => outcome,
+        Err(
+            ReplayValidationError::StaleSnapshot { .. }
+            | ReplayValidationError::SnapshotSessionGenerationRegression { .. },
+        ) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
     let MarketBarModelOutcome::Published(generation) = outcome else {
         return Err("engine snapshot did not publish a client generation".to_string());
     };
-    Ok((replay, generation))
+    Ok(Some((replay, generation)))
 }
 
 fn send_recovery(
@@ -1656,6 +1675,81 @@ mod tests {
         assert_eq!(update.item().value().close, 115);
         assert_eq!(update.publication_generation(), 8);
         assert!(update.forming());
+    }
+
+    /// The engine republishes a covering snapshot whenever it repairs coverage,
+    /// so the client is routinely handed one it is already past. That is not a
+    /// failure, and failing on it put an error over a chart that was streaming.
+    #[test]
+    fn a_covering_snapshot_the_client_is_already_past_is_ignored_not_fatal() {
+        let series = series_key(
+            coinbase_products().first().expect("BTC product"),
+            ChartInterval::Minute1,
+        )
+        .expect("series");
+        let (sender, _receiver) =
+            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+        let mut model = empty_model();
+        let mut publication = None;
+        let snapshot = |publication_generation: u64, sequence: u64| SeriesSnapshot {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series.clone()),
+            provider_generation: 7,
+            price_scale: 2,
+            quantity_scale: 8,
+            bars: vec![IpcMarketBar {
+                source_sequence: sequence,
+                exchange_timestamp_seconds: i64::try_from(sequence).expect("sequence") * 60,
+                exchange_timestamp_unix_nanos: i64::try_from(sequence).expect("sequence")
+                    * 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            publication_generation,
+            forming: false,
+        };
+        let context = PolledEventContext {
+            consumer_id: 1,
+            active_generation: 1,
+            realtime: true,
+            instrument: &default_coinbase_product("BTC-USD"),
+        };
+
+        assert_eq!(
+            apply_polled_event(
+                envelope::Payload::SeriesSnapshot(snapshot(4, 2)),
+                &context,
+                &mut model,
+                &mut publication,
+                &sender,
+            ),
+            Ok(PolledEventOutcome::Applied)
+        );
+        let published = publication;
+
+        // A repair that restarted the publication counter, and one carrying bars
+        // the client already holds: both are behind, and neither is an error.
+        for superseded in [snapshot(1, 2), snapshot(4, 1)] {
+            assert_eq!(
+                apply_polled_event(
+                    envelope::Payload::SeriesSnapshot(superseded),
+                    &context,
+                    &mut model,
+                    &mut publication,
+                    &sender,
+                ),
+                Ok(PolledEventOutcome::Applied),
+                "a superseded covering snapshot must not take the chart down"
+            );
+        }
+        assert_eq!(
+            publication, published,
+            "and it must not move the client's published generation backwards"
+        );
     }
 
     #[test]
