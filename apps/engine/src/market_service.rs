@@ -956,7 +956,10 @@ impl HistorySource for LiveCoinbaseHistory {
         // split back out below: history keeps only closed buckets, and the open
         // one seeds the live aggregator so a freshly selected chart shows the
         // OHLCV that accrued before the trader got there.
-        let end_unix_nanos = (now_seconds - now_seconds.rem_euclid(profile.interval.source().1))
+        let source_seconds = profile.interval.source().1;
+        let end_unix_nanos = (now_seconds - now_seconds.rem_euclid(source_seconds))
+            .checked_add(source_seconds)
+            .ok_or_else(|| "Coinbase history end time overflowed".to_string())?
             .checked_mul(1_000_000_000)
             .ok_or_else(|| "Coinbase history end time overflowed".to_string())?;
         let range = request.range.unwrap_or_else(|| {
@@ -7040,11 +7043,13 @@ fn recent_coinbase_history_range(
     // later ones are what the forming bar is made of; the end stays on a source
     // boundary because the provider rejects any other alignment.
     let source_seconds = interval.source().1;
-    let open_source_seconds = now_seconds - now_seconds.rem_euclid(source_seconds);
+    let open_source_end_seconds = (now_seconds - now_seconds.rem_euclid(source_seconds))
+        .checked_add(source_seconds)
+        .ok_or_else(|| "Coinbase recent-history end overflowed".to_string())?;
     Ok(HistoryRange {
         start_unix_nanos: start_seconds.max(0).saturating_mul(1_000_000_000),
         end_unix_nanos: end_seconds
-            .max(open_source_seconds)
+            .max(open_source_end_seconds)
             .saturating_mul(1_000_000_000),
     })
 }
@@ -12623,18 +12628,26 @@ mod tests {
     /// split unreachable; requesting an unaligned instant is what made the
     /// provider reject the page outright.
     #[test]
-    fn the_initial_coinbase_page_ends_on_the_open_source_candle() {
-        for (period_seconds, interval) in [
-            (60_u32, CoinbaseInterval::Minute1),
-            (180, CoinbaseInterval::Minute3),
-            (300, CoinbaseInterval::Minute5),
-            (14_400, CoinbaseInterval::Hour4),
+    fn the_initial_coinbase_page_includes_the_open_source_candle() {
+        for (period, interval) in [
+            (BarPeriod::time(60).expect("1m"), CoinbaseInterval::Minute1),
+            (BarPeriod::time(180).expect("3m"), CoinbaseInterval::Minute3),
+            (BarPeriod::time(300).expect("5m"), CoinbaseInterval::Minute5),
+            (
+                BarPeriod::time(14_400).expect("4h"),
+                CoinbaseInterval::Hour4,
+            ),
+            (
+                BarPeriod::time(43_200).expect("12h"),
+                CoinbaseInterval::Hour12,
+            ),
+            (BarPeriod::month(1).expect("1M"), CoinbaseInterval::Month1),
         ] {
             let series = BarSeriesKey {
                 provider_id: "coinbase".to_string(),
                 instrument_id: "instrument:coinbase:BTC-USD".to_string(),
                 entitlement_id: "coinbase-public".to_string(),
-                period: BarPeriod::time(period_seconds).expect("period"),
+                period,
                 definition_version: 1,
             };
             let range = recent_coinbase_history_range(&series, 200).expect("initial range");
@@ -12643,22 +12656,13 @@ mod tests {
                 .div_euclid(1_000_000_000);
             let end_seconds = range.end_unix_nanos.div_euclid(1_000_000_000);
             let source_seconds = interval.source().1;
+            let open_source_start = now_seconds - now_seconds.rem_euclid(source_seconds);
 
             assert_eq!(
-                end_seconds % source_seconds,
-                0,
-                "{} pages are served in {source_seconds}s candles",
-                interval.id()
-            );
-            assert!(
-                end_seconds >= interval.bucket_start(now_seconds).expect("live edge"),
-                "{} stopped short of the open bucket",
-                interval.id()
-            );
-            assert!(
-                end_seconds <= now_seconds,
-                "{} asked for a candle the market has not reached",
-                interval.id()
+                end_seconds,
+                open_source_start + source_seconds,
+                "{} must use the exclusive boundary after the open source candle",
+                interval.id(),
             );
         }
     }

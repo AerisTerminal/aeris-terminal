@@ -801,8 +801,16 @@ fn apply_series_state(
         SeriesLoadState::Ready if !published => {
             Err("engine marked history ready without a covering snapshot".to_string())
         }
-        // Provider history is installed; the trade handoff may still be
-        // connecting before it promotes the series to live.
+        // Provider history is installed; a realtime series is still loading
+        // until its trade handoff promotes it to Live. Revealing it at Ready
+        // exposes the history/live seam as a stalled or disconnected chart.
+        SeriesLoadState::Ready if realtime => {
+            announce(
+                ChartState::Loading,
+                "Coinbase history is loaded; connecting the live edge".to_string(),
+            )?;
+            Ok(())
+        }
         SeriesLoadState::Ready => {
             announce(
                 ChartState::Ready,
@@ -1719,6 +1727,23 @@ mod tests {
                 "Showing retained local history while provider coverage repairs".to_string()
             )],
             "retained history has to read as loading, with the engine's own reason"
+        );
+
+        apply_series_state(
+            state(SeriesLoadState::Ready, None),
+            true,
+            true,
+            &mut live,
+            &sender,
+        )
+        .expect("provider history can precede the live handoff");
+        assert_eq!(
+            drained_states(&receiver),
+            vec![(
+                ChartState::Loading,
+                "Coinbase history is loaded; connecting the live edge".to_string()
+            )],
+            "the replacement stays covered until the trade handoff is live"
         );
 
         apply_series_state(

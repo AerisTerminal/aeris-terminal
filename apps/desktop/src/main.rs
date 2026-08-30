@@ -840,13 +840,15 @@ const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
 /// screen keeps streaming its own series until the replacement's covering
 /// snapshot arrives, and only then is it swapped. `Pending` is the window
 /// between the request and the mailbox marker that orders it; `Swapping` is the
-/// window between that marker and the snapshot that replaces the chart.
+/// window between that marker and the snapshot that replaces the chart;
+/// `Initializing` keeps that replacement covered until its live handoff lands.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum CoinbaseSwitchState {
     #[default]
     Idle,
     Pending,
     Swapping,
+    Initializing,
 }
 
 impl CoinbaseSwitchState {
@@ -861,7 +863,7 @@ impl CoinbaseSwitchState {
     }
 
     const fn in_progress(self) -> bool {
-        matches!(self, Self::Pending | Self::Swapping)
+        matches!(self, Self::Pending | Self::Swapping | Self::Initializing)
     }
 }
 
@@ -2309,8 +2311,7 @@ impl WorkspaceSurface {
                 }
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
-                self.coinbase_switch = CoinbaseSwitchState::Idle;
-                self.coinbase_previous_selection = None;
+                self.coinbase_switch = CoinbaseSwitchState::Initializing;
                 ChartState::Ready
             }
             (Some(_), _) if swapping => {
@@ -2533,12 +2534,25 @@ impl WorkspaceSurface {
                     self.connection_message = Some(message.clone());
                     if swapping {
                         self.restore_coinbase_selection_after_failure(&message, cx);
+                    } else {
+                        self.coinbase_previous_selection = None;
                     }
                 } else if self.provider == TerminalProvider::Coinbase
                     && state == ChartState::Recovering
                 {
                     self.connection_state = Some(FeedConnectionState::Recovering);
                     self.connection_message = Some(message.clone());
+                } else if self.provider == TerminalProvider::Coinbase && state == ChartState::Ready
+                {
+                    self.coinbase_switch = CoinbaseSwitchState::Idle;
+                    self.coinbase_previous_selection = None;
+                    self.symbol_selection_pending = false;
+                    self.symbol_message = self.coinbase_product.as_ref().map_or_else(
+                        || "Coinbase market ready".to_string(),
+                        |product| format!("{} · Coinbase spot", product.provider_symbol),
+                    );
+                    self.connection_state = Some(FeedConnectionState::Streaming);
+                    self.connection_message = Some("Coinbase market data is current".to_string());
                 }
                 self.set_chart_state(state, message, cx);
             }

@@ -614,7 +614,13 @@ fn validate_request(request: &HistoryPageRequest) -> Result<(), String> {
         .ok()
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
         .ok_or_else(|| "system time is unavailable for Coinbase history".to_string())?;
-    if request.range.end_unix_nanos > now_unix_nanos {
+    // Ranges are half-open. Ending at the next source boundary is how the
+    // caller asks for the source candle that is forming right now; fetch_page
+    // translates that boundary back to the open candle's start for Coinbase.
+    let latest_end_unix_nanos = (now_unix_nanos - now_unix_nanos.rem_euclid(source_nanos))
+        .checked_add(source_nanos)
+        .ok_or_else(|| "Coinbase history end time overflowed".to_string())?;
+    if request.range.end_unix_nanos > latest_end_unix_nanos {
         return Err("Coinbase history range ends in the future".to_string());
     }
     if !request.instrument_id.starts_with("instrument:coinbase:") {
@@ -1126,7 +1132,8 @@ fn start_resolver() -> Result<mpsc::SyncSender<ResolutionRequest>, &'static str>
 mod tests {
     use super::{
         COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseHistoryCapabilityAdapter, CoinbaseHistoryTransport,
-        decode_history_bar, decode_history_segment, encode_history_segment,
+        ONE_MINUTE_SECONDS, ONE_SECOND_NANOS, decode_history_bar, decode_history_segment,
+        encode_history_segment, validate_request,
     };
     use crate::ENTITLEMENT_CLASS;
     use axiusflow_provider_history::{
@@ -1142,7 +1149,7 @@ mod tests {
             Arc,
             atomic::{AtomicBool, Ordering},
         },
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     #[test]
@@ -1194,6 +1201,30 @@ mod tests {
             maximum_items: NonZeroUsize::new(maximum_items).expect("nonzero fixture limit"),
             continuation: None,
         }
+    }
+
+    #[test]
+    fn validation_allows_only_the_boundary_covering_the_open_candle() {
+        let source_nanos = ONE_MINUTE_SECONDS * ONE_SECOND_NANOS;
+        let now_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let now_unix_nanos = i64::try_from(now_unix_nanos).expect("clock fits history identity");
+        let open_start = now_unix_nanos - now_unix_nanos.rem_euclid(source_nanos);
+        let mut open_candle = request(3);
+        open_candle.range = HistoryRange {
+            start_unix_nanos: open_start - source_nanos,
+            end_unix_nanos: open_start + source_nanos,
+        };
+
+        validate_request(&open_candle).expect("next boundary covers the open source candle");
+
+        open_candle.range.end_unix_nanos = open_start + 3 * source_nanos;
+        assert_eq!(
+            validate_request(&open_candle),
+            Err("Coinbase history range ends in the future".to_string())
+        );
     }
 
     #[test]
