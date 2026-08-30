@@ -160,7 +160,6 @@ enum Command {
 enum HistoryRequestKind {
     Initial,
     ViewportBackfill,
-    SeamRepair,
 }
 
 struct HistoryRequest {
@@ -319,7 +318,6 @@ struct LiveHandoff {
     history_ready: bool,
     dirty: bool,
     published: Option<PublishedTailState>,
-    seam_repair: Option<HistoryRange>,
     viewport_position: ViewportPosition,
 }
 
@@ -651,7 +649,6 @@ impl LiveHandoff {
             history_ready: false,
             dirty: false,
             published: None,
-            seam_repair: None,
             viewport_position: ViewportPosition::Live,
         })
     }
@@ -664,7 +661,6 @@ impl LiveHandoff {
         self.history_ready = false;
         self.dirty = false;
         self.published = None;
-        self.seam_repair = None;
         self.viewport_position = ViewportPosition::Live;
     }
 
@@ -799,19 +795,20 @@ impl HistorySource for LiveCoinbaseHistory {
             .map(decode_history_bar)
             .collect::<Result<Vec<_>, _>>()?;
         let confirmed_empty = source_bars.is_empty();
+        let completed_before_seconds =
+            end_seconds.min(range.end_unix_nanos.div_euclid(1_000_000_000));
         let (mut bars, _) = if source_bars.is_empty() {
             (
                 Vec::new(),
                 axiusflow_coinbase_market_adapter::CoinbaseAggregationDiagnostics::default(),
             )
         } else {
-            aggregate_coinbase_bars(&source_bars, profile.interval)?
+            aggregate_coinbase_bars(
+                &source_bars,
+                profile.interval,
+                Some(completed_before_seconds),
+            )?
         };
-        retain_completed_coinbase_bars(
-            profile.interval,
-            end_seconds.min(range.end_unix_nanos.div_euclid(1_000_000_000)),
-            &mut bars,
-        );
         for (index, bar) in bars.iter_mut().enumerate() {
             bar.source_sequence = u64::try_from(index)
                 .ok()
@@ -1695,7 +1692,7 @@ fn read_local_history(
     else {
         return Ok(None);
     };
-    let (bars, _) = aggregate_coinbase_bars(&source.bars, interval)?;
+    let (bars, _) = aggregate_coinbase_bars(&source.bars, interval, None)?;
     if bars.is_empty() {
         return Ok(None);
     }
@@ -2973,7 +2970,7 @@ impl Coordinator<'_> {
             source_bars.pop();
         }
         let interval = coinbase_interval(target_seconds)?;
-        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval)?;
+        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval, None)?;
         if bars.is_empty() {
             return Ok(false);
         }
@@ -3721,6 +3718,13 @@ impl Coordinator<'_> {
             && snapshot.bars.len() >= self.resource_policy.history_prefetch_bars.max(1)
     }
 
+    /// Seeds the live aggregator from installed history and drains the buffer.
+    ///
+    /// The history installed here runs to the live edge, so the aggregator takes
+    /// over from a current edge: trades older than it are dropped as late, and
+    /// the quiet buckets before the first trade that is not are carried forward.
+    /// The handoff always completes — a series left waiting publishes nothing at
+    /// all, and on a thin product it would wait for the whole quiet stretch.
     fn complete_coinbase_live_handoff(
         &mut self,
         series: &BarSeriesKey,
@@ -3731,34 +3735,9 @@ impl Coordinator<'_> {
         };
         let connected = live.connected;
         let buffered = std::mem::take(&mut live.buffered);
-        let interval = coinbase_interval_nanos(series).ok();
-        let seam_repair = bars.last().and_then(|last| {
-            let interval = interval?;
-            buffered
-                .iter()
-                .filter_map(|trade| {
-                    coinbase_seam_repair(
-                        last.exchange_timestamp_unix_nanos,
-                        trade.trade_time_unix_nanos,
-                        interval,
-                    )
-                })
-                .min_by_key(|range| range.start_unix_nanos)
-        });
         live.aggregator.reset();
-        if live.aggregator.seed_canonical_history(bars).is_err() {
-            self.realtime_interrupted(
-                FailureStage::Handoff,
-                "Coinbase history/live handoff failed",
-            );
-            return false;
-        }
-        live.connected = connected;
-        live.seam_repair = seam_repair;
-        live.history_ready = live.seam_repair.is_none();
-        live.dirty = false;
-        if live.history_ready
-            && buffered
+        if live.aggregator.seed_canonical_history(bars).is_err()
+            || buffered
                 .iter()
                 .any(|trade| live.aggregator.apply_trade(trade).is_err())
         {
@@ -3768,11 +3747,9 @@ impl Coordinator<'_> {
             );
             return false;
         }
-        if live.history_ready {
-            live.dirty = live.aggregator.in_flight().is_some();
-        } else {
-            live.buffered = buffered.into_iter().collect();
-        }
+        live.connected = connected;
+        live.history_ready = true;
+        live.dirty = live.aggregator.in_flight().is_some();
         live.published = bars
             .last()
             .map(|bar| PublishedTailState::Covering(bar.source_sequence));
@@ -3863,17 +3840,6 @@ impl Coordinator<'_> {
             Ok(()) => {
                 self.history_inflight.insert(key.clone(), range);
                 self.history_cancellations.insert(key, stop);
-                if kind == HistoryRequestKind::SeamRepair
-                    && let Some(live) = self.live.get_mut(series)
-                {
-                    live.history_ready = false;
-                }
-                if kind == HistoryRequestKind::SeamRepair {
-                    self.broadcast_series_recovery_for(
-                        series,
-                        "Repairing the Coinbase history/live seam",
-                    );
-                }
                 Ok(())
             }
             Err(error) => Err(error),
@@ -4015,7 +3981,6 @@ impl Coordinator<'_> {
                     series,
                     generation,
                     range,
-                    kind,
                     "Visible history backfill is unavailable; retained data remains usable",
                 );
             }
@@ -4066,7 +4031,6 @@ impl Coordinator<'_> {
                     series,
                     generation,
                     range,
-                    kind,
                     "Visible history could not be merged; retained data remains usable",
                 );
             }
@@ -4077,7 +4041,7 @@ impl Coordinator<'_> {
         } else {
             snapshot.bars.clone()
         };
-        let publish = !replace_covering || self.coinbase_repair_publishes(series, kind, range);
+        let publish = !replace_covering || self.coinbase_repair_publishes(series, range);
         if publish {
             self.deferred_publications.remove(series);
         } else {
@@ -4096,7 +4060,6 @@ impl Coordinator<'_> {
                     series,
                     generation,
                     range,
-                    kind,
                     "Visible history could not be installed; retained data remains usable",
                 );
             }
@@ -4110,7 +4073,6 @@ impl Coordinator<'_> {
         if should_complete_handoff && !self.complete_coinbase_live_handoff(series, &bars) {
             return;
         }
-        let seam_repair = self.live.get(series).and_then(|live| live.seam_repair);
         self.pending.remove(series);
         self.series_live_if_ready(series);
         if let Err(error) = self.record_coinbase_history_coverage(series, &bars) {
@@ -4119,16 +4081,9 @@ impl Coordinator<'_> {
         if arm_initial_viewport {
             self.arm_initial_viewport_history(series, generation);
         }
-        if let Some(range) = seam_repair {
-            self.viewport_history_ranges
-                .insert((series.clone(), generation), range);
-        }
-        let continuation = if seam_repair.is_some() {
-            self.schedule_coinbase_history(series, generation, HistoryRequestKind::SeamRepair)
-        } else {
+        if let Err(error) =
             self.schedule_coinbase_history(series, generation, HistoryRequestKind::ViewportBackfill)
-        };
-        if let Err(error) = continuation {
+        {
             self.viewport_history_ranges
                 .remove(&(series.clone(), generation));
             self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
@@ -4146,19 +4101,11 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    /// Reports whether one Coinbase covering repair is consumer-visible. Seam
-    /// repairs sit at the live edge; interior pages publish only while a
-    /// consumer viewport actually overlaps the fetched range, so background
-    /// working-window fills stay off the IPC path until their plan resolves.
-    fn coinbase_repair_publishes(
-        &self,
-        series: &BarSeriesKey,
-        kind: HistoryRequestKind,
-        page: Option<HistoryRange>,
-    ) -> bool {
-        if kind == HistoryRequestKind::SeamRepair {
-            return true;
-        }
+    /// Reports whether one Coinbase covering repair is consumer-visible. An
+    /// interior page publishes only while a consumer viewport actually overlaps
+    /// the fetched range, so background working-window fills stay off the IPC
+    /// path until their plan resolves.
+    fn coinbase_repair_publishes(&self, series: &BarSeriesKey, page: Option<HistoryRange>) -> bool {
         let Some(page) = page else {
             return false;
         };
@@ -4193,20 +4140,21 @@ impl Coordinator<'_> {
         }
     }
 
+    /// Resolves one failed Coinbase repair page without stranding the live feed.
+    ///
+    /// The live handoff is never held open for a repair, so a page the provider
+    /// refuses to serve costs the consumer visible history and nothing else: the
+    /// series is reported `Partial` and keeps receiving bars.
     fn viewport_backfill_failed(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         failed_range: Option<HistoryRange>,
-        kind: HistoryRequestKind,
         detail: &'static str,
     ) {
         let key = (series.clone(), generation);
         if self.viewport_history_ranges.get(&key).copied() == failed_range {
             self.viewport_history_ranges.remove(&key);
-        }
-        if kind != HistoryRequestKind::SeamRepair {
-            self.resume_live_after_viewport_failure(series);
         }
         if self.viewport_history_ranges.contains_key(&key) {
             if let Err(error) = self.schedule_coinbase_history(
@@ -4231,28 +4179,6 @@ impl Coordinator<'_> {
             PersistenceState::Durable,
             Some(detail),
         );
-    }
-
-    fn resume_live_after_viewport_failure(&mut self, series: &BarSeriesKey) {
-        let failed = self.live.get_mut(series).is_some_and(|live| {
-            let buffered = std::mem::take(&mut live.buffered);
-            if buffered
-                .iter()
-                .any(|trade| live.aggregator.apply_trade(trade).is_err())
-            {
-                return true;
-            }
-            live.history_ready = true;
-            live.seam_repair = None;
-            live.dirty = live.aggregator.in_flight().is_some();
-            false
-        });
-        if failed {
-            self.realtime_interrupted(
-                FailureStage::Handoff,
-                "Coinbase visible-history recovery could not resume the live handoff",
-            );
-        }
     }
 
     fn install_completed_history(
@@ -5201,69 +5127,31 @@ impl Coordinator<'_> {
         self.provider_online_if_all_series_ready();
     }
 
+    /// Applies one live trade to every series seeded against this generation.
+    ///
+    /// A quiet stretch is not a seam. While the socket is up the trade feed is
+    /// authoritative for "nothing traded", so a bucket the feed skipped is empty
+    /// rather than missing and the aggregator carries the close across it. Real
+    /// holes come from losing the socket, and that path reconnects on a fresh
+    /// generation and reseeds from history instead of repairing a seam here.
     fn realtime_trade(&mut self, generation: ProviderGeneration, trade: &CanonicalTrade) {
         let mut interrupted = None;
-        let mut seam_repairs = Vec::new();
-        for (series, live) in self.live.iter_mut().filter(|(_, live)| {
+        for live in self.live.values_mut().filter(|live| {
             live.generation == generation
                 && live.connected
                 && live.aggregator.product_id() == trade.product_id
         }) {
             if live.history_ready {
-                let Ok(interval) = coinbase_interval_nanos(series) else {
-                    interrupted = Some("Coinbase realtime interval is invalid");
-                    break;
-                };
-                let anchor = live
-                    .aggregator
-                    .in_flight()
-                    .map(|bar| bar.exchange_timestamp_unix_nanos)
-                    .or_else(|| {
-                        live.aggregator
-                            .history()
-                            .last()
-                            .map(|bar| bar.exchange_timestamp_unix_nanos)
-                    });
-                if let Some(range) = anchor.and_then(|anchor| {
-                    coinbase_seam_repair(anchor, trade.trade_time_unix_nanos, interval)
-                }) {
-                    if live.buffered.len() == LIVE_BUFFER_CAPACITY {
-                        interrupted = Some("Coinbase history/live buffer overflowed");
-                        break;
-                    }
-                    live.history_ready = false;
-                    live.dirty = false;
-                    live.seam_repair = Some(range);
-                    live.buffered.push_back(trade.clone());
-                    seam_repairs.push((series.clone(), live.generation, range));
-                } else if live.aggregator.apply_trade(trade).is_err() {
+                if live.aggregator.apply_trade(trade).is_err() {
                     interrupted = Some("Coinbase realtime aggregation failed");
                     break;
                 }
-                if live.history_ready {
-                    live.dirty = true;
-                }
+                live.dirty = true;
             } else if live.buffered.len() == LIVE_BUFFER_CAPACITY {
                 interrupted = Some("Coinbase history/live buffer overflowed");
                 break;
             } else {
                 live.buffered.push_back(trade.clone());
-            }
-        }
-        for (series, generation, range) in seam_repairs {
-            self.viewport_history_ranges
-                .insert((series.clone(), generation), range);
-            if let Err(error) =
-                self.schedule_coinbase_history(&series, generation, HistoryRequestKind::SeamRepair)
-            {
-                self.viewport_history_ranges
-                    .remove(&(series.clone(), generation));
-                self.broadcast_demand_error_for(
-                    &series,
-                    FailureStage::ProviderHistory,
-                    &error,
-                    None,
-                );
             }
         }
         if let Some(detail) = interrupted {
@@ -6451,15 +6339,6 @@ fn recent_coinbase_history_range(
     })
 }
 
-fn coinbase_seam_repair(anchor: i64, trade_time: i64, interval: i64) -> Option<HistoryRange> {
-    let start = anchor.checked_add(interval)?;
-    let end = align_down(trade_time, interval);
-    (end > start).then_some(HistoryRange {
-        start_unix_nanos: start,
-        end_unix_nanos: end,
-    })
-}
-
 fn viewport_coinbase_history_range(
     series: &BarSeriesKey,
     viewport: Viewport,
@@ -6532,30 +6411,12 @@ fn coinbase_history_page_range(
     })
 }
 
-fn coinbase_interval_nanos(series: &BarSeriesKey) -> Result<i64, String> {
-    let seconds = match series.period {
-        BarPeriod::Time { seconds } => i64::from(seconds),
-        BarPeriod::Week { weeks: 1 } => 7 * 86_400,
-        BarPeriod::Tick { .. }
-        | BarPeriod::Session { .. }
-        | BarPeriod::Week { .. }
-        | BarPeriod::Month { .. } => return Err("Coinbase interval is not fixed".to_string()),
-    };
-    seconds
-        .checked_mul(1_000_000_000)
-        .ok_or_else(|| "Coinbase interval overflowed".to_string())
-}
-
 fn current_unix_nanos() -> Result<i64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
         .ok_or_else(|| "system clock is unavailable".to_string())
-}
-
-const fn align_down(value: i64, interval: i64) -> i64 {
-    value - value.rem_euclid(interval)
 }
 
 fn coinbase_bar_coverage_ranges(
@@ -6697,16 +6558,6 @@ fn coinbase_bar_is_aligned(interval: CoinbaseInterval, bar: &MarketBar) -> bool 
     bar.exchange_timestamp_unix_nanos.rem_euclid(1_000_000_000) == 0
         && interval.bucket_start(bar.exchange_timestamp_seconds)
             == Ok(bar.exchange_timestamp_seconds)
-}
-
-fn retain_completed_coinbase_bars(
-    interval: CoinbaseInterval,
-    completed_before_seconds: i64,
-    bars: &mut Vec<MarketBar>,
-) {
-    if matches!(interval, CoinbaseInterval::Week1 | CoinbaseInterval::Month1) {
-        bars.retain(|bar| bar.exchange_timestamp_seconds < completed_before_seconds);
-    }
 }
 
 fn coinbase_shift_nanos(
@@ -8705,7 +8556,7 @@ mod tests {
             let previous = interval
                 .shift_bucket(completed_before, -1)
                 .expect("previous bucket");
-            let mut bars = vec![
+            let bars = vec![
                 MarketBar {
                     exchange_timestamp_seconds: previous,
                     exchange_timestamp_unix_nanos: previous * 1_000_000_000,
@@ -8718,7 +8569,8 @@ mod tests {
                 },
             ];
 
-            retain_completed_coinbase_bars(interval, completed_before, &mut bars);
+            let (bars, _) = aggregate_coinbase_bars(&bars, interval, Some(completed_before))
+                .expect("aggregates");
 
             assert_eq!(bars.len(), 1);
             assert_eq!(bars[0].exchange_timestamp_seconds, previous);
@@ -9641,6 +9493,10 @@ mod tests {
         assert!(merged.windows(2).all(|pair| {
             pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
         }));
+    }
+
+    const fn align_down(value: i64, interval: i64) -> i64 {
+        value - value.rem_euclid(interval)
     }
 
     fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {
@@ -11659,6 +11515,105 @@ mod tests {
                 ProviderGeneration(NonZeroU64::new(2).expect("generation")),
             )
         );
+    }
+
+    /// A quiet market must not stall the live feed.
+    ///
+    /// Coinbase publishes no candle for a bucket in which nothing traded, so the
+    /// feed skipping two buckets means the market was quiet, not that data was
+    /// lost. Treating that as a history seam froze the series behind a repair
+    /// that could never find the bars it was waiting for.
+    #[test]
+    fn a_quiet_market_gap_keeps_streaming_and_fills_the_empty_buckets() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        attach_fixture_consumers(&harness);
+        expect_realtime_generation(&harness, "first realtime generation", 1);
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("connect fixture");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
+            .expect("first live trade");
+        let live = poll_until(&harness.service, 1, 1, |event| {
+            is_live_update(event, 1, 1, 200)
+        });
+        assert!(is_live_update(&live, 1, 1, 200));
+
+        // Nothing trades for two minutes, then the market resumes.
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(5, "2.50", 2)))
+            .expect("live trade after a quiet gap");
+        let resumed = poll_until(&harness.service, 1, 1, |event| {
+            matches!(event, envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.bars.last().is_some_and(|bar| bar.close == 250))
+        });
+        let envelope::Payload::SeriesSnapshot(snapshot) = resumed else {
+            panic!("quiet-gap recovery publishes a covering snapshot");
+        };
+        let minutes = snapshot
+            .bars
+            .iter()
+            .map(|bar| bar.exchange_timestamp_seconds / 60)
+            .collect::<Vec<_>>();
+        assert_eq!(minutes, vec![1, 2, 3, 4, 5]);
+        assert!(
+            snapshot.bars.windows(2).all(|pair| {
+                pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
+            }),
+            "the filled series stays canonical"
+        );
+        let quiet = &snapshot.bars[2..4];
+        assert!(
+            quiet.iter().all(|bar| bar.volume == 0
+                && bar.open == 200
+                && bar.high == 200
+                && bar.low == 200
+                && bar.close == 200),
+            "empty buckets carry the previous close at zero volume: {quiet:?}"
+        );
+    }
+
+    /// Switching timeframe after a quiet stretch must still print bars.
+    ///
+    /// A series frozen behind a seam repair also held the provider short of
+    /// `Online`, and every other series is gated on that, so the chart the user
+    /// switched to stayed blank.
+    #[test]
+    fn switching_timeframe_after_a_quiet_gap_resumes_live_bars() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        attach_fixture_consumers(&harness);
+        expect_realtime_generation(&harness, "first realtime generation", 1);
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("connect fixture");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(6, "2.00", 1)))
+            .expect("live trade after a quiet gap");
+        let live = poll_until(&harness.service, 1, 1, |event| {
+            is_live_update(event, 1, 1, 200)
+        });
+        assert!(is_live_update(&live, 1, 1, 200));
+
+        let five_minute = selected_series("instrument:coinbase:btc:usd", 300);
+        harness
+            .service
+            .set_demand(1, 1, 2, &five_minute)
+            .expect("the chart switches timeframe");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(35, "2.40", 2)))
+            .expect("live trade on the new timeframe");
+        let switched = poll_until(&harness.service, 1, 1, |event| {
+            is_live_update(event, 2, 1, 240)
+        });
+        assert!(is_live_update(&switched, 2, 1, 240));
     }
 
     #[test]

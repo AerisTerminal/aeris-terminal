@@ -297,7 +297,7 @@ fn benchmark_timeframes(bars: &[MarketBar]) -> Result<Vec<TimeframeEvidence>, Bo
             if let Some((_, output, diagnostics)) = cached {
                 (Arc::clone(output), *diagnostics, true)
             } else {
-                let (output, diagnostics) = aggregate_coinbase_bars(bars, interval)?;
+                let (output, diagnostics) = aggregate_coinbase_bars(bars, interval, None)?;
                 let output = Arc::new(output);
                 derived.push((interval, Arc::clone(&output), diagnostics));
                 (output, diagnostics, false)

@@ -1,3 +1,4 @@
+use crate::MAXIMUM_AGGREGATED_HISTORY_BARS;
 use axiusflow_market_data::{ChartInterval, MarketBar};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -174,12 +175,18 @@ pub struct CoinbaseAggregationDiagnostics {
 
 /// Aggregates sorted or unsorted Coinbase source bars into one provider-neutral interval.
 ///
+/// `completed_before_seconds` is the exclusive bucket the caller asked the
+/// provider about. Supplying it drops any bucket still forming and carries the
+/// last close out to that boundary, so a page that simply stops at its last
+/// trade still reaches the edge it covers.
+///
 /// # Errors
 ///
 /// Returns an error for invalid bars, unsupported timestamps, or numeric overflow.
 pub fn aggregate_coinbase_bars(
     source: &[MarketBar],
     interval: CoinbaseInterval,
+    completed_before_seconds: Option<i64>,
 ) -> Result<(Vec<MarketBar>, CoinbaseAggregationDiagnostics), String> {
     let mut diagnostics = CoinbaseAggregationDiagnostics::default();
     let mut sorted_storage = Vec::new();
@@ -243,6 +250,10 @@ pub fn aggregate_coinbase_bars(
         });
         index = next;
     }
+    if let Some(end) = completed_before_seconds {
+        output.retain(|bar| bar.exchange_timestamp_seconds < end);
+    }
+    let mut output = carry_close_forward(output, interval, completed_before_seconds)?;
     for (index, bar) in output.iter_mut().enumerate() {
         bar.source_sequence = u64::try_from(index)
             .ok()
@@ -251,6 +262,65 @@ pub fn aggregate_coinbase_bars(
     }
     diagnostics.output_bars = output.len() as u64;
     Ok((output, diagnostics))
+}
+
+/// Carries each close across the empty buckets that follow it.
+///
+/// Coinbase returns no candle for a bucket in which nothing traded, so an
+/// otherwise healthy page arrives full of holes that read downstream as missing
+/// history. Nothing is missing: the market did not move, so each empty bucket
+/// carries the previous close at zero volume. The fill never runs past what the
+/// caller asked the provider about, and stops after a full retention window so
+/// that bars further apart than anything retainable cannot expand without bound.
+fn carry_close_forward(
+    bars: Vec<MarketBar>,
+    interval: CoinbaseInterval,
+    completed_before_seconds: Option<i64>,
+) -> Result<Vec<MarketBar>, String> {
+    let mut filled: Vec<MarketBar> = Vec::with_capacity(bars.len());
+    let mut budget = MAXIMUM_AGGREGATED_HISTORY_BARS;
+    for bar in bars {
+        carry_close_until(
+            &mut filled,
+            interval,
+            bar.exchange_timestamp_seconds,
+            &mut budget,
+        )?;
+        filled.push(bar);
+    }
+    if let Some(end) = completed_before_seconds {
+        carry_close_until(&mut filled, interval, end, &mut budget)?;
+    }
+    Ok(filled)
+}
+
+fn carry_close_until(
+    filled: &mut Vec<MarketBar>,
+    interval: CoinbaseInterval,
+    end_seconds: i64,
+    budget: &mut usize,
+) -> Result<(), String> {
+    let Some(previous) = filled.last().copied() else {
+        return Ok(());
+    };
+    let mut bucket = interval.shift_bucket(previous.exchange_timestamp_seconds, 1)?;
+    while bucket < end_seconds && *budget > 0 {
+        *budget -= 1;
+        filled.push(MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: bucket,
+            exchange_timestamp_unix_nanos: bucket
+                .checked_mul(1_000_000_000)
+                .ok_or_else(|| "Coinbase aggregate timestamp overflow".to_string())?,
+            open: previous.close,
+            high: previous.close,
+            low: previous.close,
+            close: previous.close,
+            volume: 0,
+        });
+        bucket = interval.shift_bucket(bucket, 1)?;
+    }
+    Ok(())
 }
 
 fn bucket_start(timestamp: i64, interval: CoinbaseInterval) -> Result<i64, String> {
@@ -330,11 +400,51 @@ mod tests {
         );
     }
 
+    /// A thin product leaves most of its buckets empty.
+    ///
+    /// Measured against the live venue on 2026-08-30: two hours of SKL-USD
+    /// one-minute candles came back as 15 rows spanning 103 buckets — 14 holes,
+    /// the largest 29 minutes wide. BTC-USD and ETH-USD had none over the same
+    /// window, which is why this stayed invisible. Every one of those holes has
+    /// to close, or the chart draws a scatter and the live seam reads them as
+    /// missing history.
+    #[test]
+    fn empty_buckets_are_carried_forward_at_zero_volume() {
+        let input = [bar(0, 100), bar(60, 200), bar(300, 300)];
+        let (output, diagnostics) =
+            aggregate_coinbase_bars(&input, CoinbaseInterval::Minute1, None).expect("aggregates");
+        assert_eq!(diagnostics.gaps, 1);
+        assert_eq!(
+            output
+                .iter()
+                .map(|bar| bar.exchange_timestamp_seconds)
+                .collect::<Vec<_>>(),
+            vec![0, 60, 120, 180, 240, 300]
+        );
+        assert!(
+            output.windows(2).all(|pair| {
+                pair[0].source_sequence + 1 == pair[1].source_sequence
+                    && pair[0].exchange_timestamp_unix_nanos < pair[1].exchange_timestamp_unix_nanos
+            }),
+            "the filled page stays canonical"
+        );
+        let carried = &output[2..5];
+        assert!(
+            carried.iter().all(|bar| bar.volume == 0
+                && bar.open == 201
+                && bar.high == 201
+                && bar.low == 201
+                && bar.close == 201),
+            "empty buckets carry the previous close: {carried:?}"
+        );
+        assert_eq!(output[5].open, 300, "the next traded bucket is untouched");
+    }
+
     #[test]
     fn aggregation_deduplicates_and_reports_source_gaps() {
         let input = [bar(0, 100), bar(60, 101), bar(60, 102), bar(180, 103)];
         let (output, diagnostics) =
-            aggregate_coinbase_bars(&input, CoinbaseInterval::Minute3).expect("aggregates");
+            aggregate_coinbase_bars(&input, CoinbaseInterval::Minute3, None).expect("aggregates");
         assert_eq!(diagnostics.duplicate_bars, 1);
         assert_eq!(diagnostics.gaps, 1);
         assert_eq!(output.len(), 2);
@@ -348,9 +458,9 @@ mod tests {
         let sorted = [bar(0, 100), bar(60, 101), bar(120, 102), bar(180, 103)];
         let unsorted = [sorted[2], sorted[0], sorted[3], sorted[1]];
         let sorted_result =
-            aggregate_coinbase_bars(&sorted, CoinbaseInterval::Minute3).expect("aggregates");
-        let unsorted_result =
-            aggregate_coinbase_bars(&unsorted, CoinbaseInterval::Minute3).expect("aggregates");
+            aggregate_coinbase_bars(&sorted, CoinbaseInterval::Minute3, None).expect("aggregates");
+        let unsorted_result = aggregate_coinbase_bars(&unsorted, CoinbaseInterval::Minute3, None)
+            .expect("aggregates");
         assert_eq!(sorted_result, unsorted_result);
     }
 
@@ -359,7 +469,7 @@ mod tests {
         // 2024-01-01 00:00:00 UTC was Monday and is also a month boundary.
         let timestamp = 1_704_067_200;
         for interval in [CoinbaseInterval::Week1, CoinbaseInterval::Month1] {
-            let (output, _) = aggregate_coinbase_bars(&[bar(timestamp, 100)], interval)
+            let (output, _) = aggregate_coinbase_bars(&[bar(timestamp, 100)], interval, None)
                 .expect("calendar aggregation succeeds");
             assert_eq!(output[0].exchange_timestamp_seconds, timestamp);
         }

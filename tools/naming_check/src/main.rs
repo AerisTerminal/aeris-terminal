@@ -801,11 +801,11 @@ mod tests {
             })
             .sum::<usize>();
 
-        // Set to the real count after deleting the in-app windowed benchmark harness. Lower it
+        // Set to the real count after deleting the Coinbase history/live seam repair. Lower it
         // when code goes away; do not raise it to make a growing codebase fit.
         assert!(
-            line_count <= 72_479,
-            "platform Rust source upper bound is {line_count} lines, above the 72,479-line soft review threshold"
+            line_count <= 72_477,
+            "platform Rust source upper bound is {line_count} lines, above the 72,477-line soft review threshold"
         );
     }
 

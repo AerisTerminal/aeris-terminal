@@ -402,17 +402,27 @@ impl CoinbaseBarAggregator {
                     self.in_flight = Some(finished);
                     return Ok(None);
                 }
-                completed = Some(self.complete(finished)?);
+                let finished_bucket = finished.bucket_unix_seconds;
+                let aggregated = self.complete(finished)?;
+                self.carry_close_across_empty_buckets(
+                    finished_bucket,
+                    bucket,
+                    aggregated.bar.close,
+                )?;
+                completed = Some(aggregated);
                 self.open_bar(bucket, price, size, trade);
             }
             None => {
-                if self
-                    .history
-                    .back()
-                    .is_some_and(|bar| bucket <= bar.exchange_timestamp_seconds)
-                {
-                    self.late_trades = self.late_trades.saturating_add(1);
-                    return Ok(None);
+                if let Some(previous) = self.history.back().copied() {
+                    if bucket <= previous.exchange_timestamp_seconds {
+                        self.late_trades = self.late_trades.saturating_add(1);
+                        return Ok(None);
+                    }
+                    self.carry_close_across_empty_buckets(
+                        previous.exchange_timestamp_seconds,
+                        bucket,
+                        previous.close,
+                    )?;
                 }
                 self.open_bar(bucket, price, size, trade);
             }
@@ -445,6 +455,67 @@ impl CoinbaseBarAggregator {
             close: bar.close,
             volume: bar.volume,
         })
+    }
+
+    /// Carries `close` across the empty buckets between two traded buckets.
+    ///
+    /// Coinbase emits no candle for a bucket in which nothing traded, so a quiet
+    /// market otherwise punches a hole in the series that every consumer of it —
+    /// the chart, the history/live seam, coverage accounting — reads as missing
+    /// data. Nothing is missing: the market did not move, so each empty bucket
+    /// carries the previous close at zero volume.
+    ///
+    /// The stretch after a seeded edge is filled the same way, because the
+    /// engine seeds from history that runs to the live edge and only while the
+    /// socket is up. A seed that is nonetheless stale is bounded twice over: the
+    /// fill is clamped to the retention bound, and the covering repair that
+    /// follows a stale seed reseeds this aggregator from what the provider
+    /// actually served.
+    fn carry_close_across_empty_buckets(
+        &mut self,
+        previous_bucket: i64,
+        bucket: i64,
+        close: i64,
+    ) -> Result<(), CoinbaseBarAggregationError> {
+        let interval = i64::from(self.config.interval_seconds.get());
+        let empty = bucket
+            .checked_sub(previous_bucket)
+            .ok_or(CoinbaseBarAggregationError::NumericOverflow)?
+            .div_euclid(interval)
+            .saturating_sub(1);
+        let retained = i64::try_from(self.config.maximum_history_bars.get()).unwrap_or(i64::MAX);
+        let mut empty_bucket = bucket
+            .checked_sub(empty.min(retained).saturating_mul(interval))
+            .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
+        while empty_bucket < bucket {
+            let filled = MarketBar {
+                source_sequence: self.next_sequence,
+                exchange_timestamp_seconds: empty_bucket,
+                exchange_timestamp_unix_nanos: empty_bucket
+                    .checked_mul(1_000_000_000)
+                    .ok_or(CoinbaseBarAggregationError::NumericOverflow)?,
+                open: close,
+                high: close,
+                low: close,
+                close,
+                volume: 0,
+            };
+            filled
+                .validate()
+                .map_err(|_| CoinbaseBarAggregationError::InvalidBar)?;
+            self.next_sequence = self
+                .next_sequence
+                .checked_add(1)
+                .ok_or(CoinbaseBarAggregationError::SequenceOverflow)?;
+            self.history.push_back(filled);
+            if self.history.len() > self.config.maximum_history_bars.get() {
+                self.history.pop_front();
+            }
+            empty_bucket = empty_bucket
+                .checked_add(interval)
+                .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
+        }
+        Ok(())
     }
 
     fn open_bar(&mut self, bucket: i64, price: i64, size: i64, trade: &CanonicalTrade) {

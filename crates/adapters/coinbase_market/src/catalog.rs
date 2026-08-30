@@ -34,10 +34,18 @@ pub struct CoinbaseCatalogDiagnostics {
 struct ProductsResponse {
     #[serde(default)]
     products: Vec<ProductMessage>,
+    /// Coinbase nests paging under `pagination`; a response without it is the
+    /// last page.
+    #[serde(default)]
+    pagination: ProductsPagination,
+}
+
+#[derive(Default, Deserialize)]
+struct ProductsPagination {
     #[serde(default)]
     has_next: bool,
     #[serde(default)]
-    cursor: String,
+    next_cursor: String,
 }
 
 #[derive(Deserialize)]
@@ -157,7 +165,7 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                 }
                 products.push(profile);
             }
-            if self.diagnostics.truncated || !response.has_next {
+            if self.diagnostics.truncated || !response.pagination.has_next {
                 products.sort_by(|left, right| {
                     product_rank(left)
                         .cmp(&product_rank(right))
@@ -165,7 +173,9 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                 });
                 return Ok(products);
             }
-            if response.cursor.is_empty() || cursor.as_ref() == Some(&response.cursor) {
+            if response.pagination.next_cursor.is_empty()
+                || cursor.as_ref() == Some(&response.pagination.next_cursor)
+            {
                 self.diagnostics.truncated = true;
                 products.sort_by(|left, right| {
                     product_rank(left)
@@ -174,7 +184,7 @@ impl<T: CoinbaseHistoryTransport> CoinbaseProductCatalog<T> {
                 });
                 return Ok(products);
             }
-            cursor = Some(response.cursor);
+            cursor = Some(response.pagination.next_cursor);
         }
         self.diagnostics.truncated = true;
         products.sort_by(|left, right| {
@@ -285,8 +295,8 @@ mod tests {
     #[test]
     fn catalog_paginates_and_keeps_only_active_spot_products_with_exact_precision() {
         let pages = VecDeque::from([
-            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online","trading_disabled":false,"is_disabled":false,"view_only":false},{"product_id":"OLD-USD","base_currency_id":"OLD","quote_currency_id":"USD","base_increment":"0.01","price_increment":"0.01","product_type":"SPOT","status":"offline"}],"has_next":true,"cursor":"next"}"#.to_vec(),
-            br#"{"products":[{"product_id":"ETH-USDC","base_currency_id":"ETH","quote_currency_id":"USDC","base_increment":"0.000001","price_increment":"0.001","product_type":"SPOT","status":"online"},{"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":false,"cursor":""}"#.to_vec(),
+            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online","trading_disabled":false,"is_disabled":false,"view_only":false},{"product_id":"OLD-USD","base_currency_id":"OLD","quote_currency_id":"USD","base_increment":"0.01","price_increment":"0.01","product_type":"SPOT","status":"offline"}],"pagination":{"has_next":true,"next_cursor":"next"}}"#.to_vec(),
+            br#"{"products":[{"product_id":"ETH-USDC","base_currency_id":"ETH","quote_currency_id":"USDC","base_increment":"0.000001","price_increment":"0.001","product_type":"SPOT","status":"online"},{"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"pagination":{"has_next":false,"next_cursor":""}}"#.to_vec(),
         ]);
         let mut catalog = CoinbaseProductCatalog::with_transport(Pages(pages));
         let products = catalog
@@ -307,7 +317,7 @@ mod tests {
             {"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.05","product_type":"SPOT","status":"online"},
             {"product_id":"BAD","base_currency_id":"BAD","quote_currency_id":"USD","base_increment":"0.01","price_increment":"0.01","product_type":"SPOT","status":"online"},
             {"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.0001","price_increment":"0.5","product_type":"SPOT","status":"online"}
-        ],"has_next":false,"cursor":""}"#.to_vec();
+        ],"pagination":{"has_next":false,"next_cursor":""}}"#.to_vec();
         let mut catalog = CoinbaseProductCatalog::with_transport(Pages(VecDeque::from([page])));
         let products = catalog
             .fetch_active_spot_products()
@@ -324,8 +334,8 @@ mod tests {
     #[test]
     fn catalog_retains_the_validated_prefix_on_pagination_anomalies() {
         let pages = VecDeque::from([
-            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":true,"cursor":"stuck"}"#.to_vec(),
-            br#"{"products":[{"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":true,"cursor":"stuck"}"#.to_vec(),
+            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"pagination":{"has_next":true,"next_cursor":"stuck"}}"#.to_vec(),
+            br#"{"products":[{"product_id":"ETH-USD","base_currency_id":"ETH","quote_currency_id":"USD","base_increment":"0.000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"pagination":{"has_next":true,"next_cursor":"stuck"}}"#.to_vec(),
         ]);
         let mut catalog = CoinbaseProductCatalog::with_transport(Pages(pages));
         let products = catalog
@@ -339,7 +349,7 @@ mod tests {
     fn catalog_retries_bounded_rate_limit_rejections() {
         let pages = VecDeque::from([
             b"rate limited: HTTP 429".to_vec(),
-            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"has_next":false,"cursor":""}"#.to_vec(),
+            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"pagination":{"has_next":false,"next_cursor":""}}"#.to_vec(),
         ]);
         let mut catalog = CoinbaseProductCatalog::with_transport(FailingThenOk(pages));
         let products = catalog
@@ -371,7 +381,7 @@ mod tests {
         fn get(&mut self, _path: &str) -> Result<Vec<u8>, String> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             self.stop.store(true, Ordering::Release);
-            Ok(br#"{"products":[],"has_next":true,"cursor":"next"}"#.to_vec())
+            Ok(br#"{"products":[],"pagination":{"has_next":true,"next_cursor":"next"}}"#.to_vec())
         }
     }
 
