@@ -3,7 +3,7 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -6800,17 +6800,10 @@ fn coinbase_catalog_dispatch_error(error: CoinbaseCatalogDispatchError) -> Strin
     }
 }
 
-fn chart_stream_requirements(series: &BarSeriesKey) -> StreamRequirements {
-    let live_bars = series.provider_id == "rithmic"
-        || !matches!(
-            series.period,
-            BarPeriod::Week { .. } | BarPeriod::Month { .. }
-        );
-    let mut streams = StreamRequirements::BARS;
-    if live_bars {
-        streams = streams.with(MarketStream::Trades).with(MarketStream::Depth);
-    }
-    streams
+fn chart_stream_requirements(_series: &BarSeriesKey) -> StreamRequirements {
+    StreamRequirements::BARS
+        .with(MarketStream::Trades)
+        .with(MarketStream::Depth)
 }
 
 fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Result<(), String> {
@@ -7194,11 +7187,11 @@ fn record_covered_range(
 }
 
 fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggregator, String> {
-    CoinbaseBarAggregatorConfig::try_new_interval(
+    CoinbaseBarAggregatorConfig::try_new_period(
         profile.product_id,
         profile.price_scale,
         profile.quantity_scale,
-        NonZeroU32::new(profile.interval_seconds).unwrap_or(NonZeroU32::MIN),
+        profile.interval,
         NonZeroUsize::new(HISTORY_BARS_PER_SERIES).unwrap_or(NonZeroUsize::MIN),
     )
     .map(CoinbaseBarAggregator::new)
@@ -7209,7 +7202,6 @@ fn coinbase_aggregator(profile: CoinbaseSeriesProfile) -> Result<CoinbaseBarAggr
 struct CoinbaseSeriesProfile {
     product_id: String,
     resolution: &'static str,
-    interval_seconds: u32,
     price_scale: u8,
     quantity_scale: u8,
     interval: CoinbaseInterval,
@@ -7235,8 +7227,6 @@ fn coinbase_series_profile(
     Ok(CoinbaseSeriesProfile {
         product_id: installed.provider_symbol.clone(),
         resolution: interval.id(),
-        interval_seconds: u32::try_from(interval.fixed_seconds().unwrap_or(86_400))
-            .map_err(|_| "Coinbase interval is invalid".to_string())?,
         price_scale: u8::try_from(installed.price_scale)
             .map_err(|_| "Coinbase price scale is invalid".to_string())?,
         quantity_scale: u8::try_from(installed.quantity_scale)
@@ -7535,7 +7525,8 @@ mod tests {
                         .ok_or_else(|| "fixture Coinbase instrument is unavailable".to_string())?;
                     let profile = coinbase_series_profile(&request.series, instrument)?;
                     (
-                        profile.interval_seconds,
+                        u32::try_from(profile.interval.fixed_seconds().unwrap_or(86_400))
+                            .map_err(|_| "fixture interval is invalid".to_string())?,
                         profile.price_scale,
                         profile.quantity_scale,
                     )
@@ -9059,7 +9050,7 @@ mod tests {
             // A run starting at bucket zero, numbered the way the adapter numbers
             // it. Deriving a coarser series needs source bars that cover a whole
             // target bucket; a single bar covers none of one.
-            let interval = i64::from(profile.interval_seconds);
+            let interval = profile.interval.fixed_seconds().unwrap_or(86_400);
             Ok(HistorySnapshot {
                 price_scale: profile.price_scale,
                 quantity_scale: profile.quantity_scale,
@@ -9101,10 +9092,10 @@ mod tests {
                     source_sequence: 1,
                     exchange_timestamp_seconds: 0,
                     exchange_timestamp_unix_nanos: 0,
-                    open: i64::from(profile.interval_seconds),
-                    high: i64::from(profile.interval_seconds),
-                    low: i64::from(profile.interval_seconds),
-                    close: i64::from(profile.interval_seconds),
+                    open: profile.interval.fixed_seconds().unwrap_or(86_400),
+                    high: profile.interval.fixed_seconds().unwrap_or(86_400),
+                    low: profile.interval.fixed_seconds().unwrap_or(86_400),
+                    close: profile.interval.fixed_seconds().unwrap_or(86_400),
                     volume: 1,
                 }],
                 forming: None,
@@ -9144,8 +9135,11 @@ mod tests {
                 price_scale: profile.price_scale,
                 quantity_scale: profile.quantity_scale,
                 bars: vec![MarketBar {
-                    exchange_timestamp_seconds: i64::from(profile.interval_seconds),
-                    exchange_timestamp_unix_nanos: i64::from(profile.interval_seconds)
+                    exchange_timestamp_seconds: profile.interval.fixed_seconds().unwrap_or(86_400),
+                    exchange_timestamp_unix_nanos: profile
+                        .interval
+                        .fixed_seconds()
+                        .unwrap_or(86_400)
                         * 1_000_000_000,
                     ..history_bar()
                 }],
@@ -9324,6 +9318,34 @@ mod tests {
 
             assert_eq!(bars.len(), 1);
             assert_eq!(bars[0].exchange_timestamp_seconds, previous);
+        }
+    }
+
+    #[test]
+    fn coinbase_twelve_hour_and_calendar_demands_create_live_handoffs() {
+        for (cadence, value) in [
+            (SeriesCadence::FixedSeconds, 43_200),
+            (SeriesCadence::CalendarWeeks, 1),
+            (SeriesCadence::CalendarMonths, 1),
+        ] {
+            let series = internal_series(&SeriesKey {
+                provider: "coinbase".to_string(),
+                instrument_id: "instrument:coinbase:btc:usd".to_string(),
+                cadence_value: value,
+                definition_revision: 1,
+                entitlement_id: ENTITLEMENT_CLASS.to_string(),
+                cadence: cadence as i32,
+            })
+            .expect("Coinbase series is supported");
+            assert!(chart_stream_requirements(&series).contains(MarketStream::Trades));
+            assert!(
+                LiveHandoff::try_new(
+                    &series,
+                    ProviderGeneration(NonZeroU64::MIN),
+                    &coinbase_instrument(&series),
+                )
+                .is_ok()
+            );
         }
     }
 

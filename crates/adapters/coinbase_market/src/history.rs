@@ -1,7 +1,4 @@
-use crate::{
-    CoinbaseInterval, CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS,
-    FixedPointValue,
-};
+use crate::{CoinbaseInterval, CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS};
 use axiusflow_market_data::MarketBar;
 use axiusflow_provider_history::{
     Continuation, DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
@@ -722,22 +719,51 @@ fn history_source_resolution(resolution: &str) -> Result<HistorySourceResolution
 }
 
 fn fixed_at_scale(source: &str, target_scale: u32) -> Result<i64, String> {
-    let value = FixedPointValue::parse(source).map_err(|error| error.to_string())?;
-    if value.scale == target_scale {
-        return Ok(value.mantissa);
+    let trimmed = source.trim();
+    let (negative, unsigned) = trimmed
+        .strip_prefix('-')
+        .map_or((false, trimmed), |value| (true, value));
+    let mut parts = unsigned.split('.');
+    let integer = parts.next().unwrap_or_default();
+    let fraction = parts.next().unwrap_or_default();
+    if trimmed.is_empty()
+        || trimmed.len() > 40
+        || parts.next().is_some()
+        || (integer.is_empty() && fraction.is_empty())
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("Coinbase candle fixed-point value is invalid".to_string());
     }
-    if value.scale < target_scale {
-        let shift = target_scale - value.scale;
-        return value
-            .mantissa
-            .checked_mul(10_i64.pow(shift))
-            .ok_or_else(|| "Coinbase candle fixed-point overflow".to_string());
+    let scale = usize::try_from(target_scale)
+        .ok()
+        .filter(|scale| *scale <= 18)
+        .ok_or_else(|| "Coinbase candle fixed-point scale is invalid".to_string())?;
+    let mut magnitude = 0_i128;
+    for byte in integer
+        .bytes()
+        .chain(fraction.bytes().take(scale))
+        .chain(std::iter::repeat_n(
+            b'0',
+            scale.saturating_sub(fraction.len()),
+        ))
+    {
+        magnitude = magnitude
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(i128::from(byte - b'0')))
+            .ok_or_else(|| "Coinbase candle fixed-point overflow".to_string())?;
     }
-    let divisor = 10_i64.pow(value.scale - target_scale);
-    if value.mantissa % divisor != 0 {
-        return Err("Coinbase candle precision exceeds instrument scale".to_string());
+    if fraction
+        .as_bytes()
+        .get(scale)
+        .is_some_and(|digit| *digit >= b'5')
+    {
+        magnitude = magnitude
+            .checked_add(1)
+            .ok_or_else(|| "Coinbase candle fixed-point overflow".to_string())?;
     }
-    Ok(value.mantissa / divisor)
+    i64::try_from(if negative { -magnitude } else { magnitude })
+        .map_err(|_| "Coinbase candle fixed-point overflow".to_string())
 }
 
 #[must_use]
@@ -1353,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_and_over_precise_candles() {
+    fn rejects_duplicate_and_quantizes_provider_candles_at_catalog_precision() {
         let paths = Rc::new(RefCell::new(Vec::new()));
         let duplicate = br#"{"candles":[
             {"start":"1700000040","low":"1.00","high":"1.00","open":"1.00","close":"1.00","volume":"1.00000000"},
@@ -1368,7 +1394,7 @@ mod tests {
         assert!(adapter.fetch_page(&request(3)).is_err());
 
         let over_precise = br#"{"candles":[
-            {"start":"1700000040","low":"1.001","high":"1.001","open":"1.001","close":"1.001","volume":"1.00000000"}
+            {"start":"1700000040","low":"1.005","high":"14577.9100235022372411","open":"1.005","close":"1.005","volume":"1.000000001"}
         ]}"#
         .to_vec();
         let mut adapter = CoinbaseHistoryCapabilityAdapter::try_with_transport(FixtureTransport {
@@ -1376,7 +1402,13 @@ mod tests {
             paths,
         })
         .expect("fixture adapter");
-        assert!(adapter.fetch_page(&request(3)).is_err());
+        let page = adapter
+            .fetch_page(&request(3))
+            .expect("provider precision is quantized without floating point");
+        let bar = decode_history_bar(&page.items[0]).expect("quantized candle decodes");
+        assert_eq!(bar.open, 101);
+        assert_eq!(bar.high, 1_457_791);
+        assert_eq!(bar.volume, 100_000_000);
     }
 
     #[test]

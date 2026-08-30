@@ -610,12 +610,6 @@ static COINBASE_INTERVALS: &[ChartInterval] = &[
     ChartInterval::Month1,
 ];
 const COINBASE_ENTITLEMENT_ID: &str = "crypto_public_realtime";
-const COINBASE_CALENDAR_HISTORY_STATUS: &str =
-    "Completed Coinbase history; current calendar bucket is not live";
-
-const fn coinbase_interval_is_history_only(interval: ChartInterval) -> bool {
-    matches!(interval, ChartInterval::Week1 | ChartInterval::Month1)
-}
 
 fn generation_status(
     worker_label: &str,
@@ -1156,7 +1150,6 @@ struct HeaderState {
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
-    history_only: bool,
     instrument_scroll: ScrollHandle,
 }
 
@@ -1236,10 +1229,6 @@ struct ChartSurfaceNotice {
     detail: Option<String>,
     placement: ChartNoticePlacement,
     tone: ChartNoticeTone,
-    /// Covers the surface underneath. Set when what is drawn belongs to the
-    /// selection the trader just left: it is real market data, but it is not the
-    /// data they asked for, and a corner spinner over it reads as current.
-    scrim: bool,
 }
 
 fn chart_surface_notice(
@@ -1253,7 +1242,6 @@ fn chart_surface_notice(
     } else {
         ChartNoticePlacement::Center
     };
-    let scrim = superseded && has_market_data;
     let detail = bounded_status_detail(detail, state.label());
     match state {
         ChartState::Loading => Some(ChartSurfaceNotice {
@@ -1261,7 +1249,6 @@ fn chart_surface_notice(
             detail,
             placement,
             tone: ChartNoticeTone::Muted,
-            scrim,
         }),
         ChartState::Ready => None,
         ChartState::Stale | ChartState::Recovering => Some(ChartSurfaceNotice {
@@ -1269,14 +1256,12 @@ fn chart_surface_notice(
             detail,
             placement,
             tone: ChartNoticeTone::Warning,
-            scrim,
         }),
         ChartState::Error => Some(ChartSurfaceNotice {
             label: state.label(),
             detail,
             placement,
             tone: ChartNoticeTone::Loss,
-            scrim,
         }),
     }
 }
@@ -1412,29 +1397,18 @@ fn terminal_startup_state(
                 coinbase_product: None,
             }
         }
-        MarketWorkerStartup::Loading(startup) => {
-            let history_only = coinbase_interval_is_history_only(startup.coinbase_interval);
-            TerminalStartupState {
-                chart: None,
-                chart_state: ChartState::Loading,
-                chart_state_message: "waiting for a covering market snapshot".to_string(),
-                replay_label: "waiting for a covering market snapshot".to_string(),
-                worker_label: startup.worker_label,
-                subscription_id: startup.subscription_id,
-                connection_state: Some(if history_only {
-                    FeedConnectionState::Authenticating
-                } else {
-                    FeedConnectionState::Discovering
-                }),
-                connection_message: Some(if history_only {
-                    "Loading Coinbase history-only interval".to_string()
-                } else {
-                    "Connecting to Coinbase public markets".to_string()
-                }),
-                provider: TerminalProvider::Coinbase,
-                coinbase_product: Some(startup.coinbase_product),
-            }
-        }
+        MarketWorkerStartup::Loading(startup) => TerminalStartupState {
+            chart: None,
+            chart_state: ChartState::Loading,
+            chart_state_message: "waiting for a covering market snapshot".to_string(),
+            replay_label: "waiting for a covering market snapshot".to_string(),
+            worker_label: startup.worker_label,
+            subscription_id: startup.subscription_id,
+            connection_state: Some(FeedConnectionState::Discovering),
+            connection_message: Some("Connecting to Coinbase public markets".to_string()),
+            provider: TerminalProvider::Coinbase,
+            coinbase_product: Some(startup.coinbase_product),
+        },
     }
 }
 
@@ -2376,26 +2350,15 @@ impl WorkspaceSurface {
             cx.notify();
         } else if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
-            self.chart_state_message = if self.provider == TerminalProvider::Coinbase
-                && coinbase_interval_is_history_only(self.coinbase_interval)
-            {
-                COINBASE_CALENDAR_HISTORY_STATUS.to_string()
-            } else {
-                "market snapshot is current".to_string()
-            };
+            self.chart_state_message = "market snapshot is current".to_string();
             if self.provider == TerminalProvider::Coinbase {
                 self.symbol_selection_pending = false;
                 self.symbol_message = self.coinbase_product.as_ref().map_or_else(
                     || "Coinbase market ready".to_string(),
                     |product| format!("{} · Coinbase spot", product.provider_symbol),
                 );
-                if coinbase_interval_is_history_only(self.coinbase_interval) {
-                    self.connection_state = Some(FeedConnectionState::Disconnected);
-                    self.connection_message = Some(COINBASE_CALENDAR_HISTORY_STATUS.to_string());
-                } else {
-                    self.connection_state = Some(FeedConnectionState::Streaming);
-                    self.connection_message = Some("Coinbase market data is current".to_string());
-                }
+                self.connection_state = Some(FeedConnectionState::Streaming);
+                self.connection_message = Some("Coinbase market data is current".to_string());
             }
         } else {
             self.set_chart_state(
@@ -2465,13 +2428,7 @@ impl WorkspaceSurface {
                     MarketPublicationGeneration::from_generation(&bootstrap.generation),
                 );
                 self.chart_state = ChartState::Ready;
-                self.chart_state_message = if self.provider == TerminalProvider::Coinbase
-                    && coinbase_interval_is_history_only(self.coinbase_interval)
-                {
-                    COINBASE_CALENDAR_HISTORY_STATUS.to_string()
-                } else {
-                    "market snapshot is current".to_string()
-                };
+                self.chart_state_message = "market snapshot is current".to_string();
                 cx.notify();
             }
             Ok(false) => eprintln!("ignored stale fixture recovery response {request_id}"),
@@ -2504,7 +2461,7 @@ impl WorkspaceSurface {
     fn showing_superseded_series(&self) -> bool {
         self.chart.is_some()
             && match self.provider {
-                TerminalProvider::Coinbase => self.coinbase_switch.is_swapping(),
+                TerminalProvider::Coinbase => self.coinbase_switch.in_progress(),
                 TerminalProvider::Rithmic => self.series_browser.pending().is_some(),
             }
     }
@@ -4953,30 +4910,24 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
             .absolute()
             .role(Role::Status)
             .aria_label(notice.label)
-            .when(notice.scrim, |overlay| {
-                // The chart underneath belongs to the selection the trader left.
-                // It stays on screen so the surface never goes blank, but it is
-                // covered and named, because reading prices off it would be
-                // reading the wrong market.
-                overlay.bg(gpui_color(colors.surface.with_alpha(0.82)))
-            })
+            // A loading surface is deliberately opaque. On first launch there
+            // is no chart to read, and during a switch the retained chart belongs
+            // to the previous selection.
+            .bg(gpui_color(colors.surface))
+            .gap_2()
             .child(spinner)
-            .when(notice.scrim, |overlay| {
-                overlay
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(gpui_color(colors.text_primary))
-                            .child(notice.label),
-                    )
-                    .children(notice.detail.clone().map(|detail| {
-                        div()
-                            .text_xs()
-                            .text_color(gpui_color(colors.text_secondary))
-                            .child(detail)
-                    }))
-            });
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(gpui_color(colors.text_primary))
+                    .child(notice.label),
+            )
+            .children(notice.detail.clone().map(|detail| {
+                div()
+                    .text_xs()
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(detail)
+            }));
         return overlay
             .inset_0()
             .flex()
@@ -6322,7 +6273,6 @@ fn header_controls(
         state.connection_state,
         state.chart_state,
         state.delayed,
-        state.history_only,
     );
     div()
         .h_full()
@@ -7600,27 +7550,11 @@ fn connection_presentation(
     state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
-    history_only: bool,
 ) -> (String, ConnectionColor) {
     let provider = match provider {
         TerminalProvider::Coinbase => "Coinbase",
         TerminalProvider::Rithmic => "Test",
     };
-    if history_only {
-        return match chart_state {
-            ChartState::Ready => (format!("{provider} · Completed history"), |theme| {
-                theme.colors.bullish
-            }),
-            ChartState::Error => (format!("{provider} · Data error"), |theme| {
-                theme.colors.danger
-            }),
-            ChartState::Loading | ChartState::Stale | ChartState::Recovering => {
-                (format!("{provider} · Loading history"), |theme| {
-                    theme.colors.bearish
-                })
-            }
-        };
-    }
     if chart_state == ChartState::Stale {
         return (format!("{provider} · Stale"), |theme| theme.colors.bearish);
     }
@@ -9493,11 +9427,6 @@ fn active_header_state(
             .unwrap_or(FeedConnectionState::Disconnected),
         chart_state: workspace.chart_state,
         delayed: false,
-        history_only: workspace.provider == TerminalProvider::Coinbase
-            && matches!(
-                workspace.coinbase_interval,
-                ChartInterval::Week1 | ChartInterval::Month1
-            ),
         instrument_scroll: workspace.scrolls.instrument.clone(),
     }
 }
@@ -10773,19 +10702,19 @@ mod tests {
     use super::{
         CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_FOOTER_HEIGHT,
         CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT,
-        CHROME_MENU_WIDTH, COINBASE_CALENDAR_HISTORY_STATUS, COINBASE_ENTITLEMENT_ID,
-        COINBASE_INTERVALS, CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement,
-        ChartNoticeTone, ChartState, ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls,
-        InputEvent, InstrumentMenuEntry, InstrumentMenuSelection, OVERLAY_EDGE_MARGIN,
-        PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
-        RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-        RithmicSessionRetirement, SidePanel, SidePanelResize, SymbolInputAction,
-        SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
-        TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
-        WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
-        WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
-        caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-        chart_status_detail, chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
+        CHROME_MENU_WIDTH, COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS, CaptionPlatform,
+        CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
+        DesktopLifetimeMode, HeaderControls, InputEvent, InstrumentMenuEntry,
+        InstrumentMenuSelection, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout,
+        PriceAxisMenuRow, ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState,
+        RithmicReconnectTarget, RithmicSessionRetirement, SidePanel, SidePanelResize,
+        SymbolInputAction, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
+        TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
+        WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
+        WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+        active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
+        caption_pointer_owner, catalog_rejection_message, chart_status_detail,
+        chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
         chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
         clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
         current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
@@ -11846,10 +11775,6 @@ mod tests {
             chart_surface_notice(ChartState::Loading, true, true, "Loading 5m market history")
                 .expect("a switch in flight is announced");
         assert_eq!(switching.placement, ChartNoticePlacement::Center);
-        assert!(
-            switching.scrim,
-            "the market the trader left must not be readable as the one they chose"
-        );
         assert_eq!(
             switching.detail.as_deref(),
             Some("Loading 5m market history")
@@ -11861,7 +11786,6 @@ mod tests {
             chart_surface_notice(ChartState::Loading, true, false, "repairing coverage")
                 .expect("a repair is announced");
         assert_eq!(repairing.placement, ChartNoticePlacement::BottomRight);
-        assert!(!repairing.scrim);
     }
 
     /// A load in flight is not an outage, and labelling it as one is what made
@@ -11874,7 +11798,6 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Loading,
                 false,
-                false,
             )
             .0,
             "Coinbase · Loading"
@@ -11885,7 +11808,6 @@ mod tests {
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Recovering,
                 ChartState::Loading,
-                false,
                 false,
             )
             .0,
@@ -11899,7 +11821,6 @@ mod tests {
                 FeedConnectionState::Disconnected,
                 ChartState::Loading,
                 false,
-                false,
             )
             .0,
             "Offline"
@@ -11909,7 +11830,6 @@ mod tests {
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Recovering,
                 ChartState::Recovering,
-                false,
                 false,
             )
             .0,
@@ -11925,7 +11845,6 @@ mod tests {
                 FeedConnectionState::Disconnected,
                 ChartState::Loading,
                 false,
-                false,
             )
             .0,
             "Offline"
@@ -11935,7 +11854,6 @@ mod tests {
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Streaming,
                 ChartState::Ready,
-                false,
                 false,
             )
             .0,
@@ -11947,7 +11865,6 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Stale,
                 false,
-                false,
             )
             .0,
             "Test · Stale"
@@ -11958,7 +11875,6 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Ready,
                 true,
-                false,
             )
             .0,
             "Test · Delayed"
@@ -11969,24 +11885,10 @@ mod tests {
                 FeedConnectionState::Streaming,
                 ChartState::Ready,
                 false,
-                false,
             )
             .0,
             "Coinbase · Live"
         );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Coinbase,
-                FeedConnectionState::Streaming,
-                ChartState::Ready,
-                false,
-                true,
-            )
-            .0,
-            "Coinbase · Completed history"
-        );
-        assert!(COINBASE_CALENDAR_HISTORY_STATUS.contains("current calendar bucket is not live"));
-        assert!(!COINBASE_CALENDAR_HISTORY_STATUS.contains("is current"));
         let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));

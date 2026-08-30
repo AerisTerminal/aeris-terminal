@@ -566,7 +566,7 @@ fn receive_and_apply_event(
         &PushedEventContext {
             consumer_id: endpoint.consumer_id,
             active_generation: endpoint.active_generation,
-            realtime: interval_supports_realtime(record.interval),
+            realtime: true,
             instrument: &record.product,
         },
         &mut endpoint.publication,
@@ -801,8 +801,8 @@ fn apply_series_state(
         SeriesLoadState::Ready if !published => {
             Err("engine marked history ready without a covering snapshot".to_string())
         }
-        // Provider history is installed. A calendar series never goes live, so
-        // this is the only readiness it will ever report.
+        // Provider history is installed; the trade handoff may still be
+        // connecting before it promotes the series to live.
         SeriesLoadState::Ready => {
             announce(
                 ChartState::Ready,
@@ -1196,7 +1196,13 @@ fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String>
         .as_ref()
         .ok_or_else(|| "engine update has no series identity".to_string())?;
     if series.provider != "coinbase"
-        || SeriesCadence::try_from(series.cadence) != Ok(SeriesCadence::FixedSeconds)
+        || series.cadence_value == 0
+        || !matches!(
+            SeriesCadence::try_from(series.cadence),
+            Ok(SeriesCadence::FixedSeconds
+                | SeriesCadence::CalendarWeeks
+                | SeriesCadence::CalendarMonths)
+        )
     {
         return Err("engine Coinbase update identity is invalid".to_string());
     }
@@ -1351,25 +1357,22 @@ fn replay_bar_definition(series: &SeriesKey) -> Result<BarDefinition, String> {
 }
 
 fn series_supports_realtime(series: &SeriesKey) -> bool {
-    SeriesCadence::try_from(series.cadence) == Ok(SeriesCadence::FixedSeconds)
+    series.cadence_value > 0
+        && matches!(
+            SeriesCadence::try_from(series.cadence),
+            Ok(SeriesCadence::FixedSeconds
+                | SeriesCadence::CalendarWeeks
+                | SeriesCadence::CalendarMonths)
+        )
 }
 
-const fn interval_supports_realtime(interval: ChartInterval) -> bool {
-    !matches!(interval, ChartInterval::Week1 | ChartInterval::Month1)
-}
-
-const fn snapshot_connection_state(interval: ChartInterval) -> (FeedConnectionState, &'static str) {
-    if interval_supports_realtime(interval) {
-        (
-            FeedConnectionState::Discovering,
-            "Historical bars are visible; Coinbase realtime is connecting",
-        )
-    } else {
-        (
-            FeedConnectionState::Disconnected,
-            "Completed Coinbase history; current calendar bucket is not live",
-        )
-    }
+const fn snapshot_connection_state(
+    _interval: ChartInterval,
+) -> (FeedConnectionState, &'static str) {
+    (
+        FeedConnectionState::Discovering,
+        "Historical bars are visible; Coinbase realtime is connecting",
+    )
 }
 
 fn default_coinbase_product(product_id: &str) -> InstallProviderInstrument {
@@ -2174,13 +2177,11 @@ mod tests {
     }
 
     #[test]
-    fn calendar_history_state_never_claims_realtime_connection() {
+    fn calendar_snapshot_connects_to_the_shared_realtime_session() {
         for interval in [ChartInterval::Week1, ChartInterval::Month1] {
             let (state, message) = snapshot_connection_state(interval);
-            assert_eq!(state, FeedConnectionState::Disconnected);
-            assert!(message.contains("Completed Coinbase history"));
-            assert!(message.contains("current calendar bucket is not live"));
-            assert!(!message.contains("is current"));
+            assert_eq!(state, FeedConnectionState::Discovering);
+            assert!(message.contains("realtime is connecting"));
         }
 
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
@@ -2191,15 +2192,21 @@ mod tests {
                 generation: 1,
                 detail: None,
             },
-            false,
+            true,
             &sender,
         )
-        .expect("history-only provider state is ignored");
-        assert!(receiver.drain().0.is_empty());
+        .expect("calendar provider state is forwarded");
+        assert!(matches!(
+            receiver.drain().0.as_slice(),
+            [MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Discovering,
+                ..
+            }]
+        ));
     }
 
     #[test]
-    fn calendar_history_rejects_an_engine_live_claim() {
+    fn calendar_series_accepts_the_engine_live_handoff() {
         let product = default_coinbase_product("BTC-USD");
         let series = series_key(&product, ChartInterval::Week1).expect("calendar series");
         let snapshot = SeriesSnapshot {
@@ -2230,35 +2237,34 @@ mod tests {
             &PushedEventContext {
                 consumer_id: 1,
                 active_generation: 7,
-                realtime: false,
+                realtime: true,
                 instrument: &default_coinbase_product("BTC-USD"),
             },
             &mut publication,
             &mut live,
             &sender,
         )
-        .expect("completed calendar snapshot applies");
+        .expect("calendar snapshot applies");
 
-        assert_eq!(
-            apply_pushed_event(
-                envelope::Payload::SeriesState(SeriesState {
-                    consumer_id: 1,
-                    generation: 7,
-                    state: SeriesLoadState::Live as i32,
-                    ..SeriesState::default()
-                }),
-                &PushedEventContext {
-                    consumer_id: 1,
-                    active_generation: 7,
-                    realtime: false,
-                    instrument: &default_coinbase_product("BTC-USD"),
-                },
-                &mut publication,
-                &mut live,
-                &sender,
-            ),
-            Err("engine marked a Coinbase calendar-history series live".to_string())
-        );
+        apply_pushed_event(
+            envelope::Payload::SeriesState(SeriesState {
+                consumer_id: 1,
+                generation: 7,
+                state: SeriesLoadState::Live as i32,
+                ..SeriesState::default()
+            }),
+            &PushedEventContext {
+                consumer_id: 1,
+                active_generation: 7,
+                realtime: true,
+                instrument: &default_coinbase_product("BTC-USD"),
+            },
+            &mut publication,
+            &mut live,
+            &sender,
+        )
+        .expect("calendar live state applies");
+        assert!(live);
     }
 
     #[test]

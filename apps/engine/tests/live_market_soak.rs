@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use axiusflow_coinbase_market_adapter::CoinbaseInterval;
 use axiusflow_engine::MarketService;
 use axiusflow_engine_protocol::{
     InstallProviderInstrument, MarketBar, SearchProviderInstruments, SelectProviderInstrument,
@@ -68,9 +69,9 @@ const HISTORY_DEPTH: usize = 200;
 
 /// Intervals the chart cycles through. All are realtime-capable.
 ///
-/// 3600 is here because it is the one an interim derived series covers most
-/// thinly — a few hundred minute bars aggregate to only a handful of hours.
-const TIMEFRAMES: [u32; 4] = [60, 300, 900, 3_600];
+/// 12h is early in the cycle because long buckets previously exposed a dead
+/// history/live handoff after a timeframe switch.
+const TIMEFRAMES: [u32; 5] = [60, 43_200, 300, 900, 3_600];
 const SYMBOLS: [&str; 2] = ["BTC-USD", "ETH-USD"];
 
 /// What the consumer has reconstructed for one demand generation.
@@ -667,6 +668,91 @@ fn live_coinbase_streams_across_timeframe_and_symbol_switches() {
         symbols: &SYMBOLS,
         timeframes: &TIMEFRAMES,
     });
+}
+
+#[test]
+#[ignore = "drives the live Coinbase monthly history/live handoff"]
+fn live_coinbase_monthly_reaches_a_forming_update() {
+    let gate = Gate {
+        provider: "coinbase",
+        symbols: &SYMBOLS,
+        timeframes: &TIMEFRAMES,
+    };
+    let service = start_gate_service(&gate);
+    let instrument = install_symbol(&service, "coinbase", "BTC-USD", 1);
+    let generation = 1;
+    service
+        .set_demand(
+            CLIENT_ID,
+            CONSUMER_ID,
+            generation,
+            &SeriesKey {
+                provider: "coinbase".to_string(),
+                instrument_id: instrument.instrument_id,
+                cadence_value: 1,
+                definition_revision: 1,
+                entitlement_id: instrument.entitlement_id,
+                cadence: SeriesCadence::CalendarMonths as i32,
+            },
+        )
+        .expect("monthly demand is accepted");
+
+    let interval = CoinbaseInterval::Month1;
+    let deadline = Instant::now() + HISTORY_DEADLINE;
+    let mut snapshot = false;
+    let mut live = false;
+    let mut update = false;
+    while Instant::now() < deadline && !(snapshot && live && update) {
+        if let Some(event) = service
+            .poll_event(CLIENT_ID, CONSUMER_ID)
+            .expect("monthly market poll succeeds")
+        {
+            if let Some(failure) = terminal_failure(&event) {
+                panic!("monthly stream failed terminally: {failure}");
+            }
+            match event {
+                envelope::Payload::SeriesSnapshot(series) if series.generation == generation => {
+                    for pair in series.bars.windows(2) {
+                        assert_eq!(pair[0].source_sequence + 1, pair[1].source_sequence);
+                        assert_eq!(
+                            interval
+                                .shift_bucket(pair[0].exchange_timestamp_seconds, 1)
+                                .expect("monthly bucket advances"),
+                            pair[1].exchange_timestamp_seconds
+                        );
+                    }
+                    snapshot = !series.bars.is_empty();
+                }
+                envelope::Payload::SeriesState(state)
+                    if state.generation == generation
+                        && state.state == SeriesLoadState::Live as i32 =>
+                {
+                    live = true;
+                }
+                envelope::Payload::SeriesUpdate(tail) if tail.generation == generation => {
+                    let bar = tail.bar.expect("monthly update carries a bar");
+                    assert_eq!(
+                        interval
+                            .bucket_start(bar.exchange_timestamp_seconds)
+                            .expect("monthly update is bucketed"),
+                        bar.exchange_timestamp_seconds
+                    );
+                    update = true;
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        snapshot,
+        "monthly demand never produced a covering snapshot"
+    );
+    assert!(live, "monthly demand never reached the live state");
+    assert!(update, "monthly demand never produced a forming update");
+    service
+        .shutdown(Duration::from_secs(10))
+        .expect("engine shuts down");
 }
 
 /// The Rithmic counterpart of the Coinbase gate.

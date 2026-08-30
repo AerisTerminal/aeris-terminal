@@ -1,6 +1,6 @@
-//! Bounded deterministic fixed-interval aggregation for Coinbase spot trades.
+//! Bounded deterministic interval aggregation for Coinbase spot trades.
 
-use crate::{CanonicalTrade, FixedPointValue};
+use crate::{CanonicalTrade, CoinbaseInterval, FixedPointValue};
 use axiusflow_market_data::MarketBar;
 use core::fmt;
 use std::{
@@ -47,7 +47,7 @@ pub struct CoinbaseBarAggregatorConfig {
     instrument_id: String,
     price_scale: u8,
     quantity_scale: u8,
-    interval_seconds: NonZeroU32,
+    interval: CoinbaseInterval,
     maximum_history_bars: NonZeroUsize,
 }
 
@@ -85,6 +85,32 @@ impl CoinbaseBarAggregatorConfig {
         interval_seconds: NonZeroU32,
         maximum_history_bars: NonZeroUsize,
     ) -> Result<Self, CoinbaseBarAggregationError> {
+        let interval = CoinbaseInterval::ALL
+            .into_iter()
+            .find(|candidate| candidate.fixed_seconds() == Some(i64::from(interval_seconds.get())))
+            .ok_or(CoinbaseBarAggregationError::InvalidConfiguration)?;
+        Self::try_new_period(
+            product_id,
+            price_scale,
+            quantity_scale,
+            interval,
+            maximum_history_bars,
+        )
+    }
+
+    /// Creates a validated Coinbase spot aggregation profile for one interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed identity, unsupported scales, or an
+    /// interval outside the live aggregation range.
+    pub fn try_new_period(
+        product_id: impl Into<String>,
+        price_scale: u8,
+        quantity_scale: u8,
+        interval: CoinbaseInterval,
+        maximum_history_bars: NonZeroUsize,
+    ) -> Result<Self, CoinbaseBarAggregationError> {
         let product_id = product_id.into();
         let Some((base, quote)) = product_id.split_once('-') else {
             return Err(CoinbaseBarAggregationError::InvalidConfiguration);
@@ -97,10 +123,9 @@ impl CoinbaseBarAggregatorConfig {
             })
             || price_scale > MAXIMUM_DECIMAL_SCALE
             || quantity_scale > MAXIMUM_DECIMAL_SCALE
-            || !interval_seconds
-                .get()
-                .is_multiple_of(ONE_MINUTE_SECONDS_U32)
-            || interval_seconds.get() > MAXIMUM_FIXED_INTERVAL_SECONDS
+            || interval
+                .fixed_seconds()
+                .is_some_and(|seconds| seconds > i64::from(MAXIMUM_FIXED_INTERVAL_SECONDS))
             || maximum_history_bars.get() > MAXIMUM_AGGREGATED_HISTORY_BARS
         {
             return Err(CoinbaseBarAggregationError::InvalidConfiguration);
@@ -111,7 +136,7 @@ impl CoinbaseBarAggregatorConfig {
             product_id,
             price_scale,
             quantity_scale,
-            interval_seconds,
+            interval,
             maximum_history_bars,
         })
     }
@@ -140,14 +165,14 @@ impl CoinbaseBarAggregatorConfig {
         self.quantity_scale
     }
 
-    /// Fixed UTC-aligned aggregation interval.
+    /// UTC-aligned aggregation interval.
     #[must_use]
-    pub const fn interval_seconds(&self) -> NonZeroU32 {
-        self.interval_seconds
+    pub const fn interval(&self) -> CoinbaseInterval {
+        self.interval
     }
 }
 
-/// Deterministic, bounded fixed-interval bar aggregator for one Coinbase product.
+/// Deterministic, bounded interval bar aggregator for one Coinbase product.
 pub struct CoinbaseBarAggregator {
     config: CoinbaseBarAggregatorConfig,
     in_flight: Option<InFlightBar>,
@@ -171,8 +196,8 @@ impl CoinbaseBarAggregator {
 
     /// Returns the canonical source sequence for one aligned bucket.
     ///
-    /// Identical to [`CoinbaseInterval::bucket_sequence`] for the fixed intervals
-    /// this aggregator accepts: bucket `n` since the epoch is sequence `n + 1`.
+    /// Identical to [`CoinbaseInterval::bucket_sequence`]: bucket `n` since the
+    /// interval epoch is sequence `n + 1`.
     /// Because identity is derived from the bucket and never from a position in
     /// the retained deque, a reseed after a history repair produces exactly the
     /// sequences the engine already published.
@@ -180,14 +205,20 @@ impl CoinbaseBarAggregator {
         &self,
         bucket_unix_seconds: i64,
     ) -> Result<u64, CoinbaseBarAggregationError> {
-        let interval = i64::from(self.config.interval_seconds.get());
-        if bucket_unix_seconds < 0 || bucket_unix_seconds.rem_euclid(interval) != 0 {
+        if bucket_unix_seconds < 0
+            || self
+                .config
+                .interval
+                .bucket_start(bucket_unix_seconds)
+                .map_err(|_| CoinbaseBarAggregationError::NumericOverflow)?
+                != bucket_unix_seconds
+        {
             return Err(CoinbaseBarAggregationError::InvalidBar);
         }
-        u64::try_from(bucket_unix_seconds.div_euclid(interval))
-            .ok()
-            .and_then(|index| index.checked_add(1))
-            .ok_or(CoinbaseBarAggregationError::SequenceOverflow)
+        self.config
+            .interval
+            .bucket_sequence(bucket_unix_seconds)
+            .map_err(|_| CoinbaseBarAggregationError::SequenceOverflow)
     }
 
     /// Product identity accepted by this aggregator.
@@ -342,11 +373,12 @@ impl CoinbaseBarAggregator {
         if price <= 0 || size <= 0 {
             return Err(CoinbaseBarAggregationError::InvalidBar);
         }
-        let interval_seconds = i64::from(self.config.interval_seconds.get());
-        let interval_nanos = interval_seconds
-            .checked_mul(1_000_000_000)
-            .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
-        let bucket = trade.trade_time_unix_nanos.div_euclid(interval_nanos) * interval_seconds;
+        let trade_seconds = trade.trade_time_unix_nanos.div_euclid(1_000_000_000);
+        let bucket = self
+            .config
+            .interval
+            .bucket_start(trade_seconds)
+            .map_err(|_| CoinbaseBarAggregationError::NumericOverflow)?;
         self.activity_started = true;
         let mut completed = None;
         match &mut self.in_flight {
@@ -461,16 +493,18 @@ impl CoinbaseBarAggregator {
         bucket: i64,
         close: i64,
     ) -> Result<(), CoinbaseBarAggregationError> {
-        let interval = i64::from(self.config.interval_seconds.get());
-        let empty = bucket
-            .checked_sub(previous_bucket)
-            .ok_or(CoinbaseBarAggregationError::NumericOverflow)?
-            .div_euclid(interval)
+        let empty = self
+            .config
+            .interval
+            .buckets_between(previous_bucket, bucket)
+            .map_err(|_| CoinbaseBarAggregationError::NumericOverflow)?
             .saturating_sub(1);
         let retained = i64::try_from(self.config.maximum_history_bars.get()).unwrap_or(i64::MAX);
-        let mut empty_bucket = bucket
-            .checked_sub(empty.min(retained).saturating_mul(interval))
-            .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
+        let mut empty_bucket = self
+            .config
+            .interval
+            .shift_bucket(bucket, -empty.min(retained))
+            .map_err(|_| CoinbaseBarAggregationError::NumericOverflow)?;
         while empty_bucket < bucket {
             let filled = MarketBar {
                 source_sequence: self.bucket_sequence(empty_bucket)?,
@@ -491,9 +525,11 @@ impl CoinbaseBarAggregator {
             if self.history.len() > self.config.maximum_history_bars.get() {
                 self.history.pop_front();
             }
-            empty_bucket = empty_bucket
-                .checked_add(interval)
-                .ok_or(CoinbaseBarAggregationError::NumericOverflow)?;
+            empty_bucket = self
+                .config
+                .interval
+                .shift_bucket(empty_bucket, 1)
+                .map_err(|_| CoinbaseBarAggregationError::NumericOverflow)?;
         }
         Ok(())
     }
@@ -601,7 +637,7 @@ mod tests {
         CoinbaseBarAggregationError, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
         ONE_MINUTE_NANOS, ONE_MINUTE_SECONDS,
     };
-    use crate::{CanonicalTrade, FixedPointValue};
+    use crate::{CanonicalTrade, CoinbaseInterval, FixedPointValue};
     use axiusflow_market_data::MarketBar;
     use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -636,6 +672,35 @@ mod tests {
             source_sequence: u64::try_from(minute + 1).expect("positive fixture sequence"),
             exchange_timestamp_seconds: minute * ONE_MINUTE_SECONDS,
             exchange_timestamp_unix_nanos: minute * ONE_MINUTE_SECONDS * 1_000_000_000,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 100_000_000,
+        }
+    }
+
+    fn trade_at(timestamp_seconds: i64, price: &str, size: &str) -> CanonicalTrade {
+        CanonicalTrade {
+            product_id: "BTC-USD".to_string(),
+            trade_id: format!("t-{timestamp_seconds}-{price}"),
+            price: FixedPointValue::parse(price).expect("price parses"),
+            size: FixedPointValue::parse(size).expect("size parses"),
+            maker_side_buy: true,
+            trade_time_unix_nanos: timestamp_seconds * 1_000_000_000,
+            provider_timestamp_unix_nanos: timestamp_seconds * 1_000_000_000,
+            sequence_num: 1,
+            canonical_sequence: 1,
+        }
+    }
+
+    fn interval_bar(interval: CoinbaseInterval, timestamp_seconds: i64, price: i64) -> MarketBar {
+        MarketBar {
+            source_sequence: interval
+                .bucket_sequence(timestamp_seconds)
+                .expect("fixture bucket has a sequence"),
+            exchange_timestamp_seconds: timestamp_seconds,
+            exchange_timestamp_unix_nanos: timestamp_seconds * 1_000_000_000,
             open: price,
             high: price,
             low: price,
@@ -699,6 +764,54 @@ mod tests {
         assert_eq!(completed.source_sequence, 23);
         assert_eq!(completed.open, 10_200);
         assert_eq!(completed.close, 10_300);
+    }
+
+    #[test]
+    fn calendar_month_uses_the_same_history_live_handoff() {
+        const JANUARY_2024: i64 = 1_704_067_200;
+        const FEBRUARY_2024: i64 = 1_706_745_600;
+        const MARCH_2024: i64 = 1_709_251_200;
+        let interval = CoinbaseInterval::Month1;
+        let mut aggregator = CoinbaseBarAggregator::new(
+            CoinbaseBarAggregatorConfig::try_new_period(
+                "BTC-USD",
+                2,
+                8,
+                interval,
+                NonZeroUsize::new(4).expect("nonzero retention"),
+            )
+            .expect("monthly config validates"),
+        );
+        aggregator
+            .seed_history(&[interval_bar(interval, JANUARY_2024, 10_000)])
+            .expect("monthly history seeds");
+        aggregator
+            .apply_trade(&trade_at(FEBRUARY_2024 + 14 * 86_400, "102.00", "0.5"))
+            .expect("February bucket opens");
+        aggregator
+            .apply_trade(&trade_at(FEBRUARY_2024 + 20 * 86_400, "103.00", "0.5"))
+            .expect("February bucket revises");
+        let completed = aggregator
+            .apply_trade(&trade_at(MARCH_2024 + 86_400, "104.00", "0.5"))
+            .expect("March bucket opens")
+            .expect("February bucket completes");
+
+        assert_eq!(completed.exchange_timestamp_seconds, FEBRUARY_2024);
+        assert_eq!(
+            completed.source_sequence,
+            interval
+                .bucket_sequence(FEBRUARY_2024)
+                .expect("February sequence")
+        );
+        assert_eq!(completed.open, 10_200);
+        assert_eq!(completed.close, 10_300);
+        assert_eq!(
+            aggregator
+                .in_flight()
+                .expect("March is forming")
+                .exchange_timestamp_seconds,
+            MARCH_2024
+        );
     }
 
     #[test]
