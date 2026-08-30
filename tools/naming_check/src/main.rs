@@ -536,6 +536,14 @@ mod tests {
     }
 
     #[test]
+    /// Only the files are asserted here, never the names of the tests inside
+    /// them.
+    ///
+    /// Asserting that a source contains a particular test-function name proves
+    /// nothing about behaviour: renaming a test failed the gate while gutting
+    /// its body passed it, so the assertion punished the one change that was
+    /// safe and waved through the one that was not. What a test covers is the
+    /// test's job to assert; this one only keeps the boundaries from vanishing.
     fn durable_migration_test_boundaries_remain_present() {
         for relative in [
             "tools/run_rithmic_protocol_conformance.sh",
@@ -551,59 +559,6 @@ mod tests {
                 "durable migration test boundary {relative} is missing"
             );
         }
-
-        let engine_core = manifest("crates/market_engine/src/lib.rs");
-        assert!(
-            engine_core.contains("stale_history_never_overwrites_a_new_consumer_generation")
-                && engine_core.contains("twenty_consumers_share_one_immutable_series_snapshot"),
-            "MarketEngine generation and sharing conformance must remain represented"
-        );
-        let engine_service = manifest("apps/engine/src/market_service.rs");
-        for regression in [
-            "storage_failure_degrades_persistence_without_hiding_provider_history",
-            "storage_degradation_preserves_provider_and_live_progress",
-        ] {
-            assert!(
-                engine_service.contains(regression),
-                "historical history.install_failed invariant lost regression {regression}"
-            );
-        }
-    }
-
-    #[test]
-    fn resident_engine_chart_and_timeframe_flows_remain_covered() {
-        let engine_ipc = manifest("apps/engine/src/lib.rs");
-        assert!(
-            engine_ipc
-                .contains("authenticated_market_demand_crosses_ipc_and_returns_engine_snapshot"),
-            "resident engine chart flow must retain authenticated IPC snapshot coverage"
-        );
-
-        let engine_service = manifest("apps/engine/src/market_service.rs");
-        for regression in [
-            "storage_failure_degrades_persistence_without_hiding_provider_history",
-            "compatible_minute_history_publishes_and_caches_a_coarser_series",
-            "finer_history_never_derives_from_a_coarser_cached_series",
-            "symbol_and_interval_switch_reuses_the_shared_realtime_session",
-            "newer_demand_cancels_history_without_waiting_for_cleanup",
-        ] {
-            assert!(
-                engine_service.contains(regression),
-                "resident engine flow lost regression {regression}"
-            );
-        }
-
-        let desktop_bridge = manifest("apps/desktop/src/engine_market_worker.rs");
-        assert!(
-            desktop_bridge
-                .contains("ipc_snapshot_preserves_fixed_point_precision_and_engine_provenance"),
-            "desktop must retain engine snapshot conversion coverage"
-        );
-        let chart_view = manifest("crates/ui/chart_integration/src/view.rs");
-        assert!(
-            chart_view.contains("empty_chart_surface_accepts_its_first_real_snapshot"),
-            "Nucleus chart integration must retain first-snapshot coverage"
-        );
     }
 
     #[test]

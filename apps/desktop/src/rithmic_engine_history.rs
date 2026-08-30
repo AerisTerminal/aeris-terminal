@@ -18,6 +18,7 @@ use axiusflow_market_data::{
 };
 use axiusflow_terminal_ui::{DomFrame, DomSelection, ReadOnlyDom};
 use std::{
+    collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
@@ -34,6 +35,8 @@ use axiusflow_desktop::market_worker::{MarketWorkerBootstrap, MarketWorkerMessag
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_DOM_LEVELS: usize = 20;
 const HISTORY_COMMAND_CAPACITY: usize = 2;
+/// Live bars this task may hold for a chart that has not drained them yet.
+const LIVE_RESULT_CAPACITY: usize = 256;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_TIMEOUT: Duration = Duration::from_secs(35);
 const ENGINE_WORKSPACE_ID: u64 = 1;
@@ -67,10 +70,17 @@ struct LatestHistoryResult {
     value: Mutex<PendingHistoryResults>,
 }
 
+/// Bounded per-chart outbox for the Rithmic engine history task.
+///
+/// `live` is a queue, not a slot. Bar identity is a strict sequence, so
+/// replacing a pending update that carries a different bar loses that bar, and
+/// the chart's replay bridge reads the gap as corruption it can only clear with
+/// a covering snapshot. Successive revisions of one open period carry the same
+/// sequence and do supersede each other.
 #[derive(Default)]
 struct PendingHistoryResults {
     history: Option<RithmicHistoryResult>,
-    live: Option<RithmicHistoryResult>,
+    live: VecDeque<RithmicHistoryResult>,
 }
 
 #[derive(Default)]
@@ -95,16 +105,34 @@ impl LatestDomFrame {
 }
 
 impl LatestHistoryResult {
-    fn publish(&self, result: RithmicHistoryResult) {
+    /// Queues one result. Returns `false` when a live bar could not be queued
+    /// without losing another, which the caller resolves by reloading history.
+    fn publish(&self, result: RithmicHistoryResult) -> bool {
         let mut pending = self
             .value
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(&result.result, Ok(RithmicSeriesPublication::Live(_))) {
-            pending.live = Some(result);
-        } else {
+        let Some(sequence) = live_publication_sequence(&result) else {
+            // A covering history bootstrap supersedes every live bar queued
+            // behind it, so the queue starts again from it.
+            pending.live.clear();
             pending.history = Some(result);
+            return true;
+        };
+        if let Some(queued) = pending
+            .live
+            .iter_mut()
+            .find(|queued| live_publication_sequence(queued) == Some(sequence))
+        {
+            *queued = result;
+            return true;
         }
+        if pending.live.len() >= LIVE_RESULT_CAPACITY {
+            pending.live.clear();
+            return false;
+        }
+        pending.live.push_back(result);
+        true
     }
 
     fn take(&self) -> Option<RithmicHistoryResult> {
@@ -112,7 +140,18 @@ impl LatestHistoryResult {
             .value
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pending.history.take().or_else(|| pending.live.take())
+        pending.history.take().or_else(|| pending.live.pop_front())
+    }
+}
+
+/// The bar sequence carried by one live publication, if this is one.
+fn live_publication_sequence(result: &RithmicHistoryResult) -> Option<u64> {
+    match &result.result {
+        Ok(RithmicSeriesPublication::Live(update)) => match update.as_ref() {
+            ReplayStreamUpdate::Tail(tail) => Some(tail.item().value().source_sequence),
+            ReplayStreamUpdate::Snapshot(_) | ReplayStreamUpdate::Delta(_) => None,
+        },
+        _ => None,
     }
 }
 
@@ -267,6 +306,7 @@ impl EngineHistorySession {
         &mut self,
         request: &HistoryFetchRequest,
         dom: &LatestDomFrame,
+        results: &LatestHistoryResult,
     ) -> Result<MarketWorkerBootstrap, String> {
         let series = engine_series_key(request)?;
         self.client
@@ -292,7 +332,17 @@ impl EngineHistorySession {
             };
             match update {
                 EngineUpdate::History(bootstrap) => return Ok(*bootstrap),
-                EngineUpdate::Live(_) => {}
+                // A bar that arrives while the covering snapshot is still on its
+                // way is queued behind it, not dropped: `take` hands the
+                // bootstrap over first, so the chart still applies them in
+                // order, and the bar is not silently lost.
+                EngineUpdate::Live(update) => {
+                    publish_history_result(
+                        results,
+                        request,
+                        Ok(RithmicSeriesPublication::Live(update)),
+                    );
+                }
                 EngineUpdate::Dom(frame) => dom.publish(frame),
             }
         }
@@ -429,10 +479,10 @@ fn run_history_worker(
         match commands.recv_timeout(POLL_INTERVAL) {
             Ok(HistoryCommand::Fetch(request)) => {
                 let result = if let Some(active) = session.as_mut() {
-                    active.fetch(&request, dom)
+                    active.fetch(&request, dom, results)
                 } else {
                     EngineHistorySession::connect().and_then(|mut active| {
-                        let result = active.fetch(&request, dom);
+                        let result = active.fetch(&request, dom, results);
                         session = Some(active);
                         result
                     })
@@ -478,11 +528,26 @@ fn run_history_worker(
                             Ok(RithmicSeriesPublication::History(bootstrap)),
                         );
                     }
-                    Ok(Some(EngineUpdate::Live(update))) => publish_history_result(
-                        results,
-                        request,
-                        Ok(RithmicSeriesPublication::Live(update)),
-                    ),
+                    Ok(Some(EngineUpdate::Live(update))) => {
+                        if !publish_history_result(
+                            results,
+                            request,
+                            Ok(RithmicSeriesPublication::Live(update)),
+                        ) {
+                            // The chart has not drained a bounded run of bars,
+                            // so what is still queued can no longer be delivered
+                            // without a gap. Reloading covering history is the
+                            // recovery; dropping a bar is not.
+                            publish_history_result(
+                                results,
+                                request,
+                                Err("Rithmic live stream outran the chart;                                      covering history is reloading"
+                                    .to_string()),
+                            );
+                            active_request = None;
+                            session = None;
+                        }
+                    }
                     Ok(Some(EngineUpdate::Dom(frame))) => dom.publish(frame),
                     Ok(None) => {}
                     Err(error) => {
@@ -497,16 +562,17 @@ fn run_history_worker(
     }
 }
 
+/// Queues one result, reporting whether it displaced a bar the chart still needs.
 fn publish_history_result(
     results: &LatestHistoryResult,
     request: &HistoryFetchRequest,
     result: Result<RithmicSeriesPublication, String>,
-) {
+) -> bool {
     results.publish(RithmicHistoryResult {
         selection_generation: request.selection_generation,
         series_generation: request.series_generation,
         result,
-    });
+    })
 }
 
 pub(crate) fn validate_engine_instrument(
@@ -1082,6 +1148,70 @@ mod tests {
                 .as_ref()
                 .map(|level| level.relative_size_bps),
             Some(5_714)
+        );
+    }
+
+    /// Distinct bars queue; revisions of one bar supersede each other.
+    ///
+    /// A single latest-value slot here dropped a completed bar whenever a second
+    /// one arrived before the chart drained the first, and the replay bridge read
+    /// the resulting gap as corruption it could only clear with a resnapshot.
+    #[test]
+    fn pending_live_results_keep_distinct_bars_and_report_overflow() {
+        let request = request(RithmicSeries::from(ChartInterval::Minute1));
+        let results = LatestHistoryResult::default();
+        let live = |sequence: u64, close: i64| RithmicHistoryResult {
+            selection_generation: request.selection_generation,
+            series_generation: request.series_generation,
+            result: Ok(RithmicSeriesPublication::Live(Box::new(
+                ReplayStreamUpdate::Tail(
+                    tail_from_update(
+                        &request,
+                        &SeriesUpdate {
+                            consumer_id: 5,
+                            generation: 3,
+                            series: Some(engine_series_key(&request).expect("series key")),
+                            provider_generation: 8,
+                            bar: Some(IpcMarketBar {
+                                source_sequence: sequence,
+                                exchange_timestamp_seconds: 1_700_000_000
+                                    + i64::try_from(sequence).unwrap_or(0) * 60,
+                                exchange_timestamp_unix_nanos: (1_700_000_000
+                                    + i64::try_from(sequence).unwrap_or(0) * 60)
+                                    * 1_000_000_000,
+                                open: 10_050,
+                                high: 10_500,
+                                low: 10_000,
+                                close,
+                                volume: 5,
+                            }),
+                            forming: true,
+                            publication_generation: sequence,
+                        },
+                    )
+                    .expect("tail converts"),
+                ),
+            ))),
+        };
+
+        assert!(results.publish(live(2, 10_100)));
+        assert!(results.publish(live(3, 10_200)));
+        // The same bar again is a revision, so it replaces rather than queues.
+        assert!(results.publish(live(3, 10_250)));
+
+        let first = results.take().expect("the first bar is delivered");
+        assert_eq!(live_publication_sequence(&first), Some(2));
+        let second = results.take().expect("the second bar is delivered");
+        assert_eq!(live_publication_sequence(&second), Some(3));
+        assert!(results.take().is_none(), "no third bar was ever queued");
+
+        // Falling further behind than the queue holds is reported, never hidden.
+        for sequence in 0..u64::try_from(LIVE_RESULT_CAPACITY).expect("capacity fits") {
+            assert!(results.publish(live(sequence + 10, 10_300)));
+        }
+        assert!(
+            !results.publish(live(10_000, 10_400)),
+            "an overflow has to be reported so covering history can be reloaded"
         );
     }
 

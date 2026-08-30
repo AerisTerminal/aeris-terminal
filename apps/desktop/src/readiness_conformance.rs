@@ -1,4 +1,11 @@
 //! Headless desktop burst and frame-conflation evidence.
+//!
+//! Everything measured here is **synthetic**: a fixture worker drives a real
+//! mailbox, frame gate, and client model, with no engine process, no IPC, and no
+//! provider. That makes it a bounds-and-conflation check, not evidence that the
+//! desktop works against a venue. The only thing that can say that is the live
+//! market gate, whose result this report carries verbatim — including
+//! [`LiveMarketGate::NotRun`], which is never reported as a pass.
 
 use crate::frame_poll_gate::FramePollGate;
 
@@ -29,6 +36,13 @@ use std::{
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const BURST_UPDATES: usize = 10_000;
+/// Where each live market gate records its own outcome, relative to the
+/// repository root. A gate is a separate, credentialed, network-bound run; a
+/// missing file means it did not run, which is not a pass.
+const LIVE_GATE_REPORTS: [&str; 2] = [
+    ".cache/evidence/live_market_gate_coinbase.json",
+    ".cache/evidence/live_market_gate_rithmic.json",
+];
 const MAXIMUM_WORKING_SET_GROWTH_BYTES: u64 = 64 * 1_024 * 1_024;
 const ENDURANCE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ENDURANCE_BURST_UPDATES: usize = 1_000;
@@ -36,10 +50,57 @@ const ENDURANCE_BURST_EVERY_FRAMES: u64 = 60;
 const ENDURANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_mins(1);
 const ENDURANCE_QUALIFICATION_DURATION: Duration = Duration::from_hours(8);
 
+/// What a conformance report is actually evidence of.
+///
+/// The four states are kept distinct because collapsing them is how a suite
+/// starts reporting green for work nobody ran. A deterministic pass says the
+/// bounds hold in a fixture; it says nothing about a venue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LiveMarketGate {
+    /// No live gate has recorded a result. Never a pass.
+    NotRun,
+    Passed,
+    Failed,
+}
+
+/// Reads what each live market gate recorded, and reports the worst of them.
+///
+/// A failure anywhere is a failure; a gate that has not run leaves the whole
+/// result "not run", because a provider nobody exercised cannot be reported as
+/// working on the strength of another one that was.
+fn live_market_gate() -> LiveMarketGate {
+    let mut combined = LiveMarketGate::Passed;
+    for report in LIVE_GATE_REPORTS {
+        match recorded_gate(Path::new(report)) {
+            LiveMarketGate::Failed => return LiveMarketGate::Failed,
+            LiveMarketGate::NotRun => combined = LiveMarketGate::NotRun,
+            LiveMarketGate::Passed => {}
+        }
+    }
+    combined
+}
+
+fn recorded_gate(path: &Path) -> LiveMarketGate {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return LiveMarketGate::NotRun;
+    };
+    if contents.contains("\"outcome\": \"passed\"") {
+        LiveMarketGate::Passed
+    } else if contents.contains("\"outcome\": \"failed\"") {
+        LiveMarketGate::Failed
+    } else {
+        LiveMarketGate::NotRun
+    }
+}
+
 #[derive(Serialize)]
 struct DesktopBurstEvidence {
     schema_version: u32,
     evidence_scope: &'static str,
+    /// What the live gate reported, carried through so a reader never has to
+    /// infer venue behaviour from a fixture run.
+    live_market_gate: LiveMarketGate,
     burst_updates: usize,
     mailbox_capacity: usize,
     retained_items: usize,
@@ -141,7 +202,11 @@ struct DesktopEnduranceEvidence {
     maximum_working_set_growth_bytes: u64,
     working_set_within_bound: bool,
     clean_stop: bool,
-    readiness_qualified: bool,
+    /// The synthetic bounds held for the full qualification window. This is a
+    /// statement about the mailbox, the frame gate, and the working set under a
+    /// fixture load — not about the desktop against a venue.
+    synthetic_bounds_qualified: bool,
+    live_market_gate: LiveMarketGate,
 }
 
 impl ProcessMemoryProbe {
@@ -227,11 +292,10 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     };
 
     let mut gate = FramePollGate::default();
-    let accepted_frame_requests_while_pending = (0..BURST_UPDATES)
-        .filter(|_| gate.try_schedule(true))
-        .count();
+    let accepted_frame_requests_while_pending =
+        (0..BURST_UPDATES).filter(|_| gate.try_schedule()).count();
     gate.complete();
-    let accepted_frame_requests_after_completion = usize::from(gate.try_schedule(true));
+    let accepted_frame_requests_after_completion = usize::from(gate.try_schedule());
 
     let bounded_latest_state_conflation = retained_items == 1
         && mailbox_capacity == capacity.get()
@@ -255,6 +319,7 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     Ok(DesktopBurstEvidence {
         schema_version: 4,
         evidence_scope: "deterministic_desktop_burst_and_frame_conflation",
+        live_market_gate: live_market_gate(),
         burst_updates: BURST_UPDATES,
         mailbox_capacity,
         retained_items,
@@ -539,13 +604,22 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     encoded.push(b'\n');
     fs::write(report_path, encoded)?;
     println!(
-        "desktop_burst_conformance=passed updates={} retained={} frame_schedules={} report={}",
+        "desktop_burst_conformance=deterministic_passed live_market_gate={} updates={} retained={} frame_schedules={} report={}",
+        live_gate_label(report.live_market_gate),
         report.burst_updates,
         report.retained_items,
         report.accepted_frame_requests_while_pending,
         report_path.display()
     );
     Ok(())
+}
+
+const fn live_gate_label(gate: LiveMarketGate) -> &'static str {
+    match gate {
+        LiveMarketGate::NotRun => "not_run",
+        LiveMarketGate::Passed => "passed",
+        LiveMarketGate::Failed => "failed",
+    }
 }
 
 fn validate_endurance_duration(duration: Duration) -> Result<(), Box<dyn Error>> {
@@ -563,14 +637,14 @@ fn endurance_evidence(
     duration: Duration,
     snapshot: &EnduranceEvidenceSnapshot<'_>,
 ) -> DesktopEnduranceEvidence {
-    let readiness_qualified = completion_state == EnduranceCompletionState::Completed
+    let synthetic_bounds_qualified = completion_state == EnduranceCompletionState::Completed
         && duration == ENDURANCE_QUALIFICATION_DURATION
         && snapshot.elapsed >= ENDURANCE_QUALIFICATION_DURATION
         && snapshot.working_set_within_bound
         && snapshot.clean_stop;
     DesktopEnduranceEvidence {
         schema_version: 2,
-        evidence_scope: "headless_desktop_continuous_endurance",
+        evidence_scope: "synthetic_headless_desktop_continuous_endurance",
         completion_state,
         checkpoint_sequence,
         checkpoint_unix_milliseconds: SystemTime::now()
@@ -592,7 +666,8 @@ fn endurance_evidence(
         maximum_working_set_growth_bytes: MAXIMUM_WORKING_SET_GROWTH_BYTES,
         working_set_within_bound: snapshot.working_set_within_bound,
         clean_stop: snapshot.clean_stop,
-        readiness_qualified,
+        synthetic_bounds_qualified,
+        live_market_gate: live_market_gate(),
     }
 }
 
@@ -646,7 +721,7 @@ fn run_endurance_frame(
         counters.updates_published = counters.updates_published.saturating_add(1);
     }
     counters.mailbox_high_water_items = counters.mailbox_high_water_items.max(sender.occupancy().0);
-    if !gate.try_schedule(true) {
+    if !gate.try_schedule() {
         return Err("desktop endurance frame gate rejected an idle frame".into());
     }
     let (messages, disconnected) = receiver.drain();
@@ -782,8 +857,9 @@ pub(crate) fn run_endurance(report_path: &Path, duration: Duration) -> Result<()
     )?;
     write_endurance_evidence_atomically(report_path, &report)?;
     println!(
-        "desktop_endurance=completed readiness_qualified={} seconds={} frames={} updates={} memory_high_water={} report={}",
-        report.readiness_qualified,
+        "desktop_endurance=synthetic_completed synthetic_bounds_qualified={} live_market_gate={} seconds={} frames={} updates={} memory_high_water={} report={}",
+        report.synthetic_bounds_qualified,
+        live_gate_label(report.live_market_gate),
         report.requested_duration_seconds,
         report.frame_cycles,
         report.updates_published,
@@ -872,13 +948,15 @@ mod tests {
     }
 
     #[test]
-    fn frame_gate_accepts_one_request_until_completion() {
+    fn frame_gate_coalesces_requests_without_consulting_window_focus() {
+        // The gate must never be the reason a visible chart stops draining its
+        // feed. It takes no focus argument precisely so that polling cannot be
+        // switched off by the trader looking at another window.
         let mut gate = FramePollGate::default();
-        assert!(!gate.try_schedule(false));
-        assert!(gate.try_schedule(true));
-        assert!(!gate.try_schedule(true));
+        assert!(gate.try_schedule());
+        assert!(!gate.try_schedule());
         gate.complete();
-        assert!(gate.try_schedule(true));
+        assert!(gate.try_schedule());
     }
 
     #[test]
@@ -981,7 +1059,7 @@ mod tests {
             evidence.completion_state,
             EnduranceCompletionState::Completed
         );
-        assert!(!evidence.readiness_qualified);
+        assert!(!evidence.synthetic_bounds_qualified);
     }
 
     #[test]
@@ -1030,7 +1108,9 @@ mod tests {
         assert_eq!(persisted["completion_state"], "incomplete");
         assert!(persisted["checkpoint_sequence"].as_u64().unwrap_or(0) >= 1);
         assert_eq!(persisted["clean_stop"], false);
-        assert_eq!(persisted["readiness_qualified"], false);
+        assert_eq!(persisted["synthetic_bounds_qualified"], false);
+        // A conformance report never claims a live gate it did not run.
+        assert_eq!(persisted["live_market_gate"], "not_run");
         assert!(
             std::fs::read_dir(&directory)
                 .expect("checkpoint directory remains readable")
@@ -1066,7 +1146,7 @@ mod tests {
                 clean_stop: true,
             },
         );
-        assert!(exact.readiness_qualified);
+        assert!(exact.synthetic_bounds_qualified);
 
         let short = endurance_evidence(
             EnduranceCompletionState::Completed,
@@ -1081,7 +1161,7 @@ mod tests {
                 clean_stop: true,
             },
         );
-        assert!(!short.readiness_qualified);
+        assert!(!short.synthetic_bounds_qualified);
 
         let unclean = endurance_evidence(
             EnduranceCompletionState::Completed,
@@ -1096,6 +1176,6 @@ mod tests {
                 clean_stop: false,
             },
         );
-        assert!(!unclean.readiness_qualified);
+        assert!(!unclean.synthetic_bounds_qualified);
     }
 }

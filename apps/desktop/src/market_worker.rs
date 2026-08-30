@@ -450,20 +450,22 @@ impl MarketWorkerSender {
         }
     }
 
+    /// Queues one live tail, folding it into a queued update for the same bar.
+    ///
+    /// Only a tail carrying the *same* bar sequence may replace a queued one:
+    /// those are successive revisions of one forming bucket and the newest is
+    /// complete on its own. Replacing a queued tail that carries a different bar
+    /// drops that bar outright, and the chart's replay bridge reads the gap as
+    /// corruption it can only clear with a covering snapshot.
     fn send_live_tail(
         &self,
         queue: &mut VecDeque<MarketWorkerMessage>,
         message: MarketWorkerMessage,
     ) {
         let incoming_generation = market_publication_generation(&message);
+        let incoming_sequence = live_tail_sequence(&message);
         if let Some(index) = queue.iter().position(|queued| {
-            matches!(
-                queued,
-                MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Tail(_),
-                    ..
-                })
-            )
+            live_tail_sequence(queued).is_some() && live_tail_sequence(queued) == incoming_sequence
         }) {
             if market_publication_generation(&queue[index]) <= incoming_generation {
                 self.record_coalesced_message(&queue[index]);
@@ -480,24 +482,53 @@ impl MarketWorkerSender {
         }
         if queue.len() < self.mailbox.capacity {
             queue.push_back(message);
-        } else {
-            self.record_coalesced_message(&message);
+            return;
         }
+        // A dropped tail is a missing bar, and a bar the replay bridge never
+        // sees is a hole it cannot detect until the next one fails to continue
+        // the run. The queue collapses to the covering snapshot it already holds
+        // plus an explicit recovery request instead, so the gap is announced
+        // rather than discovered.
+        self.record_coalesced_message(&message);
+        let covering_snapshot = take_covering_snapshot(queue);
+        for queued in queue.iter() {
+            if !is_control_message(queued) {
+                self.record_coalesced_message(queued);
+            }
+        }
+        queue.retain(is_control_message);
+        if let Some(snapshot) = covering_snapshot {
+            self.enqueue_publication(queue, snapshot);
+        }
+        self.enqueue_control(queue, mailbox_overflow_state());
     }
 
+    /// Queues one Rithmic live publication.
+    ///
+    /// A covering snapshot supersedes everything queued for the same selection,
+    /// so it replaces it. A tail may only replace a queued tail carrying the
+    /// *same* bar: those are successive revisions of one open period. Replacing
+    /// a tail that carries a different bar drops that bar, and the replay bridge
+    /// reads the gap as corruption it can only clear with a resnapshot.
     fn send_rithmic_live(
         &self,
         queue: &mut VecDeque<MarketWorkerMessage>,
         message: MarketWorkerMessage,
     ) {
         let incoming_generation = rithmic_message_generation(&message);
-        if let Some(index) = queue
-            .iter()
-            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicLive { .. }))
-        {
+        let incoming_sequence = rithmic_live_tail_sequence(&message);
+        let replaceable = |queued: &MarketWorkerMessage| match queued {
+            MarketWorkerMessage::RithmicLive { .. } => {
+                incoming_sequence.is_none()
+                    || rithmic_live_tail_sequence(queued) == incoming_sequence
+            }
+            _ => false,
+        };
+        if let Some(index) = queue.iter().position(replaceable) {
             if rithmic_message_generation(&queue[index]) > incoming_generation {
                 return;
             }
+            self.record_coalesced_message(&queue[index]);
             queue[index] = message;
             return;
         }
@@ -510,7 +541,18 @@ impl MarketWorkerSender {
         }
         if queue.len() < self.mailbox.capacity {
             queue.push_back(message);
+            return;
         }
+        // Same contract as the Coinbase tail: announce the gap rather than let
+        // the bridge discover it.
+        self.record_coalesced_message(&message);
+        for queued in queue.iter() {
+            if !is_control_message(queued) {
+                self.record_coalesced_message(queued);
+            }
+        }
+        queue.retain(is_control_message);
+        self.enqueue_control(queue, mailbox_overflow_state());
     }
 
     fn send_rithmic_dom(
@@ -741,6 +783,31 @@ fn rithmic_message_generation(message: &MarketWorkerMessage) -> Option<(usize, u
             series_generation,
             ..
         } => Some((selection_generation.get(), series_generation.get())),
+        _ => None,
+    }
+}
+
+/// The bar sequence carried by a Rithmic live tail, if this is one.
+///
+/// A snapshot or delta returns `None`, because neither is a revision of one bar:
+/// a snapshot supersedes the series outright.
+fn rithmic_live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
+    match message {
+        MarketWorkerMessage::RithmicLive {
+            update: ReplayStreamUpdate::Tail(tail),
+            ..
+        } => Some(tail.item().value().source_sequence),
+        _ => None,
+    }
+}
+
+/// The bar sequence carried by a live tail publication, if this is one.
+fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
+    match message {
+        MarketWorkerMessage::Update(MarketWorkerPublication {
+            update: ReplayStreamUpdate::Tail(tail),
+            ..
+        }) => Some(tail.item().value().source_sequence),
         _ => None,
     }
 }
@@ -2155,6 +2222,157 @@ mod tests {
             panic!("latest tail remains queued");
         };
         assert_eq!(publication.generation.publication_generation(), 64);
+    }
+
+    /// Tails carrying different bars must all reach the UI.
+    ///
+    /// Conflation used to replace whichever tail happened to be queued, so a
+    /// completed bar was dropped whenever a second one arrived in the same
+    /// frame. The chart's replay bridge reads that gap as corruption and stalls
+    /// on a covering snapshot it has to ask the engine for.
+    #[test]
+    fn live_tails_for_distinct_bars_are_all_delivered() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(8).expect("capacity is nonzero"));
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
+        let source = bootstrap
+            .snapshot
+            .bars()
+            .last()
+            .cloned()
+            .expect("tail exists");
+        let first_sequence = source.value().source_sequence;
+        for offset in 1_u64..=3 {
+            let mut bar = *source.value();
+            bar.source_sequence = first_sequence.saturating_add(offset);
+            bar.exchange_timestamp_seconds = bar
+                .exchange_timestamp_seconds
+                .saturating_add(60 * i64::try_from(offset).expect("offset fits"));
+            bar.exchange_timestamp_unix_nanos =
+                bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
+            let mut provenance = source.provenance().clone();
+            provenance.source_sequence = bar.source_sequence;
+            provenance.exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
+            let tail = ReplayTailUpdate::try_new(
+                Provenanced::new(bar, provenance),
+                offset.saturating_add(2),
+                true,
+            )
+            .expect("tail validates");
+            sender
+                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Tail(tail),
+                    generation: MarketPublicationGeneration::from_tail(
+                        offset.saturating_add(2),
+                        2,
+                        1,
+                        2,
+                    ),
+                    subscription_id: "tail".to_string(),
+                    worker_label: "tail".to_string(),
+                    ui_diagnostics: None,
+                }))
+                .expect("tail sends");
+        }
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        let sequences = messages
+            .iter()
+            .filter_map(super::live_tail_sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sequences,
+            vec![first_sequence + 1, first_sequence + 2, first_sequence + 3]
+        );
+    }
+
+    /// An overflowed mailbox announces the gap instead of hiding it.
+    ///
+    /// Dropping a tail that will not fit leaves a hole in a strictly sequenced
+    /// run, and the chart cannot see it until the following bar fails to
+    /// continue. The queue collapses to the covering snapshot it already holds
+    /// plus an explicit recovery request, so continuity is restored rather than
+    /// silently broken.
+    #[test]
+    fn an_overflowed_mailbox_asks_for_a_covering_snapshot_instead_of_dropping_a_bar() {
+        let capacity = NonZeroUsize::new(4).expect("capacity is nonzero");
+        let (sender, receiver) = market_worker_channel(capacity);
+        let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
+        let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
+        let source = bootstrap
+            .snapshot
+            .bars()
+            .last()
+            .cloned()
+            .expect("tail exists");
+        let first_sequence = source.value().source_sequence;
+        sender
+            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot.clone()),
+                generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
+                subscription_id: "burst".to_string(),
+                worker_label: "burst".to_string(),
+                ui_diagnostics: None,
+            }))
+            .expect("covering snapshot sends");
+
+        // Far more distinct bars than the mailbox can hold, none of them a
+        // revision of another.
+        for offset in 1_u64..=32 {
+            let mut bar = *source.value();
+            bar.source_sequence = first_sequence.saturating_add(offset);
+            bar.exchange_timestamp_seconds = bar
+                .exchange_timestamp_seconds
+                .saturating_add(60 * i64::try_from(offset).expect("offset fits"));
+            bar.exchange_timestamp_unix_nanos =
+                bar.exchange_timestamp_seconds.saturating_mul(1_000_000_000);
+            let mut provenance = source.provenance().clone();
+            provenance.source_sequence = bar.source_sequence;
+            provenance.exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
+            let tail = ReplayTailUpdate::try_new(
+                Provenanced::new(bar, provenance),
+                offset.saturating_add(2),
+                true,
+            )
+            .expect("tail validates");
+            sender
+                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Tail(tail),
+                    generation: MarketPublicationGeneration::from_tail(
+                        offset.saturating_add(2),
+                        2,
+                        1,
+                        2,
+                    ),
+                    subscription_id: "burst".to_string(),
+                    worker_label: "burst".to_string(),
+                    ui_diagnostics: None,
+                }))
+                .expect("tail sends");
+        }
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        let sequences = messages
+            .iter()
+            .filter_map(super::live_tail_sequence)
+            .collect::<Vec<_>>();
+        assert!(
+            sequences.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+            "whatever survives the overflow is still a contiguous run: {sequences:?}"
+        );
+        assert!(
+            messages.iter().any(|message| matches!(
+                message,
+                MarketWorkerMessage::State {
+                    state: ChartState::Recovering,
+                    ..
+                }
+            )),
+            "the overflow has to be announced so a covering snapshot follows"
+        );
     }
 
     #[test]

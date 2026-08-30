@@ -1471,6 +1471,52 @@ impl NucleusChartView {
         true
     }
 
+    /// Builds the price-series row, which carries the OHLC readout.
+    fn asset_legend_row(
+        &self,
+        entries: &[nucleuscharts_engine::SeriesEntry],
+        snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
+    ) -> Option<LegendRow> {
+        let asset = entries
+            .iter()
+            .find(|series| series.id == 0 && !series.removed)?;
+        let snapshot = snapshots.iter().find(|snapshot| snapshot.series_id == 0);
+        let (values, values_tone) = if asset.visible && self.chart_type.shows_ohlc_legend() {
+            (
+                snapshot
+                    .map(|snapshot| {
+                        let value = |label: &str, value: &Option<String>| {
+                            format!("{label} {}", value.as_deref().unwrap_or("--"))
+                        };
+                        vec![
+                            value("O", &snapshot.formatted_open),
+                            value("H", &snapshot.formatted_high),
+                            value("L", &snapshot.formatted_low),
+                            value("C", &snapshot.formatted_close),
+                        ]
+                    })
+                    .unwrap_or_default(),
+                snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
+            )
+        } else {
+            (Vec::new(), LegendValueTone::Neutral)
+        };
+        Some(LegendRow {
+            item: LegendItem::Asset,
+            pane: asset.pane_index,
+            title: if !self.asset_legend_title.is_empty() {
+                self.asset_legend_title.clone()
+            } else if asset.title.is_empty() {
+                "Asset".to_string()
+            } else {
+                asset.title.clone()
+            },
+            values,
+            values_tone,
+            visible: asset.visible,
+        })
+    }
+
     fn legend_rows(&self) -> Vec<LegendRow> {
         let logical_index = self
             .engine
@@ -1479,46 +1525,7 @@ impl NucleusChartView {
         let snapshots = self.engine.value_snapshot(logical_index);
         let entries = self.engine.series_entries();
         let mut rows = Vec::new();
-        if let Some(asset) = entries
-            .iter()
-            .find(|series| series.id == 0 && !series.removed)
-        {
-            let snapshot = snapshots.iter().find(|snapshot| snapshot.series_id == 0);
-            let (values, values_tone) = if asset.visible && self.chart_type.shows_ohlc_legend() {
-                (
-                    snapshot
-                        .map(|snapshot| {
-                            let value = |label: &str, value: &Option<String>| {
-                                format!("{label} {}", value.as_deref().unwrap_or("--"))
-                            };
-                            vec![
-                                value("O", &snapshot.formatted_open),
-                                value("H", &snapshot.formatted_high),
-                                value("L", &snapshot.formatted_low),
-                                value("C", &snapshot.formatted_close),
-                            ]
-                        })
-                        .unwrap_or_default(),
-                    snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
-                )
-            } else {
-                (Vec::new(), LegendValueTone::Neutral)
-            };
-            rows.push(LegendRow {
-                item: LegendItem::Asset,
-                pane: asset.pane_index,
-                title: if !self.asset_legend_title.is_empty() {
-                    self.asset_legend_title.clone()
-                } else if asset.title.is_empty() {
-                    "Asset".to_string()
-                } else {
-                    asset.title.clone()
-                },
-                values,
-                values_tone,
-                visible: asset.visible,
-            });
-        }
+        rows.extend(self.asset_legend_row(entries, &snapshots));
         if self.volume_legend.is_present()
             && let Some(volume) = entries
                 .iter()
@@ -1831,6 +1838,15 @@ impl NucleusChartView {
     #[must_use]
     pub fn latest_market_provenance(&self) -> Option<&MarketEventProvenance> {
         self.displayed_provenance.latest()
+    }
+
+    /// Applies every replay command the bridge is holding.
+    ///
+    /// The frame does this before painting. A host that drives the chart without
+    /// a frame — a headless test, for instance — has to call it itself, because
+    /// the bridge queue is bounded and stops accepting once it is full.
+    pub fn apply_queued_replay_updates(&mut self) {
+        let _ = self.apply_pending_data();
     }
 
     fn apply_pending_data(&mut self) -> SeriesMutation {
@@ -2943,9 +2959,11 @@ impl NucleusChartView {
         width: f32,
         height: f32,
         scale_factor: f32,
-        _mutation: SeriesMutation,
+        mutation: SeriesMutation,
         window: &Window,
     ) -> bool {
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = mutation;
         self.flush_pending_brush();
         #[cfg(feature = "diagnostics")]
         let rebuild_started = Instant::now();
@@ -3005,7 +3023,7 @@ impl NucleusChartView {
                     "AXIUSFLOW_CHART_REBUILD {{\"micros\":{},\"layout\":{},\"data\":\"{}\"}}",
                     elapsed.as_micros(),
                     layout_recomputed,
-                    _mutation.label()
+                    mutation.label()
                 );
             }
             if elapsed.as_millis() >= 4 {

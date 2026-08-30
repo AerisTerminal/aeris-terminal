@@ -1,4 +1,7 @@
-use crate::{CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS, FixedPointValue};
+use crate::{
+    CoinbaseInterval, CoinbaseNetworkFirstCache, CoinbaseSpotProduct, ENTITLEMENT_CLASS,
+    FixedPointValue,
+};
 use axiusflow_market_data::MarketBar;
 use axiusflow_provider_history::{
     Continuation, DataClass, DatasetCapability, HistoryCapabilities, HistoryItem, HistoryPage,
@@ -709,20 +712,12 @@ struct HistorySourceResolution {
 }
 
 fn history_source_resolution(resolution: &str) -> Result<HistorySourceResolution, String> {
-    let source = match resolution {
-        "1m" | "3m" => ("ONE_MINUTE", 60),
-        "5m" => ("FIVE_MINUTE", 300),
-        "15m" => ("FIFTEEN_MINUTE", 900),
-        "30m" => ("THIRTY_MINUTE", 1_800),
-        "1h" => ("ONE_HOUR", 3_600),
-        "2h" | "4h" | "8h" => ("TWO_HOUR", 7_200),
-        "12h" => ("SIX_HOUR", 21_600),
-        "1D" | "3D" | "1W" | "1M" => ("ONE_DAY", 86_400),
-        _ => return Err("unsupported Coinbase history resolution".to_string()),
-    };
+    let (granularity, seconds) = CoinbaseInterval::from_id(resolution)
+        .ok_or_else(|| "unsupported Coinbase history resolution".to_string())?
+        .source();
     Ok(HistorySourceResolution {
-        granularity: source.0,
-        seconds: source.1,
+        granularity,
+        seconds,
     })
 }
 

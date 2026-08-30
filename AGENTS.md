@@ -190,16 +190,37 @@ the maintainer reaffirms the request, that is the decision: build it.
 
 One gate is red on `main`, and it predates this file:
 
-`cargo clippy --workspace --all-targets --all-features -- -D warnings` fails in
-`crates/ui/chart_integration/src/view.rs` — `too_many_lines` on `legend_rows` (116/100) and
-`used_underscore_binding` on `_mutation` in the `diagnostics`-gated rebuild logging. Fix the code;
-do not add `#[allow]`.
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` fails. The two
+`crates/ui/chart_integration/src/view.rs` findings this section used to name — `too_many_lines` on
+`legend_rows` and `used_underscore_binding` on `_mutation` — are fixed, and fixing them revealed
+what they were hiding: clippy aborted at that crate and never reached `apps/desktop`, which has 33
+findings of its own. They are all in code untouched by the market-data work:
 
-The other three gates are green, including `tools/naming_check` at 30/30 and its `snake_case`
-scan. Keep it that way — and note that the scan itself (`cargo run -p axiusflow_naming_check`) is
-not wired into CI, so run it by hand when you add files.
+- `apps/desktop/src/main.rs` — 9 `needless_pass_by_value`, 6 `too_many_arguments`,
+  4 `fn_params_excessive_bools`, 4 `float_cmp` (raised through `assert_eq!` in its test module),
+  3 `cast_precision_loss`, 2 `struct_excessive_bools`, 1 `too_many_lines` on
+  `on_terminal_key_down`, 1 `if_not_else`
+- `apps/desktop/src/native_ui/` — 3 `redundant_closure_for_method_calls`, 1 `struct_excessive_bools`
+- `apps/desktop/src/readiness_conformance.rs` — `dead_code` on four `ProcessMemoryProbe` accessors
+
+Most need parameter structs or newtypes rather than one-line edits. Fix the code; do not add
+`#[allow]`.
+
+`cargo fmt`, `cargo build`, and `cargo test` are green apart from
+`platform_rust_source_upper_bound_stays_within_soft_budget` — see below. `tools/naming_check` is
+29/30 on that one assertion and its `snake_case` scan is clean. Note that the scan itself
+(`cargo run -p axiusflow_naming_check`) is not wired into CI, so run it by hand when you add
+files.
 
 The source-line budget in `platform_rust_source_upper_bound_stays_within_soft_budget` is set to the
 current real count. It exists to make growth visible. **Lower it when code goes away; never raise
 it to make a growing codebase fit** — it had already been ratcheted up at least once before anyone
 noticed it was failing.
+
+It is currently over: 73,760 production lines against the 72,477 threshold. The overage is the
+market-data streaming repair — bar identity derived from the bucket, the bounded consumer series
+queue and its covering-snapshot recovery, contiguous history retention, stored-history
+canonicalisation, the per-series reseed path that replaced the unrecoverable global outage, the
+history/live forming-candle handoff on both providers, and the Rithmic selection identity that
+replaced a one-shot boolean. The threshold has deliberately **not** been raised. Raising it, or
+paying the 1,283 lines back elsewhere, is the maintainer's call.

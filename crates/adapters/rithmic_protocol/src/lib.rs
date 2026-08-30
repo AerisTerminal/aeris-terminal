@@ -49,8 +49,8 @@ pub use history_adapter::{
     RithmicHistoryAdapterError, RithmicHistoryCapabilityAdapter, RithmicHistoryLimits,
     RithmicHistorySessionTransport, RithmicHistoryTransport, RithmicTimeBarResolution,
     canonical_rithmic_tick_bar, canonical_rithmic_time_bar, collect_rithmic_chart_history,
-    collect_rithmic_covering_recovery_evidence, covering_snapshot_from_page,
-    decode_rithmic_history_bar,
+    collect_rithmic_covering_recovery_evidence, collect_rithmic_trade_history,
+    covering_snapshot_from_page, decode_rithmic_history_bar,
 };
 pub use market::{
     DecodedMarketMessage, MarketIdentity, OrderBookLevel, OrderBookSides, OrderBookUpdate,

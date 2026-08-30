@@ -65,6 +65,8 @@ const REALTIME_CAPACITY: usize = 2_048;
 const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 4_096;
+/// Bar updates a consumer may fall behind by before the oldest is dropped.
+const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
 const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -204,9 +206,41 @@ enum StorageRequest {
 struct HistorySnapshot {
     price_scale: u8,
     quantity_scale: u8,
+    /// Buckets the provider has closed. Only these are persisted and installed
+    /// as canonical history.
     bars: Vec<MarketBar>,
+    /// The period that was still open when the provider served this page.
+    ///
+    /// It is deliberately kept out of `bars`: history is a record of closed
+    /// periods, and a half-built candle written into it stays wrong until the
+    /// period ends. The live handoff seeds it as the in-flight bar instead,
+    /// which is what gives a fresh chart the OHLCV that accrued before the
+    /// trader selected it.
+    forming: Option<FormingBar>,
     handoff_boundary_unix_nanos: Option<i64>,
     confirmed_empty: bool,
+}
+
+/// Everything one Rithmic series needs to close its history/live seam.
+struct RithmicHandoffSeed<'a> {
+    price_scale: u8,
+    quantity_scale: u8,
+    /// Periods the provider closed, already installed as canonical history.
+    bars: &'a [MarketBar],
+    /// The period the provider caught open, held live rather than in history.
+    forming: Option<FormingBar>,
+    /// Every trade at or before this instant is already inside what the provider
+    /// returned, so replaying it would count it twice.
+    handoff_boundary_unix_nanos: Option<i64>,
+}
+
+/// The period a provider page caught mid-flight, and how far into it the market
+/// already is.
+pub(crate) struct FormingBar {
+    pub(crate) bar: MarketBar,
+    /// Trades already inside the open bundle. `None` for a clock-driven period,
+    /// where elapsed time rather than a count decides when the bar closes.
+    pub(crate) trades: Option<u32>,
 }
 
 struct LocalRangeHistory {
@@ -241,10 +275,22 @@ enum RealtimeEvent {
     Disconnected(ProviderGeneration),
 }
 
+/// Bounded per-consumer outbox.
+///
+/// The series channel is a queue, not a slot, because bar identity is a strict
+/// sequence: silently replacing a pending update loses a bar, and the consumer
+/// reads the resulting gap as corruption it can only repair with a full
+/// resnapshot. Every other channel stays latest-value, because a newer order
+/// book, provider state, or catalog result fully supersedes the one before it.
 #[derive(Default)]
 struct ConsumerEvents {
     provider: Option<envelope::Payload>,
-    snapshot: Option<envelope::Payload>,
+    series: VecDeque<envelope::Payload>,
+    /// Set when the series queue could not hold one more distinct bar. The
+    /// coordinator resolves it by replacing the whole queue with a covering
+    /// snapshot, because dropping the oldest update opens a sequence gap the
+    /// consumer can only read as corruption.
+    series_overflowed: bool,
     series_state: Option<envelope::Payload>,
     demand_error: Option<envelope::Payload>,
     order_book: Option<envelope::Payload>,
@@ -257,7 +303,7 @@ impl ConsumerEvents {
     fn pop(&mut self) -> Option<envelope::Payload> {
         self.provider
             .take()
-            .or_else(|| self.snapshot.take())
+            .or_else(|| self.series.pop_front())
             .or_else(|| self.series_state.take())
             .or_else(|| self.demand_error.take())
             .or_else(|| self.order_book.take())
@@ -266,31 +312,84 @@ impl ConsumerEvents {
             .or_else(|| self.catalog_search.take())
     }
 
+    /// Queues one covering snapshot, discarding everything it already covers.
+    fn publish_snapshot(&mut self, snapshot: envelope::Payload) {
+        self.series.clear();
+        self.series_overflowed = false;
+        self.series.push_back(snapshot);
+    }
+
+    fn clear_series(&mut self) {
+        self.series.clear();
+        self.series_overflowed = false;
+    }
+
+    #[cfg(test)]
+    fn queued_series(&self) -> Option<&envelope::Payload> {
+        self.series.front()
+    }
+
+    /// Queues one incremental bar update.
+    ///
+    /// Two foldings keep the queue short without losing a bar: repeated updates
+    /// to the same forming bucket carry the same sequence, so the newest fully
+    /// supersedes the queued one; and an update that extends a queued snapshot
+    /// by exactly one bar is folded into it. Anything else is appended.
     fn publish_series_update(&mut self, update: envelope::Payload) {
         let envelope::Payload::SeriesUpdate(next) = update else {
             return;
         };
-        if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = self.snapshot.as_mut()
-            && snapshot.consumer_id == next.consumer_id
-            && snapshot.generation == next.generation
-            && snapshot.series == next.series
-            && let Some(bar) = next.bar.as_ref()
-        {
-            match snapshot.bars.last_mut() {
-                Some(current) if current.source_sequence == bar.source_sequence => *current = *bar,
-                Some(current)
-                    if current.source_sequence.checked_add(1) == Some(bar.source_sequence) =>
-                {
-                    snapshot.bars.push(*bar);
-                }
-                _ => return,
+        match self.series.back_mut() {
+            Some(envelope::Payload::SeriesUpdate(queued))
+                if queued.consumer_id == next.consumer_id
+                    && queued.generation == next.generation
+                    && queued.series == next.series
+                    && queued.bar.map(|bar| bar.source_sequence)
+                        == next.bar.map(|bar| bar.source_sequence) =>
+            {
+                *queued = next;
+                return;
             }
-            snapshot.provider_generation = next.provider_generation;
-            snapshot.publication_generation = next.publication_generation;
-            snapshot.forming = next.forming;
-            return;
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
+                if snapshot.consumer_id == next.consumer_id
+                    && snapshot.generation == next.generation
+                    && snapshot.series == next.series =>
+            {
+                if let Some(bar) = next.bar.as_ref() {
+                    let folded = match snapshot.bars.last_mut() {
+                        Some(current) if current.source_sequence == bar.source_sequence => {
+                            *current = *bar;
+                            true
+                        }
+                        Some(current)
+                            if current.source_sequence.checked_add(1)
+                                == Some(bar.source_sequence) =>
+                        {
+                            snapshot.bars.push(*bar);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if folded {
+                        snapshot.provider_generation = next.provider_generation;
+                        snapshot.publication_generation = next.publication_generation;
+                        snapshot.forming = next.forming;
+                        return;
+                    }
+                }
+            }
+            _ => {}
         }
-        self.snapshot = Some(envelope::Payload::SeriesUpdate(next));
+        if self.series.len() >= CONSUMER_SERIES_QUEUE_CAPACITY {
+            // Everything queued is about to be superseded by a covering
+            // snapshot, so the newest update is kept and the rest discarded.
+            // Silently dropping the oldest instead leaves a hole in the middle
+            // of a strictly sequenced run, which the consumer cannot detect
+            // until the following bar fails to continue it.
+            self.series.clear();
+            self.series_overflowed = true;
+        }
+        self.series.push_back(envelope::Payload::SeriesUpdate(next));
     }
 }
 
@@ -317,14 +416,9 @@ struct LiveHandoff {
     connected: bool,
     history_ready: bool,
     dirty: bool,
-    published: Option<PublishedTailState>,
-    viewport_position: ViewportPosition,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ViewportPosition {
-    Live,
-    Historical,
+    /// Highest sequence the canonical series already holds as a completed bar.
+    /// Everything above it in the aggregator still has to be appended.
+    published_completed: Option<u64>,
 }
 
 struct RithmicLiveHandoff {
@@ -339,6 +433,13 @@ struct RithmicLiveHandoff {
     history_ready: bool,
     dirty: bool,
     published: Option<PublishedTailState>,
+    /// The sequence of the period the provider caught open, when it caught one.
+    ///
+    /// Live trades revise an open period in place; they may never touch a period
+    /// the provider has closed. Without this the two are indistinguishable, and
+    /// the first trade of a freshly seeded chart was dropped rather than folded
+    /// into the candle it belongs to.
+    forming_tail_sequence: Option<u64>,
     live_session_generation: Option<u64>,
     last_trade_sequence: Option<u64>,
     history_boundary_unix_nanos: i64,
@@ -358,17 +459,26 @@ enum RithmicLiveCadence {
     },
 }
 
+/// One live publication for a series.
+///
+/// `Tails` is an append-only run: every bar extends the canonical series by one
+/// sequence, or replaces the forming bar in place. A bucket roll therefore adds
+/// the completed bar and opens the next one without ever replacing the covering
+/// history — which is what used to discard a backfill the moment a bar rolled.
 enum LiveSeriesPublication {
-    Tail(MarketBar),
+    Tails(Vec<MarketBar>),
     Covering(Vec<MarketBar>),
 }
 
+/// What the canonical series last accepted from one live handoff.
 #[derive(Clone, Copy)]
 enum PublishedTailState {
     Covering(u64),
     Forming(u64),
 }
 
+/// A live bar that neither continues the published tail nor revises it in place
+/// cannot be appended, so the whole series is republished instead.
 fn requires_covering_publication(
     published: Option<PublishedTailState>,
     active_sequence: u64,
@@ -417,6 +527,7 @@ impl RithmicLiveHandoff {
             history_ready: false,
             dirty: false,
             published: None,
+            forming_tail_sequence: None,
             live_session_generation: None,
             last_trade_sequence: None,
             history_boundary_unix_nanos: i64::MIN,
@@ -431,6 +542,7 @@ impl RithmicLiveHandoff {
         self.history_ready = false;
         self.dirty = false;
         self.published = None;
+        self.forming_tail_sequence = None;
         self.live_session_generation = None;
         self.last_trade_sequence = None;
         self.history_boundary_unix_nanos = i64::MIN;
@@ -439,31 +551,69 @@ impl RithmicLiveHandoff {
         }
     }
 
+    /// Closes the history/live seam.
+    ///
+    /// `bars` are the periods the provider has closed and the engine has
+    /// installed as canonical history. `forming` is the period it caught open,
+    /// which is held here rather than in history and published as a tail. Every
+    /// trade at or before `handoff_boundary_unix_nanos` is already inside what
+    /// the provider returned, so replaying it would count it twice.
     fn seed(
         &mut self,
         price_scale: u8,
         quantity_scale: u8,
         bars: &[MarketBar],
+        forming: Option<FormingBar>,
         handoff_boundary_unix_nanos: Option<i64>,
     ) -> Result<(), String> {
-        let last_bar_boundary = bars
+        // A tick bundle whose trade count is unknown cannot be resumed: the
+        // cadence would not know when it closes, so it is treated as complete.
+        let forming = forming.filter(|forming| {
+            let countable = forming.trades.is_some()
+                || !matches!(self.cadence, RithmicLiveCadence::Tick { .. });
+            countable
+                && bars
+                    .last()
+                    .is_none_or(|last| last.source_sequence < forming.bar.source_sequence)
+        });
+        let mut working = bars.to_vec();
+        if let Some(forming) = &forming {
+            working.push(forming.bar);
+        }
+        let last_bar_boundary = working
             .last()
             .ok_or_else(|| "Rithmic live handoff requires history".to_string())?
             .exchange_timestamp_unix_nanos;
         self.price_scale = price_scale;
         self.quantity_scale = quantity_scale;
-        self.bars = bars.to_vec();
+        self.published = if forming.is_some() {
+            bars.last()
+                .map(|bar| PublishedTailState::Covering(bar.source_sequence))
+        } else {
+            working
+                .last()
+                .map(|bar| PublishedTailState::Covering(bar.source_sequence))
+        };
+        self.forming_tail_sequence = forming.as_ref().map(|forming| forming.bar.source_sequence);
+        self.bars = working;
         self.history_boundary_unix_nanos = handoff_boundary_unix_nanos
             .unwrap_or(last_bar_boundary)
             .max(last_bar_boundary);
-        self.published = bars
-            .last()
-            .map(|bar| PublishedTailState::Covering(bar.source_sequence));
         self.live_session_generation = None;
         self.last_trade_sequence = None;
-        if let RithmicLiveCadence::Tick { trades, forming } = &mut self.cadence {
-            *forming = *trades;
+        if let RithmicLiveCadence::Tick {
+            trades,
+            forming: open,
+        } = &mut self.cadence
+        {
+            *open = forming
+                .as_ref()
+                .and_then(|forming| forming.trades)
+                .unwrap_or(*trades);
         }
+        // The open period has to reach the consumer even if no trade arrives
+        // next: it is the candle the chart opens on.
+        self.dirty = forming.is_some();
         let buffered = std::mem::take(&mut self.buffered);
         self.history_ready = true;
         for trade in &buffered {
@@ -485,7 +635,7 @@ impl RithmicLiveHandoff {
         if covering {
             Some(LiveSeriesPublication::Covering(self.bars.clone()))
         } else {
-            Some(LiveSeriesPublication::Tail(active))
+            Some(LiveSeriesPublication::Tails(vec![active]))
         }
     }
 
@@ -541,7 +691,11 @@ impl RithmicLiveHandoff {
                 }
                 let elapsed = trade_seconds - last.exchange_timestamp_seconds;
                 if elapsed < seconds {
-                    if self.last_trade_sequence.is_none() {
+                    // A period the provider closed is never revised by a live
+                    // trade; the period it caught open always is.
+                    if self.last_trade_sequence.is_none()
+                        && self.forming_tail_sequence != Some(last.source_sequence)
+                    {
                         return Ok(false);
                     }
                     updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
@@ -648,8 +802,7 @@ impl LiveHandoff {
             connected: false,
             history_ready: false,
             dirty: false,
-            published: None,
-            viewport_position: ViewportPosition::Live,
+            published_completed: None,
         })
     }
 
@@ -660,25 +813,28 @@ impl LiveHandoff {
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
-        self.published = None;
-        self.viewport_position = ViewportPosition::Live;
+        self.published_completed = None;
     }
 
+    /// Every bar the canonical series has not seen yet, oldest first, ending in
+    /// the still-forming bucket.
+    ///
+    /// Sequences come from the bucket, so this run always continues the series
+    /// the engine holds — including after a repair reseeded this aggregator from
+    /// a longer window.
     fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
         if !self.connected || !self.history_ready || !self.dirty {
             return None;
         }
-        let active = self.aggregator.in_flight()?;
-        self.dirty = false;
-        let covering = requires_covering_publication(self.published, active.source_sequence);
-        self.published = Some(PublishedTailState::Forming(active.source_sequence));
-        if covering {
-            let mut bars = self.aggregator.history();
-            bars.push(active);
-            Some(LiveSeriesPublication::Covering(bars))
-        } else {
-            Some(LiveSeriesPublication::Tail(active))
+        let mut bars = self
+            .aggregator
+            .completed_after(self.published_completed.unwrap_or(0));
+        if let Some(newest) = bars.last() {
+            self.published_completed = Some(newest.source_sequence);
         }
+        bars.extend(self.aggregator.in_flight());
+        self.dirty = false;
+        (!bars.is_empty()).then_some(LiveSeriesPublication::Tails(bars))
     }
 }
 
@@ -728,6 +884,29 @@ impl LiveCoinbaseHistory {
     }
 }
 
+/// Projects one installed instrument into the adapter's product identity.
+fn coinbase_spot_product(
+    installed: &InstallProviderInstrument,
+) -> Result<CoinbaseSpotProduct, String> {
+    Ok(CoinbaseSpotProduct {
+        product_id: installed.provider_symbol.clone(),
+        instrument_id: installed.instrument_id.clone(),
+        display_symbol: installed.display_symbol.clone(),
+        base_currency: installed
+            .provider_symbol
+            .split_once('-')
+            .map_or_else(String::new, |(base, _)| base.to_string()),
+        quote_currency: installed
+            .provider_symbol
+            .split_once('-')
+            .map_or_else(String::new, |(_, quote)| quote.to_string()),
+        price_scale: u8::try_from(installed.price_scale)
+            .map_err(|_| "Coinbase price scale is invalid".to_string())?,
+        quantity_scale: u8::try_from(installed.quantity_scale)
+            .map_err(|_| "Coinbase quantity scale is invalid".to_string())?,
+    })
+}
+
 impl HistorySource for LiveCoinbaseHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
         self.adapter.set_stop(Arc::clone(&request.stop));
@@ -737,24 +916,9 @@ impl HistorySource for LiveCoinbaseHistory {
             .as_ref()
             .ok_or_else(|| "Coinbase instrument is not installed".to_string())?;
         let profile = coinbase_series_profile(series, installed)?;
-        let product = CoinbaseSpotProduct {
-            product_id: installed.provider_symbol.clone(),
-            instrument_id: installed.instrument_id.clone(),
-            display_symbol: installed.display_symbol.clone(),
-            base_currency: installed
-                .provider_symbol
-                .split_once('-')
-                .map_or_else(String::new, |(base, _)| base.to_string()),
-            quote_currency: installed
-                .provider_symbol
-                .split_once('-')
-                .map_or_else(String::new, |(_, quote)| quote.to_string()),
-            price_scale: u8::try_from(installed.price_scale)
-                .map_err(|_| "Coinbase price scale is invalid".to_string())?,
-            quantity_scale: u8::try_from(installed.quantity_scale)
-                .map_err(|_| "Coinbase quantity scale is invalid".to_string())?,
-        };
-        self.adapter.register_product(&product);
+        let kind = request.kind;
+        self.adapter
+            .register_product(&coinbase_spot_product(installed)?);
         let now_seconds = i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -762,14 +926,24 @@ impl HistorySource for LiveCoinbaseHistory {
                 .as_secs(),
         )
         .map_err(|_| "Coinbase history end time overflowed".to_string())?;
-        let end_seconds = profile.interval.bucket_start(now_seconds)?;
-        let end_unix_nanos = end_seconds
+        let live_edge_seconds = profile.interval.bucket_start(now_seconds)?;
+        // A live-edge page ends *on* the open bucket rather than before it, so
+        // the provider also returns the candle that is still forming. It is
+        // split back out below: history keeps only closed buckets, and the open
+        // one seeds the live aggregator so a freshly selected chart shows the
+        // OHLCV that accrued before the trader got there.
+        let end_unix_nanos = (now_seconds - now_seconds.rem_euclid(profile.interval.source().1))
             .checked_mul(1_000_000_000)
             .ok_or_else(|| "Coinbase history end time overflowed".to_string())?;
         let range = request.range.unwrap_or_else(|| {
             let start_seconds = i64::try_from(request.maximum_bars)
                 .ok()
-                .and_then(|count| profile.interval.shift_bucket(end_seconds, -count).ok())
+                .and_then(|count| {
+                    profile
+                        .interval
+                        .shift_bucket(live_edge_seconds, -count)
+                        .ok()
+                })
                 .unwrap_or(0);
             HistoryRange {
                 start_unix_nanos: start_seconds.saturating_mul(1_000_000_000),
@@ -789,15 +963,27 @@ impl HistorySource for LiveCoinbaseHistory {
             continuation: None,
         };
         let batch = self.adapter.fetch_paginated(&request)?;
+        // The provider built this page at some instant no later than now, so
+        // every trade the socket delivers after this point is definitely absent
+        // from it. Taking the boundary *after* the response — rather than the
+        // request's own end — is what keeps the buffered replay from counting a
+        // trade the forming candle already contains.
+        let served_at_unix_nanos = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| "system clock is unavailable".to_string())?
+                .as_nanos(),
+        )
+        .map_err(|_| "Coinbase history handoff boundary overflowed".to_string())?;
         let source_bars = batch
             .items
             .iter()
             .map(decode_history_bar)
             .collect::<Result<Vec<_>, _>>()?;
         let confirmed_empty = source_bars.is_empty();
-        let completed_before_seconds =
-            end_seconds.min(range.end_unix_nanos.div_euclid(1_000_000_000));
-        let (mut bars, _) = if source_bars.is_empty() {
+        let requested_end_seconds = range.end_unix_nanos.div_euclid(1_000_000_000);
+        let completed_before_seconds = live_edge_seconds.min(requested_end_seconds);
+        let (bars, _) = if source_bars.is_empty() {
             (
                 Vec::new(),
                 axiusflow_coinbase_market_adapter::CoinbaseAggregationDiagnostics::default(),
@@ -809,20 +995,54 @@ impl HistorySource for LiveCoinbaseHistory {
                 Some(completed_before_seconds),
             )?
         };
-        for (index, bar) in bars.iter_mut().enumerate() {
-            bar.source_sequence = u64::try_from(index)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| "Coinbase history sequence overflowed".to_string())?;
-        }
+        // Only the live-edge load hands over to the aggregator; a backfill is a
+        // window into closed history even when it happens to reach the edge.
+        let forming =
+            if kind == HistoryRequestKind::Initial && requested_end_seconds >= live_edge_seconds {
+                forming_coinbase_bucket(&source_bars, profile.interval, live_edge_seconds)?
+                    .map(|bar| FormingBar { bar, trades: None })
+            } else {
+                None
+            };
+        let handoff_boundary_unix_nanos = if forming.is_some() {
+            served_at_unix_nanos
+        } else {
+            range.end_unix_nanos
+        };
         Ok(HistorySnapshot {
             price_scale: profile.price_scale,
             quantity_scale: profile.quantity_scale,
             bars,
-            handoff_boundary_unix_nanos: Some(range.end_unix_nanos),
+            forming,
+            handoff_boundary_unix_nanos: Some(handoff_boundary_unix_nanos),
             confirmed_empty,
         })
     }
+}
+
+/// Folds the source bars inside the still-open bucket into one forming bar.
+///
+/// A page is served at minute granularity, so a coarser target bucket spans
+/// several source bars and the open one is whatever part of it has traded so
+/// far. Returning `None` means the bucket has not traded yet, which is a real
+/// answer: the aggregator then opens it on the first live trade.
+fn forming_coinbase_bucket(
+    source_bars: &[MarketBar],
+    interval: CoinbaseInterval,
+    bucket_seconds: i64,
+) -> Result<Option<MarketBar>, String> {
+    let open = source_bars
+        .iter()
+        .filter(|bar| bar.exchange_timestamp_seconds >= bucket_seconds)
+        .copied()
+        .collect::<Vec<_>>();
+    if open.is_empty() {
+        return Ok(None);
+    }
+    let (mut bars, _) = aggregate_coinbase_bars(&open, interval, None)?;
+    Ok(bars
+        .pop()
+        .filter(|bar| bar.exchange_timestamp_seconds == bucket_seconds))
 }
 
 impl HistorySource for LiveRithmicHistory {
@@ -850,6 +1070,7 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
         price_scale: snapshot.price_scale,
         quantity_scale: snapshot.quantity_scale,
         bars: snapshot.bars,
+        forming: snapshot.forming,
         handoff_boundary_unix_nanos: Some(snapshot.handoff_boundary_unix_nanos),
         confirmed_empty: false,
     })
@@ -1667,10 +1888,14 @@ fn read_local_history(
     series: &BarSeriesKey,
 ) -> Result<Option<StoredHistory>, String> {
     let scope = local_history_scope(series)?;
-    if let Some(stored) = storage
+    if let Some(mut stored) = storage
         .read_latest(&scope, series)
         .map_err(|error| error.to_string())?
     {
+        stored.bars = canonicalize_coinbase_history(series, stored.bars)?;
+        if stored.bars.is_empty() {
+            return Ok(None);
+        }
         return Ok(Some(stored));
     }
     let target_seconds = match series.period {
@@ -1938,7 +2163,8 @@ fn run_coordinator(
         catalog_selections: BTreeMap::new(),
         realtime_started: false,
         realtime_connected: false,
-        rithmic_realtime_started: false,
+        rithmic_selection: None,
+        rithmic_pending_selection: None,
         realtime_products: BTreeSet::new(),
     };
     loop {
@@ -1953,6 +2179,8 @@ fn run_coordinator(
         }
         coordinator.publish_live();
         coordinator.publish_rithmic_live();
+        coordinator.recover_overflowed_series_queues();
+        coordinator.flush_rithmic_selection();
         if !coordinator.live.is_empty() {
             let _ = coordinator.sync_coinbase_realtime();
         }
@@ -2044,8 +2272,29 @@ struct Coordinator<'a> {
     catalog_selections: BTreeMap<String, u64>,
     realtime_started: bool,
     realtime_connected: bool,
-    rithmic_realtime_started: bool,
+    /// The instrument the Rithmic live worker is currently selected on.
+    ///
+    /// A boolean here could only say "a selection was sent once", so changing
+    /// symbol never sent the replacement `Select` and the worker stayed on the
+    /// previous instrument: the new chart received the old contract's trades, or
+    /// nothing at all. Holding the identity makes "the selection is stale" a
+    /// question with an answer, and holding the generation makes a selection
+    /// from a retired session stale by construction.
+    rithmic_selection: Option<RithmicSelection>,
+    /// A replacement selection the control channel could not take yet.
+    ///
+    /// One slot, newest wins: the worker itself already coalesces queued
+    /// selections, so a switch that arrives while the channel is full only has
+    /// to survive until the next tick rather than fail the demand behind it.
+    rithmic_pending_selection: Option<InstallProviderInstrument>,
     realtime_products: BTreeSet<String>,
+}
+
+/// The Rithmic live worker's current instrument selection.
+#[derive(Clone, PartialEq, Eq)]
+struct RithmicSelection {
+    instrument_id: String,
+    generation: ProviderGeneration,
 }
 
 impl Coordinator<'_> {
@@ -2536,7 +2785,8 @@ impl Coordinator<'_> {
         }
         self.realtime_started = false;
         self.realtime_connected = false;
-        self.rithmic_realtime_started = false;
+        self.rithmic_selection = None;
+        self.rithmic_pending_selection = None;
         self.realtime_products.clear();
         self.live.clear();
         self.rithmic_live.clear();
@@ -2767,7 +3017,7 @@ impl Coordinator<'_> {
         self.reconcile_order_books();
         self.remove_waiter(waiter.consumer_id);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
-            events.snapshot = None;
+            events.clear_series();
             events.series_state = None;
             events.demand_error = None;
         }
@@ -2802,11 +3052,13 @@ impl Coordinator<'_> {
         self.active_viewports.remove(&waiter.consumer_id);
         self.prune_unused_live_series();
         self.prune_history_tracking();
-        let realtime = if series.provider_id == "rithmic" {
-            Ok(())
-        } else {
-            self.ensure_realtime(series)
-        };
+        // The live handoff, and the bounded trade buffer inside it, must exist
+        // before history starts. A Rithmic history fetch can take tens of
+        // seconds; deferring the handoff until it returned dropped every trade
+        // that arrived in between, and left `rithmic_live` empty across a symbol
+        // switch, so the idle check below tore down the provider session that a
+        // presentation change is never allowed to touch.
+        let realtime = self.ensure_realtime(series);
         self.stop_realtime_if_idle();
         if let Err(error) = realtime {
             let _ = reply.send(Err(error));
@@ -2876,9 +3128,15 @@ impl Coordinator<'_> {
                 }
                 live.aggregator.reset();
                 let seeded = if snapshot.forming {
-                    live.aggregator.seed_canonical_backfill(&snapshot.bars)
+                    live.published_completed = snapshot
+                        .bars
+                        .len()
+                        .checked_sub(2)
+                        .map(|index| snapshot.bars[index].source_sequence);
+                    live.aggregator.seed_backfill(&snapshot.bars)
                 } else {
-                    live.aggregator.seed_canonical_history(&snapshot.bars)
+                    live.published_completed = snapshot.bars.last().map(|bar| bar.source_sequence);
+                    live.aggregator.seed_history(&snapshot.bars)
                 };
                 if seeded.is_ok() {
                     live.history_ready = true;
@@ -2970,7 +3228,24 @@ impl Coordinator<'_> {
             source_bars.pop();
         }
         let interval = coinbase_interval(target_seconds)?;
-        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval, None)?;
+        // Keep only target buckets the source actually covers end to end.
+        // Deriving through the bucket the source stops inside froze a half-built
+        // candle into history, and it stayed wrong until that bucket rolled —
+        // on an hourly or daily switch, a long time to show bad data.
+        let BarPeriod::Time {
+            seconds: source_seconds,
+        } = source.series.period
+        else {
+            return Ok(false);
+        };
+        let Some(source_end) = source_bars
+            .last()
+            .map(|bar| bar.exchange_timestamp_seconds + i64::from(source_seconds))
+        else {
+            return Ok(false);
+        };
+        let completed_before = interval.bucket_start(source_end)?;
+        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval, Some(completed_before))?;
         if bars.is_empty() {
             return Ok(false);
         }
@@ -3301,9 +3576,7 @@ impl Coordinator<'_> {
                         stored.bars.clone(),
                         HISTORY_BARS_PER_SERIES,
                         coinbase_series_interval(series).ok(),
-                        self.viewport_history_ranges
-                            .get(&(series.clone(), generation))
-                            .copied(),
+                        HistoryPrecedence::Current,
                     )
                     .ok()
                 })
@@ -3334,6 +3607,7 @@ impl Coordinator<'_> {
                         );
                     }
                 }
+                self.resync_coinbase_live(series);
             }
         }
         if let Err(detail) =
@@ -3519,21 +3793,34 @@ impl Coordinator<'_> {
             return Ok(());
         }
         if series.provider_id == "rithmic" {
-            if !self.rithmic_realtime_started
-                && let Some(control) = self.rithmic_realtime_control
-            {
-                let instrument = self
-                    .catalog
-                    .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                    .cloned()
-                    .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
-                match control.try_send(RithmicRealtimeControl::Select(instrument)) {
-                    Ok(()) => self.rithmic_realtime_started = true,
-                    Err(TrySendError::Full(_)) => {
-                        return Err("Rithmic live selection capacity is exhausted".to_string());
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        return Err("Rithmic live worker is unavailable".to_string());
+            if let Some(control) = self.rithmic_realtime_control {
+                // A timeframe change keeps the same instrument and generation, so
+                // it sends nothing; a symbol change, or a session that has been
+                // retired and replaced, sends the worker its replacement
+                // selection.
+                let selection = RithmicSelection {
+                    instrument_id: series.instrument_id.clone(),
+                    generation: self.provider_generation_for_series(series)?,
+                };
+                if self.rithmic_selection.as_ref() != Some(&selection) {
+                    let instrument = self
+                        .catalog
+                        .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                        .cloned()
+                        .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+                    match control.try_send(RithmicRealtimeControl::Select(instrument.clone())) {
+                        Ok(()) => self.rithmic_selection = Some(selection),
+                        Err(TrySendError::Full(_)) => {
+                            // The worker coalesces queued selections to the
+                            // newest, so a full channel is a "try again next
+                            // tick", not a reason to reject the switch the
+                            // trader just made.
+                            self.rithmic_pending_selection = Some(instrument);
+                            self.rithmic_selection = Some(selection);
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err("Rithmic live worker is unavailable".to_string());
+                        }
                     }
                 }
             }
@@ -3647,13 +3934,6 @@ impl Coordinator<'_> {
                 range,
             },
         );
-        if let Some(live) = self.live.get_mut(&series) {
-            live.viewport_position = if viewport_follows_live(&series, range)? {
-                ViewportPosition::Live
-            } else {
-                ViewportPosition::Historical
-            };
-        }
         let key = (series.clone(), provider_generation);
         let replaced = self.viewport_history_ranges.insert(key.clone(), range);
         if replaced.is_some_and(|previous| previous != range)
@@ -3720,25 +4000,54 @@ impl Coordinator<'_> {
 
     /// Seeds the live aggregator from installed history and drains the buffer.
     ///
-    /// The history installed here runs to the live edge, so the aggregator takes
-    /// over from a current edge: trades older than it are dropped as late, and
-    /// the quiet buckets before the first trade that is not are carried forward.
+    /// The seam is closed in three steps, in this order:
+    ///
+    /// 1. Closed buckets seed the aggregator's completed history.
+    /// 2. The bucket that was still open when the page was served seeds the
+    ///    in-flight bar, so a chart the trader has just selected opens on the
+    ///    real current candle instead of on the first trade after the click.
+    /// 3. Trades buffered during the fetch are replayed in order, skipping
+    ///    everything the served page already covers so nothing is counted twice.
+    ///
     /// The handoff always completes — a series left waiting publishes nothing at
     /// all, and on a thin product it would wait for the whole quiet stretch.
     fn complete_coinbase_live_handoff(
         &mut self,
         series: &BarSeriesKey,
         bars: &[MarketBar],
+        forming: Option<FormingBar>,
+        handoff_boundary_unix_nanos: Option<i64>,
     ) -> bool {
+        let already_live = self.live.get(series).is_some_and(|live| live.history_ready);
+        if already_live {
+            self.resync_coinbase_live(series);
+            return true;
+        }
         let Some(live) = self.live.get_mut(series) else {
             return true;
         };
         let connected = live.connected;
         let buffered = std::mem::take(&mut live.buffered);
         live.aggregator.reset();
-        if live.aggregator.seed_canonical_history(bars).is_err()
+        let forming = forming.map(|forming| forming.bar).filter(|forming| {
+            bars.last().is_none_or(|last| {
+                last.exchange_timestamp_seconds < forming.exchange_timestamp_seconds
+            })
+        });
+        let seeded = match forming {
+            Some(forming) => {
+                let mut seed = Vec::with_capacity(bars.len() + 1);
+                seed.extend_from_slice(bars);
+                seed.push(forming);
+                live.aggregator.seed_backfill(&seed)
+            }
+            None => live.aggregator.seed_history(bars),
+        };
+        let boundary = handoff_boundary_unix_nanos.unwrap_or(i64::MIN);
+        if seeded.is_err()
             || buffered
                 .iter()
+                .filter(|trade| trade.trade_time_unix_nanos > boundary)
                 .any(|trade| live.aggregator.apply_trade(trade).is_err())
         {
             self.realtime_interrupted(
@@ -3750,10 +4059,37 @@ impl Coordinator<'_> {
         live.connected = connected;
         live.history_ready = true;
         live.dirty = live.aggregator.in_flight().is_some();
-        live.published = bars
-            .last()
-            .map(|bar| PublishedTailState::Covering(bar.source_sequence));
+        // The series holds every seeded bar as completed, so only what the
+        // aggregator opens after the handoff still needs appending.
+        live.published_completed = bars.last().map(|bar| bar.source_sequence);
         true
+    }
+
+    /// Realigns an already-live aggregator with the series a repair just
+    /// installed, without discarding the bucket currently forming.
+    ///
+    /// A backfill extends history backwards and can keep or drop the forming
+    /// tail, so what the series holds as *completed* moves. Bar identity comes
+    /// from the bucket, so nothing is renumbered — only the append cursor has to
+    /// follow. If the aggregator turns out not to line up after all, the next
+    /// publication fails for this one series and reseeds it.
+    fn resync_coinbase_live(&mut self, series: &BarSeriesKey) {
+        let Some(snapshot) = self.engine.series_snapshot(series) else {
+            return;
+        };
+        let completed = if snapshot.forming {
+            snapshot
+                .bars
+                .len()
+                .checked_sub(2)
+                .map(|index| snapshot.bars[index].source_sequence)
+        } else {
+            snapshot.bars.last().map(|bar| bar.source_sequence)
+        };
+        if let Some(live) = self.live.get_mut(series) {
+            live.published_completed = completed;
+            live.dirty = live.aggregator.in_flight().is_some();
+        }
     }
 
     fn schedule_coinbase_history(
@@ -4047,7 +4383,8 @@ impl Coordinator<'_> {
         } else {
             self.deferred_publications.insert(series.clone());
         }
-        let Some(bars) = self.install_completed_history(
+        let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
+        let Some((bars, forming)) = self.install_completed_history(
             series,
             generation,
             snapshot,
@@ -4065,12 +4402,8 @@ impl Coordinator<'_> {
             }
             return;
         };
-        let should_complete_handoff = kind != HistoryRequestKind::ViewportBackfill
-            || self
-                .live
-                .get(series)
-                .is_none_or(|live| live.viewport_position == ViewportPosition::Live);
-        if should_complete_handoff && !self.complete_coinbase_live_handoff(series, &bars) {
+        if !self.complete_coinbase_live_handoff(series, &bars, forming, handoff_boundary_unix_nanos)
+        {
             return;
         }
         self.pending.remove(series);
@@ -4189,10 +4522,18 @@ impl Coordinator<'_> {
         replace_covering: bool,
         persisted_bars: Vec<MarketBar>,
         publish: bool,
-    ) -> Option<Vec<MarketBar>> {
+    ) -> Option<(Vec<MarketBar>, Option<FormingBar>)> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
+        let mut forming = snapshot.forming;
+        // Rithmic closes its own seam inside this install; Coinbase closes it
+        // afterwards, against the bars the engine actually accepted.
+        let rithmic_forming = if series.provider_id == "rithmic" {
+            forming.take()
+        } else {
+            None
+        };
         let bars = snapshot.bars;
         let installed = if replace_covering {
             self.engine.replace_covering_history(
@@ -4248,10 +4589,13 @@ impl Coordinator<'_> {
         if let Err(error) = self.finish_rithmic_history_handoff(
             series,
             generation,
-            price_scale,
-            quantity_scale,
-            handoff_boundary_unix_nanos,
-            &bars,
+            RithmicHandoffSeed {
+                price_scale,
+                quantity_scale,
+                bars: &bars,
+                forming: rithmic_forming,
+                handoff_boundary_unix_nanos,
+            },
         ) {
             if let Some(waiters) = self.pending.remove(series) {
                 fail_waiters(
@@ -4264,7 +4608,7 @@ impl Coordinator<'_> {
             }
             return None;
         }
-        Some(bars)
+        Some((bars, forming))
     }
 
     fn prepare_history_repair(
@@ -4283,9 +4627,7 @@ impl Coordinator<'_> {
                 snapshot.bars,
                 HISTORY_BARS_PER_SERIES,
                 Some(coinbase_series_interval(series).ok()?),
-                self.viewport_history_ranges
-                    .get(&(series.clone(), generation))
-                    .copied(),
+                HistoryPrecedence::Repair,
             ) else {
                 return None;
             };
@@ -4300,8 +4642,13 @@ impl Coordinator<'_> {
             self.history_failed(series, generation);
             return None;
         };
-        let merged =
-            reconcile_history_repair(&current, snapshot.bars, HISTORY_BARS_PER_SERIES, None, None);
+        let merged = reconcile_history_repair(
+            &current,
+            snapshot.bars,
+            HISTORY_BARS_PER_SERIES,
+            coinbase_series_interval(series).ok(),
+            HistoryPrecedence::Repair,
+        );
         let Ok(bars) = merged else {
             self.history_failed(series, generation);
             return None;
@@ -4318,6 +4665,20 @@ impl Coordinator<'_> {
         snapshot: &axiusflow_market_engine::SeriesSnapshot,
     ) -> Result<(), String> {
         self.ensure_realtime(series)?;
+        // A retained series whose newest bar is still forming hands that bar over
+        // as the open period rather than as closed history, so the first live
+        // trade revises it instead of being dropped against a bar the provider
+        // never closed.
+        let (bars, forming) = match snapshot.bars.split_last() {
+            Some((last, head)) if snapshot.forming => (
+                head,
+                Some(FormingBar {
+                    bar: *last,
+                    trades: None,
+                }),
+            ),
+            _ => (snapshot.bars.as_ref(), None),
+        };
         let handoff_boundary_unix_nanos = snapshot
             .bars
             .last()
@@ -4325,10 +4686,13 @@ impl Coordinator<'_> {
         if self.seed_rithmic_history(
             series,
             snapshot.provider_generation,
-            snapshot.price_scale,
-            snapshot.quantity_scale,
-            handoff_boundary_unix_nanos,
-            &snapshot.bars,
+            RithmicHandoffSeed {
+                price_scale: snapshot.price_scale,
+                quantity_scale: snapshot.quantity_scale,
+                bars,
+                forming,
+                handoff_boundary_unix_nanos,
+            },
         ) {
             Ok(())
         } else {
@@ -4340,44 +4704,39 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        price_scale: u8,
-        quantity_scale: u8,
-        handoff_boundary_unix_nanos: Option<i64>,
-        bars: &[MarketBar],
+        seed: RithmicHandoffSeed<'_>,
     ) -> Result<(), String> {
         if series.provider_id != "rithmic" {
             return Ok(());
         }
         self.ensure_realtime(series)?;
-        self.seed_rithmic_history(
-            series,
-            generation,
-            price_scale,
-            quantity_scale,
-            handoff_boundary_unix_nanos,
-            bars,
-        )
-        .then_some(())
-        .ok_or_else(|| "Rithmic history/live handoff failed".to_string())
+        self.seed_rithmic_history(series, generation, seed)
+            .then_some(())
+            .ok_or_else(|| "Rithmic history/live handoff failed".to_string())
     }
 
     fn seed_rithmic_history(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        price_scale: u8,
-        quantity_scale: u8,
-        handoff_boundary_unix_nanos: Option<i64>,
-        bars: &[MarketBar],
+        seed: RithmicHandoffSeed<'_>,
     ) -> bool {
         let Some(live) = self.rithmic_live.get_mut(series) else {
             return true;
         };
+        let RithmicHandoffSeed {
+            price_scale,
+            quantity_scale,
+            bars,
+            forming,
+            handoff_boundary_unix_nanos,
+        } = seed;
         if live
             .seed(
                 price_scale,
                 quantity_scale,
                 bars,
+                forming,
                 handoff_boundary_unix_nanos,
             )
             .is_ok()
@@ -4547,10 +4906,7 @@ impl Coordinator<'_> {
             RealtimeEvent::Heartbeat(generation) => self.realtime_heartbeat(generation),
             RealtimeEvent::Disconnected(generation) => {
                 if generation == self.coinbase_provider_generation() {
-                    self.realtime_interrupted(
-                        FailureStage::ProviderRealtime,
-                        "Coinbase realtime disconnected",
-                    );
+                    self.realtime_disconnected("Coinbase realtime disconnected");
                 }
             }
         }
@@ -4571,7 +4927,8 @@ impl Coordinator<'_> {
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
             }
             RithmicRealtimeEvent::Disconnected(generation) => {
-                self.rithmic_realtime_started = false;
+                self.rithmic_selection = None;
+                self.rithmic_pending_selection = None;
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
             }
         }
@@ -5173,27 +5530,66 @@ impl Coordinator<'_> {
         }
     }
 
-    fn realtime_interrupted(&mut self, stage: FailureStage, detail: &str) {
+    /// Rebuilds every Coinbase history/live seam after an interruption that
+    /// affects the whole provider — a realtime queue overflow, or aggregation
+    /// refusing a trade.
+    ///
+    /// `connected` stays owned by the socket lifecycle. Clearing it here left
+    /// the feed permanently down whenever the socket had not actually dropped:
+    /// nothing but a reconnect set it back, and no reconnect was coming. What an
+    /// interruption really invalidates is the seam, so this clears
+    /// `history_ready` and refetches, which the heartbeat also retries.
+    fn realtime_interrupted(&mut self, _stage: FailureStage, detail: &str) {
+        let generation = self.invalidate_coinbase_seams(detail);
+        // The socket is still up, so nobody else is going to reseed these: the
+        // refetch has to start here. Clearing `connected` instead — which is what
+        // this used to do — left the feed down for good, because only a reconnect
+        // set it back and no reconnect was coming.
+        for series in self.live.keys().cloned().collect::<Vec<_>>() {
+            self.broadcast_series_resolution_for(
+                &series,
+                SeriesLoadState::Partial,
+                PersistenceState::Durable,
+                Some(detail),
+            );
+            if let Err(error) = self.enqueue_history(&series, generation) {
+                self.broadcast_demand_error_for(&series, FailureStage::Handoff, error, None);
+            }
+        }
+    }
+
+    /// The socket dropped. The worker reconnects on a fresh generation and
+    /// `realtime_connected` reseeds every series then, so this only marks the
+    /// seams stale — refetching now would fetch against a generation that is
+    /// already being retired.
+    fn realtime_disconnected(&mut self, detail: &'static str) {
+        self.invalidate_coinbase_seams(detail);
+        self.realtime_connected = false;
+        for live in self.live.values_mut() {
+            live.connected = false;
+        }
+    }
+
+    /// Marks every Coinbase history/live seam as needing a reseed and reports the
+    /// provider as recovering. Returns the current provider generation.
+    fn invalidate_coinbase_seams(&mut self, detail: &str) -> ProviderGeneration {
         let generation = self.coinbase_provider_generation();
         let _ = self
             .engine
             .set_provider_health("coinbase", generation, ProviderHealth::Recovering);
-        self.realtime_connected = false;
-        let affected = self.live.keys().cloned().collect::<Vec<_>>();
-        for series in &affected {
-            self.broadcast_demand_error_for(series, stage, detail, None);
-        }
         for live in self.live.values_mut() {
-            live.connected = false;
             live.history_ready = false;
             live.dirty = false;
+            live.published_completed = None;
             live.buffered.clear();
+            live.aggregator.reset();
         }
         self.broadcast_provider(
             ProviderConnectionState::Recovering,
             generation,
             Some(detail),
         );
+        generation
     }
 
     fn provider_online_if_all_series_ready(&mut self) {
@@ -5230,14 +5626,64 @@ impl Coordinator<'_> {
         }
     }
 
+    /// Replaces an overflowed consumer's queued bar stream with one covering
+    /// snapshot.
+    ///
+    /// The queue only overflows when a consumer falls further behind than
+    /// [`CONSUMER_SERIES_QUEUE_CAPACITY`] distinct bars, which a healthy chart
+    /// never does. Recovering with the current series — rather than dropping
+    /// the oldest update — keeps the strict `+1` sequence contract intact, and
+    /// costs exactly one snapshot.
+    fn recover_overflowed_series_queues(&mut self) {
+        let overflowed = self
+            .events
+            .iter()
+            .filter(|(_, events)| events.series_overflowed)
+            .map(|(consumer_id, _)| *consumer_id)
+            .collect::<Vec<_>>();
+        for consumer_id in overflowed {
+            let series = self
+                .engine
+                .current_demand(consumer_id)
+                .and_then(|demand| demand.series.clone());
+            let Some(series) = series else {
+                if let Some(events) = self.events.get_mut(&consumer_id) {
+                    events.clear_series();
+                }
+                continue;
+            };
+            match self.engine.publish_series_snapshot(&series) {
+                Ok(publications) => {
+                    for publication in publications
+                        .iter()
+                        .filter(|publication| publication.consumer_id == consumer_id)
+                    {
+                        if let Some(events) = self.events.get_mut(&consumer_id) {
+                            events.publish_snapshot(snapshot_message(publication));
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Axiusflow engine series-queue overflow recovery failed: {error}");
+                }
+            }
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                events.series_overflowed = false;
+            }
+        }
+    }
+
+    /// Publishes every Coinbase series that has bars the consumer has not seen.
+    ///
+    /// A series whose viewport sits back in history still publishes: the bars go
+    /// into the canonical series and the consumer's own viewport decides what is
+    /// drawn. Withholding them used to stall the feed permanently, because
+    /// nothing re-armed publication when the viewport came back to the edge.
     fn publish_live(&mut self) {
         let ready = self
             .live
             .iter_mut()
             .filter_map(|(series, live)| {
-                if live.viewport_position != ViewportPosition::Live {
-                    return None;
-                }
                 Some((
                     series.clone(),
                     live.generation,
@@ -5248,43 +5694,91 @@ impl Coordinator<'_> {
             })
             .collect::<Vec<_>>();
         for (series, generation, price_scale, quantity_scale, update) in ready {
-            let published = match update {
-                LiveSeriesPublication::Tail(bar) => self
-                    .engine
-                    .install_realtime_tail(
-                        generation,
-                        &series,
-                        price_scale,
-                        quantity_scale,
-                        bar,
-                        true,
-                    )
-                    .map(|publications| {
-                        for publication in publications {
-                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                                events.publish_series_update(series_update_message(&publication));
-                            }
-                        }
-                    }),
-                LiveSeriesPublication::Covering(bars) => self
-                    .engine
-                    .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
-                    .map(|publications| {
-                        for publication in publications {
-                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                                events.snapshot = Some(snapshot_message(&publication));
-                            }
-                        }
-                    }),
-            };
-            if let Err(error) = published {
+            if let Err(error) = self.install_live_publication(
+                &series,
+                generation,
+                price_scale,
+                quantity_scale,
+                update,
+            ) {
                 eprintln!("Axiusflow engine Coinbase live publication failed: {error}");
-                self.realtime_interrupted(
-                    FailureStage::Publication,
-                    "Coinbase live publication failed",
-                );
-                return;
+                self.reseed_coinbase_series(&series, "Coinbase live publication needs a reseed");
             }
+        }
+    }
+
+    /// Installs one live publication into the canonical series.
+    fn install_live_publication(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        update: LiveSeriesPublication,
+    ) -> Result<(), String> {
+        match update {
+            LiveSeriesPublication::Tails(bars) => {
+                let last = bars.len().saturating_sub(1);
+                for (index, bar) in bars.into_iter().enumerate() {
+                    let publications = self
+                        .engine
+                        .install_realtime_tail(
+                            generation,
+                            series,
+                            price_scale,
+                            quantity_scale,
+                            bar,
+                            index == last,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    for publication in publications {
+                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                            events.publish_series_update(series_update_message(&publication));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            LiveSeriesPublication::Covering(bars) => {
+                let publications = self
+                    .engine
+                    .install_realtime(generation, series, price_scale, quantity_scale, bars, true)
+                    .map_err(|error| error.to_string())?;
+                for publication in publications {
+                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                        events.publish_snapshot(snapshot_message(&publication));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Rearms one Coinbase series after its live publication stopped lining up
+    /// with the canonical series.
+    ///
+    /// This is deliberately per-series and recoverable. Escalating to
+    /// `realtime_interrupted` used to take every other chart down with it and
+    /// left them all down, because only a socket reconnect cleared the flags and
+    /// the socket had not dropped.
+    fn reseed_coinbase_series(&mut self, series: &BarSeriesKey, detail: &'static str) {
+        let generation = self.coinbase_provider_generation();
+        let Some(live) = self.live.get_mut(series) else {
+            return;
+        };
+        live.history_ready = false;
+        live.dirty = false;
+        live.published_completed = None;
+        live.buffered.clear();
+        live.aggregator.reset();
+        self.broadcast_series_resolution_for(
+            series,
+            SeriesLoadState::Partial,
+            PersistenceState::Durable,
+            Some(detail),
+        );
+        if let Err(error) = self.enqueue_history(series, generation) {
+            self.broadcast_demand_error_for(series, FailureStage::Handoff, error, None);
         }
     }
 
@@ -5304,31 +5798,30 @@ impl Coordinator<'_> {
             .collect::<Vec<_>>();
         for (series, generation, price_scale, quantity_scale, update) in ready {
             let published = match update {
-                LiveSeriesPublication::Tail(bar) => self
-                    .engine
-                    .install_realtime_tail(
+                LiveSeriesPublication::Tails(bars) => bars.into_iter().try_for_each(|bar| {
+                    let publications = self.engine.install_realtime_tail(
                         generation,
                         &series,
                         price_scale,
                         quantity_scale,
                         bar,
                         true,
-                    )
-                    .map(|publications| {
-                        for publication in publications {
-                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                                events.publish_series_update(series_update_message(&publication));
-                                events.series_state = Some(series_state_with_persistence(
-                                    publication.consumer_id,
-                                    publication.generation,
-                                    ipc_series(&publication.series),
-                                    SeriesLoadState::Live,
-                                    PersistenceState::Durable,
-                                    None,
-                                ));
-                            }
+                    )?;
+                    for publication in publications {
+                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                            events.publish_series_update(series_update_message(&publication));
+                            events.series_state = Some(series_state_with_persistence(
+                                publication.consumer_id,
+                                publication.generation,
+                                ipc_series(&publication.series),
+                                SeriesLoadState::Live,
+                                PersistenceState::Durable,
+                                None,
+                            ));
                         }
-                    }),
+                    }
+                    Ok(())
+                }),
                 LiveSeriesPublication::Covering(bars) => self
                     .engine
                     .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
@@ -5653,6 +6146,21 @@ impl Coordinator<'_> {
         Ok(())
     }
 
+    /// Hands the worker a replacement selection the control channel refused.
+    fn flush_rithmic_selection(&mut self) {
+        let Some(instrument) = self.rithmic_pending_selection.take() else {
+            return;
+        };
+        let Some(control) = self.rithmic_realtime_control else {
+            return;
+        };
+        if let Err(TrySendError::Full(RithmicRealtimeControl::Select(instrument))) =
+            control.try_send(RithmicRealtimeControl::Select(instrument))
+        {
+            self.rithmic_pending_selection = Some(instrument);
+        }
+    }
+
     fn stop_realtime_if_idle(&mut self) {
         if self.live.is_empty() && self.realtime_started {
             self.realtime_stop.store(true, Ordering::Release);
@@ -5663,11 +6171,12 @@ impl Coordinator<'_> {
             let generation = self.coinbase_provider_generation();
             let _ = self.engine.end_provider_session("coinbase", generation);
         }
-        if self.rithmic_live.is_empty() && self.rithmic_realtime_started {
+        if self.rithmic_live.is_empty() && self.rithmic_selection.is_some() {
             if let Some(control) = self.rithmic_realtime_control {
                 let _ = control.try_send(RithmicRealtimeControl::Stop);
             }
-            self.rithmic_realtime_started = false;
+            self.rithmic_selection = None;
+            self.rithmic_pending_selection = None;
             if let Some(generation) = self
                 .engine
                 .provider_status("rithmic")
@@ -5893,7 +6402,7 @@ fn publish_state(
     detail: Option<&str>,
 ) {
     let series = ipc_series(&publication.snapshot.series);
-    events.snapshot = Some(snapshot_message(publication));
+    events.publish_snapshot(snapshot_message(publication));
     events.series_state = Some(series_state_with_persistence(
         publication.consumer_id,
         publication.generation,
@@ -6201,70 +6710,108 @@ fn validate_provider_instrument(instrument: &InstallProviderInstrument) -> Resul
     Ok(())
 }
 
+/// Merges a Coinbase repair page into the canonical series.
+///
+/// Every bar's `source_sequence` is derived from its bucket, so merging is a
+/// union keyed on timestamp and nothing is ever renumbered: a bar the consumer
+/// already holds keeps the identity it was published with. The result is the
+/// contiguous run ending at the newest bar, because a series with a hole in it
+/// fails the contiguity checks in `SeriesStore` and in the desktop's replay
+/// model. Anything older than a hole is dropped rather than spliced, and the
+/// coverage ledger refetches it.
+/// Which side of a merge owns a bucket both sides carry.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HistoryPrecedence {
+    /// The incoming page came from the provider and is authoritative.
+    Repair,
+    /// The incoming page came from the local cache and may only fill gaps.
+    Current,
+}
+
 fn reconcile_interval_history(
     current: &SeriesSnapshot,
     repair: Vec<MarketBar>,
     maximum_bars: usize,
     interval: CoinbaseInterval,
-    anchor: Option<HistoryRange>,
+    precedence: HistoryPrecedence,
 ) -> Result<Vec<MarketBar>, String> {
     let mut merged = BTreeMap::new();
     for bar in current.bars.iter().copied() {
         bar.validate().map_err(|error| error.to_string())?;
-        if !coinbase_bar_is_aligned(interval, &bar)
-            || merged
-                .insert(bar.exchange_timestamp_unix_nanos, bar)
-                .is_some()
-        {
+        if !coinbase_bar_is_aligned(interval, &bar) {
             return Err("Coinbase current history is not canonical".to_string());
         }
+        merged.insert(bar.exchange_timestamp_seconds, bar);
     }
-    for mut bar in repair {
+    for bar in repair {
         bar.validate().map_err(|error| error.to_string())?;
         if !coinbase_bar_is_aligned(interval, &bar) {
             return Err("Coinbase repair is not interval aligned".to_string());
         }
-        bar.source_sequence = 1;
-        merged
-            .entry(bar.exchange_timestamp_unix_nanos)
-            .or_insert(bar);
+        match precedence {
+            HistoryPrecedence::Repair => {
+                merged.insert(bar.exchange_timestamp_seconds, bar);
+            }
+            HistoryPrecedence::Current => {
+                merged.entry(bar.exchange_timestamp_seconds).or_insert(bar);
+            }
+        }
     }
-    let bars = retain_anchored_history(merged.into_values().collect(), maximum_bars, anchor);
-    let mut bars = bars;
-    for (index, bar) in bars.iter_mut().enumerate() {
-        bar.source_sequence = u64::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_add(1))
-            .ok_or_else(|| "Coinbase covering repair sequence overflowed".to_string())?;
-        bar.validate().map_err(|error| error.to_string())?;
-    }
-    Ok(bars)
+    Ok(retain_contiguous_tail(
+        &merged.into_values().collect::<Vec<_>>(),
+        maximum_bars,
+    ))
 }
 
-fn retain_anchored_history(
+/// Retains the newest contiguous run, bounded to `maximum_bars`.
+///
+/// `bars` must be sorted by timestamp. The scan walks back from the newest bar
+/// and stops at the first sequence break, so the retained window always reaches
+/// the live edge and always satisfies the `+1` contract every consumer checks.
+fn retain_contiguous_tail(bars: &[MarketBar], maximum_bars: usize) -> Vec<MarketBar> {
+    if bars.is_empty() || maximum_bars == 0 {
+        return Vec::new();
+    }
+    let mut start = bars.len() - 1;
+    while start > 0 && bars.len() - start < maximum_bars {
+        if bars[start - 1].source_sequence.checked_add(1) != Some(bars[start].source_sequence) {
+            break;
+        }
+        start -= 1;
+    }
+    bars[start..].to_vec()
+}
+
+/// Restates one stored Coinbase series in canonical form.
+///
+/// Local history outlives the process, and a store written before bar identity
+/// was derived from the bucket holds positional sequences. Re-deriving them here
+/// — at the one place stored bars enter the engine — means a restart cannot
+/// reintroduce two numbering schemes into the same series. Rithmic history is
+/// returned untouched; it owns its own provider sequences.
+fn canonicalize_coinbase_history(
+    series: &BarSeriesKey,
     bars: Vec<MarketBar>,
-    maximum_bars: usize,
-    anchor: Option<HistoryRange>,
-) -> Vec<MarketBar> {
-    if bars.len() <= maximum_bars {
-        return bars;
+) -> Result<Vec<MarketBar>, String> {
+    if series.provider_id != "coinbase" {
+        return Ok(bars);
     }
-    let Some(anchor) = anchor else {
-        return bars[bars.len().saturating_sub(maximum_bars)..].to_vec();
-    };
-    let before_end =
-        bars.partition_point(|bar| bar.exchange_timestamp_unix_nanos < anchor.end_unix_nanos);
-    let tail_start = bars.len().saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE);
-    let tail_count = bars.len().saturating_sub(tail_start);
-    let viewport_capacity = maximum_bars.saturating_sub(tail_count);
-    let viewport_start = before_end.saturating_sub(viewport_capacity);
-    if tail_start <= before_end {
-        return bars[bars.len().saturating_sub(maximum_bars)..].to_vec();
+    let interval = coinbase_series_interval(series)?;
+    let mut canonical = BTreeMap::new();
+    for mut bar in bars {
+        if !coinbase_bar_is_aligned(interval, &bar) {
+            continue;
+        }
+        bar.source_sequence = interval.bucket_sequence(bar.exchange_timestamp_seconds)?;
+        if bar.validate().is_err() {
+            continue;
+        }
+        canonical.insert(bar.exchange_timestamp_seconds, bar);
     }
-    let mut retained = Vec::with_capacity(maximum_bars);
-    retained.extend_from_slice(&bars[viewport_start..before_end]);
-    retained.extend_from_slice(&bars[tail_start..]);
-    retained
+    Ok(retain_contiguous_tail(
+        &canonical.into_values().collect::<Vec<_>>(),
+        HISTORY_BARS_PER_SERIES,
+    ))
 }
 
 fn reconcile_history_repair(
@@ -6272,13 +6819,13 @@ fn reconcile_history_repair(
     repair: Vec<MarketBar>,
     maximum_bars: usize,
     interval: Option<CoinbaseInterval>,
-    anchor: Option<HistoryRange>,
+    precedence: HistoryPrecedence,
 ) -> Result<Vec<MarketBar>, String> {
     if maximum_bars == 0 || current.bars.is_empty() {
         return Err("covering history repair is empty".to_string());
     }
     if let Some(interval) = interval {
-        return reconcile_interval_history(current, repair, maximum_bars, interval, anchor);
+        return reconcile_interval_history(current, repair, maximum_bars, interval, precedence);
     }
     if repair.is_empty() {
         return Err("covering history repair is empty".to_string());
@@ -6309,7 +6856,11 @@ fn reconcile_history_repair(
             }
         }
     }
-    let retained = retain_anchored_history(merged, maximum_bars, anchor);
+    let retained = if merged.len() > maximum_bars {
+        merged[merged.len() - maximum_bars..].to_vec()
+    } else {
+        merged
+    };
     for bar in &retained {
         bar.validate().map_err(|error| error.to_string())?;
     }
@@ -6327,15 +6878,25 @@ fn recent_coinbase_history_range(
     maximum_bars: usize,
 ) -> Result<HistoryRange, String> {
     let interval = coinbase_series_interval(series)?;
-    let end_seconds = interval.bucket_start(current_unix_nanos()?.div_euclid(1_000_000_000))?;
+    let now_seconds = current_unix_nanos()?.div_euclid(1_000_000_000);
+    let end_seconds = interval.bucket_start(now_seconds)?;
     let start_seconds = interval.shift_bucket(
         end_seconds,
         -i64::try_from(maximum_bars)
             .map_err(|_| "Coinbase recent-history span overflowed".to_string())?,
     )?;
+    // The page runs through the source candle the market is trading in right
+    // now, not only to the boundary of the open bucket. Coinbase serves an
+    // interval it does not publish natively as several source candles, and the
+    // later ones are what the forming bar is made of; the end stays on a source
+    // boundary because the provider rejects any other alignment.
+    let source_seconds = interval.source().1;
+    let open_source_seconds = now_seconds - now_seconds.rem_euclid(source_seconds);
     Ok(HistoryRange {
         start_unix_nanos: start_seconds.max(0).saturating_mul(1_000_000_000),
-        end_unix_nanos: end_seconds.saturating_mul(1_000_000_000),
+        end_unix_nanos: end_seconds
+            .max(open_source_seconds)
+            .saturating_mul(1_000_000_000),
     })
 }
 
@@ -6359,22 +6920,22 @@ fn viewport_coinbase_history_range(
     let visible_bars = interval.buckets_between(visible_start, visible_end)?;
     let prefetched_start = interval.shift_bucket(visible_start, -visible_bars)?;
     let bounded_start = interval.shift_bucket(
-        visible_end,
+        now_end,
         -i64::try_from(VIEWPORT_BACKFILL_BARS)
             .map_err(|_| "Coinbase viewport-history span overflowed".to_string())?,
     )?;
+    // The request runs from the visible window all the way to the live edge, not
+    // just across the window. Coverage pages it back from the edge one page at a
+    // time, so what lands is always adjacent to what the series already holds.
+    // Fetching the window alone produced an island the series could not join,
+    // and splicing that island onto the live edge is what corrupted the series.
     Ok(HistoryRange {
         start_unix_nanos: prefetched_start
             .max(bounded_start)
             .max(0)
             .saturating_mul(1_000_000_000),
-        end_unix_nanos: visible_end.saturating_mul(1_000_000_000),
+        end_unix_nanos: now_end.saturating_mul(1_000_000_000),
     })
-}
-
-fn viewport_follows_live(series: &BarSeriesKey, range: HistoryRange) -> Result<bool, String> {
-    let recent = recent_coinbase_history_range(series, VIEWPORT_LIVE_TAIL_RESERVE)?;
-    Ok(range.end_unix_nanos > recent.start_unix_nanos)
 }
 
 fn coinbase_history_page_range(
@@ -6856,6 +7417,7 @@ mod tests {
                 price_scale,
                 quantity_scale,
                 bars,
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             })
@@ -7090,7 +7652,8 @@ mod tests {
             catalog_selections: BTreeMap::new(),
             realtime_started: false,
             realtime_connected: false,
-            rithmic_realtime_started: false,
+            rithmic_selection: None,
+            rithmic_pending_selection: None,
             realtime_products: BTreeSet::new(),
         }
     }
@@ -7406,7 +7969,7 @@ mod tests {
         generation: ProviderGeneration,
     ) -> RithmicLiveHandoff {
         let mut live = RithmicLiveHandoff::new(series, generation, "CME").expect("live cadence");
-        live.seed(2, 0, &[history_bar()], None)
+        live.seed(2, 0, &[history_bar()], None, None)
             .expect("history seeds handoff");
         live.connected = true;
         live
@@ -7426,6 +7989,7 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 0,
                 bars: vec![history_bar()],
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             }),
@@ -7504,20 +8068,18 @@ mod tests {
     fn pending_covering_snapshot_is_never_replaced_by_an_out_of_order_tail() {
         let series = btc();
         let covering_bar = history_bar();
-        let mut events = ConsumerEvents {
-            snapshot: Some(envelope::Payload::SeriesSnapshot(IpcSeriesSnapshot {
-                consumer_id: 1,
-                generation: 1,
-                series: Some(series.clone()),
-                provider_generation: 1,
-                price_scale: 2,
-                quantity_scale: 8,
-                bars: vec![ipc_bar(covering_bar)],
-                publication_generation: 4,
-                forming: false,
-            })),
-            ..ConsumerEvents::default()
-        };
+        let mut events = ConsumerEvents::default();
+        events.publish_snapshot(envelope::Payload::SeriesSnapshot(IpcSeriesSnapshot {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series.clone()),
+            provider_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            bars: vec![ipc_bar(covering_bar)],
+            publication_generation: 4,
+            forming: false,
+        }));
         let stale = MarketBar {
             source_sequence: covering_bar.source_sequence.saturating_sub(1),
             ..covering_bar
@@ -7535,11 +8097,15 @@ mod tests {
         ));
 
         assert!(matches!(
-            events.snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            events.queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.bars == vec![ipc_bar(covering_bar)]
                     && snapshot.publication_generation == 4
         ));
+        // The tail is queued behind the snapshot rather than folded into it or
+        // dropped. Dropping it is what used to open sequence gaps the consumer
+        // could only repair with a full resnapshot.
+        assert_eq!(events.series.len(), 2);
     }
 
     #[test]
@@ -7564,7 +8130,9 @@ mod tests {
         };
         let mut fixed = RithmicLiveHandoff::new(&fixed_series, generation, "CME")
             .expect("fixed cadence streams");
-        fixed.seed(2, 0, &[history], None).expect("history seeds");
+        fixed
+            .seed(2, 0, &[history], None, None)
+            .expect("history seeds");
         fixed
             .accept_trade(&rithmic_trade(1, 1, 70_000_000_000, 108))
             .expect("trade inside completed history is stale");
@@ -7584,8 +8152,8 @@ mod tests {
         fixed.connected = true;
         assert!(matches!(
             fixed.take_publication(),
-            Some(LiveSeriesPublication::Tail(bar))
-                if bar.source_sequence == 41 && bar.close == 116
+            Some(LiveSeriesPublication::Tails(ref bars))
+                if bars.len() == 1 && bars[0].source_sequence == 41 && bars[0].close == 116
         ));
         fixed
             .accept_trade(&rithmic_trade(4, 1, 126_000_000_000, 117))
@@ -7623,7 +8191,7 @@ mod tests {
         };
         let mut tick =
             RithmicLiveHandoff::new(&tick_series, generation, "CME").expect("tick cadence streams");
-        tick.seed(2, 0, &[tick_history], None)
+        tick.seed(2, 0, &[tick_history], None, None)
             .expect("tick history seeds");
         tick.accept_trade(&rithmic_trade(1, 1, 60_500_000_000, 120))
             .expect("first trade starts a new tick bar");
@@ -7679,8 +8247,14 @@ mod tests {
             };
             let mut live = RithmicLiveHandoff::new(&series, generation, "CME")
                 .expect("calendar cadence streams");
-            live.seed(2, 0, &[history], Some(boundary_seconds * 1_000_000_000))
-                .expect("calendar history seeds");
+            live.seed(
+                2,
+                0,
+                &[history],
+                None,
+                Some(boundary_seconds * 1_000_000_000),
+            )
+            .expect("calendar history seeds");
 
             live.accept_trade(&rithmic_trade(1, 1, same_bucket, 112))
                 .expect("same calendar bucket updates");
@@ -8316,20 +8890,28 @@ mod tests {
                 .recv()
                 .map_err(|_| "test history release disconnected".to_string())?;
             let profile = coinbase_series_profile(series, &coinbase_instrument(series))?;
+            // A run starting at bucket zero, numbered the way the adapter numbers
+            // it. Deriving a coarser series needs source bars that cover a whole
+            // target bucket; a single bar covers none of one.
+            let interval = i64::from(profile.interval_seconds);
             Ok(HistorySnapshot {
                 price_scale: profile.price_scale,
                 quantity_scale: profile.quantity_scale,
-                bars: vec![MarketBar {
-                    source_sequence: 1,
-                    exchange_timestamp_seconds: i64::from(profile.interval_seconds),
-                    exchange_timestamp_unix_nanos: i64::from(profile.interval_seconds)
-                        * 1_000_000_000,
-                    open: 100,
-                    high: 110,
-                    low: 90,
-                    close: 105,
-                    volume: 7,
-                }],
+                bars: (0..5)
+                    .map(|index| MarketBar {
+                        source_sequence: index + 1,
+                        exchange_timestamp_seconds: i64::try_from(index).unwrap_or(0) * interval,
+                        exchange_timestamp_unix_nanos: i64::try_from(index).unwrap_or(0)
+                            * interval
+                            * 1_000_000_000,
+                        open: 100,
+                        high: 110,
+                        low: 90,
+                        close: 105,
+                        volume: 7,
+                    })
+                    .collect(),
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             })
@@ -8359,6 +8941,7 @@ mod tests {
                     close: i64::from(profile.interval_seconds),
                     volume: 1,
                 }],
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             })
@@ -8400,6 +8983,7 @@ mod tests {
                         * 1_000_000_000,
                     ..history_bar()
                 }],
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             })
@@ -8627,6 +9211,16 @@ mod tests {
         }
     }
 
+    /// Minute bars numbered the way the Coinbase adapter numbers them: sequence
+    /// is the bucket index since the epoch, plus one.
+    fn coinbase_history(first_minute: i64, count: usize) -> Vec<MarketBar> {
+        sequential_history(
+            u64::try_from(first_minute).expect("minute fits") + 1,
+            count,
+            first_minute,
+        )
+    }
+
     fn sequential_history(first_sequence: u64, count: usize, first_minute: i64) -> Vec<MarketBar> {
         (0..count)
             .map(|index| {
@@ -8734,7 +9328,7 @@ mod tests {
         let consumer_generation = GenerationId(id(1).expect("generation"));
         let provider_generation = ProviderGeneration(NonZeroU64::MIN);
         let series = internal_series(&btc()).expect("series");
-        let bars = sequential_history(1, 1_000, 1);
+        let bars = coinbase_history(1, 1_000);
         engine
             .register_consumer(
                 ConsumerIdentity {
@@ -8908,6 +9502,7 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 8,
                 bars: Vec::new(),
+                forming: None,
                 handoff_boundary_unix_nanos: Some(page.end_unix_nanos),
                 confirmed_empty: true,
             }),
@@ -9000,7 +9595,8 @@ mod tests {
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 8,
-                bars: sequential_history(1, 350, end_minute - 350),
+                bars: coinbase_history(end_minute - 350, 350),
+                forming: None,
                 handoff_boundary_unix_nanos: Some(end_minute * interval),
                 confirmed_empty: false,
             }),
@@ -9077,18 +9673,14 @@ mod tests {
                 .expect("initial range"),
             ),
             HistoryRequestKind::Initial,
-            Ok(backfill_snapshot(sequential_history(
-                1,
-                200,
-                end_minute - 200,
-            ))),
+            Ok(backfill_snapshot(coinbase_history(end_minute - 200, 200))),
         );
-        assert!(coordinator.events[&consumer_id].snapshot.is_some());
+        assert!(coordinator.events[&consumer_id].queued_series().is_some());
         coordinator
             .events
             .get_mut(&consumer_id)
             .expect("events")
-            .snapshot = None;
+            .clear_series();
         let _ = storage_rx.try_recv().expect("initial history persists");
         (
             coordinator,
@@ -9106,6 +9698,7 @@ mod tests {
             price_scale: 2,
             quantity_scale: 8,
             bars,
+            forming: None,
             handoff_boundary_unix_nanos: None,
             confirmed_empty: false,
         }
@@ -9165,19 +9758,30 @@ mod tests {
             provider_generation,
             Some(page),
             HistoryRequestKind::ViewportBackfill,
-            Ok(snapshot(sequential_history(1, minutes, start_minute))),
+            Ok(snapshot(coinbase_history(start_minute, minutes))),
         );
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot)) if snapshot.bars.len() == 200 + minutes
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot)) if snapshot.bars.len() == 200 + minutes
         ));
 
         coordinator
             .events
             .get_mut(&consumer_id)
             .expect("events")
-            .snapshot = None;
+            .clear_series();
         let _ = storage_rx.try_recv().expect("visible page persists");
+
+        // A page that does not adjoin the retained run cannot be spliced onto
+        // it: the series would then carry a hole under a contiguous sequence,
+        // which every consumer reads as one unbroken run. The page is still
+        // persisted, so the pages that close the gap can pick it up.
+        let installed = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("series is installed")
+            .bars
+            .len();
         coordinator.history_completed(
             &series,
             provider_generation,
@@ -9186,20 +9790,20 @@ mod tests {
                 end_unix_nanos: (end_minute - 4_800) * interval,
             }),
             HistoryRequestKind::ViewportBackfill,
-            Ok(snapshot(sequential_history(1, 200, end_minute - 5_000))),
+            Ok(snapshot(coinbase_history(end_minute - 5_000, 200))),
         );
         assert!(
-            coordinator.events[&consumer_id].snapshot.is_none(),
+            coordinator.events[&consumer_id].queued_series().is_none(),
             "a disjoint background page defers its snapshot"
         );
         assert_eq!(
             coordinator
                 .engine
                 .series_snapshot(&series)
-                .expect("background page installs")
+                .expect("series survives a disjoint page")
                 .bars
                 .len(),
-            400 + minutes
+            installed
         );
         assert!(matches!(
             storage_rx.try_recv(),
@@ -9222,20 +9826,17 @@ mod tests {
                 &storage_rx,
             );
         let interval = 60_000_000_000_i64;
-        // Install one background page silently while no plan is pending.
+        // Install one background page silently while no plan is pending. It
+        // adjoins the retained run, so it becomes part of the canonical series.
         coordinator.history_completed(
             &series,
             provider_generation,
             Some(HistoryRange {
-                start_unix_nanos: (end_minute - 5_000) * interval,
-                end_unix_nanos: (end_minute - 4_800) * interval,
+                start_unix_nanos: (end_minute - 400) * interval,
+                end_unix_nanos: (end_minute - 200) * interval,
             }),
             HistoryRequestKind::ViewportBackfill,
-            Ok(backfill_snapshot(sequential_history(
-                1,
-                200,
-                end_minute - 5_000,
-            ))),
+            Ok(backfill_snapshot(coinbase_history(end_minute - 400, 200))),
         );
         assert_eq!(
             coordinator
@@ -9250,11 +9851,9 @@ mod tests {
 
         // Demanding the same region and failing its repair resolves the plan
         // and must flush one covering snapshot carrying the silent install.
-        let resolution = Viewport::try_new(
-            (end_minute - 5_100) * interval,
-            (end_minute - 4_900) * interval,
-        )
-        .expect("resolution viewport");
+        let resolution =
+            Viewport::try_new((end_minute - 500) * interval, (end_minute - 300) * interval)
+                .expect("resolution viewport");
         coordinator
             .request_viewport_history(consumer_id, generation, resolution)
             .expect("resolution demand queues");
@@ -9285,8 +9884,8 @@ mod tests {
             Err("fixture backfill superseded".to_string()),
         );
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.bars.len() == 400
         ));
         assert!(coordinator.deferred_publications.is_empty());
@@ -9374,17 +9973,28 @@ mod tests {
         let replacement = history_rx.try_recv().expect("newer viewport rearms");
         assert_eq!(replacement.kind, HistoryRequestKind::ViewportBackfill);
         assert_ne!(replacement.range, Some(first));
+        // The demanded span now reaches the newest viewport; the pages that fill
+        // it walk back from the live edge so each one lands adjacent to what the
+        // series already holds.
         assert!(
-            replacement
-                .range
+            coordinator
+                .viewport_history_ranges
+                .get(&(series.clone(), provider_generation))
                 .is_some_and(|range| range.start_unix_nanos <= newest.start_unix_nanos)
         );
     }
 
+    /// A backfill that does not reach the live edge must not be spliced onto it.
+    ///
+    /// The retained window used to be the visible page plus a reserved live
+    /// tail, concatenated with a hole between them and renumbered contiguously.
+    /// The engine and the desktop both read that as one unbroken series, so the
+    /// hole was invisible until the live aggregator's next bar no longer
+    /// continued the renumbered sequence and the whole feed stopped.
     #[test]
-    fn viewport_history_merge_retains_visible_backfill_and_latest_live_tail() {
+    fn viewport_history_merge_keeps_only_the_run_that_reaches_the_live_edge() {
         let series = internal_series(&btc()).expect("series");
-        let backfill = sequential_history(1, VIEWPORT_BACKFILL_BARS + 100, 1);
+        let disjoint_backfill = coinbase_history(1, 1_000);
         let current = SeriesSnapshot {
             series,
             provider_generation: ProviderGeneration(NonZeroU64::MIN),
@@ -9392,45 +10002,70 @@ mod tests {
             price_scale: 2,
             quantity_scale: 8,
             forming: true,
-            bars: sequential_history(100_000, 1_000, 100_000).into(),
+            bars: coinbase_history(100_000, 1_000).into(),
         };
 
-        let anchor = HistoryRange {
-            start_unix_nanos: 60_000_000_000,
-            end_unix_nanos: i64::try_from(VIEWPORT_BACKFILL_BARS + 101)
-                .expect("history bound fits")
-                * 60_000_000_000,
-        };
         let merged = reconcile_history_repair(
             &current,
-            backfill,
+            disjoint_backfill,
             HISTORY_BARS_PER_SERIES,
             Some(CoinbaseInterval::Minute1),
-            Some(anchor),
+            HistoryPrecedence::Repair,
         )
         .expect("merge");
 
-        assert_eq!(merged.len(), HISTORY_BARS_PER_SERIES);
-        assert_eq!(merged[0].exchange_timestamp_seconds, 101 * 60);
-        assert_eq!(
-            merged[HISTORY_BARS_PER_SERIES - VIEWPORT_LIVE_TAIL_RESERVE].exchange_timestamp_seconds,
-            100_488 * 60
-        );
+        assert_eq!(merged.len(), 1_000);
+        assert_eq!(merged[0].exchange_timestamp_seconds, 100_000 * 60);
         assert_eq!(
             merged.last().map(|bar| bar.exchange_timestamp_seconds),
             Some(100_999 * 60)
         );
-        assert_eq!(merged[0].source_sequence, 1);
-        assert_eq!(
-            merged.last().map(|bar| bar.source_sequence),
-            Some(u64::try_from(HISTORY_BARS_PER_SERIES).expect("bound fits"))
+        assert!(merged.windows(2).all(|pair| {
+            pair[0].source_sequence + 1 == pair[1].source_sequence
+                && pair[0].exchange_timestamp_seconds + 60 == pair[1].exchange_timestamp_seconds
+        }));
+    }
+
+    /// An adjoining backfill extends the same run, and every bar keeps the
+    /// identity it already had.
+    #[test]
+    fn adjoining_viewport_backfill_extends_the_run_without_renumbering() {
+        let series = internal_series(&btc()).expect("series");
+        let current_bars = coinbase_history(100_000, 500);
+        let live_edge = *current_bars.last().expect("live edge");
+        let current = SeriesSnapshot {
+            series,
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            forming: true,
+            bars: current_bars.into(),
+        };
+
+        let merged = reconcile_history_repair(
+            &current,
+            coinbase_history(99_500, 500),
+            HISTORY_BARS_PER_SERIES,
+            Some(CoinbaseInterval::Minute1),
+            HistoryPrecedence::Repair,
+        )
+        .expect("merge");
+
+        assert_eq!(merged.len(), 1_000);
+        assert_eq!(merged[0].exchange_timestamp_seconds, 99_500 * 60);
+        assert_eq!(merged.last().copied(), Some(live_edge));
+        assert!(
+            merged
+                .windows(2)
+                .all(|pair| { pair[0].source_sequence + 1 == pair[1].source_sequence })
         );
     }
 
     #[test]
     fn coinbase_coverage_keeps_interior_missing_bars_repairable() {
         let series = internal_series(&btc()).expect("series");
-        let mut bars = sequential_history(1, 5, 1);
+        let mut bars = coinbase_history(1, 5);
         bars.remove(2);
 
         let ranges = coinbase_bar_coverage_ranges(&series, &bars).expect("coverage");
@@ -9461,7 +10096,7 @@ mod tests {
     #[test]
     fn coinbase_covering_repair_fills_holes_and_preserves_current_overlap() {
         let series = internal_series(&btc()).expect("series");
-        let mut current_bars = sequential_history(1, 5, 1);
+        let mut current_bars = coinbase_history(1, 5);
         current_bars.remove(2);
         let current = SeriesSnapshot {
             series: series.clone(),
@@ -9472,9 +10107,9 @@ mod tests {
             forming: true,
             bars: current_bars.into(),
         };
-        let mut repair = sequential_history(1, 1, 3);
+        let mut repair = coinbase_history(3, 1);
         repair[0].close = 103;
-        let mut overlap = sequential_history(2, 1, 1);
+        let mut overlap = coinbase_history(1, 1);
         overlap[0].close = 102;
         repair.extend(overlap);
 
@@ -9483,12 +10118,14 @@ mod tests {
             repair,
             HISTORY_BARS_PER_SERIES,
             Some(coinbase_series_interval(&series).expect("interval")),
-            None,
+            HistoryPrecedence::Current,
         )
         .expect("repair merges");
 
         assert_eq!(merged.len(), 5);
-        assert_eq!(merged[1].close, 105);
+        // The repair fills the hole it was fetched for and never overwrites a
+        // bar the series already published.
+        assert_eq!(merged[0].close, 105);
         assert_eq!(merged[2].close, 103);
         assert!(merged.windows(2).all(|pair| {
             pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
@@ -9522,6 +10159,50 @@ mod tests {
         }
     }
 
+    /// Folds the consumer's event stream back into a bar series.
+    ///
+    /// This is the contract the desktop's replay model implements: a snapshot
+    /// replaces the series, and every update appends one bar or replaces the
+    /// forming one. Reconstructing the series this way fails loudly if the
+    /// stream ever skips a sequence, which a latest-value mailbox did silently.
+    fn collect_series_until(
+        service: &MarketService,
+        client_id: u64,
+        consumer_id: u64,
+        mut done: impl FnMut(&BTreeMap<u64, IpcMarketBar>) -> bool,
+    ) -> BTreeMap<u64, IpcMarketBar> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut bars: BTreeMap<u64, IpcMarketBar> = BTreeMap::new();
+        loop {
+            match service
+                .poll_event(client_id, consumer_id)
+                .expect("market poll succeeds")
+            {
+                Some(envelope::Payload::SeriesSnapshot(snapshot)) => {
+                    bars = snapshot
+                        .bars
+                        .into_iter()
+                        .map(|bar| (bar.source_sequence, bar))
+                        .collect();
+                }
+                Some(envelope::Payload::SeriesUpdate(update)) => {
+                    if let Some(bar) = update.bar {
+                        bars.insert(bar.source_sequence, bar);
+                    }
+                }
+                _ => {}
+            }
+            if done(&bars) {
+                return bars;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "series never completed; collected {bars:#?}"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn poll_until(
         service: &MarketService,
         client_id: u64,
@@ -9529,15 +10210,24 @@ mod tests {
         mut accept: impl FnMut(&envelope::Payload) -> bool,
     ) -> envelope::Payload {
         let deadline = Instant::now() + Duration::from_secs(2);
+        let mut seen: Vec<String> = Vec::new();
         loop {
             if let Some(event) = service
                 .poll_event(client_id, consumer_id)
                 .expect("market poll succeeds")
-                && accept(&event)
             {
-                return event;
+                if accept(&event) {
+                    return event;
+                }
+                let rendered = format!("{event:?}");
+                if !seen.contains(&rendered) {
+                    seen.push(rendered);
+                }
             }
-            assert!(Instant::now() < deadline, "market event timed out");
+            assert!(
+                Instant::now() < deadline,
+                "market event timed out; distinct events seen: {seen:#?}"
+            );
             thread::sleep(Duration::from_millis(1));
         }
     }
@@ -9571,14 +10261,12 @@ mod tests {
             envelope::Payload::SeriesUpdate(update)
                 if update.generation == generation
                     && update.provider_generation == provider_generation
-                    && update.forming
                     && update.bar.as_ref().is_some_and(|bar| bar.close == close)
         ) || matches!(
             event,
             envelope::Payload::SeriesSnapshot(snapshot)
                 if snapshot.generation == generation
                     && snapshot.provider_generation == provider_generation
-                    && snapshot.forming
                     && snapshot.bars.last().is_some_and(|bar| bar.close == close)
         )
     }
@@ -9988,6 +10676,123 @@ mod tests {
         );
     }
 
+    /// The live worker follows the instrument, not a one-shot flag.
+    ///
+    /// Tracking "a selection was sent once" meant a symbol change never sent the
+    /// replacement `Select`: the worker stayed on the previous contract, so the
+    /// new chart received the old one's trades or nothing at all. Holding the
+    /// identity makes "the selection is stale" a question with an answer — and a
+    /// timeframe change, which keeps the instrument, must still send nothing.
+    #[test]
+    fn rithmic_instrument_change_selects_the_replacement_and_a_timeframe_change_does_not() {
+        let (history_tx, _history_rx) = mpsc::sync_channel(4);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(4);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(4);
+        let (rithmic_control_tx, rithmic_control_rx) = mpsc::sync_channel(4);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let generation = ProviderGeneration(id(7).expect("provider generation"));
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let first = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        let mut faster = first.clone();
+        faster.period = BarPeriod::time(300).expect("five minute cadence");
+        let second = rithmic_series_key("instrument:rithmic:CME:MESU6", "rithmic-test:CME:MESU6");
+
+        let mut engine = configured_engine().expect("engine configures");
+        engine
+            .begin_provider_session("rithmic", generation)
+            .expect("Rithmic session begins");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &first,
+        );
+        coordinator.rithmic_realtime_control = Some(&rithmic_control_tx);
+        for series in [&first, &faster, &second] {
+            let mut instrument = provider_instrument(7, 1);
+            instrument.instrument_id = series.instrument_id.clone();
+            instrument.entitlement_id = series.entitlement_id.clone();
+            coordinator.catalog.insert(
+                (series.provider_id.clone(), series.instrument_id.clone()),
+                instrument,
+            );
+        }
+
+        let mut demand = 1_u64;
+        let mut select = |coordinator: &mut Coordinator<'_>, series: &BarSeriesKey| {
+            demand += 1;
+            coordinator
+                .engine
+                .set_series_demand_with_streams(
+                    consumer_id,
+                    GenerationId(id(demand).expect("generation")),
+                    series,
+                    chart_stream_requirements(series),
+                )
+                .expect("Rithmic demand installs");
+            coordinator
+                .ensure_realtime(series)
+                .expect("Rithmic realtime is established");
+        };
+
+        select(&mut coordinator, &first);
+        assert!(
+            matches!(
+                rithmic_control_rx.try_recv(),
+                Ok(RithmicRealtimeControl::Select(instrument))
+                    if instrument.instrument_id == first.instrument_id
+            ),
+            "the first demand selects its instrument"
+        );
+
+        select(&mut coordinator, &faster);
+        assert!(
+            rithmic_control_rx.try_recv().is_err(),
+            "a timeframe change keeps the same instrument and must not reselect"
+        );
+
+        select(&mut coordinator, &second);
+        assert!(
+            matches!(
+                rithmic_control_rx.try_recv(),
+                Ok(RithmicRealtimeControl::Select(instrument))
+                    if instrument.instrument_id == second.instrument_id
+            ),
+            "a contract change sends the worker its replacement selection"
+        );
+        assert_eq!(
+            coordinator
+                .rithmic_selection
+                .as_ref()
+                .map(|selection| selection.instrument_id.clone()),
+            Some(second.instrument_id.clone())
+        );
+        // Both series still have a live handoff, so neither one's buffered trades
+        // were thrown away by the switch, and the provider session was never torn
+        // down for what is only a presentation change.
+        assert!(coordinator.rithmic_live.contains_key(&second));
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .and_then(|status| status.generation),
+            Some(generation)
+        );
+    }
+
     #[test]
     fn slow_consumer_conflates_live_state_without_blocking_control() {
         let harness = MarketService::start_fixture_realtime(vec![history_bar()])
@@ -10304,7 +11109,7 @@ mod tests {
                 if state.state == SeriesLoadState::Partial as i32
                     && state.persistence == PersistenceState::Durable as i32
         ));
-        assert!(coordinator.events[&consumer_id].snapshot.is_some());
+        assert!(coordinator.events[&consumer_id].queued_series().is_some());
     }
 
     #[test]
@@ -10352,6 +11157,7 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 8,
                 bars: vec![history_bar()],
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             }),
@@ -10370,8 +11176,8 @@ mod tests {
             })),
         );
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.bars[0].close == 105
         ));
         assert!(
@@ -10430,8 +11236,8 @@ mod tests {
             })),
         );
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.bars[0].close == 99
         ));
         assert!(history_rx.try_recv().is_ok());
@@ -10448,7 +11254,7 @@ mod tests {
                 if state.state == SeriesLoadState::Partial as i32
                     && state.persistence == PersistenceState::Durable as i32
         ));
-        assert!(coordinator.events[&consumer_id].snapshot.is_some());
+        assert!(coordinator.events[&consumer_id].queued_series().is_some());
         coordinator.history_completed(
             &series,
             generation,
@@ -10458,6 +11264,7 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 8,
                 bars: vec![history_bar()],
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             }),
@@ -10469,8 +11276,8 @@ mod tests {
                     && state.persistence == PersistenceState::Pending as i32
         ));
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.bars[0].close == 105
         ));
         assert!(matches!(
@@ -10520,7 +11327,7 @@ mod tests {
             &series,
             generation,
             Ok(Some(StoredHistory {
-                bars: sequential_history(1, 350, 1),
+                bars: coinbase_history(1, 350),
                 derived: false,
                 durable: true,
             })),
@@ -10535,27 +11342,30 @@ mod tests {
             Ok(HistorySnapshot {
                 price_scale: 2,
                 quantity_scale: 8,
-                bars: sequential_history(1, 250, 102),
+                bars: coinbase_history(102, 250),
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             }),
         );
 
         let Some(envelope::Payload::SeriesSnapshot(snapshot)) =
-            coordinator.events[&consumer_id].snapshot.as_ref()
+            coordinator.events[&consumer_id].queued_series()
         else {
             panic!("covering repair publishes a snapshot");
         };
+        // Retained and repaired bars merge on timestamp, and every bar keeps the
+        // sequence its bucket gives it: minute 1 is 2, minute 351 is 352.
         assert_eq!(snapshot.bars.len(), 351);
-        assert_eq!(snapshot.bars[0].source_sequence, 1);
+        assert_eq!(snapshot.bars[0].source_sequence, 2);
         assert_eq!(snapshot.bars[0].exchange_timestamp_seconds, 60);
-        assert_eq!(snapshot.bars[350].source_sequence, 351);
+        assert_eq!(snapshot.bars[350].source_sequence, 352);
         assert_eq!(snapshot.bars[350].exchange_timestamp_seconds, 21_060);
         assert!(matches!(
             storage_rx.try_recv(),
             Ok(StorageRequest::Persist(_, _, ref bars, false, _, _))
-                if bars.first().is_some_and(|bar| bar.source_sequence == 1)
-                    && bars.last().is_some_and(|bar| bar.source_sequence == 351)
+                if bars.first().is_some_and(|bar| bar.source_sequence == 2)
+                    && bars.last().is_some_and(|bar| bar.source_sequence == 352)
         ));
     }
 
@@ -10624,8 +11434,8 @@ mod tests {
             })),
         );
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.provider_generation == 7
                     && snapshot.price_scale == 2
                     && snapshot.quantity_scale == 0
@@ -10647,6 +11457,7 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 0,
                 bars: vec![repaired],
+                forming: None,
                 handoff_boundary_unix_nanos: None,
                 confirmed_empty: false,
             }),
@@ -10800,7 +11611,7 @@ mod tests {
             None,
         );
         let mut live = RithmicLiveHandoff::new(&series, generation, "CME").expect("live cadence");
-        live.seed(2, 0, &[history_bar()], None)
+        live.seed(2, 0, &[history_bar()], None, None)
             .expect("history seeds live handoff");
         live.connected = true;
         coordinator.rithmic_live.insert(series.clone(), live);
@@ -10812,8 +11623,8 @@ mod tests {
             Some(snapshot) if snapshot.provider_generation == generation
         ));
         assert!(matches!(
-            coordinator.events[&consumer_id].snapshot,
-            Some(envelope::Payload::SeriesSnapshot(ref snapshot))
+            coordinator.events[&consumer_id].queued_series(),
+            Some(envelope::Payload::SeriesSnapshot(snapshot))
                 if snapshot.provider_generation == generation.0.get()
         ));
         assert!(matches!(
@@ -11011,7 +11822,7 @@ mod tests {
                     event,
                     envelope::Payload::SeriesSnapshot(_)
                 )),
-                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.bars.len() == 1
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.bars.len() == 5
             ));
         }
         service
@@ -11078,7 +11889,7 @@ mod tests {
         poll_until(&service, 1, 1, |event| {
             matches!(event, envelope::Payload::SeriesSnapshot(snapshot)
                 if snapshot.generation == 2
-                    && snapshot.bars.len() == 2
+                    && snapshot.bars.len() == 5
                     && snapshot.bars[0].exchange_timestamp_seconds == 0
                     && snapshot.bars[1].exchange_timestamp_seconds == 300
                     && snapshot.bars[1].source_sequence == 2)
@@ -11547,26 +12358,19 @@ mod tests {
             .actions
             .send(FixtureRealtimeAction::Trade(trade(5, "2.50", 2)))
             .expect("live trade after a quiet gap");
-        let resumed = poll_until(&harness.service, 1, 1, |event| {
-            matches!(event, envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.bars.last().is_some_and(|bar| bar.close == 250))
+        let bars = collect_series_until(&harness.service, 1, 1, |bars| {
+            bars.values().any(|bar| bar.close == 250)
         });
-        let envelope::Payload::SeriesSnapshot(snapshot) = resumed else {
-            panic!("quiet-gap recovery publishes a covering snapshot");
-        };
-        let minutes = snapshot
-            .bars
-            .iter()
+
+        // The attach snapshot already delivered minute 1 as sequence 2, so the
+        // live stream has to continue at 3 and reach minute 5 without a gap.
+        let minutes = bars
+            .values()
             .map(|bar| bar.exchange_timestamp_seconds / 60)
             .collect::<Vec<_>>();
-        assert_eq!(minutes, vec![1, 2, 3, 4, 5]);
-        assert!(
-            snapshot.bars.windows(2).all(|pair| {
-                pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
-            }),
-            "the filled series stays canonical"
-        );
-        let quiet = &snapshot.bars[2..4];
+        assert_eq!(minutes, vec![2, 3, 4, 5]);
+        assert_eq!(bars.keys().copied().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+        let quiet = bars.values().skip(1).take(2).collect::<Vec<_>>();
         assert!(
             quiet.iter().all(|bar| bar.volume == 0
                 && bar.open == 200
@@ -11582,6 +12386,532 @@ mod tests {
     /// A series frozen behind a seam repair also held the provider short of
     /// `Online`, and every other series is gated on that, so the chart the user
     /// switched to stayed blank.
+    /// The open bucket is history's tail, not history's newest entry.
+    ///
+    /// A page fetched through *now* carries a bucket the provider has not closed.
+    /// Writing it into history freezes a half-built candle that stays wrong until
+    /// the bucket rolls; on an hourly chart that is an hour of bad data.
+    #[test]
+    fn coinbase_history_separates_the_open_bucket_from_closed_history() {
+        // Seven minute bars: the first five close one 5m bucket, the last two are
+        // the part of the next bucket that has traded so far.
+        let source = (0..7)
+            .map(|minute| MarketBar {
+                source_sequence: u64::try_from(minute).expect("minute fits") + 1,
+                exchange_timestamp_seconds: minute * 60,
+                exchange_timestamp_unix_nanos: minute * 60 * 1_000_000_000,
+                open: 100 + minute,
+                high: 120 + minute,
+                low: 80 + minute,
+                close: 110 + minute,
+                volume: 3,
+            })
+            .collect::<Vec<_>>();
+
+        let (closed, _) =
+            aggregate_coinbase_bars(&source, CoinbaseInterval::Minute5, Some(300)).expect("closed");
+        let forming = forming_coinbase_bucket(&source, CoinbaseInterval::Minute5, 300)
+            .expect("forming bucket")
+            .expect("the open bucket has traded");
+
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].exchange_timestamp_seconds, 0);
+        assert_eq!(forming.exchange_timestamp_seconds, 300);
+        assert_eq!(forming.source_sequence, closed[0].source_sequence + 1);
+        // The open candle carries what the bucket has actually done, not just
+        // whatever trades happen to arrive after the chart was selected.
+        assert_eq!(forming.open, 105);
+        assert_eq!(forming.close, 116);
+        assert_eq!(forming.high, 126);
+        assert_eq!(forming.low, 85);
+        assert_eq!(forming.volume, 6);
+    }
+
+    /// The live-edge page has to reach the candle the market is trading in, and
+    /// it has to stay on a source boundary while doing so.
+    ///
+    /// Requesting only up to the last closed bucket is what made the forming
+    /// split unreachable; requesting an unaligned instant is what made the
+    /// provider reject the page outright.
+    #[test]
+    fn the_initial_coinbase_page_ends_on_the_open_source_candle() {
+        for (period_seconds, interval) in [
+            (60_u32, CoinbaseInterval::Minute1),
+            (180, CoinbaseInterval::Minute3),
+            (300, CoinbaseInterval::Minute5),
+            (14_400, CoinbaseInterval::Hour4),
+        ] {
+            let series = BarSeriesKey {
+                provider_id: "coinbase".to_string(),
+                instrument_id: "instrument:coinbase:BTC-USD".to_string(),
+                entitlement_id: "coinbase-public".to_string(),
+                period: BarPeriod::time(period_seconds).expect("period"),
+                definition_version: 1,
+            };
+            let range = recent_coinbase_history_range(&series, 200).expect("initial range");
+            let now_seconds = current_unix_nanos()
+                .expect("clock")
+                .div_euclid(1_000_000_000);
+            let end_seconds = range.end_unix_nanos.div_euclid(1_000_000_000);
+            let source_seconds = interval.source().1;
+
+            assert_eq!(
+                end_seconds % source_seconds,
+                0,
+                "{} pages are served in {source_seconds}s candles",
+                interval.id()
+            );
+            assert!(
+                end_seconds >= interval.bucket_start(now_seconds).expect("live edge"),
+                "{} stopped short of the open bucket",
+                interval.id()
+            );
+            assert!(
+                end_seconds <= now_seconds,
+                "{} asked for a candle the market has not reached",
+                interval.id()
+            );
+        }
+    }
+
+    /// A bucket the source has not covered end to end is never closed history.
+    #[test]
+    fn coinbase_forming_bucket_is_absent_until_the_bucket_trades() {
+        let source = vec![MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: 0,
+            exchange_timestamp_unix_nanos: 0,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 3,
+        }];
+        assert!(
+            forming_coinbase_bucket(&source, CoinbaseInterval::Minute5, 300)
+                .expect("forming bucket")
+                .is_none()
+        );
+    }
+
+    /// The seam: the open candle seeds the aggregator, and only trades the page
+    /// cannot already contain are replayed on top of it.
+    #[test]
+    fn coinbase_handoff_seeds_the_open_candle_and_replays_only_newer_trades() {
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let series = internal_series(&btc()).expect("series");
+        let (history_tx, _history_rx) = mpsc::sync_channel(4);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(4);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &stop,
+            consumer_id,
+            &series,
+        );
+        let instrument = coinbase_instrument(&series);
+        let mut live = LiveHandoff::try_new(
+            &series,
+            coordinator.coinbase_provider_generation(),
+            &instrument,
+        )
+        .expect("live handoff");
+        live.connected = true;
+        // Two trades arrive while the page is in flight. The first is inside the
+        // window the page covers; the second is not.
+        let boundary = 10 * 60_000_000_000 + 30_000_000_000;
+        live.buffered.push_back(trade(10, "1.50", 1));
+        let mut newer = trade(10, "3.00", 2);
+        newer.trade_time_unix_nanos = boundary + 1;
+        live.buffered.push_back(newer);
+        coordinator.live.insert(series.clone(), live);
+
+        let closed = coinbase_history(1, 9);
+        let forming = MarketBar {
+            source_sequence: 11,
+            exchange_timestamp_seconds: 600,
+            exchange_timestamp_unix_nanos: 600_000_000_000,
+            open: 100,
+            high: 210,
+            low: 90,
+            close: 200,
+            volume: 5,
+        };
+        assert!(coordinator.complete_coinbase_live_handoff(
+            &series,
+            &closed,
+            Some(FormingBar {
+                bar: forming,
+                trades: None,
+            }),
+            Some(boundary),
+        ));
+
+        let live = coordinator.live.get_mut(&series).expect("handoff exists");
+        let open = live
+            .aggregator
+            .in_flight()
+            .expect("the open candle is held");
+        assert_eq!(open.source_sequence, 11);
+        assert_eq!(open.exchange_timestamp_seconds, 600);
+        // The page's own OHLCV survives, the newer trade extends it, and the
+        // trade the page already covered is not counted a second time.
+        assert_eq!(open.open, 100);
+        assert_eq!(open.low, 90);
+        assert_eq!(open.close, 300);
+        assert_eq!(open.high, 300);
+        assert_eq!(open.volume, 6);
+        // Closed history is what the engine holds; the open candle is published
+        // as the tail that continues it.
+        assert_eq!(live.published_completed, Some(10));
+    }
+
+    /// The consumer outbox may lose bars only by announcing it.
+    #[test]
+    fn an_overflowed_series_queue_is_replaced_by_a_covering_snapshot() {
+        let mut events = ConsumerEvents::default();
+        let series = btc();
+        for sequence in
+            1..=u64::try_from(CONSUMER_SERIES_QUEUE_CAPACITY).expect("capacity fits") + 1
+        {
+            events.publish_series_update(envelope::Payload::SeriesUpdate(
+                axiusflow_engine_protocol::SeriesUpdate {
+                    consumer_id: 1,
+                    generation: 1,
+                    series: Some(series.clone()),
+                    provider_generation: 1,
+                    bar: Some(ipc_bar(MarketBar {
+                        source_sequence: sequence,
+                        exchange_timestamp_seconds: i64::try_from(sequence).expect("fits") * 60,
+                        exchange_timestamp_unix_nanos: i64::try_from(sequence).expect("fits")
+                            * 60_000_000_000,
+                        open: 100,
+                        high: 110,
+                        low: 90,
+                        close: 105,
+                        volume: 1,
+                    })),
+                    publication_generation: 1,
+                    forming: true,
+                },
+            ));
+        }
+
+        assert!(
+            events.series_overflowed,
+            "falling further behind than the queue holds must be announced"
+        );
+        assert!(
+            events.series.len() <= CONSUMER_SERIES_QUEUE_CAPACITY,
+            "the queue stays bounded"
+        );
+        // The one thing that must never happen is a queue that still looks
+        // contiguous while a bar in the middle of it has been discarded.
+        events.publish_snapshot(envelope::Payload::SeriesSnapshot(IpcSeriesSnapshot {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series),
+            provider_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            bars: Vec::new(),
+            publication_generation: 2,
+            forming: false,
+        }));
+        assert!(!events.series_overflowed);
+        assert_eq!(events.series.len(), 1);
+    }
+
+    /// Trades that arrive while Rithmic history is in flight belong to the open
+    /// candle, not to the floor.
+    ///
+    /// A Rithmic replay can take tens of seconds. Every trade in that window used
+    /// to be discarded, so a chart opened on a period that began at the first
+    /// trade after the fetch returned.
+    #[test]
+    fn rithmic_trades_buffered_during_history_reach_the_open_time_candle() {
+        let series = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        let mut live = RithmicLiveHandoff::new(&series, ProviderGeneration(NonZeroU64::MIN), "CME")
+            .expect("live cadence");
+        live.connected = true;
+
+        // The open minute starts at 120s. One trade lands inside the window the
+        // replay already covers; two land after it.
+        let boundary = 130_000_000_000;
+        for trade in [
+            rithmic_trade(1, 1, 125_000_000_000, 108),
+            rithmic_trade(2, 1, 135_000_000_000, 121),
+            rithmic_trade(3, 1, 145_000_000_000, 117),
+        ] {
+            live.accept_trade(&trade).expect("trades buffer");
+        }
+        assert!(!live.history_ready, "history has not landed yet");
+
+        let closed = MarketBar {
+            source_sequence: 4,
+            exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        };
+        let forming = MarketBar {
+            source_sequence: 5,
+            exchange_timestamp_seconds: 120,
+            exchange_timestamp_unix_nanos: 120_000_000_000,
+            open: 105,
+            high: 112,
+            low: 104,
+            close: 108,
+            volume: 3,
+        };
+        live.seed(
+            2,
+            0,
+            &[closed],
+            Some(FormingBar {
+                bar: forming,
+                trades: None,
+            }),
+            Some(boundary),
+        )
+        .expect("history seeds");
+
+        let open = *live.bars.last().expect("the open candle is held");
+        assert_eq!(
+            open.source_sequence, 5,
+            "the open period is revised in place"
+        );
+        assert_eq!(open.exchange_timestamp_seconds, 120);
+        // The replay's own OHLCV survives and the two newer trades extend it;
+        // the trade the replay already covered is not counted twice.
+        assert_eq!(open.open, 105);
+        assert_eq!(open.high, 121);
+        assert_eq!(open.low, 104);
+        assert_eq!(open.close, 117);
+        assert_eq!(open.volume, 7);
+        assert_eq!(
+            live.bars.len(),
+            2,
+            "closed history keeps exactly its own bar"
+        );
+        // The engine holds the closed bar, so the open one publishes as the tail
+        // that continues it rather than as a whole new series.
+        assert!(matches!(
+            live.take_publication(),
+            Some(LiveSeriesPublication::Tails(bars)) if bars.len() == 1 && bars[0].source_sequence == 5
+        ));
+    }
+
+    /// A tick chart's open bundle resumes at the trade count it was caught at.
+    #[test]
+    fn rithmic_open_tick_bundle_resumes_at_its_replayed_trade_count() {
+        let mut series =
+            rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        series.period = BarPeriod::tick(100).expect("tick period");
+        let mut live = RithmicLiveHandoff::new(&series, ProviderGeneration(NonZeroU64::MIN), "CME")
+            .expect("live cadence");
+        live.connected = true;
+        let closed = MarketBar {
+            source_sequence: 4,
+            exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        };
+        let forming = MarketBar {
+            source_sequence: 5,
+            exchange_timestamp_seconds: 120,
+            exchange_timestamp_unix_nanos: 120_000_000_000,
+            open: 105,
+            high: 112,
+            low: 104,
+            close: 108,
+            volume: 98,
+        };
+        live.seed(
+            2,
+            0,
+            &[closed],
+            Some(FormingBar {
+                bar: forming,
+                trades: Some(98),
+            }),
+            Some(120_000_000_000),
+        )
+        .expect("history seeds");
+        assert!(matches!(
+            live.cadence,
+            RithmicLiveCadence::Tick { forming: 98, .. }
+        ));
+
+        // Trades 99 and 100 finish the bundle; 101 opens the next one.
+        live.apply_trade(&rithmic_trade(1, 1, 130_000_000_000, 115))
+            .expect("trade 99 applies");
+        live.apply_trade(&rithmic_trade(2, 1, 131_000_000_000, 116))
+            .expect("trade 100 applies");
+        assert_eq!(live.bars.len(), 2, "the bundle is still the open one");
+        assert_eq!(live.bars[1].source_sequence, 5);
+        live.apply_trade(&rithmic_trade(3, 1, 132_000_000_000, 117))
+            .expect("trade 101 applies");
+        assert_eq!(
+            live.bars.len(),
+            3,
+            "the hundred-and-first trade opens the next bundle"
+        );
+        assert_eq!(live.bars[2].source_sequence, 6);
+    }
+
+    /// A tick bundle with no replayed count is treated as closed.
+    ///
+    /// Resuming a bundle whose trade count is unknown would put a fabricated
+    /// candle on the chart and split every later one in the wrong place.
+    #[test]
+    fn rithmic_open_tick_bundle_without_a_count_is_treated_as_closed() {
+        let mut series =
+            rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+        series.period = BarPeriod::tick(100).expect("tick period");
+        let mut live = RithmicLiveHandoff::new(&series, ProviderGeneration(NonZeroU64::MIN), "CME")
+            .expect("live cadence");
+        live.connected = true;
+        live.seed(
+            2,
+            0,
+            &[history_bar()],
+            Some(FormingBar {
+                bar: MarketBar {
+                    source_sequence: 3,
+                    exchange_timestamp_seconds: 120,
+                    exchange_timestamp_unix_nanos: 120_000_000_000,
+                    ..history_bar()
+                },
+                trades: None,
+            }),
+            None,
+        )
+        .expect("history seeds");
+        assert!(live.forming_tail_sequence.is_none());
+        assert!(matches!(
+            live.cadence,
+            RithmicLiveCadence::Tick { trades, forming } if trades == forming
+        ));
+    }
+
+    /// Round-tripping the timeframe must leave the minute series exactly as it
+    /// was, plus whatever the market did in between.
+    ///
+    /// Bar identity comes from the bucket, so a minute bar keeps its sequence
+    /// across a switch to five minutes and back. When identity came from a
+    /// running counter, the returning series renumbered every bar and the
+    /// consumer read the result as a series that had changed underneath it.
+    #[test]
+    fn switching_coinbase_timeframe_and_back_keeps_the_minute_series_canonical() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        attach_fixture_consumers(&harness);
+        expect_realtime_generation(&harness, "first realtime generation", 1);
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("connect fixture");
+        for (minute, price) in [(6_i64, "2.00"), (7, "2.10"), (8, "2.20")] {
+            harness
+                .actions
+                .send(FixtureRealtimeAction::Trade(trade(
+                    minute,
+                    price,
+                    u64::try_from(minute).expect("minute fits"),
+                )))
+                .expect("live trade");
+        }
+        let reference = collect_series_until(&harness.service, 1, 1, |bars| {
+            bars.values().any(|bar| bar.close == 220)
+        });
+
+        let five_minute = selected_series("instrument:coinbase:btc:usd", 300);
+        harness
+            .service
+            .set_demand(1, 1, 2, &five_minute)
+            .expect("the chart switches to five minutes");
+        let _ = poll_until(
+            &harness.service,
+            1,
+            1,
+            |event| matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2),
+        );
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(9, "2.30", 9)))
+            .expect("live trade on the coarser timeframe");
+
+        harness
+            .service
+            .set_demand(1, 1, 3, &btc())
+            .expect("the chart switches back to one minute");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(10, "2.40", 10)))
+            .expect("live trade after switching back");
+        let returned = collect_series_until(&harness.service, 1, 1, |bars| {
+            bars.values().any(|bar| bar.close == 240)
+        });
+
+        // Contiguity is the contract every consumer checks: adjacent sequences,
+        // adjacent buckets, no holes.
+        let sequences = returned.keys().copied().collect::<Vec<_>>();
+        assert!(
+            sequences.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+            "the returning minute series is not contiguous: {sequences:?}"
+        );
+        assert!(
+            returned
+                .values()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .all(|pair| pair[0].exchange_timestamp_seconds + 60
+                    == pair[1].exchange_timestamp_seconds),
+            "the returning minute series skips a bucket"
+        );
+
+        // Every bar both folds hold must be the same bar: same identity, same
+        // OHLCV. Anything else means the switch rewrote history.
+        let mut shared = 0;
+        for (sequence, bar) in &reference {
+            if let Some(returning) = returned.get(sequence) {
+                assert_eq!(
+                    returning, bar,
+                    "minute bar {sequence} changed across a timeframe round trip"
+                );
+                shared += 1;
+            }
+        }
+        assert!(shared > 0, "the two folds share no bars to compare");
+        assert!(
+            returned.values().any(|bar| bar.close == 240),
+            "the returning series never reached the newest trade"
+        );
+    }
+
     #[test]
     fn switching_timeframe_after_a_quiet_gap_resumes_live_bars() {
         let harness = MarketService::start_fixture_realtime(vec![history_bar()])

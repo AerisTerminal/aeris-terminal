@@ -605,6 +605,44 @@ pub fn canonical_rithmic_time_bar(
     })
 }
 
+/// Collects one bounded run of individual trades as one-trade bars.
+///
+/// A tick chart's current candle is a count of trades, not a clock, so the only
+/// way to know how far into it the market already is — and what it looks like —
+/// is to replay the trades since the newest complete bundle. There is no
+/// `ChartInterval` for this because it is never a chart: it exists solely to
+/// close the history/live seam on a tick chart.
+///
+/// # Errors
+///
+/// Returns an error for an invalid range, provider response, or canonical conversion.
+pub fn collect_rithmic_trade_history<T: RithmicHistoryTransport>(
+    transport: &mut T,
+    instrument: &RithmicProviderInstrument,
+    range: HistoryRange,
+    maximum_trades: NonZeroUsize,
+) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
+    if range.start_unix_nanos % NANOS_PER_SECOND_I64 != 0
+        || range.end_unix_nanos % NANOS_PER_SECOND_I64 != 0
+        || range.start_unix_nanos >= range.end_unix_nanos
+        || maximum_trades.get() > MAXIMUM_REPLAY_BARS
+    {
+        return Err(RithmicHistoryAdapterError::InvalidRequest);
+    }
+    let start_seconds = i32::try_from(range.start_unix_nanos / NANOS_PER_SECOND_I64)
+        .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
+    let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND_I64)
+        .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
+    collect_tick_chart_history(
+        transport,
+        instrument,
+        1,
+        start_seconds,
+        finish_seconds,
+        maximum_trades,
+    )
+}
+
 /// Collects one bounded canonical chart-history response for any supported Rithmic interval.
 ///
 /// # Errors

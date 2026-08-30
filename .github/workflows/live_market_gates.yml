@@ -1,0 +1,60 @@
+name: Live market gates
+
+# The deterministic suite in `ci.yml` proves the rules hold against fixtures.
+# Only these jobs prove they hold against a venue, so they run every night and
+# publish the result each conformance report reads back.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coinbase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install desktop build libraries
+        run: tools/setup_linux_desktop.sh --system
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Soak the live Coinbase feed through the engine
+        env:
+          AXIUSFLOW_SOAK_SECONDS: "600"
+        run: >-
+          cargo test -p axiusflow_engine --test live_market_soak --
+          --ignored --nocapture live_coinbase_streams_across_timeframe_and_symbol_switches
+      - name: Upload the recorded gate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-market-gate-coinbase
+          path: .cache/evidence/live_market_gate_coinbase.json
+          retention-days: 30
+
+  rithmic:
+    # Rithmic needs credentials in the runner's native vault, so this job only
+    # runs where they exist. It is expected to be skipped elsewhere, and a
+    # skipped gate is reported as "not run" — never as a pass.
+    runs-on: [self-hosted, rithmic-credentials]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Soak the live Rithmic feed through the engine
+        env:
+          AXIUSFLOW_SOAK_SECONDS: "600"
+        run: >-
+          cargo test -p axiusflow_engine --test live_market_soak --
+          --ignored --nocapture live_rithmic_streams_across_timeframe_and_instrument_switches
+      - name: Upload the recorded gate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-market-gate-rithmic
+          path: .cache/evidence/live_market_gate_rithmic.json
+          retention-days: 30

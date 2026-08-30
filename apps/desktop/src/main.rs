@@ -159,7 +159,7 @@ const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
 const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
-const MARKET_MESSAGES_PER_FRAME: usize = 8;
+const MARKET_MESSAGES_PER_FRAME: usize = 64;
 const WORKSPACE_TAB_WIDTH: f32 = 132.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
@@ -793,6 +793,11 @@ struct WorkspaceSurface {
     coinbase_pending_interval: Option<ChartInterval>,
     coinbase_pending_product: Option<InstallProviderInstrument>,
     coinbase_pending_sequence: Option<u64>,
+    /// The selection to fall back to if the switch in flight never loads.
+    ///
+    /// A failed switch must leave the trader on the chart they had, not on an
+    /// empty surface, so the previous demand is restored rather than abandoned.
+    coinbase_previous_selection: Option<(Option<InstallProviderInstrument>, ChartInterval)>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
     pending_chart_context_menu: Option<ChartContextRequest>,
@@ -835,16 +840,34 @@ const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
     }
 }
 
+/// Where a Coinbase symbol or timeframe change is in its handover.
+///
+/// A switch is a presentation change, so it never blanks the chart. The chart on
+/// screen keeps streaming its own series until the replacement's covering
+/// snapshot arrives, and only then is it swapped. `Pending` is the window
+/// between the request and the mailbox marker that orders it; `Swapping` is the
+/// window between that marker and the snapshot that replaces the chart.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum CoinbaseSwitchState {
     #[default]
     Idle,
     Pending,
+    Swapping,
 }
 
 impl CoinbaseSwitchState {
     const fn is_pending(self) -> bool {
         matches!(self, Self::Pending)
+    }
+
+    /// Whether a chart is on screen that no longer matches the committed
+    /// selection, and must not be fed the replacement's incremental updates.
+    const fn is_swapping(self) -> bool {
+        matches!(self, Self::Swapping)
+    }
+
+    const fn in_progress(self) -> bool {
+        matches!(self, Self::Pending | Self::Swapping)
     }
 }
 
@@ -1527,6 +1550,7 @@ impl WorkspaceSurface {
             coinbase_pending_interval: None,
             coinbase_pending_product: None,
             coinbase_pending_sequence: None,
+            coinbase_previous_selection: None,
             restored_viewport: restored_coinbase.and_then(|restored| restored.1),
             last_persisted_viewport: None,
             pending_chart_context_menu: None,
@@ -2281,8 +2305,15 @@ impl WorkspaceSurface {
         self.subscription_id = subscription_id;
         self.replay_label =
             generation_status(&self.worker_label, &self.subscription_id, generation);
+        // A switch that has been committed but not yet drawn keeps the previous
+        // chart on screen. That chart belongs to the previous series, so the
+        // replacement's incremental updates must not reach it; only its covering
+        // snapshot may, and that snapshot is what swaps the chart.
+        let swapping = self.coinbase_switch.is_swapping();
         let next_state = match (&self.chart, update) {
-            (None, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot)) => {
+            (existing, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot))
+                if existing.is_none() || swapping =>
+            {
                 let chart_theme = nucleus_chart_theme(self.theme.mode);
                 let chart = cx
                     .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
@@ -2295,7 +2326,14 @@ impl WorkspaceSurface {
                 }
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
+                self.coinbase_switch = CoinbaseSwitchState::Idle;
+                self.coinbase_previous_selection = None;
                 ChartState::Ready
+            }
+            (Some(_), _) if swapping => {
+                // The replacement has not arrived yet; the previous chart stays
+                // as it is rather than being fed another series' bars.
+                return;
             }
             (Some(chart), update) => {
                 let (accepted, recovery_pending) = chart.update(cx, |chart, _| {
@@ -2307,11 +2345,7 @@ impl WorkspaceSurface {
                 });
                 publication_chart_state(accepted, recovery_pending)
             }
-            (
-                None,
-                axiusflow_application::ReplayStreamUpdate::Delta(_)
-                | axiusflow_application::ReplayStreamUpdate::Tail(_),
-            ) => {
+            (None, _) => {
                 self.reject_incremental_publication(ui_diagnostics, cx);
                 return;
             }
@@ -2454,16 +2488,6 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    fn reset_chart_surface(&mut self, cx: &mut Context<Self>) {
-        self.retain_chart_indicators(cx);
-        let chart_theme = nucleus_chart_theme(self.theme.mode);
-        self.chart = Some(cx.new(move |_| NucleusChartView::empty_with_theme(chart_theme)));
-        if let Some(chart) = &self.chart {
-            self.apply_chart_chrome_to_chart(chart, cx);
-        }
-        observe_chart(self.chart.as_ref(), cx);
-    }
-
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
         if !self.market_worker.is_connected() {
             return;
@@ -2512,6 +2536,7 @@ impl WorkspaceSurface {
             }
             MarketWorkerMessage::State { state, message } => {
                 if state == ChartState::Error && self.provider == TerminalProvider::Coinbase {
+                    let swapping = self.coinbase_switch.is_swapping();
                     self.coinbase_switch = CoinbaseSwitchState::Idle;
                     self.coinbase_pending_interval = None;
                     self.coinbase_pending_product = None;
@@ -2519,6 +2544,9 @@ impl WorkspaceSurface {
                     self.symbol_selection_pending = false;
                     self.connection_state = Some(FeedConnectionState::Disconnected);
                     self.connection_message = Some(message.clone());
+                    if swapping {
+                        self.restore_coinbase_selection_after_failure(&message, cx);
+                    }
                 } else if self.provider == TerminalProvider::Coinbase
                     && matches!(state, ChartState::Loading | ChartState::Recovering)
                 {
@@ -2612,6 +2640,13 @@ impl WorkspaceSurface {
         }
     }
 
+    /// Commits a Coinbase switch's identity without touching the chart.
+    ///
+    /// The marker only says "everything after this belongs to the new
+    /// selection". The chart the trader is looking at is left on screen — still
+    /// its own series, still correct — under a loading notice, and is replaced
+    /// in `apply_publication` when the replacement's covering snapshot arrives.
+    /// Dropping it here is what produced the blank surface on every switch.
     fn apply_coinbase_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
         if self.provider != TerminalProvider::Coinbase
             || !self.coinbase_switch.is_pending()
@@ -2619,6 +2654,8 @@ impl WorkspaceSurface {
         {
             return;
         }
+        self.coinbase_previous_selection =
+            Some((self.coinbase_product.clone(), self.coinbase_interval));
         if let Some(interval) = self.coinbase_pending_interval.take() {
             self.coinbase_interval = interval;
         }
@@ -2626,12 +2663,44 @@ impl WorkspaceSurface {
             self.coinbase_product = Some(product);
         }
         self.coinbase_pending_sequence = None;
-        self.coinbase_switch = CoinbaseSwitchState::Idle;
+        self.coinbase_switch = if self.chart.is_some() {
+            CoinbaseSwitchState::Swapping
+        } else {
+            CoinbaseSwitchState::Idle
+        };
         self.retain_chart_indicators(cx);
-        self.chart = None;
         self.restored_viewport = None;
         self.last_persisted_viewport = None;
         self.chart_state = ChartState::Loading;
+        cx.notify();
+    }
+
+    /// Restores the selection a failed switch was replacing.
+    ///
+    /// The chart on screen is still the previous series, so restoring means
+    /// re-stating its demand and reporting an actionable error over it — never
+    /// leaving the trader on a surface with no data and no way back.
+    fn restore_coinbase_selection_after_failure(&mut self, detail: &str, cx: &mut Context<Self>) {
+        let Some((product, interval)) = self.coinbase_previous_selection.take() else {
+            return;
+        };
+        self.coinbase_product.clone_from(&product);
+        self.coinbase_interval = interval;
+        self.coinbase_pending_interval = None;
+        self.coinbase_pending_product = None;
+        self.coinbase_pending_sequence = None;
+        self.coinbase_switch = CoinbaseSwitchState::Idle;
+        let restored = product.and_then(|product| {
+            self.market_worker
+                .try_select_coinbase(product, interval)
+                .ok()
+        });
+        if let Some(sequence) = restored {
+            self.coinbase_pending_sequence = Some(sequence);
+            self.coinbase_pending_interval = Some(interval);
+            self.coinbase_switch = CoinbaseSwitchState::Pending;
+        }
+        self.series_message = format!("{detail} — showing {}", interval.label());
         cx.notify();
     }
 
@@ -3157,7 +3226,10 @@ impl WorkspaceSurface {
             });
         self.rithmic_reconnect = RithmicReconnectState::Idle;
         self.series_browser.reset();
-        self.reset_chart_surface(cx);
+        // The chart for the previous contract stays on screen under a loading
+        // notice until the new one's covering history arrives. Emptying it here
+        // is what made every instrument switch blank the surface first.
+        self.retain_chart_indicators(cx);
         self.bridge_label = "bridge awaiting series selection".to_string();
         self.replay_label = "Selected instrument · choose a series".to_string();
         self.subscription_id = format!("{} · {}", instrument.display_symbol, instrument.venue_id);
@@ -3173,16 +3245,16 @@ impl WorkspaceSurface {
         series: rithmic_history::RithmicSeries,
         cx: &mut Context<Self>,
     ) {
-        if self.series_browser.pending().is_some() {
-            self.series_message = "A chart series is already loading".to_string();
-            cx.notify();
-            return;
-        }
         let Some(selection) = self.symbol_browser.selected() else {
             self.series_message = "Select a symbol before choosing a series".to_string();
             cx.notify();
             return;
         };
+        // A newer request supersedes one still loading rather than being
+        // refused: the history task cancels the older fetch and the browser
+        // fences everything but the newest generation, so rapid switching lands
+        // on the last thing the trader asked for.
+        let superseded = self.series_browser.pending();
         let request = self.series_browser.select(selection.generation, series);
         if self
             .market_worker
@@ -3193,7 +3265,11 @@ impl WorkspaceSurface {
             })
             .is_ok()
         {
-            self.reset_chart_surface(cx);
+            // The chart on screen stays: it is still its own series and still
+            // correct, and it is replaced only when the replacement's covering
+            // history arrives. Emptying it here is what produced the blank
+            // surface on every switch.
+            self.retain_chart_indicators(cx);
             self.bridge_label = "bridge awaiting visible history".to_string();
             self.series_message = format!("Loading {} visible history", series.label());
             self.set_chart_state(
@@ -3203,9 +3279,26 @@ impl WorkspaceSurface {
             );
         } else {
             self.series_browser.reject(request.series_generation);
+            if let Some(superseded) = superseded {
+                self.series_browser.restore_pending(superseded);
+            }
             self.series_message = "Rithmic history worker is busy; try again".to_string();
         }
         cx.notify();
+    }
+
+    /// Re-states the demand for the series still on screen after a failed switch.
+    fn restore_rithmic_series_after_failure(&mut self) {
+        let Some(selected) = self.series_browser.selected() else {
+            return;
+        };
+        let _ = self
+            .market_worker
+            .try_request_engine_series(EngineSeriesRequest {
+                selection_generation: selected.selection_generation,
+                series_generation: selected.series_generation,
+                interval: selected.series.interval(),
+            });
     }
 
     fn apply_rithmic_history(
@@ -3225,6 +3318,10 @@ impl WorkspaceSurface {
                         format!("Rithmic visible history could not be loaded: {error}"),
                         cx,
                     );
+                    // The chart on screen is still the previous series, so its
+                    // demand is restated rather than abandoned: the trader keeps
+                    // a live chart and an actionable error, not an empty surface.
+                    self.restore_rithmic_series_after_failure();
                 }
                 return;
             }
@@ -3616,7 +3713,7 @@ fn chrome_overlay_content(
     cx: &App,
 ) -> AnyElement {
     let pending =
-        app_state.series_browser.pending().is_some() || app_state.coinbase_switch.is_pending();
+        app_state.series_browser.pending().is_some() || app_state.coinbase_switch.in_progress();
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
@@ -9202,7 +9299,7 @@ impl TerminalApp {
     }
 
     fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.frame_poll_gate.try_schedule(self.window_active) {
+        if !self.frame_poll_gate.try_schedule() {
             return;
         }
         let terminal = cx.entity();
@@ -9297,7 +9394,7 @@ fn active_header_state(
         pending: HeaderPendingState {
             symbol_selection: workspace.symbol_selection_pending,
             series: workspace.series_browser.pending().is_some()
-                || workspace.coinbase_switch.is_pending(),
+                || workspace.coinbase_switch.in_progress(),
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(

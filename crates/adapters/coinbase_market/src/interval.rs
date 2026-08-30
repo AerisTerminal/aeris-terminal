@@ -76,6 +76,32 @@ impl CoinbaseInterval {
         }
     }
 
+    /// Resolves one interval from the identifier [`Self::id`] publishes.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|interval| interval.id() == id)
+    }
+
+    /// Returns the candle granularity Coinbase serves this interval in.
+    ///
+    /// Coinbase publishes a fixed set of granularities. An interval outside that
+    /// set is aggregated from the coarsest published one that divides it, so its
+    /// buckets span several source candles and the open bucket is only complete
+    /// once every source candle inside it has been fetched.
+    #[must_use]
+    pub const fn source(self) -> (&'static str, i64) {
+        match self {
+            Self::Minute1 | Self::Minute3 => ("ONE_MINUTE", 60),
+            Self::Minute5 => ("FIVE_MINUTE", 300),
+            Self::Minute15 => ("FIFTEEN_MINUTE", 900),
+            Self::Minute30 => ("THIRTY_MINUTE", 1_800),
+            Self::Hour1 => ("ONE_HOUR", 3_600),
+            Self::Hour2 | Self::Hour4 | Self::Hour8 => ("TWO_HOUR", 7_200),
+            Self::Hour12 => ("SIX_HOUR", 21_600),
+            Self::Day1 | Self::Day3 | Self::Week1 | Self::Month1 => ("ONE_DAY", 86_400),
+        }
+    }
+
     /// Returns the UTC bucket containing one provider timestamp.
     ///
     /// # Errors
@@ -138,6 +164,47 @@ impl CoinbaseInterval {
             year * 12 + i64::from(month) - 1
         };
         Ok(month_index(end) - month_index(start))
+    }
+
+    /// Returns the canonical source sequence for one aligned UTC bucket.
+    ///
+    /// The sequence is a pure function of the bucket and the interval: bucket
+    /// `n` since the epoch is sequence `n + 1`. Identity therefore never depends
+    /// on a bar's position in an array, so merging a backfill, evicting the
+    /// oldest bars, or reseeding the live aggregator cannot renumber a bar that
+    /// consumers already hold. Adjacent buckets are adjacent sequences, which is
+    /// what the engine's and the desktop's contiguity checks require.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timestamp is unaligned or arithmetic overflows.
+    pub fn bucket_sequence(self, bucket_seconds: i64) -> Result<u64, String> {
+        if self.bucket_start(bucket_seconds)? != bucket_seconds {
+            return Err("Coinbase bucket timestamp is not aligned".to_string());
+        }
+        let index = match self {
+            Self::Week1 => bucket_seconds
+                .div_euclid(86_400)
+                .checked_add(3)
+                .ok_or_else(|| "Coinbase bucket sequence overflowed".to_string())?
+                .div_euclid(7),
+            Self::Month1 => {
+                let (year, month, _) = civil_from_days(bucket_seconds.div_euclid(86_400));
+                year.checked_mul(12)
+                    .and_then(|value| value.checked_add(i64::from(month) - 1))
+                    .ok_or_else(|| "Coinbase bucket sequence overflowed".to_string())?
+            }
+            _ => {
+                let seconds = self
+                    .fixed_seconds()
+                    .ok_or_else(|| "Coinbase interval has no bucket rule".to_string())?;
+                bucket_seconds.div_euclid(seconds)
+            }
+        };
+        u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| "Coinbase bucket sequence overflowed".to_string())
     }
 }
 
@@ -239,7 +306,7 @@ pub fn aggregate_coinbase_bars(
             continue;
         }
         output.push(MarketBar {
-            source_sequence: 1,
+            source_sequence: interval.bucket_sequence(bucket)?,
             exchange_timestamp_seconds: bucket,
             exchange_timestamp_unix_nanos: bucket * 1_000_000_000,
             open: bar.open,
@@ -253,13 +320,7 @@ pub fn aggregate_coinbase_bars(
     if let Some(end) = completed_before_seconds {
         output.retain(|bar| bar.exchange_timestamp_seconds < end);
     }
-    let mut output = carry_close_forward(output, interval, completed_before_seconds)?;
-    for (index, bar) in output.iter_mut().enumerate() {
-        bar.source_sequence = u64::try_from(index)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| "Coinbase aggregate sequence overflow".to_string())?;
-    }
+    let output = carry_close_forward(output, interval, completed_before_seconds)?;
     diagnostics.output_bars = output.len() as u64;
     Ok((output, diagnostics))
 }
@@ -307,7 +368,7 @@ fn carry_close_until(
     while bucket < end_seconds && *budget > 0 {
         *budget -= 1;
         filled.push(MarketBar {
-            source_sequence: 1,
+            source_sequence: interval.bucket_sequence(bucket)?,
             exchange_timestamp_seconds: bucket,
             exchange_timestamp_unix_nanos: bucket
                 .checked_mul(1_000_000_000)

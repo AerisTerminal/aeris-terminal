@@ -16,10 +16,13 @@ use axiusflow_market_data::{
 };
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_provider_history::HistoryRange;
+
+use crate::market_service::FormingBar;
 use axiusflow_rithmic_protocol_adapter::{
     InstrumentDescriptor, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication,
     RithmicCredentialBytes, RithmicHistorySessionTransport, RithmicProviderInstrument,
     RithmicSessionLimits, RithmicTestSession, collect_rithmic_chart_history,
+    collect_rithmic_trade_history,
 };
 use zeroize::Zeroize;
 
@@ -30,12 +33,28 @@ const MAXIMUM_REPLAY_BARS: usize = 10_000;
 const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
 const DAILY_SESSION_PADDING_BARS: usize = 150;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
+/// Upper bound on the one-trade replay that rebuilds an open tick bundle.
+const MAXIMUM_FORMING_TRADES: usize = 1_000;
 
 pub(super) struct Snapshot {
     pub(super) price_scale: u8,
     pub(super) quantity_scale: u8,
+    /// Periods the provider has closed. Only these become canonical history.
     pub(super) bars: Vec<MarketBar>,
+    /// The period that was still open when the replay ran.
+    pub(super) forming: Option<FormingBar>,
     pub(super) handoff_boundary_unix_nanos: i64,
+}
+
+/// How the trailing open period is separated from closed history.
+#[derive(Clone, Copy)]
+enum FormingPlan {
+    /// A returned bar at or after this instant belongs to the open bucket.
+    Bucket { closed_before_unix_nanos: i64 },
+    /// Fold the trades after the newest complete bundle into the open bundle.
+    Bundle { trades_per_bar: u32 },
+    /// The provider only serves closed periods for this interval.
+    Closed,
 }
 
 pub(super) fn fetch(
@@ -67,16 +86,45 @@ pub(super) fn fetch(
     )
     .map_err(|_| "Rithmic history transport is unavailable".to_string())?;
     let instrument = provider_instrument(installed)?;
-    let collected = collect_rithmic_chart_history(
+    // Both replays run on one session, because the tick case needs a second
+    // one-trade pass to rebuild the bundle that is still open.
+    let collected = collect_replay(
         &mut transport,
         &instrument,
         interval,
+        replay,
+        maximum_visible_bars,
+        stop,
+    );
+    transport.close().map_err(|error| error.to_string())?;
+    let (bars, forming, handoff_boundary_unix_nanos) = collected?;
+    Ok(Snapshot {
+        price_scale: instrument.descriptor.price_scale,
+        quantity_scale: instrument.descriptor.quantity_scale,
+        bars,
+        forming,
+        handoff_boundary_unix_nanos,
+    })
+}
+
+/// Runs both replay passes and returns closed history, the open period, and the
+/// handoff boundary.
+fn collect_replay(
+    transport: &mut RithmicHistorySessionTransport,
+    instrument: &RithmicProviderInstrument,
+    interval: ChartInterval,
+    replay: ReplayEnvelope,
+    maximum_visible_bars: usize,
+    stop: &Arc<AtomicBool>,
+) -> Result<(Vec<MarketBar>, Option<FormingBar>, i64), String> {
+    let mut bars = collect_rithmic_chart_history(
+        transport,
+        instrument,
+        interval,
         replay.range,
         replay.maximum_bars,
-    );
-    let closed = transport.close();
-    let mut bars = collected.map_err(|error| error.to_string())?;
-    closed.map_err(|error| error.to_string())?;
+    )
+    .map_err(|error| error.to_string())?;
     bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
     if bars.len() > maximum_visible_bars {
         bars.drain(..bars.len() - maximum_visible_bars);
@@ -90,12 +138,149 @@ pub(super) fn fetch(
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| "Rithmic history sequence overflowed".to_string())?;
     }
-    Ok(Snapshot {
-        price_scale: instrument.descriptor.price_scale,
-        quantity_scale: instrument.descriptor.quantity_scale,
-        bars,
-        handoff_boundary_unix_nanos: replay.range.end_unix_nanos,
-    })
+    let (forming, boundary) = split_forming_period(transport, instrument, replay, &mut bars, stop)?;
+    Ok((bars, forming, boundary))
+}
+
+/// Separates the period the replay caught mid-flight from closed history.
+///
+/// History is a record of closed periods; a half-built bar written into it stays
+/// wrong until the period ends, which on an hourly or daily chart is a long time
+/// to show bad data. The open period is handed to the live handoff instead,
+/// which is what gives a freshly selected chart the OHLCV that accrued before
+/// the trader got there.
+///
+/// The returned instant is the handoff boundary: every buffered trade at or
+/// before it is already inside what is returned here, and replaying it would
+/// count it twice.
+fn split_forming_period(
+    transport: &mut RithmicHistorySessionTransport,
+    instrument: &RithmicProviderInstrument,
+    replay: ReplayEnvelope,
+    bars: &mut Vec<MarketBar>,
+    stop: &Arc<AtomicBool>,
+) -> Result<(Option<FormingBar>, i64), String> {
+    match replay.forming {
+        FormingPlan::Closed => Ok((None, replay.range.end_unix_nanos)),
+        FormingPlan::Bucket {
+            closed_before_unix_nanos,
+        } => {
+            // One completed bar always has to remain: a series whose only bar is
+            // still forming has no history to hand over.
+            let open = bars.len() > 1
+                && bars.last().is_some_and(|bar| {
+                    bar.exchange_timestamp_unix_nanos >= closed_before_unix_nanos
+                });
+            if !open {
+                return Ok((None, replay.range.end_unix_nanos));
+            }
+            let bar = bars
+                .pop()
+                .ok_or_else(|| "Rithmic history is empty".to_string())?;
+            // The provider built this page at some instant no later than the end
+            // of the replay window, so trades after that window are certainly
+            // absent from it.
+            Ok((
+                Some(FormingBar { bar, trades: None }),
+                replay.range.end_unix_nanos,
+            ))
+        }
+        FormingPlan::Bundle { trades_per_bar } => {
+            if stop.load(Ordering::Acquire) {
+                return Err("Rithmic history request was cancelled".to_string());
+            }
+            let newest = bars
+                .last()
+                .ok_or_else(|| "Rithmic history is empty".to_string())?;
+            let after_unix_nanos = newest.exchange_timestamp_unix_nanos;
+            let sequence = newest
+                .source_sequence
+                .checked_add(1)
+                .ok_or_else(|| "Rithmic history sequence overflowed".to_string())?;
+            let forming = forming_tick_bundle(
+                transport,
+                instrument,
+                trades_per_bar,
+                after_unix_nanos,
+                replay.range.end_unix_nanos,
+                sequence,
+            )?;
+            let boundary = forming.as_ref().map_or(after_unix_nanos, |forming| {
+                forming.bar.exchange_timestamp_unix_nanos
+            });
+            Ok((forming, boundary))
+        }
+    }
+}
+
+/// Rebuilds the still-open tick bundle from one-trade history.
+///
+/// Returns `None` when the bundle cannot be reconstructed unambiguously — no
+/// trades since the newest complete bundle, or so many that complete bundles
+/// must have been missed. Guessing there would put a fabricated candle on the
+/// chart, which is worse than opening the bundle on the next live trade.
+fn forming_tick_bundle(
+    transport: &mut RithmicHistorySessionTransport,
+    instrument: &RithmicProviderInstrument,
+    trades_per_bar: u32,
+    after_unix_nanos: i64,
+    end_unix_nanos: i64,
+    source_sequence: u64,
+) -> Result<Option<FormingBar>, String> {
+    let start_unix_nanos = after_unix_nanos
+        .div_euclid(NANOS_PER_SECOND)
+        .checked_mul(NANOS_PER_SECOND)
+        .ok_or_else(|| "Rithmic forming range overflowed".to_string())?;
+    if start_unix_nanos >= end_unix_nanos {
+        return Ok(None);
+    }
+    let trades = collect_rithmic_trade_history(
+        transport,
+        instrument,
+        HistoryRange {
+            start_unix_nanos,
+            end_unix_nanos,
+        },
+        NonZeroUsize::new(MAXIMUM_FORMING_TRADES).unwrap_or(NonZeroUsize::MIN),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut open = trades
+        .into_iter()
+        .filter(|trade| trade.exchange_timestamp_unix_nanos > after_unix_nanos)
+        .collect::<Vec<_>>();
+    open.sort_unstable_by_key(|trade| trade.exchange_timestamp_unix_nanos);
+    if open.is_empty() || open.len() >= usize::try_from(trades_per_bar).unwrap_or(usize::MAX) {
+        return Ok(None);
+    }
+    let first = *open
+        .first()
+        .ok_or_else(|| "Rithmic forming bundle is empty".to_string())?;
+    let last = *open
+        .last()
+        .ok_or_else(|| "Rithmic forming bundle is empty".to_string())?;
+    let mut bar = MarketBar {
+        source_sequence,
+        exchange_timestamp_seconds: last.exchange_timestamp_seconds,
+        exchange_timestamp_unix_nanos: last.exchange_timestamp_unix_nanos,
+        open: first.open,
+        high: first.high,
+        low: first.low,
+        close: last.close,
+        volume: 0,
+    };
+    for trade in &open {
+        bar.high = bar.high.max(trade.high);
+        bar.low = bar.low.min(trade.low);
+        bar.volume = bar
+            .volume
+            .checked_add(trade.volume)
+            .ok_or_else(|| "Rithmic forming volume overflowed".to_string())?;
+    }
+    bar.validate().map_err(|error| error.to_string())?;
+    Ok(Some(FormingBar {
+        bar,
+        trades: Some(u32::try_from(open.len()).unwrap_or(trades_per_bar)),
+    }))
 }
 
 fn provider_instrument(
@@ -151,6 +336,7 @@ fn connect(
 struct ReplayEnvelope {
     range: HistoryRange,
     maximum_bars: NonZeroUsize,
+    forming: FormingPlan,
 }
 
 fn replay_envelope(
@@ -170,10 +356,27 @@ fn replay_envelope(
         ChartAggregation::FixedSeconds(seconds) => u64::from(seconds.get()),
         ChartAggregation::Trades(_) | ChartAggregation::CalendarMonth => 60,
     };
-    let end_seconds = if interval == ChartInterval::Tick100 {
-        now_seconds
+    // The window runs to *now*, not to the last closed boundary, so the reply
+    // also carries the period that is still open. It is split back out in
+    // `split_forming_period`; history keeps only closed periods.
+    let closed_before_seconds = now_seconds - now_seconds % interval_seconds;
+    let end_seconds = now_seconds;
+    let forming = if interval == ChartInterval::Tick100 {
+        FormingPlan::Bundle {
+            trades_per_bar: match interval.aggregation() {
+                ChartAggregation::Trades(trades) => trades.get(),
+                ChartAggregation::FixedSeconds(_) | ChartAggregation::CalendarMonth => {
+                    return Err("Rithmic tick interval has no trade count".to_string());
+                }
+            },
+        }
     } else {
-        now_seconds - now_seconds % interval_seconds
+        FormingPlan::Bucket {
+            closed_before_unix_nanos: i64::try_from(closed_before_seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
+                .ok_or_else(|| "Rithmic forming boundary overflowed".to_string())?,
+        }
     };
     let requested_bars = if interval == ChartInterval::Day1 {
         maximum_visible_bars.saturating_add(DAILY_SESSION_PADDING_BARS)
@@ -184,7 +387,7 @@ fn replay_envelope(
         .checked_mul(requested_bars as u64)
         .and_then(|span| span.checked_add(MAXIMUM_NON_TRADING_GAP_SECONDS))
         .ok_or_else(|| "Rithmic visible range overflowed".to_string())?;
-    let start_seconds = end_seconds
+    let start_seconds = closed_before_seconds
         .checked_sub(span_seconds)
         .ok_or_else(|| "Rithmic visible range underflowed".to_string())?;
     let theoretical_bars = if interval == ChartInterval::Tick100 {
@@ -201,6 +404,7 @@ fn replay_envelope(
     Ok(ReplayEnvelope {
         range: history_range(start_seconds, end_seconds)?,
         maximum_bars: NonZeroUsize::new(theoretical_bars).unwrap_or(NonZeroUsize::MIN),
+        forming,
     })
 }
 
@@ -235,6 +439,11 @@ fn aggregate_replay_envelope(
     Ok(ReplayEnvelope {
         range: history_range(start_seconds, end_seconds)?,
         maximum_bars: NonZeroUsize::new(maximum_bars).unwrap_or(NonZeroUsize::MIN),
+        // Weeks and months are aggregated locally from daily session bars, and
+        // the venue calendar — not a clock — decides where their buckets end.
+        // Splitting an open one here would need that calendar, so the live
+        // handoff opens it from trades as it always has.
+        forming: FormingPlan::Closed,
     })
 }
 

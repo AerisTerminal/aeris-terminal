@@ -3,6 +3,6 @@
 /.cache/
 /.reference/
 /provider_kit/
-/local-data/
+local-data/
 /.cursor/
 __pycache__/
