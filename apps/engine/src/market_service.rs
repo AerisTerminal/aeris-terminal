@@ -70,6 +70,8 @@ const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
 const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
+const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
@@ -2227,6 +2229,7 @@ fn run_coordinator(
         deferred_publications: BTreeSet::new(),
         pending_empty_repairs: BTreeMap::new(),
         empty_repair_retry_at: Instant::now(),
+        history_retries: BTreeMap::new(),
         local_history_deadlines: BTreeMap::new(),
         local_loaded: BTreeSet::new(),
         warming: BTreeSet::new(),
@@ -2269,6 +2272,7 @@ fn run_coordinator(
         }
         coordinator.expire_local_history_reads();
         coordinator.retry_pending_empty_repairs();
+        coordinator.retry_history();
         coordinator.enforce_resource_policy();
         match channels.commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
@@ -2339,6 +2343,7 @@ struct Coordinator<'a> {
     deferred_publications: BTreeSet<BarSeriesKey>,
     pending_empty_repairs: BTreeMap<BarSeriesKey, HistoryRange>,
     empty_repair_retry_at: Instant,
+    history_retries: BTreeMap<(BarSeriesKey, ProviderGeneration), (Instant, u8)>,
     local_history_deadlines: BTreeMap<(BarSeriesKey, ProviderGeneration), Instant>,
     local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     warming: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
@@ -3420,6 +3425,63 @@ impl Coordinator<'_> {
         }
     }
 
+    fn schedule_history_retry(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        error: &str,
+    ) -> bool {
+        let key = (series.clone(), generation);
+        let attempts = self
+            .history_retries
+            .get(&key)
+            .map_or(1, |(_, attempts)| attempts.saturating_add(1));
+        eprintln!(
+            "Axiusflow engine Coinbase history attempt {attempts} failed for {}: {error}",
+            series.instrument_id
+        );
+        if attempts > MAXIMUM_HISTORY_RETRIES {
+            self.history_retries.remove(&key);
+            return false;
+        }
+        self.history_retries
+            .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts));
+        self.broadcast_provider_for(
+            "coinbase",
+            ProviderConnectionState::Recovering,
+            generation,
+            Some("Coinbase current history is retrying"),
+        );
+        true
+    }
+
+    fn retry_history(&mut self) {
+        let now = Instant::now();
+        let Some(key) = self
+            .history_retries
+            .iter()
+            .find(|(key, (retry_at, _))| {
+                now >= *retry_at && !self.history_inflight.contains_key(*key)
+            })
+            .map(|(key, _)| key.clone())
+        else {
+            return;
+        };
+        let (series, generation) = &key;
+        let current_generation = self
+            .engine
+            .provider_status(&series.provider_id)
+            .and_then(|status| status.generation);
+        if !self.engine.has_subscription(series) || current_generation != Some(*generation) {
+            self.history_retries.remove(&key);
+            return;
+        }
+        let _ = self.enqueue_history(series, *generation);
+        if let Some((retry_at, _)) = self.history_retries.get_mut(&key) {
+            *retry_at = now + HISTORY_RETRY_DELAY;
+        }
+    }
+
     fn protected_history_ranges(&self) -> Vec<(BarSeriesKey, HistoryRange)> {
         let mut protected = BTreeSet::new();
         for (consumer_id, viewport) in &self.active_viewports {
@@ -4284,7 +4346,7 @@ impl Coordinator<'_> {
                 "coinbase",
                 ProviderConnectionState::Recovering,
                 generation,
-                Some("Coinbase history repair is retrying"),
+                Some("Coinbase current history is unavailable"),
             );
         }
     }
@@ -4369,28 +4431,39 @@ impl Coordinator<'_> {
             }
             return None;
         }
-        let Ok(snapshot) = result else {
-            if cancelled {
-                if self.viewport_history_ranges.contains_key(&key) {
-                    let _ = self.schedule_coinbase_history(
+        let snapshot = match result {
+            Ok(snapshot) => {
+                self.history_retries.remove(&key);
+                snapshot
+            }
+            Err(error) => {
+                if cancelled {
+                    if self.viewport_history_ranges.contains_key(&key) {
+                        let _ = self.schedule_coinbase_history(
+                            series,
+                            generation,
+                            HistoryRequestKind::ViewportBackfill,
+                        );
+                    } else if self.engine.has_subscription(series) {
+                        let _ = self.enqueue_history(series, generation);
+                    }
+                } else if kind == HistoryRequestKind::Initial {
+                    let retrying = series.provider_id == "coinbase"
+                        && self.local_loaded.contains(&key)
+                        && self.schedule_history_retry(series, generation, &error);
+                    if !retrying {
+                        self.history_failed(series, generation);
+                    }
+                } else {
+                    self.viewport_backfill_failed(
                         series,
                         generation,
-                        HistoryRequestKind::ViewportBackfill,
+                        range,
+                        "Visible history backfill is unavailable; retained data remains usable",
                     );
-                } else if self.engine.has_subscription(series) {
-                    let _ = self.enqueue_history(series, generation);
                 }
-            } else if kind == HistoryRequestKind::Initial {
-                self.history_failed(series, generation);
-            } else {
-                self.viewport_backfill_failed(
-                    series,
-                    generation,
-                    range,
-                    "Visible history backfill is unavailable; retained data remains usable",
-                );
+                return None;
             }
-            return None;
         };
         if cancelled
             && kind != HistoryRequestKind::Initial
@@ -6171,6 +6244,14 @@ impl Coordinator<'_> {
         for key in obsolete_viewports {
             self.viewport_history_ranges.remove(&key);
         }
+        self.history_retries.retain(|(series, generation), _| {
+            self.engine.has_subscription(series)
+                && self
+                    .engine
+                    .provider_status(&series.provider_id)
+                    .and_then(|status| status.generation)
+                    == Some(*generation)
+        });
         self.deferred_publications
             .retain(|series| self.engine.has_subscription(series));
     }
@@ -7736,6 +7817,7 @@ mod tests {
             deferred_publications: BTreeSet::new(),
             pending_empty_repairs: BTreeMap::new(),
             empty_repair_retry_at: Instant::now(),
+            history_retries: BTreeMap::new(),
             local_history_deadlines: BTreeMap::new(),
             local_loaded: BTreeSet::new(),
             warming: BTreeSet::new(),
@@ -11405,12 +11487,11 @@ mod tests {
             HistoryRequestKind::Initial,
             Err("provider unavailable".to_string()),
         );
-        assert!(matches!(
-            coordinator.events[&consumer_id].series_state,
-            Some(envelope::Payload::SeriesState(ref state))
-                if state.state == SeriesLoadState::Partial as i32
-                    && state.persistence == PersistenceState::Durable as i32
-        ));
+        let retry = (series.clone(), generation);
+        assert!(coordinator.history_retries.contains_key(&retry));
+        coordinator.history_retries.get_mut(&retry).unwrap().0 = Instant::now();
+        coordinator.retry_history();
+        assert!(history_rx.try_recv().is_ok());
         assert!(coordinator.events[&consumer_id].queued_series().is_some());
         coordinator.history_completed(
             &series,
@@ -11426,6 +11507,7 @@ mod tests {
                 confirmed_empty: false,
             }),
         );
+        assert!(!coordinator.history_retries.contains_key(&retry));
         assert!(matches!(
             coordinator.events[&consumer_id].series_state,
             Some(envelope::Payload::SeriesState(ref state))
