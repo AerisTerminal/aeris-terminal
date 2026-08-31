@@ -239,10 +239,10 @@ fn project_level(
         quantity: level.quantity,
         order_count: level.order_count,
         price_text: grouped_fixed_point_text(level.price, price_scale),
-        quantity_text: compact_fixed_point_text(level.quantity, quantity_scale),
+        quantity_text: compact_quantity_text(level.quantity, quantity_scale),
         traded_volume,
         traded_volume_text: if traded_volume > 0 {
-            compact_fixed_point_text(traded_volume, quantity_scale)
+            compact_quantity_text(traded_volume, quantity_scale)
         } else {
             String::new()
         },
@@ -284,6 +284,14 @@ fn compact_fixed_point_text(value: i64, scale: u8) -> String {
         }
     }
     text
+}
+
+fn compact_quantity_text(value: i64, scale: u8) -> String {
+    let divisor = 10_i128.pow(u32::from(scale));
+    if value != 0 && scale >= 6 && i128::from(value).abs() * 1_000 < divisor {
+        return format!("{}µ", compact_fixed_point_text(value, scale - 6));
+    }
+    compact_fixed_point_text(value, scale)
 }
 
 fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
@@ -520,5 +528,8 @@ mod tests {
         assert_eq!(compact_fixed_point_text(125_000_000, 8), "1.25");
         assert_eq!(compact_fixed_point_text(10_000, 8), "0.0001");
         assert_eq!(compact_fixed_point_text(0, 8), "0");
+        assert_eq!(compact_quantity_text(9_200, 8), "92µ");
+        assert_eq!(compact_quantity_text(1, 8), "0.01µ");
+        assert_eq!(compact_quantity_text(100_000, 8), "0.001");
     }
 }
