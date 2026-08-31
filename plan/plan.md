@@ -22,7 +22,8 @@ The completed system has:
 - a decomposed but still single-owner market coordinator;
 - a provider-neutral, versioned local IPC contract;
 - durable local history behind `local_history`;
-- signed release delivery independent of CDN trust;
+- signed, transactional release delivery that activates one matching desktop/engine build and removes the superseded build;
+- a complete native uninstall that removes every Axiusflow-owned local artifact and credential;
 - an engine-owned user session backed by standard native OIDC;
 - Axiusflow-owned account, billing, and entitlement truth; and
 - no dependency by the desktop or market core on Better Auth, Stripe, Dodo, Cloudflare, or provider wire types.
@@ -40,6 +41,8 @@ The completed system has:
 - Credentials, tokens, raw provider payloads, webhook bodies, and payment details never enter logs.
 - The desktop depends on no provider adapter, storage implementation, `market_engine`, Better Auth package, or payment SDK.
 - There remain two local applications: desktop and engine. The later cloud control plane is not a third local application.
+- The installed desktop and resident engine always come from one verified release identity. A stale engine, autostart entry, launcher target, or executable cannot remain active after an update.
+- An update is not complete until the new release passes a desktop/engine handshake and superseded binaries and staging files are removed. An uninstall is not complete while any Axiusflow-owned process, service registration, credential, market-data file, cache, setting, log, or update artifact remains.
 - `unsafe_code` remains forbidden workspace-wide.
 
 ## Target ownership after migration
@@ -63,6 +66,10 @@ Coinbase and Rithmic adapters own wire decoding, provider-specific transports, a
 ### Local history
 
 `local_history` remains the only engine-facing persistence boundary. Provider history, storage mechanics, encryption, retention, quarantine, and recovery remain behind their existing crate boundaries.
+
+### Platform lifecycle
+
+`platform_runtime` owns the native install/update/uninstall boundary. It maintains one versioned inventory of Axiusflow-owned install paths, state roots, service registrations, shortcuts, IPC names, lock files, update artifacts, and native-vault identifiers. Desktop, engine, storage, and future account code register ownership through this boundary rather than scattering new paths or credential names.
 
 ### Cloud control plane - phase 5 only
 
@@ -186,11 +193,41 @@ Finish and prove the primary architecture migration before any authentication wo
 - Verify that loading always reaches data, bounded retry/recovery, or an actionable terminal error.
 - Remove migration-only aliases, forwarding functions, duplicate fixtures, and old module paths.
 - Keep release authenticity independent of authentication:
-  - build immutable platform/architecture artifacts;
-  - generate a versioned manifest with version, channel, minimum version, URL, size, hash, and rollout metadata;
+  - build one immutable release bundle containing the matching desktop, engine, and required runtime assets;
+  - generate a versioned manifest with release identity, install generation, channel, minimum version, platform, architecture, file inventory, URL, size, hash, and rollout metadata;
   - sign the canonical manifest with a key unavailable to R2/CDN;
-  - verify signature, size, hash, platform, and downgrade policy before installation; and
+  - verify signature, size, hash, file inventory, platform, architecture, permissions, and downgrade policy before activation; and
   - preserve the current installation after interrupted, corrupt, disk-full, or rejected updates.
+
+### Transactional update and stale-binary prevention
+
+- Use a small platform-native launcher/updater supplied by packaging that is not one of the binaries being replaced. It is not a resident service, a third application-state owner, or a new workspace application. Do not overwrite a running desktop or engine in place.
+- Install each candidate into a new versioned directory on the same filesystem as the active installation. Write and sync every file, validate the signed inventory, and never expose a partially staged directory as current.
+- Hold one machine/user-scoped update lock so two desktops, an autostart event, or two updater processes cannot race activation.
+- Before switching versions, mark the installation as updating so no new Axiusflow process can start, ask the resident engine to stop through authenticated IPC, close the desktop, and wait for bounded worker shutdown.
+- Confirm the old desktop and engine process identities have exited and released the IPC endpoint. Fail safely or enter an explicit reboot-required state if an owned process or file lock cannot be cleared.
+- Atomically switch one active-release pointer or launcher manifest only after the old processes have stopped. All shortcuts and autostart registrations target the stable launcher, never a version-specific desktop or engine path.
+- Extend the local handshake with release identity and install generation. The launcher starts the active desktop, the desktop resolves the engine from that same active release, and readiness succeeds only when both report the manifest's exact release identity and generation.
+- If an old engine still owns the socket, reports a different release identity, or runs outside the active version directory, the desktop must not attach to it. The updater shuts it down by verified process identity before starting the active engine; an unverified process is never killed by name alone.
+- After activation, require a bounded health check covering desktop launch, authenticated IPC, engine readiness, workspace restore, and one provider-neutral market-service readiness probe. On failure, atomically restore the previous pointer and delete the failed candidate.
+- Keep the previous version only inside the in-progress transaction. After the new release passes its health check, remove the superseded version and all download/staging files, then verify they are absent. If removal is blocked, report `UpdatePendingCleanup` or `RebootRequired`; never report the update as complete.
+- At every normal launch, reconcile the active manifest against the process path, autostart target, installed file inventory, and unfinished update journal. Repair or surface an actionable terminal error instead of silently running an old binary.
+
+### Complete local uninstall
+
+- Ship an uninstaller through the same platform-lifecycle boundary and expose one clearly confirmed action: **Remove Axiusflow and all local data**. Ordinary sign-out remains separate and does not imply account deletion.
+- The uninstaller runs outside the binaries it removes, takes the install/update lock, blocks relaunch, disables every autostart/service registration first, requests authenticated engine shutdown, closes remaining Axiusflow windows, and confirms all verified Axiusflow process identities have exited.
+- Revoke and delete every Axiusflow native-vault entry before deleting encrypted data, including the local IPC token, market-history catalog and segment keys, provider credentials, and - after phase 5 - refresh tokens, device keys, and cached entitlement material.
+- Delete every path in the ownership inventory, including:
+  - desktop and engine binaries, runtime assets, launchers, shortcuts, uninstall metadata, and version directories;
+  - engine workspace and hot-set frames, corrupt/quarantine files, local market history, catalogs, segments, staging files, provider caches, and retained market data;
+  - desktop preferences, layouts, drawing state, window state, caches, and temporary files;
+  - application logs, diagnostics, crash reports owned by Axiusflow, update downloads, journals, rollback files, lock files, and stale IPC filesystem entries; and
+  - Windows Run entries, Linux autostart desktop files, macOS launch agents, and any later OS integration owned by Axiusflow.
+- Resolve and validate every deletion target from the signed install/data inventory. Never follow symlinks or reparse points outside an Axiusflow-owned root and never delete by a broad home, profile, application-data, or temporary-directory prefix.
+- Make deletion idempotent and resumable. A crash or reboot resumes the uninstall journal before any Axiusflow launch, while missing files and already-revoked keys count as successful cleanup.
+- Finish with an absence audit covering process list, service/autostart registrations, active and superseded install roots, every registered data/cache/log root, IPC artifacts, and every registered vault key. If any item remains, show the exact redacted category and remediation and do not report success.
+- The guarantee is complete logical removal of Axiusflow-owned local state. Filesystem snapshots, external backups, and operating-system audit records outside Axiusflow's ownership cannot be erased by the application; destroying the vault keys before removing encrypted market data makes any residual storage blocks cryptographically unreadable.
 - Run focused checks while iterating, then all workspace gates:
   - `cargo fmt --all -- --check`
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
@@ -205,7 +242,9 @@ Finish and prove the primary architecture migration before any authentication wo
 - Streaming, history, persistence, IPC, recovery, resource pressure, multi-window behavior, and shutdown pass their acceptance evidence.
 - No provider session is recreated by presentation changes.
 - No obsolete migration path or duplicate authority remains.
-- Signed-update negative cases fail safely if update delivery is included in the release.
+- Interrupted download, invalid signature, corrupt file, disk-full, crash at every transaction boundary, locked executable, stale socket owner, mismatched desktop/engine release, failed health check, rollback, and reboot-required update cases fail safely.
+- A successful update leaves exactly one active release, one matching desktop/engine generation, no superseded binary or staging artifact, and an autostart entry resolving through the stable launcher to that release.
+- Fresh-install, multi-version-upgrade, interrupted-update, interrupted-uninstall, and repeated-uninstall tests leave no Axiusflow-owned local data, market history, credentials, processes, service entries, or update artifacts after uninstall reports success.
 - The maintainer explicitly approves starting the account platform.
 
 ## Phase 5 - Add Better Auth, accounts, billing, and entitlements
@@ -321,6 +360,7 @@ Better Auth is selected for control and portability, not because authentication 
 - Success, cancellation, browser close, callback timeout, duplicate callback, and port collision pass in release binaries.
 - State, nonce, PKCE, issuer, audience, expiry, and unknown-key failures fail closed.
 - Restart, refresh, logout, vault separation, and secret deletion pass native inspection.
+- The install/data inventory includes every phase-5 account, device, entitlement, and billing-cache artifact, and complete uninstall removes all of them without changing the user's remote account unless separately requested.
 - D1 backup, encrypted export, schema migration, rollback, and clean restore preserve `AccountId` links.
 - OIDC and entitlement signing-key rotation pass with supported old clients.
 - Email OTP delivery failures and abuse limits resolve to actionable states.
