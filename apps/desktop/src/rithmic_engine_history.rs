@@ -283,7 +283,6 @@ pub(crate) fn live_tail(
 pub(crate) struct DomIdentity<'a> {
     pub instrument: &'a InstallProviderInstrument,
     pub series_generation: u64,
-    pub selection_generation: u64,
 }
 
 pub(crate) fn dom_from_snapshot(
@@ -297,7 +296,6 @@ pub(crate) fn dom_from_snapshot(
         || snapshot.instrument_id != instrument.instrument_id
         || snapshot.entitlement_id != instrument.entitlement_id
         || snapshot.provider_generation < instrument.session_generation
-        || snapshot.selection_generation != identity.selection_generation
         || snapshot.bids.len() > MAXIMUM_DOM_LEVELS
         || snapshot.asks.len() > MAXIMUM_DOM_LEVELS
     {
@@ -357,7 +355,11 @@ pub(crate) fn dom_from_snapshot(
         instrument_id: snapshot.instrument_id.clone(),
         entitlement_id: snapshot.entitlement_id.clone(),
         session_generation: snapshot.provider_generation,
-        selection_generation: snapshot.selection_generation,
+        // The snapshot's consumer and demand generation already fence the
+        // active chart. Catalog selection generations are consumer-local, but
+        // the resident engine's canonical book is shared by instrument, so the
+        // projection must retain this consumer's selection identity.
+        selection_generation: instrument.selection_generation,
         precision: InstrumentPrecision::try_new(
             u8::try_from(instrument.price_scale)
                 .map_err(|_| "Engine price scale is invalid".to_string())?,

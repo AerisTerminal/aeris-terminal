@@ -891,14 +891,19 @@ fn apply_pushed_event(
             if snapshot.provider_generation < instrument.session_generation {
                 return Ok(());
             }
-            let frame = dom_from_snapshot(
+            let Ok(frame) = dom_from_snapshot(
                 &DomIdentity {
                     instrument,
                     series_generation: active_generation,
-                    selection_generation: instrument.selection_generation,
                 },
                 &snapshot,
-            )?;
+            ) else {
+                // Depth is an ancillary stream. A stale or malformed book
+                // image must never transition the price chart into a fatal
+                // state; retain the last valid DOM frame and wait for the next
+                // canonical snapshot.
+                return Ok(());
+            };
             messages
                 .send(MarketWorkerMessage::CoinbaseDom(frame))
                 .map_err(|error| error.to_string())?;
@@ -2392,7 +2397,7 @@ mod tests {
     /// snapshot had no arm here: `CoinbaseDom` was declared, coalesced, and
     /// rendered, but never constructed. Levels are real BTC-USD top-of-book.
     #[test]
-    fn coinbase_order_book_snapshot_reaches_the_dom_panel() {
+    fn coinbase_order_book_snapshot_uses_the_consumers_selection_identity() {
         let product = default_coinbase_product("BTC-USD");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
@@ -2407,7 +2412,9 @@ mod tests {
                 instrument_id: product.instrument_id.clone(),
                 entitlement_id: product.entitlement_id.clone(),
                 provider_generation: 1,
-                selection_generation: 1,
+                // The engine book is shared by instrument, so this may carry
+                // the generation of another chart that selected BTC/USD.
+                selection_generation: 99,
                 revision: 1,
                 source_watermark: 1,
                 state: IpcOrderBookState::Ready as i32,
@@ -2464,6 +2471,7 @@ mod tests {
             !frame.rows.is_empty(),
             "a projected Coinbase DOM frame must carry price rows"
         );
+        assert_eq!(frame.selection_generation, product.selection_generation);
         assert_eq!(
             frame.rows[0]
                 .bid

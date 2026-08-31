@@ -362,7 +362,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "31c36c0b27e230fce57f035b0a57d40e3eafb9a8";
+        let expected_revision = "a5240184aad486d78801bb0446b66fc951f7f782";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_render",

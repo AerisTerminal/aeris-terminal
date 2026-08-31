@@ -267,7 +267,6 @@ fn handle_engine_event(
                 &DomIdentity {
                     instrument: &active.instrument,
                     series_generation: series_generation(active.request),
-                    selection_generation: selection_generation(active.request),
                 },
                 &snapshot,
             ) {
@@ -353,10 +352,6 @@ fn publish_series_error(
         series_generation: request.series_generation,
         result: Err(error),
     });
-}
-
-fn selection_generation(request: RithmicSeriesRequest) -> u64 {
-    u64::try_from(request.selection_generation.get()).unwrap_or(u64::MAX)
 }
 
 fn series_generation(request: RithmicSeriesRequest) -> u64 {
