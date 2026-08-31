@@ -5443,10 +5443,7 @@ fn workspace_title_bar(
             .items_center()
             .pl_4()
             .pr_2()
-            .gap_2()
-            .text_sm()
-            .child(brand_mark())
-            .child("Axiusflow"),
+            .child(brand_wordmark(theme.mode)),
         terminal,
     );
     div()
@@ -7533,25 +7530,19 @@ fn exchange_mark(
         })
 }
 
-fn brand_mark() -> Div {
-    div()
-        .size(px(22.0))
+fn brand_wordmark(mode: ThemeMode) -> impl IntoElement {
+    img(brand_wordmark_asset(mode).path())
+        .w(px(97.5))
+        .h(px(28.0))
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.0))
-        .overflow_hidden()
-        .bg(asset_color((38, 38, 38)))
-        .child(
-            Icon::new(assets::BrandIcon::Mark.path())
-                .with_size(px(18.0))
-                .color(gpui::white().opacity(0.84)),
-        )
+        .object_fit(ObjectFit::Fill)
 }
 
-fn asset_color((red, green, blue): (u8, u8, u8)) -> Hsla {
-    gpui_color(ThemeColor::from_rgb8(red, green, blue))
+const fn brand_wordmark_asset(mode: ThemeMode) -> assets::BrandIcon {
+    match mode {
+        ThemeMode::Light => assets::BrandIcon::WordmarkDarkText,
+        ThemeMode::Dark => assets::BrandIcon::WordmarkLightText,
+    }
 }
 
 fn chrome_tooltip(
@@ -10886,9 +10877,9 @@ mod tests {
         TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
         WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
         WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-        active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
-        caption_pointer_owner, catalog_rejection_message, chart_status_detail,
-        chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
+        active_workspace_after_close, bounded_status_detail, brand_wordmark_asset,
+        caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+        chart_status_detail, chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
         chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
         clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
         current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
@@ -10907,6 +10898,7 @@ mod tests {
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
+    use crate::assets::BrandIcon;
     use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
     use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
     use axiusflow_engine_protocol::{
@@ -11600,6 +11592,18 @@ mod tests {
         assert_eq!(
             nucleus_chart_theme(ThemeMode::Dark),
             NucleusChartTheme::Dark
+        );
+    }
+
+    #[test]
+    fn workspace_wordmark_contrasts_with_each_theme() {
+        assert_eq!(
+            brand_wordmark_asset(ThemeMode::Light),
+            BrandIcon::WordmarkDarkText
+        );
+        assert_eq!(
+            brand_wordmark_asset(ThemeMode::Dark),
+            BrandIcon::WordmarkLightText
         );
     }
 
