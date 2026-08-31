@@ -133,8 +133,8 @@ impl std::future::Future for UiWakeNotified {
     }
 }
 
-const SIDE_PANEL_INITIAL_WIDTH: f32 = 320.0;
-const SIDE_PANEL_MINIMUM_WIDTH: f32 = 240.0;
+const SIDE_PANEL_INITIAL_WIDTH: f32 = 440.0;
+const SIDE_PANEL_MINIMUM_WIDTH: f32 = 408.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
 const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
@@ -6582,6 +6582,7 @@ const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {
     match kind {
         chart_chrome::IndicatorKind::Sma => ChartIndicator::Sma,
         chart_chrome::IndicatorKind::Ema => ChartIndicator::Ema,
+        chart_chrome::IndicatorKind::EmaRibbon => ChartIndicator::EmaRibbon,
         chart_chrome::IndicatorKind::Wma => ChartIndicator::Wma,
         chart_chrome::IndicatorKind::BollingerBands => ChartIndicator::Bollinger,
         chart_chrome::IndicatorKind::Vwap => ChartIndicator::Vwap,
@@ -11300,9 +11301,9 @@ mod tests {
             pointer_x: 500.0,
             width: 320.0,
         };
-        assert!((resized_side_panel_width(resize, 420.0) - 400.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, 420.0) - 408.0).abs() < f32::EPSILON);
         assert!((resized_side_panel_width(resize, -500.0) - 640.0).abs() < f32::EPSILON);
-        assert!((resized_side_panel_width(resize, 1_000.0) - 240.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, 1_000.0) - 408.0).abs() < f32::EPSILON);
     }
 
     #[test]

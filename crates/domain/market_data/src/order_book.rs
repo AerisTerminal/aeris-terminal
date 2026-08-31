@@ -29,6 +29,7 @@ pub struct OrderBookPublication {
     pub source_watermark: u64,
     pub bids: Vec<DepthLevel>,
     pub asks: Vec<DepthLevel>,
+    pub traded_volumes: BTreeMap<i64, i64>,
     pub state: OrderBookState,
 }
 
@@ -40,6 +41,8 @@ pub struct DomColumnLevel {
     pub order_count: Option<u32>,
     pub price_text: String,
     pub quantity_text: String,
+    pub traded_volume: i64,
+    pub traded_volume_text: String,
     /// Relative bar width in basis points (`0..=10_000`) within this frame.
     pub relative_size_bps: u16,
 }
@@ -317,6 +320,7 @@ impl OrderBook {
             source_watermark: self.source_watermark,
             bids: self.bids.values().rev().copied().collect(),
             asks: self.asks.values().copied().collect(),
+            traded_volumes: BTreeMap::new(),
             state: self.state,
         }
     }

@@ -192,6 +192,11 @@ fn project_publication(selection: &DomSelection, publication: &OrderBookPublicat
                     selection.precision.price_scale(),
                     selection.precision.quantity_scale(),
                     maximum_quantity,
+                    publication
+                        .traded_volumes
+                        .get(&level.price)
+                        .copied()
+                        .unwrap_or(0),
                 )
             }),
             ask: publication.asks.get(index).map(|level| {
@@ -200,6 +205,11 @@ fn project_publication(selection: &DomSelection, publication: &OrderBookPublicat
                     selection.precision.price_scale(),
                     selection.precision.quantity_scale(),
                     maximum_quantity,
+                    publication
+                        .traded_volumes
+                        .get(&level.price)
+                        .copied()
+                        .unwrap_or(0),
                 )
             }),
         });
@@ -222,6 +232,7 @@ fn project_level(
     price_scale: u8,
     quantity_scale: u8,
     maximum_quantity: i64,
+    traded_volume: i64,
 ) -> DomColumnLevel {
     DomColumnLevel {
         price: level.price,
@@ -229,6 +240,12 @@ fn project_level(
         order_count: level.order_count,
         price_text: grouped_fixed_point_text(level.price, price_scale),
         quantity_text: fixed_point_text(level.quantity, quantity_scale),
+        traded_volume,
+        traded_volume_text: if traded_volume > 0 {
+            fixed_point_text(traded_volume, quantity_scale)
+        } else {
+            String::new()
+        },
         relative_size_bps: relative_size_bps(level.quantity, maximum_quantity),
     }
 }

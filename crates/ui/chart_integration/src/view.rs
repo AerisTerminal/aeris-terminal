@@ -4,7 +4,7 @@ use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::nucleus_bridge::{
     ProductPriceBars, apply_merged_chart_data, chart_data_queue_capacity,
     install_product_price_series, install_replay, install_volume_series, replay_legend_title,
-    replay_price_divisor,
+    replay_price_divisor, replay_quantity_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::ReplayRecoveryCommand;
@@ -20,7 +20,8 @@ use gpui::{
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
-    DrawingKind, DrawingModifiers, FeatureSeriesOptionsPatch, NativePrimitiveId, PriceScaleTarget,
+    DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS, FeatureSeriesOptionsPatch,
+    NativePrimitiveId, PriceScaleTarget,
 };
 use nucleuscharts_render::color::Color;
 use nucleuscharts_render::draw_list::Prim;
@@ -78,6 +79,7 @@ pub enum ChartIndicator {
     Vwap,
     Sma,
     Ema,
+    EmaRibbon,
     Wma,
     Bollinger,
     Rsi,
@@ -95,11 +97,12 @@ pub struct ChartIndicatorState {
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Volume,
         Self::Vwap,
         Self::Sma,
         Self::Ema,
+        Self::EmaRibbon,
         Self::Wma,
         Self::Bollinger,
         Self::Rsi,
@@ -116,6 +119,7 @@ impl ChartIndicator {
             Self::Vwap => "Volume Weighted Average Price",
             Self::Sma => "Moving Average",
             Self::Ema => "Moving Average Exponential",
+            Self::EmaRibbon => "EMA Ribbon",
             Self::Wma => "Weighted Moving Average",
             Self::Bollinger => "Bollinger Bands",
             Self::Rsi => "Relative Strength Index",
@@ -132,6 +136,7 @@ impl ChartIndicator {
             Self::Volume => "Up/down volume",
             Self::Vwap => "Session anchored",
             Self::Sma | Self::Ema | Self::Wma => "Period 20",
+            Self::EmaRibbon => "Periods 5 · 10 · 20 · 50 · 200",
             Self::Bollinger => "Period 20 · Deviation 2",
             Self::Rsi | Self::Atr => "Period 14",
             Self::Macd => "Fast 12 · Slow 26 · Signal 9",
@@ -144,6 +149,7 @@ impl ChartIndicator {
             "vwap" => Self::Vwap,
             "sma" => Self::Sma,
             "ema" => Self::Ema,
+            "ema_ribbon" => Self::EmaRibbon,
             "wma" => Self::Wma,
             "bollinger" => Self::Bollinger,
             "rsi" => Self::Rsi,
@@ -583,6 +589,7 @@ pub struct NucleusChartView {
     data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
+    quantity_divisor: f64,
     volume_series: u32,
     volume_legend: LegendPresence,
     asset_legend_title: String,
@@ -650,6 +657,7 @@ impl NucleusChartView {
             data_bridge: None,
             displayed_provenance: DisplayedProvenance::empty(),
             price_divisor: 1.0,
+            quantity_divisor: 1.0,
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: String::new(),
@@ -741,6 +749,7 @@ impl NucleusChartView {
             data_bridge,
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
             price_divisor: replay_price_divisor(replay),
+            quantity_divisor: replay_quantity_divisor(replay),
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: replay_legend_title(replay),
@@ -809,6 +818,7 @@ impl NucleusChartView {
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
         self.price_divisor = replay_price_divisor(replay);
+        self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
@@ -1044,6 +1054,7 @@ impl NucleusChartView {
                 .collect(),
             ChartIndicator::Sma => self.engine.add_sma(0, 20).into_iter().collect(),
             ChartIndicator::Ema => self.engine.add_ema(0, 20).into_iter().collect(),
+            ChartIndicator::EmaRibbon => self.engine.add_ema_ribbon(0, EMA_RIBBON_DEFAULT_PERIODS),
             ChartIndicator::Wma => self.engine.add_wma(0, 20).into_iter().collect(),
             ChartIndicator::Bollinger => self.engine.add_bollinger(0, 20, 2.0),
             ChartIndicator::Rsi => self.engine.add_rsi(0, 14).into_iter().collect(),
@@ -1052,6 +1063,7 @@ impl NucleusChartView {
             ChartIndicator::Atr => self.engine.add_atr(0, 14).into_iter().collect(),
         };
         let expected_outputs = match indicator {
+            ChartIndicator::EmaRibbon => 5,
             ChartIndicator::Bollinger | ChartIndicator::Macd => 3,
             ChartIndicator::Stochastic => 2,
             ChartIndicator::Volume
@@ -1842,6 +1854,7 @@ impl NucleusChartView {
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
         self.price_divisor = replay_price_divisor(replay);
+        self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
@@ -1910,6 +1923,7 @@ impl NucleusChartView {
                     &mut self.engine,
                     self.volume_series,
                     &mut self.price_divisor,
+                    &mut self.quantity_divisor,
                     self.chart_type,
                     &mut self.product_bars,
                     &update,
@@ -4348,7 +4362,8 @@ mod tests {
 
         chart.reset_view();
 
-        assert!(chart.engine.right_offset().abs() < f64::EPSILON);
+        let reset_margin = chart.engine.pane_w * 0.10 / chart.engine.bar_spacing();
+        assert!((chart.engine.right_offset() - reset_margin).abs() < f64::EPSILON);
         assert_eq!(
             chart
                 .engine
@@ -4376,6 +4391,7 @@ mod tests {
         let cases = [
             (ChartIndicator::Sma, 1, "sma", "SMA 20"),
             (ChartIndicator::Ema, 1, "ema", "EMA 20"),
+            (ChartIndicator::EmaRibbon, 5, "ema_ribbon", "EMA 5"),
             (ChartIndicator::Wma, 1, "wma", "WMA 20"),
             (ChartIndicator::Bollinger, 3, "bollinger", "Bollinger 20 2"),
             (ChartIndicator::Rsi, 1, "rsi", "RSI 14"),
@@ -4756,11 +4772,15 @@ mod tests {
 
     #[test]
     fn indicator_metadata_matches_the_legacy_picker_copy() {
-        assert_eq!(ChartIndicator::ALL.len(), 10);
+        assert_eq!(ChartIndicator::ALL.len(), 11);
         assert_eq!(ChartIndicator::Volume.label(), "Volume");
         assert_eq!(ChartIndicator::Vwap.parameters(), "Session anchored");
         assert_eq!(ChartIndicator::Sma.label(), "Moving Average");
         assert_eq!(ChartIndicator::Sma.parameters(), "Period 20");
+        assert_eq!(
+            ChartIndicator::EmaRibbon.parameters(),
+            "Periods 5 · 10 · 20 · 50 · 200"
+        );
         assert_eq!(
             ChartIndicator::Bollinger.parameters(),
             "Period 20 · Deviation 2"
@@ -5093,7 +5113,8 @@ mod tests {
         assert!(chart.apply_key("escape", false));
         assert!(chart.engine.crosshair.is_none());
         assert!(chart.apply_key("home", false));
-        assert!(chart.engine.scroll_position().abs() < f64::EPSILON);
+        let reset_margin = chart.engine.pane_w * 0.10 / chart.engine.bar_spacing();
+        assert!((chart.engine.scroll_position() - reset_margin).abs() < f64::EPSILON);
         chart.engine.scroll_to_position(-4.0);
         assert!(!chart.is_at_latest());
         assert!(chart.apply_key("end", false));

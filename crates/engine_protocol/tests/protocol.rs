@@ -421,11 +421,13 @@ fn order_book_payload() -> envelope::Payload {
             price: 20_000,
             quantity: 7,
             order_count: Some(3),
+            traded_volume: 11,
         }],
         asks: vec![OrderBookLevel {
             price: 20_025,
             quantity: 4,
             order_count: None,
+            traded_volume: 9,
         }],
     })
 }

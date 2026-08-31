@@ -82,6 +82,7 @@ const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 50;
+const MAXIMUM_TRADED_VOLUME_LEVELS: usize = 4_096;
 const COINBASE_PROVIDER_GENERATION: u64 = 1;
 
 type Reply<T> = SyncSender<Result<T, String>>;
@@ -421,6 +422,7 @@ impl ConsumerEvents {
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
+    traded_volumes: BTreeMap<i64, i64>,
 }
 
 impl ProviderOrderBook {
@@ -430,7 +432,29 @@ impl ProviderOrderBook {
             book: OrderBook::new(
                 NonZeroUsize::new(MAXIMUM_PUBLISHED_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
+            traded_volumes: BTreeMap::new(),
         }
+    }
+
+    fn record_trade(&mut self, price: i64, quantity: i64) -> bool {
+        if price <= 0
+            || quantity <= 0
+            || (!self.traded_volumes.contains_key(&price)
+                && self.traded_volumes.len() == MAXIMUM_TRADED_VOLUME_LEVELS)
+        {
+            return false;
+        }
+        let Some(volume) = self
+            .traded_volumes
+            .get(&price)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(quantity)
+        else {
+            return false;
+        };
+        self.traded_volumes.insert(price, volume);
+        true
     }
 }
 
@@ -5421,6 +5445,12 @@ impl Coordinator<'_> {
             }
             return;
         }
+        self.record_order_book_trade(
+            "rithmic",
+            &trade.metadata.instrument_id,
+            trade.price,
+            trade.quantity,
+        );
         let order_flow_series = self
             .rithmic_live
             .keys()
@@ -5624,6 +5654,22 @@ impl Coordinator<'_> {
         }
     }
 
+    fn record_order_book_trade(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        price: i64,
+        quantity: i64,
+    ) {
+        let recorded = self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument_id.to_string()))
+            .is_some_and(|order_book| order_book.record_trade(price, quantity));
+        if recorded {
+            self.broadcast_order_book(provider, instrument_id);
+        }
+    }
+
     fn realtime_connecting(&mut self, generation: ProviderGeneration) {
         let current = self.coinbase_provider_generation();
         if generation < current {
@@ -5685,6 +5731,32 @@ impl Coordinator<'_> {
     /// holes come from losing the socket, and that path reconnects on a fresh
     /// generation and reseeds from history instead of repairing a seam here.
     fn realtime_trade(&mut self, generation: ProviderGeneration, trade: &CanonicalTrade) {
+        if generation != self.coinbase_provider_generation() {
+            return;
+        }
+        if let Ok(instrument_id) = coinbase_instrument_id(&trade.product_id)
+            && let Some(instrument) = self
+                .order_books
+                .get(&("coinbase".to_string(), instrument_id.clone()))
+                .map(|order_book| order_book.instrument.clone())
+            && let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            )
+            && let Ok(projected) = trade.to_market_trade(
+                price_scale,
+                quantity_scale,
+                generation.0.get(),
+                current_unix_nanos().unwrap_or(trade.provider_timestamp_unix_nanos),
+            )
+        {
+            self.record_order_book_trade(
+                "coinbase",
+                &instrument_id,
+                projected.price,
+                projected.quantity,
+            );
+        }
         let mut interrupted = None;
         for live in self.live.values_mut().filter(|live| {
             live.generation == generation
@@ -6738,18 +6810,22 @@ fn order_book_snapshot(
         revision: publication.revision,
         source_watermark: publication.source_watermark,
         state: ipc_order_book_state(publication.state) as i32,
-        bids: ipc_order_book_levels(&publication.bids),
-        asks: ipc_order_book_levels(&publication.asks),
+        bids: ipc_order_book_levels(&publication.bids, &order_book.traded_volumes),
+        asks: ipc_order_book_levels(&publication.asks, &order_book.traded_volumes),
     })
 }
 
-fn ipc_order_book_levels(levels: &[DepthLevel]) -> Vec<IpcOrderBookLevel> {
+fn ipc_order_book_levels(
+    levels: &[DepthLevel],
+    traded_volumes: &BTreeMap<i64, i64>,
+) -> Vec<IpcOrderBookLevel> {
     levels
         .iter()
         .map(|level| IpcOrderBookLevel {
             price: level.price,
             quantity: level.quantity,
             order_count: level.order_count,
+            traded_volume: traded_volumes.get(&level.price).copied().unwrap_or(0),
         })
         .collect()
 }
@@ -8608,6 +8684,10 @@ mod tests {
         assert_eq!(snapshot.state, IpcOrderBookState::Ready as i32);
         assert_eq!(snapshot.bids[0].quantity, 7);
         assert_eq!(snapshot.asks[0].price, 20_025);
+
+        coordinator.rithmic_trade(7, &rithmic_trade(12, 7, 22, 20_000));
+        let traded = pop_order_book(&mut coordinator, consumer_id);
+        assert_eq!(traded.bids[0].traded_volume, 2);
     }
 
     #[test]

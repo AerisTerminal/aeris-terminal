@@ -17,7 +17,10 @@ use axiusflow_market_data::{
     OrderBookRecoveryReason, OrderBookState,
 };
 use axiusflow_terminal_ui::{DomFrame, DomSelection, ReadOnlyDom};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axiusflow_desktop::market_worker::MarketWorkerBootstrap;
 
@@ -323,6 +326,13 @@ pub(crate) fn dom_from_snapshot(
     };
     let bids = ipc_depth_levels(&snapshot.bids, true)?;
     let asks = ipc_depth_levels(&snapshot.asks, false)?;
+    let traded_volumes = snapshot
+        .bids
+        .iter()
+        .chain(&snapshot.asks)
+        .filter(|level| level.traded_volume > 0)
+        .map(|level| (level.price, level.traded_volume))
+        .collect::<BTreeMap<_, _>>();
     if bids
         .first()
         .zip(asks.first())
@@ -339,6 +349,7 @@ pub(crate) fn dom_from_snapshot(
         source_watermark: snapshot.source_watermark,
         bids,
         asks,
+        traded_volumes,
         state,
     };
     let selection = DomSelection {
@@ -366,7 +377,7 @@ fn ipc_depth_levels(
     let mut previous = None;
     let mut converted = Vec::with_capacity(levels.len());
     for level in levels {
-        if level.price <= 0 || level.quantity <= 0 {
+        if level.price <= 0 || level.quantity <= 0 || level.traded_volume < 0 {
             return Err("Engine order-book level is invalid".to_string());
         }
         if previous.is_some_and(|previous| {

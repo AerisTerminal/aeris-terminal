@@ -972,6 +972,9 @@ pub struct OrderBookLevel {
     pub quantity: i64,
     #[prost(uint32, optional, tag = "3")]
     pub order_count: Option<u32>,
+    /// Traded quantity accumulated at this price during the resident book session.
+    #[prost(sint64, tag = "4")]
+    pub traded_volume: i64,
 }
 
 /// Latest conflated top-N image of one authoritative engine-owned order book.

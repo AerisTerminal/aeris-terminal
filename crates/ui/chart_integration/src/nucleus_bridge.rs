@@ -79,6 +79,10 @@ pub(crate) fn replay_price_divisor(replay: &ReplaySnapshot) -> f64 {
     10_f64.powi(i32::from(replay.instrument().precision.price_scale()))
 }
 
+pub(crate) fn replay_quantity_divisor(replay: &ReplaySnapshot) -> f64 {
+    10_f64.powi(i32::from(replay.instrument().precision.quantity_scale()))
+}
+
 pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
     let id = engine.add_series(SeriesKind::Histogram);
     if let Some(series) = engine
@@ -108,12 +112,14 @@ pub(crate) fn apply_merged_chart_data(
     engine: &mut ChartEngine,
     volume_series: u32,
     price_divisor: &mut f64,
+    quantity_divisor: &mut f64,
     chart_type: ChartType,
     product_bars: &mut ProductPriceBars,
     update: &MergedChartData,
 ) {
     if let Some(snapshot) = update.snapshot() {
         *price_divisor = replay_price_divisor(snapshot);
+        *quantity_divisor = replay_quantity_divisor(snapshot);
         install_replay_with_deltas(
             engine,
             volume_series,
@@ -144,7 +150,7 @@ pub(crate) fn apply_merged_chart_data(
                     fixed_price(bar.low, *price_divisor),
                     fixed_price(bar.close, *price_divisor),
                 ],
-                volume_row(bar.volume, time),
+                volume_row(bar.volume, *quantity_divisor, time),
             )
         })
         .collect::<Vec<_>>();
@@ -252,6 +258,7 @@ pub(crate) fn install_replay_with_deltas(
     let mut close = Vec::with_capacity(item_count);
     let mut volume = Vec::with_capacity(item_count);
     let price_divisor = replay_price_divisor(replay);
+    let quantity_divisor = replay_quantity_divisor(replay);
 
     for item in replay.bars().iter().chain(deltas) {
         let bar = *item.value();
@@ -266,7 +273,7 @@ pub(crate) fn install_replay_with_deltas(
         high.push(fixed_price(bar.high, price_divisor));
         low.push(fixed_price(bar.low, price_divisor));
         close.push(fixed_price(bar.close, price_divisor));
-        volume.push(bar.volume.to_f64().unwrap_or_default());
+        volume.push(fixed_value(bar.volume, quantity_divisor));
     }
 
     product_bars.replace(times, open, high, low, close);
@@ -334,11 +341,25 @@ fn replay_venue_label(venue: &str) -> &str {
     }
 }
 
-fn volume_row(volume: i64, time: f64) -> (f64, [f64; 4]) {
-    let volume = volume.to_f64().unwrap_or_default();
+fn volume_row(volume: i64, divisor: f64, time: f64) -> (f64, [f64; 4]) {
+    let volume = fixed_value(volume, divisor);
     (time, [volume; 4])
 }
 
 pub(crate) fn fixed_price(value: i64, divisor: f64) -> f64 {
+    fixed_value(value, divisor)
+}
+
+fn fixed_value(value: i64, divisor: f64) -> f64 {
     value.to_f64().unwrap_or_default() / divisor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixed_value;
+
+    #[test]
+    fn fixed_point_volume_uses_quantity_precision() {
+        assert!((fixed_value(125_000_000, 100_000_000.0) - 1.25).abs() < f64::EPSILON);
+    }
 }

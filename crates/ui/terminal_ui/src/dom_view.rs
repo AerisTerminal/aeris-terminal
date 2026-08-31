@@ -5,7 +5,11 @@ use gpui::{Context, Hsla, IntoElement, Render, Window, div, prelude::*, px, rela
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 22.0;
-const PRICE_WIDTH: f32 = 112.0;
+const PNL_WIDTH: f32 = 52.0;
+const BOOK_WIDTH: f32 = 62.0;
+const PRICE_WIDTH: f32 = 96.0;
+const ORDERS_WIDTH: f32 = 58.0;
+const VOLUME_WIDTH: f32 = 78.0;
 
 /// Flush, square-edged GPUI view for one immutable read-only DOM frame.
 pub struct ReadOnlyDomView {
@@ -83,9 +87,12 @@ impl Render for ReadOnlyDomView {
                     .border_color(gpui_color(colors.border))
                     .text_xs()
                     .text_color(gpui_color(colors.text_secondary))
-                    .child(div().flex_1().px_2().text_right().child("BID SIZE"))
+                    .child(header_cell(PNL_WIDTH, "P/L", false))
+                    .child(header_cell(BOOK_WIDTH, "BID", true))
                     .child(div().w(px(PRICE_WIDTH)).px_1().text_center().child("PRICE"))
-                    .child(div().flex_1().px_2().child("ASK SIZE")),
+                    .child(header_cell(BOOK_WIDTH, "ASK", false))
+                    .child(header_cell(ORDERS_WIDTH, "ORDERS", true))
+                    .child(header_cell(VOLUME_WIDTH, "VOLUME", true)),
             )
             .children(state.and_then(|state| status_banner(state, watermark, &self.theme)))
             .child(
@@ -150,6 +157,7 @@ fn render_level_row(
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .text_xs()
+        .child(empty_cell(PNL_WIDTH))
         .child(quantity_cell(
             (side == BookColumnSide::Bid).then_some(level),
             colors.bullish,
@@ -168,6 +176,24 @@ fn render_level_row(
             colors.bearish,
             false,
         ))
+        .child(empty_cell(ORDERS_WIDTH))
+        .child(
+            div()
+                .w(px(VOLUME_WIDTH))
+                .px_2()
+                .text_right()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(level.traded_volume_text.clone()),
+        )
+}
+
+fn header_cell(width: f32, label: &'static str, align_right: bool) -> impl IntoElement {
+    let cell = div().w(px(width)).px_2().child(label);
+    if align_right { cell.text_right() } else { cell }
+}
+
+fn empty_cell(width: f32) -> impl IntoElement {
+    div().w(px(width)).h_full()
 }
 
 fn quantity_cell(
@@ -183,7 +209,7 @@ fn quantity_cell(
         .w(relative(width))
         .bg(gpui_color(color.with_alpha(0.2)));
     let cell = div()
-        .flex_1()
+        .w(px(BOOK_WIDTH))
         .h_full()
         .relative()
         .overflow_hidden()

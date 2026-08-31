@@ -2416,11 +2416,13 @@ mod tests {
                         price: 7_798_670,
                         quantity: 653_408,
                         order_count: None,
+                        traded_volume: 125_000_000,
                     },
                     IpcOrderBookLevel {
                         price: 7_798_514,
                         quantity: 2_564_592,
                         order_count: None,
+                        traded_volume: 0,
                     },
                 ],
                 asks: vec![
@@ -2428,11 +2430,13 @@ mod tests {
                         price: 7_798_671,
                         quantity: 22_517_771,
                         order_count: None,
+                        traded_volume: 75_000_000,
                     },
                     IpcOrderBookLevel {
                         price: 7_798_727,
                         quantity: 4_582_685,
                         order_count: None,
+                        traded_volume: 0,
                     },
                 ],
             }),
@@ -2459,6 +2463,20 @@ mod tests {
         assert!(
             !frame.rows.is_empty(),
             "a projected Coinbase DOM frame must carry price rows"
+        );
+        assert_eq!(
+            frame.rows[0]
+                .bid
+                .as_ref()
+                .map(|level| level.traded_volume_text.as_str()),
+            Some("1.25000000")
+        );
+        assert_eq!(
+            frame.rows[0]
+                .ask
+                .as_ref()
+                .map(|level| level.traded_volume_text.as_str()),
+            Some("0.75000000")
         );
     }
 }
