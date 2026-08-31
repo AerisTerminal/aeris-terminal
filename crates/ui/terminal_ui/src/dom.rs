@@ -239,10 +239,10 @@ fn project_level(
         quantity: level.quantity,
         order_count: level.order_count,
         price_text: grouped_fixed_point_text(level.price, price_scale),
-        quantity_text: fixed_point_text(level.quantity, quantity_scale),
+        quantity_text: compact_fixed_point_text(level.quantity, quantity_scale),
         traded_volume,
         traded_volume_text: if traded_volume > 0 {
-            fixed_point_text(traded_volume, quantity_scale)
+            compact_fixed_point_text(traded_volume, quantity_scale)
         } else {
             String::new()
         },
@@ -271,6 +271,19 @@ fn fixed_point_text(value: i64, scale: u8) -> String {
         "{sign}{whole}.{fraction:0width$}",
         width = usize::from(scale)
     )
+}
+
+fn compact_fixed_point_text(value: i64, scale: u8) -> String {
+    let mut text = fixed_point_text(value, scale);
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    text
 }
 
 fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
@@ -504,5 +517,8 @@ mod tests {
         assert_eq!(fixed_point_text(42, 0), "42");
         assert_eq!(grouped_fixed_point_text(7_796_038, 2), "77,960.38");
         assert_eq!(grouped_fixed_point_text(-123_456, 3), "-123.456");
+        assert_eq!(compact_fixed_point_text(125_000_000, 8), "1.25");
+        assert_eq!(compact_fixed_point_text(10_000, 8), "0.0001");
+        assert_eq!(compact_fixed_point_text(0, 8), "0");
     }
 }

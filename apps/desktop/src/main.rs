@@ -37,7 +37,7 @@ use axiusflow_engine_protocol::{
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
-use axiusflow_terminal_ui::{DomFrame, ReadOnlyDomView};
+use axiusflow_terminal_ui::{DomColumn, DomColumnVisibility, DomFrame, ReadOnlyDomView};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
     Entity, FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit,
@@ -133,9 +133,9 @@ impl std::future::Future for UiWakeNotified {
     }
 }
 
-const SIDE_PANEL_INITIAL_WIDTH: f32 = 440.0;
-const SIDE_PANEL_MINIMUM_WIDTH: f32 = 408.0;
-const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 640.0;
+const SIDE_PANEL_INITIAL_WIDTH: f32 = 340.0;
+const SIDE_PANEL_MINIMUM_WIDTH: f32 = 300.0;
+const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 480.0;
 const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
@@ -743,6 +743,7 @@ struct WorkspaceSurface {
     side_panel: Option<SidePanel>,
     side_panel_width: f32,
     side_panel_resize: Option<SidePanelResize>,
+    dom_column_menu_open: bool,
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
@@ -1483,6 +1484,7 @@ impl WorkspaceSurface {
             side_panel: None,
             side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
             side_panel_resize: None,
+            dom_column_menu_open: false,
             scrolls: WorkspaceScrollHandles::default(),
             chart_state,
             chart_state_message,
@@ -3428,12 +3430,28 @@ impl WorkspaceSurface {
     fn toggle_dom(&mut self, cx: &mut Context<Self>) {
         if self.has_market_selection() {
             self.side_panel = (self.side_panel != Some(SidePanel::Dom)).then_some(SidePanel::Dom);
+            if self.side_panel.is_none() {
+                self.dom_column_menu_open = false;
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_dom_column_menu(&mut self, cx: &mut Context<Self>) {
+        self.dom_column_menu_open = !self.dom_column_menu_open;
+        cx.notify();
+    }
+
+    fn close_dom_column_menu(&mut self, cx: &mut Context<Self>) {
+        if self.dom_column_menu_open {
+            self.dom_column_menu_open = false;
             cx.notify();
         }
     }
 
     fn close_side_panel(&mut self, cx: &mut Context<Self>) {
         self.side_panel_resize = None;
+        self.dom_column_menu_open = false;
         if self.side_panel.take().is_some() {
             cx.notify();
         }
@@ -4361,6 +4379,8 @@ struct MarketWorkspaceState<'a> {
     dom: Entity<ReadOnlyDomView>,
     side_panel: Option<SidePanel>,
     side_panel_width: f32,
+    dom_column_menu_open: bool,
+    dom_columns: DomColumnVisibility,
     chart_state: ChartState,
     chart_status_detail: String,
     theme: &'a AxiusflowTheme,
@@ -4376,6 +4396,8 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         dom,
         side_panel,
         side_panel_width,
+        dom_column_menu_open,
+        dom_columns,
         chart_state,
         chart_status_detail,
         theme,
@@ -4398,18 +4420,28 @@ fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<>
         let side_panel_content = div().w(px(side_panel_width)).flex_none().child(
             div()
                 .size_full()
+                .relative()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
                 .bg(gpui_color(colors.surface))
                 .border_l_1()
                 .border_color(gpui_color(colors.border))
-                .child(side_panel_header(side_panel, app, theme))
+                .child(side_panel_header(
+                    side_panel,
+                    app.clone(),
+                    dom_column_menu_open,
+                    theme,
+                ))
                 .child(
                     div()
                         .flex_1()
                         .overflow_hidden()
-                        .children((side_panel == SidePanel::Dom).then_some(dom)),
+                        .children((side_panel == SidePanel::Dom).then_some(dom.clone())),
+                )
+                .children(
+                    (side_panel == SidePanel::Dom && dom_column_menu_open)
+                        .then(|| dom_column_menu_layer(app, &dom, dom_columns, theme)),
                 ),
         );
         div()
@@ -4882,9 +4914,11 @@ fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
 fn side_panel_header(
     panel: SidePanel,
     app: Entity<WorkspaceSurface>,
+    dom_column_menu_open: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    let settings_app = app.clone();
     div()
         .h(px(30.0))
         .flex_none()
@@ -4898,6 +4932,37 @@ fn side_panel_header(
         .text_color(gpui_color(colors.text_secondary))
         .child(div().flex_1().child(panel.title().to_uppercase()))
         .child(chrome_tooltip(
+            "dom_column_settings",
+            "Choose order-book columns",
+            div()
+                .id("dom_column_settings")
+                .occlude()
+                .size(px(WORKSPACE_TAB_ICON_HIT))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                .text_color(gpui_color(if dom_column_menu_open {
+                    colors.icon_active
+                } else {
+                    colors.icon
+                }))
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label("Choose order-book columns")
+                .when(dom_column_menu_open, |button| {
+                    button.bg(gpui_color(colors.active_bg.over(colors.surface)))
+                })
+                .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    settings_app.update(cx, WorkspaceSurface::toggle_dom_column_menu);
+                    cx.stop_propagation();
+                })
+                .child(header_icon(HugeIcon::Settings01).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
+            theme,
+        ))
+        .child(chrome_tooltip(
             "close_side_panel",
             "Close side panel",
             chrome_close_button("close_side_panel", theme, move |_, cx| {
@@ -4905,6 +4970,93 @@ fn side_panel_header(
             }),
             theme,
         ))
+}
+
+fn dom_column_menu_layer(
+    app: Entity<WorkspaceSurface>,
+    dom: &Entity<ReadOnlyDomView>,
+    columns: DomColumnVisibility,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let dismiss_app = app;
+    let mut panel = div()
+        .id("dom_column_menu")
+        .absolute()
+        .top(px(28.0))
+        .right(px(30.0))
+        .w(px(196.0))
+        .occlude()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
+        .text_color(gpui_color(colors.text_primary))
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+    let last = DomColumn::ALL.len().saturating_sub(1);
+    for (index, column) in DomColumn::ALL.into_iter().enumerate() {
+        panel = panel.child(dom_column_menu_item(
+            dom.clone(),
+            column,
+            columns.is_visible(column),
+            index == 0,
+            index == last,
+            theme,
+        ));
+    }
+    div()
+        .id("dom_column_menu_layer")
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    dismiss_app.update(cx, WorkspaceSurface::close_dom_column_menu);
+                    cx.stop_propagation();
+                }),
+        )
+        .child(panel)
+}
+
+fn dom_column_menu_item(
+    dom: Entity<ReadOnlyDomView>,
+    column: DomColumn,
+    checked: bool,
+    first: bool,
+    last: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let available = column.available();
+    let label = if available {
+        column.label().to_string()
+    } else {
+        "P/L · routing unavailable".to_string()
+    };
+    let id = match column {
+        DomColumn::ProfitLoss => "dom_column_profit_loss",
+        DomColumn::Bid => "dom_column_bid",
+        DomColumn::Price => "dom_column_price",
+        DomColumn::Ask => "dom_column_ask",
+        DomColumn::Orders => "dom_column_orders",
+        DomColumn::Volume => "dom_column_volume",
+    };
+    let item_dom = dom;
+    let mut item = MenuRow::compact(id, label, theme)
+        .disabled(!available)
+        .flush_in_panel(first, last)
+        .on_click(move |_, _, cx| {
+            item_dom.update(cx, |dom, dom_cx| dom.toggle_column(column, dom_cx));
+        });
+    if checked {
+        item = item.trailing(
+            header_icon(HugeIcon::CheckIcon)
+                .with_size(px(16.0))
+                .color(gpui_color(theme.colors.icon)),
+        );
+    }
+    item
 }
 
 fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -9667,6 +9819,7 @@ fn workspace_pane_element(
         .chart
         .as_ref()
         .is_some_and(|chart| chart.read(cx).has_market_data());
+    let dom_columns = surface.dom.read(cx).columns();
     let content = market_workspace(MarketWorkspaceState {
         app: pane.surface.clone(),
         pane_id,
@@ -9676,6 +9829,8 @@ fn workspace_pane_element(
         dom: surface.dom.clone(),
         side_panel: surface.side_panel,
         side_panel_width: surface.side_panel_width,
+        dom_column_menu_open: surface.dom_column_menu_open,
+        dom_columns,
         chart_state: surface.chart_state,
         chart_status_detail: chart_status_detail(
             surface.chart_state,
@@ -11301,9 +11456,9 @@ mod tests {
             pointer_x: 500.0,
             width: 320.0,
         };
-        assert!((resized_side_panel_width(resize, 420.0) - 408.0).abs() < f32::EPSILON);
-        assert!((resized_side_panel_width(resize, -500.0) - 640.0).abs() < f32::EPSILON);
-        assert!((resized_side_panel_width(resize, 1_000.0) - 408.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, 420.0) - 400.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, -500.0) - 480.0).abs() < f32::EPSILON);
+        assert!((resized_side_panel_width(resize, 1_000.0) - 300.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -2469,14 +2469,14 @@ mod tests {
                 .bid
                 .as_ref()
                 .map(|level| level.traded_volume_text.as_str()),
-            Some("1.25000000")
+            Some("1.25")
         );
         assert_eq!(
             frame.rows[0]
                 .ask
                 .as_ref()
                 .map(|level| level.traded_volume_text.as_str()),
-            Some("0.75000000")
+            Some("0.75")
         );
     }
 }
