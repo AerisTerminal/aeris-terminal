@@ -21,6 +21,8 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackgroundService {
     executable: PathBuf,
+    autostart_executable: PathBuf,
+    autostart_argument: Option<&'static str>,
 }
 
 impl BackgroundService {
@@ -33,7 +35,14 @@ impl BackgroundService {
         if !executable.is_absolute() || executable.file_name().is_none() {
             return Err(BackgroundServiceError::InvalidExecutable);
         }
-        Ok(Self { executable })
+        let autostart_executable =
+            inferred_launcher(&executable).unwrap_or_else(|| executable.clone());
+        let autostart_argument = (autostart_executable != executable).then_some("--launch-engine");
+        Ok(Self {
+            executable,
+            autostart_executable,
+            autostart_argument,
+        })
     }
 
     /// Reports whether this target has a native per-user autostart integration.
@@ -112,13 +121,25 @@ impl BackgroundService {
     /// Returns an error when the native user-session integration cannot be changed.
     pub fn set_autostart(&self, enabled: bool) -> Result<(), BackgroundServiceError> {
         #[cfg(target_os = "windows")]
-        return configure_windows_autostart(&self.executable, enabled);
+        return configure_windows_autostart(
+            &self.autostart_executable,
+            self.autostart_argument,
+            enabled,
+        );
 
         #[cfg(target_os = "linux")]
-        return configure_linux_autostart(&self.executable, enabled);
+        return configure_linux_autostart(
+            &self.autostart_executable,
+            self.autostart_argument,
+            enabled,
+        );
 
         #[cfg(target_os = "macos")]
-        return configure_macos_autostart(&self.executable, enabled);
+        return configure_macos_autostart(
+            &self.autostart_executable,
+            self.autostart_argument,
+            enabled,
+        );
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
@@ -133,23 +154,33 @@ impl BackgroundService {
     /// Returns an error when the native configuration cannot be inspected.
     pub fn autostart_enabled(&self) -> Result<bool, BackgroundServiceError> {
         #[cfg(target_os = "windows")]
-        return windows_autostart_enabled(&self.executable);
+        return windows_autostart_enabled(&self.autostart_executable, self.autostart_argument);
 
         #[cfg(target_os = "linux")]
         return Ok(read_exact_file(
             &linux_autostart_path()?,
-            &linux_desktop_entry(&self.executable),
+            &linux_desktop_entry(&self.autostart_executable, self.autostart_argument),
         ));
 
         #[cfg(target_os = "macos")]
         return Ok(read_exact_file(
             &macos_autostart_path()?,
-            &macos_launch_agent(&self.executable),
+            &macos_launch_agent(&self.autostart_executable, self.autostart_argument),
         ));
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Err(BackgroundServiceError::UnsupportedPlatform)
     }
+}
+
+fn inferred_launcher(engine: &Path) -> Option<PathBuf> {
+    let versions = engine.parent()?.parent()?;
+    (versions.file_name().is_some_and(|name| name == "versions")).then(|| {
+        versions.parent().unwrap_or(versions).join(format!(
+            "axiusflow_launcher{}",
+            std::env::consts::EXE_SUFFIX
+        ))
+    })
 }
 
 fn successful_status(status: ExitStatus) -> Result<(), BackgroundServiceError> {
@@ -174,6 +205,7 @@ fn configure_background_process(_command: &mut Command) {}
 #[cfg(target_os = "windows")]
 fn configure_windows_autostart(
     executable: &Path,
+    argument: Option<&str>,
     enabled: bool,
 ) -> Result<(), BackgroundServiceError> {
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -181,7 +213,7 @@ fn configure_windows_autostart(
     configure_background_process(&mut command);
     if enabled {
         command.args(["ADD", RUN_KEY, "/v", SERVICE_NAME, "/t", "REG_SZ", "/d"]);
-        command.arg(quoted_windows_command(executable));
+        command.arg(quoted_windows_command(executable, argument));
         command.arg("/f");
     } else {
         command.args(["DELETE", RUN_KEY, "/v", SERVICE_NAME, "/f"]);
@@ -192,7 +224,7 @@ fn configure_windows_autostart(
         .stderr(Stdio::null())
         .status()
         .map_err(|_| BackgroundServiceError::AutostartUpdate)?;
-    if status.success() || (!enabled && !windows_autostart_enabled(executable)?) {
+    if status.success() || (!enabled && !windows_autostart_enabled(executable, argument)?) {
         Ok(())
     } else {
         Err(BackgroundServiceError::AutostartUpdate)
@@ -200,7 +232,10 @@ fn configure_windows_autostart(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_autostart_enabled(executable: &Path) -> Result<bool, BackgroundServiceError> {
+fn windows_autostart_enabled(
+    executable: &Path,
+    argument: Option<&str>,
+) -> Result<bool, BackgroundServiceError> {
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     let output = Command::new("reg.exe")
         .args(["QUERY", RUN_KEY, "/v", SERVICE_NAME])
@@ -209,32 +244,37 @@ fn windows_autostart_enabled(executable: &Path) -> Result<bool, BackgroundServic
     if !output.status.success() {
         return Ok(false);
     }
-    let expected = quoted_windows_command(executable);
+    let expected = quoted_windows_command(executable, argument);
     Ok(String::from_utf8_lossy(&output.stdout).contains(&expected))
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn quoted_windows_command(executable: &Path) -> String {
-    format!("\"{}\"", executable.display())
+fn quoted_windows_command(executable: &Path, argument: Option<&str>) -> String {
+    argument.map_or_else(
+        || format!("\"{}\"", executable.display()),
+        |argument| format!("\"{}\" {argument}", executable.display()),
+    )
 }
 
 #[cfg(target_os = "linux")]
 fn configure_linux_autostart(
     executable: &Path,
+    argument: Option<&str>,
     enabled: bool,
 ) -> Result<(), BackgroundServiceError> {
     configure_autostart_file(
         &linux_autostart_path()?,
         enabled,
-        &linux_desktop_entry(executable),
+        &linux_desktop_entry(executable, argument),
     )
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_desktop_entry(executable: &Path) -> String {
+fn linux_desktop_entry(executable: &Path, argument: Option<&str>) -> String {
+    let argument = argument.map_or(String::new(), |argument| format!(" {argument}"));
     format!(
-        "[Desktop Entry]\nType=Application\nName={SERVICE_NAME}\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-        desktop_exec_argument(executable)
+        "[Desktop Entry]\nType=Application\nName={SERVICE_NAME}\nExec={}{argument}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+        desktop_exec_argument(executable),
     )
 }
 
@@ -259,20 +299,24 @@ fn desktop_exec_argument(executable: &Path) -> String {
 #[cfg(target_os = "macos")]
 fn configure_macos_autostart(
     executable: &Path,
+    argument: Option<&str>,
     enabled: bool,
 ) -> Result<(), BackgroundServiceError> {
     configure_autostart_file(
         &macos_autostart_path()?,
         enabled,
-        &macos_launch_agent(executable),
+        &macos_launch_agent(executable, argument),
     )
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_launch_agent(executable: &Path) -> String {
+fn macos_launch_agent(executable: &Path, argument: Option<&str>) -> String {
+    let argument = argument.map_or(String::new(), |argument| {
+        format!("<string>{}</string>", xml_escape(argument))
+    });
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.axiusflow.engine</string><key>ProgramArguments</key><array><string>{}</string></array><key>RunAtLoad</key><true/></dict></plist>\n",
-        xml_escape(&executable.to_string_lossy())
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.axiusflow.engine</string><key>ProgramArguments</key><array><string>{}</string>{argument}</array><key>RunAtLoad</key><true/></dict></plist>\n",
+        xml_escape(&executable.to_string_lossy()),
     )
 }
 
@@ -389,13 +433,29 @@ mod tests {
     #[test]
     fn platform_autostart_payloads_quote_the_exact_executable() {
         let executable = Path::new("/Program Files/Axiusflow & Co/engine \"quoted\"");
-        assert!(quoted_windows_command(executable).starts_with('"'));
+        assert!(quoted_windows_command(executable, None).starts_with('"'));
         assert!(desktop_exec_argument(executable).starts_with('"'));
-        let desktop = linux_desktop_entry(executable);
+        let desktop = linux_desktop_entry(executable, None);
         assert!(desktop.contains("Terminal=false"));
         assert!(desktop.contains("X-GNOME-Autostart-enabled=true"));
-        let launch_agent = macos_launch_agent(executable);
+        let launch_agent = macos_launch_agent(executable, None);
         assert!(launch_agent.contains("Axiusflow &amp; Co"));
         assert!(launch_agent.contains("&quot;quoted&quot;"));
+    }
+
+    #[test]
+    fn versioned_engine_autostart_always_targets_the_stable_launcher() {
+        let engine =
+            Path::new("/opt/axiusflow/versions/00000000000000000002-release-2/axiusflow_engine");
+        let service = BackgroundService::new(engine).expect("versioned engine service");
+        assert_eq!(
+            service.autostart_executable,
+            Path::new("/opt/axiusflow/axiusflow_launcher")
+        );
+        assert_eq!(service.autostart_argument, Some("--launch-engine"));
+        let desktop =
+            linux_desktop_entry(&service.autostart_executable, service.autostart_argument);
+        assert!(desktop.contains("/opt/axiusflow/axiusflow_launcher\" --launch-engine"));
+        assert!(!desktop.contains("release-2"));
     }
 }

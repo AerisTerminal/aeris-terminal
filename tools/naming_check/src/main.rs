@@ -808,8 +808,8 @@ mod tests {
         }
 
         let expected = BTreeSet::from([
-            "apps/engine/src/market_service.rs::HistorySource".to_string(),
-            "apps/engine/src/market_service.rs::RealtimeSource".to_string(),
+            "apps/engine/src/market_service/mod.rs::HistorySource".to_string(),
+            "apps/engine/src/market_service/mod.rs::RealtimeSource".to_string(),
             "crates/adapters/coinbase_market/src/history.rs::CoinbaseHistoryTransport".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),
@@ -818,6 +818,7 @@ mod tests {
             "crates/local_storage/src/model.rs::KeyRevocationEvidence".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
+            "crates/platform_runtime/src/lifecycle.rs::LifecycleHooks".to_string(),
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
         ]);
 
@@ -1064,7 +1065,7 @@ mod tests {
             );
         }
 
-        let coordinator = manifest("apps/engine/src/market_service.rs");
+        let coordinator = manifest("apps/engine/src/market_service/tests.rs");
         for regression in [
             "timeframe_switch_waits_for_its_own_current_provider_history",
             "newer_demand_cancels_history_without_waiting_for_cleanup",
@@ -1079,8 +1080,17 @@ mod tests {
 
     #[test]
     fn provider_runtime_registry_remains_the_single_engine_dispatch_boundary() {
-        let coordinator = manifest("apps/engine/src/market_service.rs");
-        let production = production_prefix(&coordinator);
+        let shared_state = manifest("apps/engine/src/market_service/mod.rs");
+        let coordinator = manifest("apps/engine/src/market_service/coordinator.rs");
+        let runtime = manifest("apps/engine/src/market_service/runtime.rs");
+        let history = manifest("apps/engine/src/market_service/history.rs");
+        let production = format!(
+            "{}\n{}\n{}\n{}",
+            production_prefix(&shared_state),
+            production_prefix(&coordinator),
+            production_prefix(&runtime),
+            production_prefix(&history)
+        );
         for contract in [
             "struct ProviderRuntimeRegistry",
             "records: BTreeMap<&'static str, ProviderRuntimeRecord>",
@@ -1132,6 +1142,49 @@ mod tests {
     }
 
     #[test]
+    fn market_service_responsibilities_remain_decomposed_under_one_coordinator() {
+        assert!(
+            !repository_root()
+                .join("apps/engine/src/market_service.rs")
+                .exists(),
+            "market service must remain an owned module tree, not a monolithic source file"
+        );
+        let module = manifest("apps/engine/src/market_service/mod.rs");
+        for owner in [
+            "coordinator",
+            "history",
+            "instrument_selection",
+            "publication",
+            "realtime",
+            "runtime",
+            "storage",
+        ] {
+            assert!(
+                module.contains(&format!("mod {owner};")),
+                "market service lost responsibility owner {owner}"
+            );
+        }
+        assert!(
+            manifest("apps/engine/src/market_service/coordinator.rs")
+                .contains("pub(super) struct Coordinator<'a>"),
+            "the decomposed service must retain exactly one coordinator state owner"
+        );
+        for (path, contract) in [
+            ("history.rs", "fn history_completed("),
+            ("instrument_selection.rs", "fn handle_catalog_selection("),
+            ("publication.rs", "fn recover_overflowed_series_queues("),
+            ("realtime.rs", "fn realtime_trade("),
+            ("runtime.rs", "impl ProviderRuntimeRegistry"),
+            ("storage.rs", "fn local_history_completed("),
+        ] {
+            assert!(
+                manifest(&format!("apps/engine/src/market_service/{path}")).contains(contract),
+                "market-service owner {path} lost {contract}"
+            );
+        }
+    }
+
+    #[test]
     fn local_clients_versions_and_workspace_writes_remain_fenced() {
         let engine_core = manifest("crates/market_engine/src/lib.rs");
         assert!(
@@ -1149,7 +1202,7 @@ mod tests {
                 "authenticated multi-client behavior lost regression {regression}"
             );
         }
-        let coordinator = manifest("apps/engine/src/market_service.rs");
+        let coordinator = manifest("apps/engine/src/market_service/tests.rs");
         assert!(
             coordinator.contains("later_consumers_reuse_one_engine_history_fetch")
                 && coordinator.contains("another client's consumer is rejected"),
@@ -1163,7 +1216,7 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 14"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 15"),
             "incompatible IPC revisions require a deliberate protocol-version change"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");
@@ -1181,6 +1234,17 @@ mod tests {
                 "engine startup/version fencing lost {contract}"
             );
         }
+        for contract in [
+            "release_identity: release.release_identity.clone()",
+            "install_generation: release.install_generation",
+            "ready.release_identity != release.release_identity",
+            "ready.install_generation != release.install_generation",
+        ] {
+            assert!(
+                client.contains(contract),
+                "desktop/engine release handshake lost {contract}"
+            );
+        }
 
         let handshake = manifest("apps/engine/tests/handshake.rs");
         for regression in [
@@ -1193,5 +1257,74 @@ mod tests {
                 "workspace revision authority lost regression {regression}"
             );
         }
+    }
+
+    #[test]
+    fn signed_transactional_lifecycle_remains_platform_owned() {
+        let lifecycle = manifest("crates/platform_runtime/src/lifecycle.rs");
+        for contract in [
+            "key.verify(&canonical, &signature)",
+            "current_version < minimum_version",
+            "verify_candidate_inventory(&root, &signed.manifest.files)",
+            "enum UpdateState",
+            "pub fn recover<",
+            "pub fn uninstall<",
+            "native_installation_inventory",
+            "remove_owned_path",
+            "metadata.file_type().is_symlink()",
+            "broad_native_root(path)",
+            "join(\"uninstall.json\").exists()",
+            "UpdatePendingCleanup",
+            "UninstallPendingCleanup",
+        ] {
+            assert!(
+                lifecycle.contains(contract),
+                "platform lifecycle lost {contract}"
+            );
+        }
+        assert!(
+            !lifecycle.contains("remove_dir_all"),
+            "lifecycle deletion must walk exact roots without following links"
+        );
+        let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
+        for contract in [
+            "installer.recover(&hooks)",
+            "audit_active_release()",
+            "--remove-all-local-data",
+            "--desktop-readiness",
+            "DesktopReadinessReport",
+            "owned_process_is_running(&self.install_root)",
+        ] {
+            assert!(
+                launcher.contains(contract),
+                "stable launcher lost {contract}"
+            );
+        }
+        let desktop = manifest("apps/desktop/src/main.rs");
+        for contract in [
+            "connect_or_start_engine(&engine)",
+            "client.restore_workspace()",
+            "client.engine_status()",
+            "client.shutdown_engine()",
+        ] {
+            assert!(
+                desktop.contains(contract),
+                "candidate desktop readiness lost {contract}"
+            );
+        }
+        let background = manifest("crates/platform_runtime/src/background_service.rs");
+        assert!(
+            background.contains("axiusflow_launcher")
+                && background.contains("--launch-engine")
+                && background.contains("assert!(!desktop.contains(\"release-2\"))"),
+            "autostart must resolve through the stable launcher"
+        );
+        assert!(
+            manifest("apps/engine/src/lib.rs")
+                .contains("axiusflow_platform_runtime::native_data_root()")
+                && manifest("apps/desktop/src/chart_chrome.rs")
+                    .contains("axiusflow_platform_runtime::native_data_root()"),
+            "desktop and engine local artifacts must share platform-owned roots"
+        );
     }
 }

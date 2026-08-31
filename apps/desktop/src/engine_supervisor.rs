@@ -644,6 +644,10 @@ mod tests {
                 engine_epoch: epoch,
                 workspace_revision: 0,
                 lifecycle_contract_revision: axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
+                release_identity: axiusflow_platform_runtime::current_release_identity()
+                    .release_identity,
+                install_generation: axiusflow_platform_runtime::current_release_identity()
+                    .install_generation,
             }));
             let mut registered_consumers = 0_usize;
             let mut visibility_demands = 0_usize;

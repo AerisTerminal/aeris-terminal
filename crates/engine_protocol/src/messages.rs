@@ -215,6 +215,12 @@ pub struct ClientHello {
     /// Client kind.
     #[prost(enumeration = "ClientKind", tag = "3")]
     pub client_kind: i32,
+    /// Immutable release identity embedded in the client binary.
+    #[prost(string, tag = "4")]
+    pub release_identity: String,
+    /// Monotonic installation generation embedded in the client binary.
+    #[prost(uint64, tag = "5")]
+    pub install_generation: u64,
 }
 
 /// Engine readiness reply.
@@ -232,6 +238,12 @@ pub struct EngineReady {
     /// Compatible lifecycle contract revision supported by this engine binary.
     #[prost(uint32, tag = "4")]
     pub lifecycle_contract_revision: u32,
+    /// Immutable release identity embedded in the engine binary.
+    #[prost(string, tag = "5")]
+    pub release_identity: String,
+    /// Monotonic installation generation embedded in the engine binary.
+    #[prost(uint64, tag = "6")]
+    pub install_generation: u64,
 }
 
 /// Requests persisted workspace restoration.

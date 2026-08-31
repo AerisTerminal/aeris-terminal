@@ -27,7 +27,9 @@ use axiusflow_engine_protocol::{
     ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, WorkspaceTabState,
     encode_envelope, envelope,
 };
-use axiusflow_platform_runtime::{BackgroundService, CredentialVault, NativeCredentialVault};
+use axiusflow_platform_runtime::{
+    BackgroundService, CredentialVault, NativeCredentialVault, current_release_identity,
+};
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
@@ -127,11 +129,14 @@ impl EngineClient {
             endpoint_reached: false,
         })?;
         let mut connection = FramedConnection::new(stream).map_err(reached_failure)?;
+        let release = current_release_identity();
         connection
             .send(envelope::Payload::ClientHello(ClientHello {
                 protocol_version: PROTOCOL_VERSION,
                 installation_token: installation_token.to_vec(),
                 client_kind: ClientKind::Ui as i32,
+                release_identity: release.release_identity.clone(),
+                install_generation: release.install_generation,
             }))
             .map_err(reached_failure)?;
         let ready = match connection.receive().map_err(reached_failure)? {
@@ -149,6 +154,15 @@ impl EngineClient {
                 });
             }
         };
+        if ready.release_identity != release.release_identity
+            || ready.install_generation != release.install_generation
+        {
+            return Err(EngineConnectionFailure {
+                detail: "resident engine release identity does not match the active desktop"
+                    .to_string(),
+                endpoint_reached: true,
+            });
+        }
         Ok(Self {
             connection,
             ready,
@@ -903,9 +917,9 @@ mod tests {
         EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, encode_envelope, envelope,
     };
 
-    use super::{ENGINE_SOCKET_NAME, connect_or_start_engine_named};
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    use super::{EngineClient, native_installation_token};
+    use super::native_installation_token;
+    use super::{ENGINE_SOCKET_NAME, EngineClient, connect_or_start_engine_named};
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
@@ -998,6 +1012,10 @@ mod tests {
                     engine_epoch: 1,
                     workspace_revision: 0,
                     lifecycle_contract_revision: 0,
+                    release_identity: axiusflow_platform_runtime::current_release_identity()
+                        .release_identity,
+                    install_generation: axiusflow_platform_runtime::current_release_identity()
+                        .install_generation,
                 })),
             })
             .expect("encode legacy readiness");
@@ -1038,6 +1056,51 @@ mod tests {
             error,
             "resident engine could not be started from the installation directory"
         );
+    }
+
+    #[test]
+    fn mismatched_engine_release_is_never_returned_as_ready() {
+        let socket_name = format!(
+            "axiusflow-engine-client-release-test-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        );
+        let name = socket_name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("create listener name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("bind mismatched endpoint");
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().expect("accept release probe");
+            let mut bytes = [0_u8; 4096];
+            let count = stream.read(&mut bytes).expect("read client hello");
+            assert!(count > 0);
+            let ready = encode_envelope(&Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                target_consumer_id: 0,
+                payload: Some(envelope::Payload::EngineReady(EngineReady {
+                    protocol_version: PROTOCOL_VERSION,
+                    engine_epoch: 1,
+                    workspace_revision: 0,
+                    lifecycle_contract_revision:
+                        axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
+                    release_identity: "superseded-release".to_string(),
+                    install_generation: 99,
+                })),
+            })
+            .expect("encode mismatched readiness");
+            stream.write_all(&ready).expect("send mismatched readiness");
+        });
+        assert_eq!(
+            EngineClient::connect(&socket_name, &[9_u8; 32])
+                .err()
+                .as_deref(),
+            Some("resident engine release identity does not match the active desktop")
+        );
+        server.join().expect("join mismatched endpoint");
     }
 
     #[cfg(target_os = "windows")]

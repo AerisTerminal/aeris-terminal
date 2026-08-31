@@ -32,7 +32,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 14);
+    assert_eq!(PROTOCOL_VERSION, 15);
 }
 
 fn workspace_payloads() -> Vec<envelope::Payload> {
@@ -42,12 +42,16 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
             protocol_version: PROTOCOL_VERSION,
             installation_token: vec![7; 32],
             client_kind: ClientKind::Ui as i32,
+            release_identity: "release-1".to_string(),
+            install_generation: 1,
         }),
         envelope::Payload::EngineReady(EngineReady {
             protocol_version: PROTOCOL_VERSION,
             engine_epoch: 7,
             workspace_revision: 3,
             lifecycle_contract_revision: LIFECYCLE_CONTRACT_REVISION,
+            release_identity: "release-1".to_string(),
+            install_generation: 1,
         }),
         envelope::Payload::RestoreWorkspace(RestoreWorkspace {}),
         envelope::Payload::WorkspaceState(workspace_state()),

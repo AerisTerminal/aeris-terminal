@@ -37,7 +37,7 @@ use axiusflow_engine_protocol::{
 use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
 use axiusflow_market_data::{BarPeriod, BarSeriesKey};
 use axiusflow_market_engine::{HotSetDescriptor, HotSetEntry, HotSetManager, WorkspaceId};
-use axiusflow_platform_runtime::BackgroundService;
+use axiusflow_platform_runtime::{BackgroundService, current_release_identity};
 use axiusflow_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 const WORKSPACE_SCHEMA_REVISION: u32 = 5;
@@ -1458,17 +1458,15 @@ fn redacted_workspace_error<E>(_error: E) -> String {
 /// # Errors
 /// Returns an error when neither the native data root nor current directory is available.
 pub fn default_engine_state_root() -> Result<PathBuf, String> {
-    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(root).join("Axiusflow").join("engine"));
-    }
-    std::env::current_dir()
-        .map(|root| root.join("local-data").join("engine"))
+    axiusflow_platform_runtime::native_data_root()
+        .map(|root| root.join("engine"))
         .map_err(|error| error.to_string())
 }
 
 struct FramedConnection {
     stream: interprocess::local_socket::RecvHalf,
-    outgoing: SyncSender<(u64, envelope::Payload)>,
+    outgoing: Option<SyncSender<(u64, envelope::Payload)>>,
+    writer: Option<thread::JoinHandle<()>>,
     decoder: EnvelopeDecoder,
     pending: VecDeque<Envelope>,
 }
@@ -1477,13 +1475,14 @@ impl FramedConnection {
     fn new(stream: LocalSocketStream, state: EngineState) -> Result<Self, String> {
         let (stream, writer) = stream.split();
         let (outgoing, messages) = mpsc::sync_channel(IPC_OUTBOX_CAPACITY);
-        thread::Builder::new()
+        let writer = thread::Builder::new()
             .name("axiusflow-engine-ipc-writer".to_string())
             .spawn(move || write_ipc_messages(writer, &messages, &state))
             .map_err(|error| error.to_string())?;
         Ok(Self {
             stream,
-            outgoing,
+            outgoing: Some(outgoing),
+            writer: Some(writer),
             decoder: EnvelopeDecoder::try_new().map_err(|error| error.to_string())?,
             pending: VecDeque::new(),
         })
@@ -1491,12 +1490,16 @@ impl FramedConnection {
 
     fn send(&mut self, payload: envelope::Payload) -> Result<(), String> {
         self.outgoing
+            .as_ref()
+            .ok_or_else(|| "ipc_send failed: local writer is stopping".to_string())?
             .send((0, payload))
             .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
     }
 
-    fn event_sender(&self) -> SyncSender<(u64, envelope::Payload)> {
-        self.outgoing.clone()
+    fn event_sender(&self) -> Result<SyncSender<(u64, envelope::Payload)>, String> {
+        self.outgoing
+            .clone()
+            .ok_or_else(|| "ipc_send failed: local writer is stopping".to_string())
     }
 
     fn receive(&mut self) -> Result<envelope::Payload, String> {
@@ -1527,6 +1530,17 @@ impl FramedConnection {
                     .push(&chunk[..count])
                     .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?,
             );
+        }
+    }
+}
+
+impl Drop for FramedConnection {
+    fn drop(&mut self) {
+        self.outgoing.take();
+        if let Some(writer) = self.writer.take()
+            && writer.join().is_err()
+        {
+            eprintln!("Axiusflow engine IPC writer stopped unexpectedly");
         }
     }
 }
@@ -1676,6 +1690,17 @@ fn serve_client_with_services(
     if ClientKind::try_from(hello.client_kind).is_err() {
         return Err("client kind is invalid".to_string());
     }
+    let release = current_release_identity();
+    if hello.release_identity != release.release_identity
+        || hello.install_generation != release.install_generation
+    {
+        connection.send(envelope::Payload::Fault(Fault {
+            code: EngineFaultCode::VersionMismatch as i32,
+            redacted_detail: "desktop and resident engine release identities do not match"
+                .to_string(),
+        }))?;
+        return Ok(());
+    }
     if !constant_time_equals(&hello.installation_token, installation_token) {
         connection.send(envelope::Payload::Fault(Fault {
             code: EngineFaultCode::Unauthenticated as i32,
@@ -1688,6 +1713,8 @@ fn serve_client_with_services(
         engine_epoch,
         workspace_revision: state.workspace().workspace_revision,
         lifecycle_contract_revision: LIFECYCLE_CONTRACT_REVISION,
+        release_identity: release.release_identity,
+        install_generation: release.install_generation,
     }))?;
     serve_authenticated_session(&mut connection, state, market, shutdown)
 }
@@ -1898,7 +1925,7 @@ fn handle_market_message(
             if attached_client.is_some() {
                 send_market_fault(connection, "client is already attached")?;
             } else if let Err(error) =
-                market.attach_stream(attachment.client_id, connection.event_sender())
+                market.attach_stream(attachment.client_id, connection.event_sender()?)
             {
                 send_market_fault(connection, error)?;
             } else {

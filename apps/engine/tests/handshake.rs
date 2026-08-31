@@ -65,6 +65,11 @@ fn unique_name() -> String {
 }
 
 fn hello(token: &[u8]) -> Vec<u8> {
+    let release = axiusflow_platform_runtime::current_release_identity();
+    hello_for(token, &release.release_identity, release.install_generation)
+}
+
+fn hello_for(token: &[u8], release_identity: &str, install_generation: u64) -> Vec<u8> {
     encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
         target_consumer_id: 0,
@@ -72,12 +77,18 @@ fn hello(token: &[u8]) -> Vec<u8> {
             protocol_version: PROTOCOL_VERSION,
             installation_token: token.to_vec(),
             client_kind: ClientKind::Ui as i32,
+            release_identity: release_identity.to_string(),
+            install_generation,
         })),
     })
     .expect("encode hello")
 }
 
 fn exchange(token: &[u8], client_token: &[u8]) -> envelope::Payload {
+    exchange_hello(token, &hello(client_token))
+}
+
+fn exchange_hello(token: &[u8], hello: &[u8]) -> envelope::Payload {
     let name = unique_name();
     let listener = bind_listener(&name).expect("bind engine listener");
     let expected = token.to_vec();
@@ -89,7 +100,7 @@ fn exchange(token: &[u8], client_token: &[u8]) -> envelope::Payload {
         .to_ns_name::<GenericNamespaced>()
         .expect("create socket name");
     let mut stream = LocalSocketStream::connect(socket_name).expect("connect client");
-    stream.write_all(&hello(client_token)).expect("write hello");
+    stream.write_all(hello).expect("write hello");
     let mut bytes = [0_u8; 4096];
     let count = stream.read(&mut bytes).expect("read reply");
     drop(stream);
@@ -119,6 +130,18 @@ fn invalid_installation_token_is_rejected_without_readiness() {
         panic!("expected authentication fault");
     };
     assert_eq!(fault.code, EngineFaultCode::Unauthenticated as i32);
+}
+
+#[test]
+fn mismatched_release_identity_is_rejected_before_readiness() {
+    let token = [7_u8; 32];
+    let envelope::Payload::Fault(fault) =
+        exchange_hello(&token, &hello_for(&token, "superseded-release", 99))
+    else {
+        panic!("expected release identity fault");
+    };
+    assert_eq!(fault.code, EngineFaultCode::VersionMismatch as i32);
+    assert!(fault.redacted_detail.contains("release identities"));
 }
 
 #[test]

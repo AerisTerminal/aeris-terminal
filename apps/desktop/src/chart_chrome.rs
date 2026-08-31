@@ -280,38 +280,9 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
 
 #[must_use]
 pub fn chart_chrome_state_path() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        return Some(
-            PathBuf::from(root)
-                .join("Axiusflow")
-                .join("desktop")
-                .join("chart-chrome"),
-        );
-    }
-    if let Some(root) = std::env::var_os("XDG_DATA_HOME") {
-        return Some(
-            PathBuf::from(root)
-                .join("axiusflow")
-                .join("desktop")
-                .join("chart-chrome"),
-        );
-    }
-    std::env::var_os("HOME").map(|home| {
-        let home = PathBuf::from(home);
-        if cfg!(target_os = "macos") {
-            home.join("Library")
-                .join("Application Support")
-                .join("Axiusflow")
-                .join("desktop")
-                .join("chart-chrome")
-        } else {
-            home.join(".local")
-                .join("share")
-                .join("axiusflow")
-                .join("desktop")
-                .join("chart-chrome")
-        }
-    })
+    axiusflow_platform_runtime::native_data_root()
+        .ok()
+        .map(|root| root.join("desktop").join("chart-chrome"))
 }
 
 #[must_use]

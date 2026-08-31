@@ -7,8 +7,10 @@ mod capability;
 mod credential_vault;
 mod display_timing;
 mod io_cancellation;
+mod lifecycle;
 mod network_notifications;
 mod power_notifications;
+mod release_identity;
 mod session_shutdown;
 
 pub use background_service::{BackgroundService, BackgroundServiceError};
@@ -20,12 +22,19 @@ pub use display_timing::{
 #[cfg(target_os = "windows")]
 pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
 pub use io_cancellation::cancel_tcp_stream_io;
+pub use lifecycle::{
+    ActiveRelease, InstallationInventory, LifecycleError, LifecycleHooks, ReleaseFile,
+    ReleaseFileRole, ReleaseInstaller, ReleaseManifest, ReleasePolicy, RolloutMetadata,
+    SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_data_root,
+    native_installation_inventory, sign_release_manifest, verify_release_manifest,
+};
 pub use network_notifications::{
     NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,
 };
 pub use power_notifications::{
     NativePowerMonitor, NativePowerMonitorCancellation, PowerEvent, PowerNotificationError,
 };
+pub use release_identity::{ReleaseIdentity, current_release_identity};
 pub use session_shutdown::{
     NativeSessionShutdownCancellation, NativeSessionShutdownMonitor, SessionShutdownError,
 };

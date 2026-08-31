@@ -36,12 +36,14 @@ version = "0.1.0"
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 display-info = "=0.5.9"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "=0.4.3"
 interprocess = { version = "=2.4.3", default-features = false }
 keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.43"
 serde_json = "=1.0.151"
+semver = "=1.0.28"
 webpki-roots = "=1.0.9"
 sha2 = "=0.10.9"
 sysinfo = { version = "=0.31.4", default-features = false, features = ["system"] }

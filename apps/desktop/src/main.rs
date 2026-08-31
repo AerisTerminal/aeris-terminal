@@ -3826,11 +3826,71 @@ fn usize_generation(generation: u64) -> Option<std::num::NonZeroUsize> {
         .and_then(std::num::NonZeroUsize::new)
 }
 
-#[cfg(feature = "diagnostics")]
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
     let usage = "usage: axiusflow_desktop --desktop-readiness <report-path>";
+    let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
+    if arguments.next().is_some() {
+        return Err(usage.to_string());
+    }
+    let engine = axiusflow_local_engine_client::sibling_engine_executable()?;
+    let mut client = axiusflow_local_engine_client::connect_or_start_engine(&engine)?;
+    let ready = client.ready().clone();
+    let workspace = client.restore_workspace()?;
+    client.attach_client(u64::from(std::process::id()))?;
+    let status = client.engine_status()?;
+    if status.process_id == 0
+        || status.connected_desktop_clients == 0
+        || status.providers.is_empty()
+        || axiusflow_engine_protocol::EngineShutdownState::try_from(status.shutdown_state)
+            != Ok(axiusflow_engine_protocol::EngineShutdownState::Running)
+    {
+        return Err("candidate market service did not reach readiness".to_string());
+    }
+    let release = axiusflow_platform_runtime::current_release_identity();
+    if ready.release_identity != release.release_identity
+        || ready.install_generation != release.install_generation
+    {
+        return Err("candidate desktop and engine release identities do not match".to_string());
+    }
+    let report = LifecycleReadinessReport {
+        schema_version: 1,
+        release_identity: release.release_identity,
+        install_generation: release.install_generation,
+        engine_process_id: status.process_id,
+        workspace_revision: workspace.workspace_revision,
+        provider_count: status.providers.len(),
+        authenticated_ipc_ready: true,
+        workspace_restored: true,
+        market_service_ready: true,
+    };
+    client.shutdown_engine()?;
+    let mut encoded = serde_json::to_vec(&report)
+        .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
+    encoded.push(b'\n');
+    std::fs::write(std::path::Path::new(&report_path), encoded)
+        .map_err(|_| "candidate readiness report could not be written".to_string())
+}
+
+#[derive(serde::Serialize)]
+struct LifecycleReadinessReport {
+    schema_version: u32,
+    release_identity: String,
+    install_generation: u64,
+    engine_process_id: u32,
+    workspace_revision: u64,
+    provider_count: usize,
+    authenticated_ipc_ready: bool,
+    workspace_restored: bool,
+    market_service_ready: bool,
+}
+
+#[cfg(feature = "diagnostics")]
+fn run_desktop_conformance_command(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), String> {
+    let usage = "usage: axiusflow_desktop --desktop-conformance <report-path>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     if arguments.next().is_some() {
         return Err(usage.to_string());
@@ -5738,9 +5798,13 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
     let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
-        #[cfg(feature = "diagnostics")]
         if argument == "--desktop-readiness" {
-            run_desktop_readiness_command(arguments).expect("desktop readiness conformance passes");
+            run_desktop_readiness_command(arguments)?;
+            return Ok(None);
+        }
+        #[cfg(feature = "diagnostics")]
+        if argument == "--desktop-conformance" {
+            run_desktop_conformance_command(arguments).expect("desktop burst conformance passes");
             return Ok(None);
         }
         #[cfg(feature = "diagnostics")]
