@@ -287,11 +287,20 @@ fn compact_fixed_point_text(value: i64, scale: u8) -> String {
 }
 
 fn compact_quantity_text(value: i64, scale: u8) -> String {
-    let divisor = 10_i128.pow(u32::from(scale));
-    if value != 0 && scale >= 6 && i128::from(value).abs() * 1_000 < divisor {
-        return format!("{}µ", compact_fixed_point_text(value, scale - 6));
+    const DISPLAY_SCALE: u8 = 4;
+    if scale <= DISPLAY_SCALE {
+        return compact_fixed_point_text(value, scale);
     }
-    compact_fixed_point_text(value, scale)
+    let divisor = 10_i128.pow(u32::from(scale - DISPLAY_SCALE));
+    let rounded = (i128::from(value).abs() + divisor / 2) / divisor;
+    if value != 0 && rounded == 0 {
+        return "<0.0001".into();
+    }
+    let signed = if value < 0 { -rounded } else { rounded };
+    i64::try_from(signed).map_or_else(
+        |_| compact_fixed_point_text(value, scale),
+        |value| compact_fixed_point_text(value, DISPLAY_SCALE),
+    )
 }
 
 fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
@@ -528,8 +537,9 @@ mod tests {
         assert_eq!(compact_fixed_point_text(125_000_000, 8), "1.25");
         assert_eq!(compact_fixed_point_text(10_000, 8), "0.0001");
         assert_eq!(compact_fixed_point_text(0, 8), "0");
-        assert_eq!(compact_quantity_text(9_200, 8), "92µ");
-        assert_eq!(compact_quantity_text(1, 8), "0.01µ");
+        assert_eq!(compact_quantity_text(9_200, 8), "0.0001");
+        assert_eq!(compact_quantity_text(1, 8), "<0.0001");
         assert_eq!(compact_quantity_text(100_000, 8), "0.001");
+        assert_eq!(compact_quantity_text(12_345_678, 8), "0.1235");
     }
 }
