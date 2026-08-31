@@ -31,7 +31,7 @@ const ONE_MINUTE_SECONDS: i64 = 60;
 const MAXIMUM_PAGE_ITEMS: usize = 350;
 const MAXIMUM_PAGINATION_PAGES: usize = 4_096;
 const PUBLIC_REQUEST_INTERVAL: Duration = Duration::from_millis(100);
-const MAXIMUM_RATE_LIMIT_RETRIES: u32 = 3;
+const MAXIMUM_PUBLIC_REQUEST_RETRIES: u32 = 3;
 const SUPPORTED_RESOLUTIONS: [&str; 14] = [
     "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
 ];
@@ -157,7 +157,10 @@ impl PublicRequestGate {
         let mut retries = 0_u32;
         loop {
             match transport.get(path) {
-                Err(error) if retries < MAXIMUM_RATE_LIMIT_RETRIES && is_rate_limited(&error) => {
+                Err(error)
+                    if retries < MAXIMUM_PUBLIC_REQUEST_RETRIES
+                        && is_retryable_public_request(&error) =>
+                {
                     retries = retries.saturating_add(1);
                     let backoff = self
                         .interval
@@ -172,8 +175,15 @@ impl PublicRequestGate {
     }
 }
 
-fn is_rate_limited(error: &str) -> bool {
+fn is_retryable_public_request(error: &str) -> bool {
     error.contains("HTTP 429")
+        || error.contains("HTTP 500")
+        || error.contains("HTTP 502")
+        || error.contains("HTTP 503")
+        || error.contains("HTTP 504")
+        || error.contains("timed out")
+        || error.contains("REST request failed")
+        || error.contains("response read failed")
 }
 
 fn sleep_cancellable(duration: Duration, stop: Option<&AtomicBool>) -> Result<(), String> {

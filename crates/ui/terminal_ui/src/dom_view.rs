@@ -1,11 +1,11 @@
 use crate::{DomColumnLevel, DomFrame, DomRow};
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
 use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
-use gpui::{Context, Hsla, IntoElement, Render, Window, div, prelude::*, px};
+use gpui::{Context, Hsla, IntoElement, Render, Window, div, prelude::*, px, relative};
 
-const HEADER_HEIGHT: f32 = 26.0;
-const ROW_HEIGHT: f32 = 24.0;
-const PRICE_WIDTH: f32 = 76.0;
+const HEADER_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = 22.0;
+const PRICE_WIDTH: f32 = 112.0;
 
 /// Flush, square-edged GPUI view for one immutable read-only DOM frame.
 pub struct ReadOnlyDomView {
@@ -84,8 +84,7 @@ impl Render for ReadOnlyDomView {
                     .text_xs()
                     .text_color(gpui_color(colors.text_secondary))
                     .child(div().flex_1().px_2().text_right().child("BID SIZE"))
-                    .child(div().w(px(PRICE_WIDTH)).px_1().text_right().child("BID"))
-                    .child(div().w(px(PRICE_WIDTH)).px_1().child("ASK"))
+                    .child(div().w(px(PRICE_WIDTH)).px_1().text_center().child("PRICE"))
                     .child(div().flex_1().px_2().child("ASK SIZE")),
             )
             .children(state.and_then(|state| status_banner(state, watermark, &self.theme)))
@@ -95,12 +94,18 @@ impl Render for ReadOnlyDomView {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .overflow_hidden()
-                    .children(
-                        rows.iter()
-                            .enumerate()
-                            .map(|(index, row)| render_row(index, row, &self.theme)),
-                    )
+                    .overflow_y_scroll()
+                    .children(rows.iter().rev().enumerate().filter_map(|(index, row)| {
+                        row.ask.as_ref().map(|level| {
+                            render_level_row(index, level, BookColumnSide::Ask, &self.theme)
+                        })
+                    }))
+                    .children(spread_row(rows, &self.theme))
+                    .children(rows.iter().enumerate().filter_map(|(index, row)| {
+                        row.bid.as_ref().map(|level| {
+                            render_level_row(index, level, BookColumnSide::Bid, &self.theme)
+                        })
+                    }))
                     .children(rows.is_empty().then(|| {
                         div()
                             .flex_1()
@@ -119,42 +124,50 @@ impl Render for ReadOnlyDomView {
     }
 }
 
-fn render_row(index: usize, row: &DomRow, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BookColumnSide {
+    Bid,
+    Ask,
+}
+
+fn render_level_row(
+    index: usize,
+    level: &DomColumnLevel,
+    side: BookColumnSide,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    let (price_color, row_id) = match side {
+        BookColumnSide::Bid => (colors.bullish, "dom_bid_row"),
+        BookColumnSide::Ask => (colors.bearish, "dom_ask_row"),
+    };
     div()
-        .id(("dom_row", index))
+        .id((row_id, index))
         .h(px(ROW_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .text_sm()
-        .child(quantity_cell(row.bid.as_ref(), colors.bullish, true))
+        .text_xs()
+        .child(quantity_cell(
+            (side == BookColumnSide::Bid).then_some(level),
+            colors.bullish,
+            true,
+        ))
         .child(
             div()
                 .w(px(PRICE_WIDTH))
                 .px_1()
-                .text_right()
-                .text_color(gpui_color(colors.bullish))
-                .child(
-                    row.bid
-                        .as_ref()
-                        .map_or_else(String::new, |level| level.price_text.clone()),
-                ),
+                .text_center()
+                .text_color(gpui_color(price_color))
+                .child(level.price_text.clone()),
         )
-        .child(
-            div()
-                .w(px(PRICE_WIDTH))
-                .px_1()
-                .text_color(gpui_color(colors.bearish))
-                .child(
-                    row.ask
-                        .as_ref()
-                        .map_or_else(String::new, |level| level.price_text.clone()),
-                ),
-        )
-        .child(quantity_cell(row.ask.as_ref(), colors.bearish, false))
+        .child(quantity_cell(
+            (side == BookColumnSide::Ask).then_some(level),
+            colors.bearish,
+            false,
+        ))
 }
 
 fn quantity_cell(
@@ -162,15 +175,54 @@ fn quantity_cell(
     color: ThemeColor,
     align_right: bool,
 ) -> impl IntoElement + use<> {
-    let intensity = level.map_or(0.0, |level| {
-        0.08 + 0.24 * (f32::from(level.relative_size_bps) / 10_000.0)
-    });
+    let width = level.map_or(0.0, |level| f32::from(level.relative_size_bps) / 10_000.0);
+    let bar = div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .w(relative(width))
+        .bg(gpui_color(color.with_alpha(0.2)));
     let cell = div()
         .flex_1()
+        .h_full()
+        .relative()
+        .overflow_hidden()
+        .flex()
+        .items_center()
         .px_2()
-        .bg(gpui_color(color.with_alpha(intensity)))
-        .child(level.map_or_else(String::new, |level| level.quantity_text.clone()));
+        .children(level.map(|_| {
+            if align_right {
+                bar.right_0().into_any_element()
+            } else {
+                bar.left_0().into_any_element()
+            }
+        }))
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .child(level.map_or_else(String::new, |level| level.quantity_text.clone())),
+        );
     if align_right { cell.text_right() } else { cell }
+}
+
+fn spread_row(rows: &[DomRow], theme: &AxiusflowTheme) -> Option<impl IntoElement + use<>> {
+    let bid = rows.first()?.bid.as_ref()?;
+    let ask = rows.first()?.ask.as_ref()?;
+    Some(
+        div()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_b_1()
+            .border_color(gpui_color(theme.colors.border))
+            .bg(gpui_color(theme.colors.surface_secondary))
+            .text_xs()
+            .text_color(gpui_color(theme.colors.text_secondary))
+            .child(format!("{}  —  {}", bid.price_text, ask.price_text)),
+    )
 }
 
 fn status_banner(

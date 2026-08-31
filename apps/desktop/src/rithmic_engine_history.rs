@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axiusflow_desktop::market_worker::MarketWorkerBootstrap;
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
-const MAXIMUM_DOM_LEVELS: usize = 20;
+const MAXIMUM_DOM_LEVELS: usize = 50;
 
 pub(crate) fn validate_engine_instrument(
     instrument: &InstallProviderInstrument,

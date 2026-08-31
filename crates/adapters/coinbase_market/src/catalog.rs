@@ -359,6 +359,19 @@ mod tests {
     }
 
     #[test]
+    fn catalog_retries_transient_transport_failures() {
+        let pages = VecDeque::from([
+            b"transient timeout".to_vec(),
+            br#"{"products":[{"product_id":"BTC-USD","base_currency_id":"BTC","quote_currency_id":"USD","base_increment":"0.00000001","price_increment":"0.01","product_type":"SPOT","status":"online"}],"pagination":{"has_next":false,"next_cursor":""}}"#.to_vec(),
+        ]);
+        let mut catalog = CoinbaseProductCatalog::with_transport(FailingThenOk(pages));
+        let products = catalog
+            .fetch_active_spot_products()
+            .expect("a transient transport failure retries");
+        assert_eq!(products.len(), 1);
+    }
+
+    #[test]
     fn catalog_pagination_honors_cooperative_cancellation() {
         let stop = Arc::new(AtomicBool::new(false));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -392,6 +405,9 @@ mod tests {
             match self.0.pop_front() {
                 Some(body) if body.starts_with(b"rate limited") => {
                     Err("Coinbase candle request returned HTTP 429".to_string())
+                }
+                Some(body) if body.starts_with(b"transient") => {
+                    Err("Coinbase REST request timed out".to_string())
                 }
                 Some(body) => Ok(body),
                 None => Err("missing page".to_string()),

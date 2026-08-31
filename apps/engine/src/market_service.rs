@@ -81,7 +81,7 @@ const VIEWPORT_BACKFILL_BARS: usize = HISTORY_BARS_PER_SERIES - VIEWPORT_LIVE_TA
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
-const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 20;
+const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 50;
 const COINBASE_PROVIDER_GENERATION: u64 = 1;
 
 type Reply<T> = SyncSender<Result<T, String>>;
@@ -997,19 +997,16 @@ impl HistorySource for LiveCoinbaseHistory {
         // from it. Taking the boundary *after* the response — rather than the
         // request's own end — is what keeps the buffered replay from counting a
         // trade the forming candle already contains.
-        let served_at_unix_nanos = i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| "system clock is unavailable".to_string())?
-                .as_nanos(),
-        )
-        .map_err(|_| "Coinbase history handoff boundary overflowed".to_string())?;
+        let served_at_unix_nanos = coinbase_history_handoff_boundary(
+            profile.interval,
+            live_edge_seconds,
+            kind == HistoryRequestKind::Initial,
+        )?;
         let source_bars = batch
             .items
             .iter()
             .map(decode_history_bar)
             .collect::<Result<Vec<_>, _>>()?;
-        let confirmed_empty = source_bars.is_empty();
         let requested_end_seconds = range.end_unix_nanos.div_euclid(1_000_000_000);
         let completed_before_seconds = live_edge_seconds.min(requested_end_seconds);
         let (bars, _) = if source_bars.is_empty() {
@@ -1035,6 +1032,10 @@ impl HistorySource for LiveCoinbaseHistory {
             };
         let handoff_boundary_unix_nanos = if forming.is_some() {
             served_at_unix_nanos
+        } else if kind == HistoryRequestKind::Initial {
+            live_edge_seconds
+                .saturating_mul(1_000_000_000)
+                .saturating_sub(1)
         } else {
             range.end_unix_nanos
         };
@@ -1044,9 +1045,37 @@ impl HistorySource for LiveCoinbaseHistory {
             bars,
             forming,
             handoff_boundary_unix_nanos: Some(handoff_boundary_unix_nanos),
-            confirmed_empty,
+            confirmed_empty: source_bars.is_empty(),
         })
     }
+}
+
+fn coinbase_history_handoff_boundary(
+    interval: CoinbaseInterval,
+    requested_edge_seconds: i64,
+    initial: bool,
+) -> Result<i64, String> {
+    let served_at_unix_nanos = current_unix_nanos()?;
+    if initial
+        && !coinbase_history_edge_is_current(
+            interval,
+            requested_edge_seconds,
+            served_at_unix_nanos,
+        )?
+    {
+        return Err("Coinbase current history crossed a candle boundary; retrying".to_string());
+    }
+    Ok(served_at_unix_nanos)
+}
+
+fn coinbase_history_edge_is_current(
+    interval: CoinbaseInterval,
+    requested_edge_seconds: i64,
+    served_at_unix_nanos: i64,
+) -> Result<bool, String> {
+    interval
+        .bucket_start(served_at_unix_nanos.div_euclid(1_000_000_000))
+        .map(|served_edge_seconds| served_edge_seconds == requested_edge_seconds)
 }
 
 /// Folds the source bars inside the still-open bucket into one forming bar.
@@ -3283,7 +3312,6 @@ impl Coordinator<'_> {
             return Err(error);
         }
         if needs_covering_repair {
-            self.engine.invalidate_series(series);
             self.local_loaded
                 .insert((series.clone(), provider_generation));
             if let Err(detail) = self.enqueue_history(series, provider_generation) {
@@ -4388,7 +4416,9 @@ impl Coordinator<'_> {
         {
             self.viewport_history_ranges.remove(key);
             self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
-        } else if !self.viewport_history_ranges.contains_key(key) {
+        } else if !self.viewport_history_ranges.contains_key(key)
+            && !self.series_live_if_ready(series)
+        {
             self.broadcast_series_resolution_for(
                 series,
                 SeriesLoadState::Partial,
@@ -4449,7 +4479,6 @@ impl Coordinator<'_> {
                     }
                 } else if kind == HistoryRequestKind::Initial {
                     let retrying = series.provider_id == "coinbase"
-                        && self.local_loaded.contains(&key)
                         && self.schedule_history_retry(series, generation, &error);
                     if !retrying {
                         self.history_failed(series, generation);
@@ -4654,12 +4683,14 @@ impl Coordinator<'_> {
             return;
         }
         self.flush_deferred_publication(series);
-        self.broadcast_series_resolution_for(
-            series,
-            SeriesLoadState::Partial,
-            PersistenceState::Durable,
-            Some(detail),
-        );
+        if !self.series_live_if_ready(series) {
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Partial,
+                PersistenceState::Durable,
+                Some(detail),
+            );
+        }
     }
 
     fn install_completed_history(
@@ -5769,13 +5800,13 @@ impl Coordinator<'_> {
         self.broadcast_series_state(SeriesLoadState::Live);
     }
 
-    fn series_live_if_ready(&mut self, series: &BarSeriesKey) {
+    fn series_live_if_ready(&mut self, series: &BarSeriesKey) -> bool {
         if !self
             .live
             .get(series)
             .is_some_and(|live| live.connected && live.history_ready)
         {
-            return;
+            return false;
         }
         if self
             .engine
@@ -5786,6 +5817,7 @@ impl Coordinator<'_> {
         } else {
             self.provider_online_if_all_series_ready();
         }
+        true
     }
 
     /// Replaces an overflowed consumer's queued bar stream with one covering
@@ -7991,7 +8023,7 @@ mod tests {
 
     #[test]
     fn warm_restore_prefetches_local_history_and_installs_it_before_reattach() {
-        let (history_tx, _history_rx) = mpsc::sync_channel(1);
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
         let (storage_tx, storage_rx) = mpsc::sync_channel(1);
         let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
         let realtime_stop = Arc::new(AtomicBool::new(true));
@@ -8049,6 +8081,28 @@ mod tests {
         );
         assert!(coordinator.engine.series_snapshot(&series).is_some());
         assert!(coordinator.prewarmed.contains(&series));
+
+        let retained = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("retained history remains installed");
+        assert!(
+            coordinator
+                .prepare_cached_demand(&series, generation, &retained)
+                .expect("warm demand starts current repair")
+        );
+        assert!(
+            coordinator.engine.series_snapshot(&series).is_some(),
+            "withholding stale publication must not delete the merge baseline"
+        );
+        assert!(matches!(
+            history_rx.try_recv(),
+            Ok(HistoryRequest {
+                ref series,
+                provider_generation,
+                ..
+            }) if series == &requested && provider_generation == generation
+        ));
     }
 
     #[test]
@@ -9787,6 +9841,77 @@ mod tests {
     }
 
     #[test]
+    fn empty_viewport_completion_cannot_hide_an_initialized_live_series() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let mut engine = configured_engine().expect("engine configures");
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        let series = internal_series(&btc()).expect("series");
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(id(1).expect("workspace")),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(
+                consumer_id,
+                GenerationId(id(1).expect("generation")),
+                &series,
+            )
+            .expect("demand installs");
+        engine
+            .install_history(generation, &series, 2, 8, vec![history_bar()])
+            .expect("history installs");
+        engine
+            .set_provider_health("coinbase", generation, ProviderHealth::Online)
+            .expect("provider is online");
+        let mut coordinator = retained_history_coordinator(
+            engine,
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let mut live = LiveHandoff::try_new(&series, generation, &coinbase_instrument(&series))
+            .expect("live handoff");
+        live.connected = true;
+        live.history_ready = true;
+        coordinator.live.insert(series.clone(), live);
+        let key = (series.clone(), generation);
+
+        assert!(coordinator.handle_empty_history_snapshot(
+            &series,
+            HistoryRequestKind::ViewportBackfill,
+            &key,
+            None,
+            &HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 8,
+                bars: Vec::new(),
+                forming: None,
+                handoff_boundary_unix_nanos: None,
+                confirmed_empty: true,
+            },
+        ));
+        assert!(matches!(
+            coordinator.events[&consumer_id].series_state,
+            Some(envelope::Payload::SeriesState(ref state))
+                if state.state == SeriesLoadState::Live as i32
+        ));
+        assert!(history_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn initial_coinbase_request_with_explicit_range_arms_bounded_viewport_repair() {
         let (history_tx, history_rx) = mpsc::sync_channel(1);
         let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
@@ -10450,7 +10575,7 @@ mod tests {
         consumer_id: u64,
         mut accept: impl FnMut(&envelope::Payload) -> bool,
     ) -> envelope::Payload {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut seen: Vec<String> = Vec::new();
         loop {
             if let Some(event) = service
@@ -12255,6 +12380,16 @@ mod tests {
                     && state.persistence == PersistenceState::NotRequested as i32
         ));
         release_tx.send(()).expect("provider failure released");
+        let retry_driver = thread::spawn(move || {
+            for _ in 0..MAXIMUM_HISTORY_RETRIES {
+                started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("provider history retry starts");
+                release_tx
+                    .send(())
+                    .expect("provider retry failure released");
+            }
+        });
         assert!(matches!(
             poll_until(&service, 1, 1, |event| matches!(
                 event,
@@ -12279,6 +12414,7 @@ mod tests {
                     && error.cause == "provider history did not produce usable canonical bars"
                     && error.elapsed_millis.is_some()
         ));
+        retry_driver.join().expect("history retry driver joins");
     }
 
     #[test]
@@ -12733,6 +12869,18 @@ mod tests {
                 interval.id(),
             );
         }
+    }
+
+    #[test]
+    fn a_coinbase_page_served_after_bucket_roll_is_retried() {
+        let interval = CoinbaseInterval::Minute1;
+
+        assert!(
+            coinbase_history_edge_is_current(interval, 600, 659_999_999_999).expect("same bucket")
+        );
+        assert!(
+            !coinbase_history_edge_is_current(interval, 600, 660_000_000_000).expect("next bucket")
+        );
     }
 
     /// Both local reads have to agree about what a bar is called.

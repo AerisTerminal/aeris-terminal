@@ -227,7 +227,7 @@ fn project_level(
         price: level.price,
         quantity: level.quantity,
         order_count: level.order_count,
-        price_text: fixed_point_text(level.price, price_scale),
+        price_text: grouped_fixed_point_text(level.price, price_scale),
         quantity_text: fixed_point_text(level.quantity, quantity_scale),
         relative_size_bps: relative_size_bps(level.quantity, maximum_quantity),
     }
@@ -254,6 +254,29 @@ fn fixed_point_text(value: i64, scale: u8) -> String {
         "{sign}{whole}.{fraction:0width$}",
         width = usize::from(scale)
     )
+}
+
+fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
+    let fixed = fixed_point_text(value, scale);
+    let (whole, fraction) = fixed
+        .split_once('.')
+        .map_or((fixed.as_str(), ""), |parts| parts);
+    let (sign, digits) = whole
+        .strip_prefix('-')
+        .map_or(("", whole), |digits| ("-", digits));
+    let mut grouped = String::with_capacity(fixed.len() + digits.len() / 3);
+    grouped.push_str(sign);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if !fraction.is_empty() {
+        grouped.push('.');
+        grouped.push_str(fraction);
+    }
+    grouped
 }
 
 #[cfg(test)]
@@ -462,5 +485,7 @@ mod tests {
         assert_eq!(fixed_point_text(-5, 3), "-0.005");
         assert_eq!(fixed_point_text(i64::MIN, 2), "-92233720368547758.08");
         assert_eq!(fixed_point_text(42, 0), "42");
+        assert_eq!(grouped_fixed_point_text(7_796_038, 2), "77,960.38");
+        assert_eq!(grouped_fixed_point_text(-123_456, 3), "-123.456");
     }
 }
