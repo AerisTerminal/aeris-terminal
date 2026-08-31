@@ -2,12 +2,15 @@ use crate::{DomColumnLevel, DomFrame, DomRow};
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
 use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
 use gpui::{
-    Context, Div, Hsla, IntoElement, Render, ScrollHandle, Window, div, prelude::*, px, relative,
+    Context, Div, Hsla, IntoElement, Render, ScrollHandle, Task, Window, div, prelude::*, px,
+    relative,
 };
+use std::time::{Duration, Instant};
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 22.0;
 const TEXT_SIZE: f32 = 11.0;
+const PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 const PNL_WIDTH: f32 = 0.12;
 const BOOK_WIDTH: f32 = 0.18;
 const PRICE_WIDTH: f32 = 0.22;
@@ -124,6 +127,9 @@ impl DomColumnVisibility {
 /// Flush, square-edged GPUI view for one immutable read-only DOM frame.
 pub struct ReadOnlyDomView {
     frame: Option<DomFrame>,
+    pending_frame: Option<DomFrame>,
+    last_presented: Option<Instant>,
+    presentation_task: Option<Task<()>>,
     theme: AxiusflowTheme,
     ask_scroll: ScrollHandle,
     columns: DomColumnVisibility,
@@ -134,6 +140,9 @@ impl ReadOnlyDomView {
     pub fn new(theme: AxiusflowTheme) -> Self {
         Self {
             frame: None,
+            pending_frame: None,
+            last_presented: None,
+            presentation_task: None,
             theme,
             ask_scroll: ScrollHandle::new(),
             columns: DomColumnVisibility::default(),
@@ -158,27 +167,28 @@ impl ReadOnlyDomView {
 
     /// Replaces the immutable frame. Older selections and revisions are rejected.
     pub fn replace_frame(&mut self, frame: DomFrame, cx: &mut Context<Self>) -> bool {
-        if self.frame.as_ref().is_some_and(|current| {
-            frame.selection_generation < current.selection_generation
-                || (frame.selection_generation == current.selection_generation
-                    && frame.revision < current.revision)
-        }) {
+        let newest = self.pending_frame.as_ref().or(self.frame.as_ref());
+        if newest.is_some_and(|current| frame_precedes(&frame, current)) {
             return false;
         }
-        let recenter = self.frame.as_ref().is_none_or(|current| {
-            frame.selection_generation != current.selection_generation
-                || (current.rows.is_empty() && !frame.rows.is_empty())
-        });
-        self.frame = Some(frame);
-        if recenter {
-            self.ask_scroll.scroll_to_bottom();
+
+        if requires_immediate_presentation(self.frame.as_ref(), &frame) {
+            self.pending_frame = None;
+            self.presentation_task = None;
+            self.install_frame(frame, cx);
+            return true;
         }
-        cx.notify();
+
+        self.pending_frame = Some(frame);
+        self.schedule_presentation(cx);
         true
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        if self.frame.take().is_some() {
+        let had_frame = self.frame.take().is_some() || self.pending_frame.take().is_some();
+        self.last_presented = None;
+        self.presentation_task = None;
+        if had_frame {
             cx.notify();
         }
     }
@@ -189,6 +199,55 @@ impl ReadOnlyDomView {
             cx.notify();
         }
     }
+
+    fn install_frame(&mut self, frame: DomFrame, cx: &mut Context<Self>) {
+        let recenter = self.frame.as_ref().is_none_or(|current| {
+            frame.selection_generation != current.selection_generation
+                || frame.session_generation != current.session_generation
+                || (current.rows.is_empty() && !frame.rows.is_empty())
+        });
+        self.frame = Some(frame);
+        self.last_presented = Some(Instant::now());
+        if recenter {
+            self.ask_scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    fn schedule_presentation(&mut self, cx: &mut Context<Self>) {
+        if self.presentation_task.is_some() {
+            return;
+        }
+        let delay = self.last_presented.map_or(Duration::ZERO, |presented| {
+            PRESENTATION_INTERVAL.saturating_sub(presented.elapsed())
+        });
+        self.presentation_task = Some(cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = view.update(cx, |view, view_cx| {
+                view.presentation_task = None;
+                if let Some(frame) = view.pending_frame.take() {
+                    view.install_frame(frame, view_cx);
+                }
+            });
+        }));
+    }
+}
+
+fn frame_precedes(candidate: &DomFrame, current: &DomFrame) -> bool {
+    candidate.selection_generation < current.selection_generation
+        || (candidate.selection_generation == current.selection_generation
+            && (candidate.session_generation < current.session_generation
+                || (candidate.session_generation == current.session_generation
+                    && candidate.revision < current.revision)))
+}
+
+fn requires_immediate_presentation(current: Option<&DomFrame>, next: &DomFrame) -> bool {
+    current.is_none_or(|current| {
+        next.selection_generation != current.selection_generation
+            || next.session_generation != current.session_generation
+            || next.state != current.state
+            || (current.rows.is_empty() && !next.rows.is_empty())
+    })
 }
 
 impl Render for ReadOnlyDomView {
@@ -307,9 +366,9 @@ fn render_ladder(
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(ask_scroll)
-                    .children(rows.iter().rev().enumerate().filter_map(|(index, row)| {
+                    .children(rows.iter().rev().filter_map(|row| {
                         row.ask.as_ref().map(|level| {
-                            render_level_row(index, level, BookColumnSide::Ask, columns, theme)
+                            render_level_row(level, BookColumnSide::Ask, columns, theme)
                         })
                     })),
             )
@@ -322,9 +381,9 @@ fn render_ladder(
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(rows.iter().enumerate().filter_map(|(index, row)| {
+                    .children(rows.iter().filter_map(|row| {
                         row.bid.as_ref().map(|level| {
-                            render_level_row(index, level, BookColumnSide::Bid, columns, theme)
+                            render_level_row(level, BookColumnSide::Bid, columns, theme)
                         })
                     })),
             ),
@@ -345,7 +404,6 @@ enum CellAlignment {
 }
 
 fn render_level_row(
-    index: usize,
     level: &DomColumnLevel,
     side: BookColumnSide,
     columns: DomColumnVisibility,
@@ -357,7 +415,7 @@ fn render_level_row(
         BookColumnSide::Ask => (colors.bearish, "dom_ask_row"),
     };
     div()
-        .id((row_id, index))
+        .id((row_id, u64::try_from(level.price).unwrap_or(0)))
         .w_full()
         .h(px(ROW_HEIGHT))
         .flex_none()
@@ -593,6 +651,32 @@ fn gpui_color(color: ThemeColor) -> Hsla {
 mod tests {
     use super::*;
 
+    fn frame(
+        selection_generation: u64,
+        session_generation: u64,
+        revision: u64,
+        state: OrderBookState,
+        has_rows: bool,
+    ) -> DomFrame {
+        DomFrame {
+            provider_id: "coinbase".into(),
+            instrument_id: "BTC-USD".into(),
+            entitlement_id: "public".into(),
+            session_generation,
+            selection_generation,
+            revision,
+            source_watermark: revision,
+            state,
+            rows: has_rows
+                .then_some(DomRow {
+                    bid: None,
+                    ask: None,
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
     #[test]
     fn routing_columns_start_hidden_and_cannot_be_enabled() {
         let mut columns = DomColumnVisibility::default();
@@ -639,5 +723,50 @@ mod tests {
                 .expect("recovery banner");
             assert_eq!(label, format!("Depth recovering · {expected}"));
         }
+    }
+
+    #[test]
+    fn active_book_updates_are_conflated_but_transitions_present_immediately() {
+        let current = frame(2, 4, 10, OrderBookState::Ready, true);
+        let update = frame(2, 4, 11, OrderBookState::Ready, true);
+        assert!(!requires_immediate_presentation(Some(&current), &update));
+
+        let recovering = frame(
+            2,
+            4,
+            12,
+            OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap),
+            true,
+        );
+        assert!(requires_immediate_presentation(Some(&current), &recovering));
+        assert!(requires_immediate_presentation(
+            Some(&current),
+            &frame(3, 4, 1, OrderBookState::Ready, false)
+        ));
+        assert!(requires_immediate_presentation(
+            Some(&current),
+            &frame(2, 5, 1, OrderBookState::Ready, true)
+        ));
+        assert!(requires_immediate_presentation(
+            Some(&frame(2, 4, 1, OrderBookState::Ready, false)),
+            &current
+        ));
+    }
+
+    #[test]
+    fn frame_ordering_resets_revision_only_for_a_new_session() {
+        let current = frame(2, 4, 10, OrderBookState::Ready, true);
+        assert!(frame_precedes(
+            &frame(2, 4, 9, OrderBookState::Ready, true),
+            &current
+        ));
+        assert!(!frame_precedes(
+            &frame(2, 5, 1, OrderBookState::Ready, true),
+            &current
+        ));
+        assert!(frame_precedes(
+            &frame(1, 9, 99, OrderBookState::Ready, true),
+            &current
+        ));
     }
 }
