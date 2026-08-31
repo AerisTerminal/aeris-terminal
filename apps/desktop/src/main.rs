@@ -199,6 +199,20 @@ impl DesktopLifetimeMode {
         }
     }
 
+    const fn description(self) -> &'static str {
+        match self {
+            Self::ExitWithDesktop => {
+                "Close the resident engine when the desktop exits. Provider connections stop and no markets continue updating."
+            }
+            Self::KeepEngineWarm => {
+                "Keep the local engine running after the desktop closes so it can preserve warm state. Live market subscriptions do not continue."
+            }
+            Self::KeepMarketsLive => {
+                "Keep the engine and selected warm-market subscriptions running after the desktop closes. Requires Live retention permission."
+            }
+        }
+    }
+
     #[cfg(test)]
     const fn next(self, markets_live_permitted: bool) -> Self {
         match (self, markets_live_permitted) {
@@ -220,6 +234,46 @@ impl DesktopLifetimeMode {
             EngineLifetimeMode::KeepMarketsLive => {
                 Err("resident engine markets-live mode lacks explicit permission".to_string())
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleToggle {
+    LoginStart,
+    LiveRetention,
+}
+
+impl LifecycleToggle {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::LoginStart => "settings_login_start",
+            Self::LiveRetention => "settings_live_retention",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::LoginStart => "Login start",
+            Self::LiveRetention => "Live retention",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::LoginStart => {
+                "Start the resident Axiusflow engine automatically when you sign in to this computer."
+            }
+            Self::LiveRetention => {
+                "Allow Markets live mode to keep selected market subscriptions updating after the desktop closes. Turning this off returns an active Markets live mode to Engine warm."
+            }
+        }
+    }
+
+    const fn toggle(self) -> fn(&mut TerminalApp, &mut Context<TerminalApp>) {
+        match self {
+            Self::LoginStart => TerminalApp::toggle_engine_autostart,
+            Self::LiveRetention => TerminalApp::toggle_markets_live_permission,
         }
     }
 }
@@ -6178,22 +6232,18 @@ fn chart_settings_menu_layer(
             .child(menu_separator(theme))
             .child(settings_toggle_row(
                 terminal,
-                "settings_login_start",
-                "Login start",
+                LifecycleToggle::LoginStart,
                 state.autostart_enabled,
                 !pending,
                 theme,
-                TerminalApp::toggle_engine_autostart,
             ))
             .child(menu_separator(theme))
             .child(settings_toggle_row(
                 terminal,
-                "settings_live_retention",
-                "Live retention",
+                LifecycleToggle::LiveRetention,
                 state.markets_live_permitted,
                 !pending,
                 theme,
-                TerminalApp::toggle_markets_live_permission,
             ))
             .children(error.map(|error| {
                 div()
@@ -6245,7 +6295,14 @@ fn settings_mode_row(
             }
             cx.stop_propagation();
         })
-        .child(mode.label())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(mode.label())
+                .child(settings_info_button(id, mode.description(), theme)),
+        )
         .children(selected.then(|| {
             header_icon(HugeIcon::CheckIcon)
                 .with_size(px(16.0))
@@ -6255,13 +6312,13 @@ fn settings_mode_row(
 
 fn settings_toggle_row(
     terminal: &Entity<TerminalApp>,
-    id: &'static str,
-    label: &'static str,
+    setting: LifecycleToggle,
     selected: bool,
     enabled: bool,
     theme: &AxiusflowTheme,
-    toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
 ) -> impl IntoElement {
+    let id = setting.id();
+    let label = setting.label();
     let colors = theme.colors;
     let switch_terminal = terminal.clone();
     div()
@@ -6278,7 +6335,14 @@ fn settings_toggle_row(
             row.text_color(gpui_color(colors.text_muted))
         })
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .child(label)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(label)
+                .child(settings_info_button(id, setting.description(), theme)),
+        )
         .child(
             Toggle::new(format!("{id}_switch"), theme)
                 .selected(selected)
@@ -6286,10 +6350,45 @@ fn settings_toggle_row(
                 .aria_label(label)
                 .on_click(move |_, _, cx| {
                     if enabled {
-                        switch_terminal.update(cx, toggle);
+                        switch_terminal.update(cx, setting.toggle());
                     }
                 }),
         )
+}
+
+fn settings_info_button(
+    id: &'static str,
+    description: &'static str,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    chrome_tooltip(
+        id,
+        description,
+        div()
+            .id((id, 0_usize))
+            .size(px(16.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+            .border_1()
+            .border_color(gpui_color(colors.border_secondary))
+            .text_xs()
+            .text_color(gpui_color(colors.text_secondary))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(description)
+            .hover(move |button| {
+                button
+                    .border_color(gpui_color(colors.border))
+                    .text_color(gpui_color(colors.text_primary))
+            })
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .child("i"),
+        theme,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -10880,12 +10979,12 @@ mod tests {
         CHROME_MENU_WIDTH, COINBASE_ENTITLEMENT_ID, COINBASE_INTERVALS, CaptionPlatform,
         CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
         DesktopLifetimeMode, HeaderControls, InputEvent, InstrumentMenuEntry,
-        InstrumentMenuSelection, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout,
-        PriceAxisMenuRow, ProviderCatalogCommand, RithmicReadyAction, RithmicReconnectState,
-        RithmicReconnectTarget, RithmicSessionRetirement, SidePanel, SidePanelResize,
-        SymbolInputAction, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
-        TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
-        WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
+        InstrumentMenuSelection, LifecycleToggle, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
+        PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, RithmicReadyAction,
+        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
+        SidePanelResize, SymbolInputAction, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP,
+        TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup,
+        WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
         WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
         active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
         caption_pointer_owner, catalog_rejection_message, chart_status_detail,
@@ -11316,6 +11415,31 @@ mod tests {
         assert_eq!(DesktopLifetimeMode::ExitWithDesktop.label(), "Exit fully");
         assert_eq!(DesktopLifetimeMode::KeepEngineWarm.label(), "Engine warm");
         assert_eq!(DesktopLifetimeMode::KeepMarketsLive.label(), "Markets live");
+        assert!(
+            DesktopLifetimeMode::ExitWithDesktop
+                .description()
+                .contains("Provider connections stop")
+        );
+        assert!(
+            DesktopLifetimeMode::KeepEngineWarm
+                .description()
+                .contains("Live market subscriptions do not continue")
+        );
+        assert!(
+            DesktopLifetimeMode::KeepMarketsLive
+                .description()
+                .contains("Requires Live retention permission")
+        );
+        assert!(
+            LifecycleToggle::LoginStart
+                .description()
+                .contains("automatically")
+        );
+        assert!(
+            LifecycleToggle::LiveRetention
+                .description()
+                .contains("after the desktop closes")
+        );
 
         let mut workspace = WorkspaceState {
             lifetime_mode: EngineLifetimeMode::KeepMarketsLive as i32,

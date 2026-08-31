@@ -235,26 +235,6 @@ impl ProcessMemoryProbe {
         self.high_water_bytes = self.high_water_bytes.max(self.current_bytes);
         Ok(())
     }
-
-    #[cfg(feature = "diagnostics")]
-    pub(super) const fn baseline_bytes(&self) -> u64 {
-        self.baseline_bytes
-    }
-
-    #[cfg(feature = "diagnostics")]
-    pub(super) const fn current_bytes(&self) -> u64 {
-        self.current_bytes
-    }
-
-    #[cfg(feature = "diagnostics")]
-    pub(super) const fn high_water_bytes(&self) -> u64 {
-        self.high_water_bytes
-    }
-
-    #[cfg(feature = "diagnostics")]
-    pub(super) const fn observed_growth_bytes(&self) -> u64 {
-        self.high_water_bytes.saturating_sub(self.baseline_bytes)
-    }
 }
 
 fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
@@ -614,6 +594,7 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(feature = "diagnostics")]
 const fn live_gate_label(gate: LiveMarketGate) -> &'static str {
     match gate {
         LiveMarketGate::NotRun => "not_run",
