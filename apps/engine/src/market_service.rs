@@ -4547,6 +4547,11 @@ impl Coordinator<'_> {
         {
             return;
         }
+        // Fold the seeded/replayed open candle into the queued covering image
+        // before `Live` can uncover the chart. `ConsumerEvents` coalesces this
+        // revision into that snapshot, so initialization reaches the desktop as
+        // one current image instead of a history paint followed by a burst.
+        self.publish_live();
         self.pending.remove(series);
         self.series_live_if_ready(series);
         if let Err(error) = self.record_coinbase_history_coverage(series, &bars) {
@@ -4676,6 +4681,9 @@ impl Coordinator<'_> {
             None
         };
         let bars = snapshot.bars;
+        let realtime_bars = forming
+            .as_ref()
+            .map(|forming| [bars.as_slice(), std::slice::from_ref(&forming.bar)].concat());
         let installed = if replace_covering {
             self.engine.replace_covering_history(
                 generation,
@@ -4684,6 +4692,17 @@ impl Coordinator<'_> {
                 quantity_scale,
                 bars.clone(),
                 publish,
+            )
+        } else if series.provider_id == "coinbase"
+            && let Some(realtime_bars) = realtime_bars
+        {
+            self.engine.install_realtime(
+                generation,
+                series,
+                price_scale,
+                quantity_scale,
+                realtime_bars,
+                true,
             )
         } else {
             self.engine.install_history(
@@ -9414,6 +9433,24 @@ mod tests {
         )
     }
 
+    fn coinbase_forming_snapshot(
+        bars: Vec<MarketBar>,
+        forming: MarketBar,
+        boundary: i64,
+    ) -> HistorySnapshot {
+        HistorySnapshot {
+            price_scale: 2,
+            quantity_scale: 8,
+            bars,
+            forming: Some(FormingBar {
+                bar: forming,
+                trades: None,
+            }),
+            handoff_boundary_unix_nanos: Some(boundary),
+            confirmed_empty: false,
+        }
+    }
+
     fn sequential_history(first_sequence: u64, count: usize, first_minute: i64) -> Vec<MarketBar> {
         (0..count)
             .map(|index| {
@@ -12740,15 +12777,13 @@ mod tests {
         );
     }
 
-    /// The seam: the open candle seeds the aggregator, and only trades the page
-    /// cannot already contain are replayed on top of it.
     #[test]
     fn coinbase_handoff_seeds_the_open_candle_and_replays_only_newer_trades() {
         let mut engine = configured_engine().expect("engine configures");
         let consumer_id = ConsumerId(id(1).expect("consumer"));
         let series = internal_series(&btc()).expect("series");
         let (history_tx, _history_rx) = mpsc::sync_channel(4);
-        let (storage_tx, _storage_rx) = mpsc::sync_channel(4);
+        let (storage_tx, storage_rx) = mpsc::sync_channel(4);
         let (realtime_tx, _realtime_rx) = mpsc::sync_channel(4);
         let stop = Arc::new(AtomicBool::new(false));
         engine
@@ -12778,8 +12813,6 @@ mod tests {
         )
         .expect("live handoff");
         live.connected = true;
-        // Two trades arrive while the page is in flight. The first is inside the
-        // window the page covers; the second is not.
         let boundary = 10 * 60_000_000_000 + 30_000_000_000;
         live.buffered.push_back(trade(10, "1.50", 1));
         let mut newer = trade(10, "3.00", 2);
@@ -12787,7 +12820,7 @@ mod tests {
         live.buffered.push_back(newer);
         coordinator.live.insert(series.clone(), live);
 
-        let closed = coinbase_history(1, 9);
+        let expected_closed = coinbase_history(1, 9);
         let forming = MarketBar {
             source_sequence: 11,
             exchange_timestamp_seconds: 600,
@@ -12798,13 +12831,30 @@ mod tests {
             close: 200,
             volume: 5,
         };
+        let (closed, forming) = coordinator
+            .install_completed_history(
+                &series,
+                coordinator.coinbase_provider_generation(),
+                coinbase_forming_snapshot(expected_closed.clone(), forming, boundary),
+                false,
+                expected_closed.clone(),
+                true,
+            )
+            .expect("history installs");
+        let initial = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("open candle installs with history");
+        assert!(initial.forming);
+        assert_eq!(initial.bars.len(), expected_closed.len() + 1);
+        assert_eq!(
+            initial.bars.last(),
+            Some(&forming.as_ref().expect("forming").bar)
+        );
         assert!(coordinator.complete_coinbase_live_handoff(
             &series,
             &closed,
-            Some(FormingBar {
-                bar: forming,
-                trades: None,
-            }),
+            forming,
             Some(boundary),
         ));
 
@@ -12815,16 +12865,16 @@ mod tests {
             .expect("the open candle is held");
         assert_eq!(open.source_sequence, 11);
         assert_eq!(open.exchange_timestamp_seconds, 600);
-        // The page's own OHLCV survives, the newer trade extends it, and the
-        // trade the page already covered is not counted a second time.
         assert_eq!(open.open, 100);
         assert_eq!(open.low, 90);
         assert_eq!(open.close, 300);
         assert_eq!(open.high, 300);
         assert_eq!(open.volume, 6);
-        // Closed history is what the engine holds; the open candle is published
-        // as the tail that continues it.
         assert_eq!(live.published_completed, Some(10));
+        assert!(matches!(
+            storage_rx.try_recv(),
+            Ok(StorageRequest::Persist(_, _, ref bars, _, _, _)) if bars == &expected_closed
+        ));
     }
 
     /// A not-yet-delivered append remains an append after same-candle coalescing.

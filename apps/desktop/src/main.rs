@@ -4922,6 +4922,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AxiusflowTheme) -> impl Into
         let overlay = div()
             .id("chart_loading_status")
             .absolute()
+            .occlude()
             .role(Role::Status)
             .aria_label(notice.label)
             // A loading surface is deliberately opaque. On first launch there
