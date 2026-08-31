@@ -345,6 +345,12 @@ fn start_series(
     };
     fold.apply_snapshot(snapshot.bars)
         .unwrap_or_else(|error| panic!("initial history is unusable: {error}"));
+    if provider == "coinbase" && !in_the_bucket_roll_grace(&fold) {
+        assert!(
+            carries_the_open_candle(&fold),
+            "the first visible Coinbase snapshot ends before the current bucket"
+        );
+    }
     // Switch latency is recorded, never asserted against an absolute duration:
     // how long a venue takes to serve a page is the venue's business, and a
     // threshold here would fail the build for a slow morning rather than for a
@@ -373,9 +379,7 @@ fn start_series(
 ///
 /// The check is skipped in the first [`BUCKET_ROLL_GRACE`] of a bucket, where a
 /// bucket that has genuinely not traded yet is indistinguishable from a broken
-/// handoff, and until the selection has settled — a fresh selection is allowed
-/// to show retained local history while its covering repair is still in flight,
-/// which is the whole point of never leaving the chart blank.
+/// handoff, and until the selection has settled.
 fn assert_carries_the_open_candle(fold: &SeriesFold, symbol: &str) {
     if fold.started.elapsed() < SETTLE || in_the_bucket_roll_grace(fold) {
         return;

@@ -1058,7 +1058,7 @@ mod tests {
 
         let coordinator = manifest("apps/engine/src/market_service.rs");
         for regression in [
-            "compatible_minute_history_publishes_and_caches_a_coarser_series",
+            "timeframe_switch_waits_for_its_own_current_provider_history",
             "newer_demand_cancels_history_without_waiting_for_cleanup",
             "symbol_and_interval_switch_reuses_the_shared_realtime_session",
         ] {

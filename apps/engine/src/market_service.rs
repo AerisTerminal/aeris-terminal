@@ -3233,7 +3233,19 @@ impl Coordinator<'_> {
         let needs_covering_repair =
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
-            if needs_covering_repair {
+            if needs_covering_repair && series.provider_id == "coinbase" {
+                // A dormant Coinbase series can belong to the current provider
+                // session while still ending several buckets behind the market.
+                // Keep it inside the engine as fallback, but do not establish a
+                // chart baseline until provider history has repaired the edge.
+                events.series_state = Some(series_state(
+                    waiter.consumer_id,
+                    waiter.generation,
+                    ipc_series(series),
+                    SeriesLoadState::Resolving,
+                    Some("Refreshing cached history to the Coinbase live edge".to_string()),
+                ));
+            } else if needs_covering_repair {
                 publish_state(
                     events,
                     publication,
@@ -3254,38 +3266,16 @@ impl Coordinator<'_> {
         provider_generation: ProviderGeneration,
         snapshot: &Arc<axiusflow_market_engine::SeriesSnapshot>,
     ) -> Result<bool, String> {
-        let needs_covering_repair =
-            snapshot.provider_generation != provider_generation || self.prewarmed.remove(series);
+        let coinbase_live = series.provider_id != "coinbase"
+            || self.live.get(series).is_some_and(|live| live.history_ready);
+        let needs_covering_repair = snapshot.provider_generation != provider_generation
+            || self.prewarmed.remove(series)
+            || !coinbase_live;
         if series.provider_id == "rithmic"
             && !needs_covering_repair
             && let Err(error) = self.start_rithmic_realtime_from_snapshot(series, snapshot)
         {
             return Err(error);
-        }
-        if series.provider_id == "coinbase"
-            && !self.live.get_mut(series).is_none_or(|live| {
-                if live.history_ready {
-                    return true;
-                }
-                live.aggregator.reset();
-                let seeded = if snapshot.forming {
-                    live.published_completed = snapshot
-                        .bars
-                        .len()
-                        .checked_sub(2)
-                        .map(|index| snapshot.bars[index].source_sequence);
-                    live.aggregator.seed_backfill(&snapshot.bars)
-                } else {
-                    live.published_completed = snapshot.bars.last().map(|bar| bar.source_sequence);
-                    live.aggregator.seed_history(&snapshot.bars)
-                };
-                if seeded.is_ok() {
-                    live.history_ready = true;
-                }
-                seeded.is_ok()
-            })
-        {
-            return Err("Coinbase cached history/live handoff failed".to_string());
         }
         if needs_covering_repair {
             self.engine.invalidate_series(series);
@@ -3325,17 +3315,22 @@ impl Coordinator<'_> {
         if !first {
             return;
         }
-        let derived = series.provider_id == "coinbase"
-            && matches!(
-                self.derive_compatible_history(series, provider_generation),
-                Ok(true)
-            );
-        let local_unavailable = !derived
+        // Coinbase's first consumer-visible image comes from its own current
+        // provider page. Publishing a coarser projection of another cached
+        // timeframe first created a plausible-looking but stale chart, then the
+        // live trade tail opened several buckets later. Flowsurface avoids that
+        // seam by using provider klines keyed on candle start; we keep the same
+        // invariant here while retaining the resident trade session.
+        let local_history_started = series.provider_id != "coinbase"
             && self
                 .enqueue_local_history(series, provider_generation)
-                .is_err();
-        if (derived || local_unavailable)
-            && let Err(detail) = self.enqueue_history(series, provider_generation)
+                .is_ok();
+        let history = if local_history_started {
+            Ok(())
+        } else {
+            self.enqueue_history(series, provider_generation)
+        };
+        if let Err(detail) = history
             && let Some(waiters) = self.pending.remove(series)
         {
             fail_waiters(
@@ -3346,81 +3341,6 @@ impl Coordinator<'_> {
                 detail,
             );
         }
-    }
-
-    fn derive_compatible_history(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-    ) -> Result<bool, String> {
-        let target_seconds = match series.period {
-            BarPeriod::Time { seconds } if seconds > 60 && seconds % 60 == 0 => seconds,
-            BarPeriod::Time { .. }
-            | BarPeriod::Tick { .. }
-            | BarPeriod::Session { .. }
-            | BarPeriod::Week { .. }
-            | BarPeriod::Month { .. } => return Ok(false),
-        };
-        let Some(source) = self.engine.compatible_series_snapshot(series, generation) else {
-            return Ok(false);
-        };
-        let mut source_bars = source.bars.to_vec();
-        if source.forming {
-            source_bars.pop();
-        }
-        let interval = coinbase_interval(target_seconds)?;
-        // Keep only target buckets the source actually covers end to end.
-        // Deriving through the bucket the source stops inside froze a half-built
-        // candle into history, and it stayed wrong until that bucket rolled —
-        // on an hourly or daily switch, a long time to show bad data.
-        let BarPeriod::Time {
-            seconds: source_seconds,
-        } = source.series.period
-        else {
-            return Ok(false);
-        };
-        let Some(source_end) = source_bars
-            .last()
-            .map(|bar| bar.exchange_timestamp_seconds + i64::from(source_seconds))
-        else {
-            return Ok(false);
-        };
-        let completed_before = interval.bucket_start(source_end)?;
-        let (bars, _) = aggregate_coinbase_bars(&source_bars, interval, Some(completed_before))?;
-        if bars.is_empty() {
-            return Ok(false);
-        }
-        let publications = self
-            .engine
-            .install_history(
-                generation,
-                series,
-                source.price_scale,
-                source.quantity_scale,
-                bars.clone(),
-            )
-            .map_err(|error| error.to_string())?;
-        self.record_coinbase_history_coverage(series, &bars)?;
-        self.local_loaded.insert((series.clone(), generation));
-        for publication in publications {
-            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                publish_state(
-                    events,
-                    &publication,
-                    SeriesLoadState::Partial,
-                    PersistenceState::Pending,
-                    Some("Showing compatible in-memory history while provider repair runs"),
-                );
-            }
-        }
-        self.enqueue_persistence(
-            series,
-            generation,
-            bars,
-            true,
-            "Derived history persistence is unavailable",
-        );
-        Ok(true)
     }
 
     fn enqueue_persistence(
@@ -4326,12 +4246,21 @@ impl Coordinator<'_> {
     fn history_failed(&mut self, series: &BarSeriesKey, generation: ProviderGeneration) {
         if self.local_loaded.contains(&(series.clone(), generation)) {
             self.pending.remove(series);
-            self.broadcast_series_resolution_for(
-                series,
-                SeriesLoadState::Partial,
-                PersistenceState::Durable,
-                Some("Retained local history is usable; provider repair is unavailable"),
-            );
+            if let Ok(publications) = self.engine.publish_series_snapshot(series) {
+                for publication in publications {
+                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                        publish_state(
+                            events,
+                            &publication,
+                            SeriesLoadState::Partial,
+                            PersistenceState::Durable,
+                            Some(
+                                "Retained local history is usable; provider repair is unavailable",
+                            ),
+                        );
+                    }
+                }
+            }
             if series.provider_id == "rithmic"
                 && let Some(snapshot) = self.engine.series_snapshot(series)
             {
@@ -12070,7 +11999,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_minute_history_publishes_and_caches_a_coarser_series() {
+    fn timeframe_switch_waits_for_its_own_current_provider_history() {
         let fetches = Arc::new(AtomicUsize::new(0));
         let (release_tx, release_rx) = mpsc::sync_channel(2);
         let service = MarketService::start_with_source(ControlledHistory {
@@ -12100,18 +12029,14 @@ mod tests {
         service
             .set_demand(1, 1, 2, &five_minute)
             .expect("coarser demand starts");
-        assert!(matches!(
-            poll_until(&service, 1, 1, |event| matches!(
-                event,
-                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2
-            )),
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.series.as_ref() == Some(&five_minute)
-                    && snapshot.bars.len() == 1
-                    && snapshot.bars[0].exchange_timestamp_seconds == 0
-        ));
         while fetches.load(Ordering::Acquire) < 2 {
             thread::yield_now();
+        }
+        while let Some(event) = service.poll_event(1, 1).expect("pending event polls") {
+            assert!(
+                !matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 2),
+                "another timeframe must not synthesize the new chart's first snapshot"
+            );
         }
         release_tx.send(()).expect("provider repair released");
         poll_until(&service, 1, 1, |event| {
@@ -12134,6 +12059,30 @@ mod tests {
             envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 3
         ));
         assert_eq!(fetches.load(Ordering::Acquire), 2);
+
+        service
+            .set_demand(1, 1, 4, &btc())
+            .expect("dormant minute demand starts");
+        while fetches.load(Ordering::Acquire) < 3 {
+            thread::yield_now();
+        }
+        while let Some(event) = service.poll_event(1, 1).expect("pending event polls") {
+            assert!(
+                !matches!(event, envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 4),
+                "a dormant cached timeframe must refresh before it becomes visible"
+            );
+        }
+        release_tx
+            .send(())
+            .expect("dormant provider repair released");
+        assert!(matches!(
+            poll_until(&service, 1, 1, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 4
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.series == Some(btc()) && snapshot.generation == 4
+        ));
     }
 
     #[test]
