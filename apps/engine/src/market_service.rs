@@ -3328,6 +3328,13 @@ impl Coordinator<'_> {
                 publish_ready(events, publication);
             }
         }
+        // A cached snapshot is the consumer's covering baseline. If the shared
+        // series is already live, readiness must be announced after that
+        // baseline is queued; publishing `Ready` after `Live` overwrites the
+        // live transition and leaves a newly split pane stuck at connecting.
+        if !needs_covering_repair {
+            self.series_live_if_ready(series);
+        }
         Ok(())
     }
 
@@ -3359,8 +3366,6 @@ impl Coordinator<'_> {
                     Some(detail),
                 );
             }
-        } else {
-            self.series_live_if_ready(series);
         }
         Ok(needs_covering_repair)
     }
@@ -11124,6 +11129,68 @@ mod tests {
             harness.generations.try_recv(),
             Err(TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn split_pane_attaches_to_an_already_live_series_without_staying_at_ready() {
+        let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+            .expect("realtime fixture starts");
+        harness.service.attach(1).expect("client attaches");
+        harness
+            .service
+            .register_consumer(1, 1, 1)
+            .expect("primary pane registers");
+        harness
+            .service
+            .set_demand(1, 1, 1, &btc())
+            .expect("primary demand starts");
+        poll_until(&harness.service, 1, 1, |event| {
+            matches!(event, envelope::Payload::SeriesSnapshot(_))
+        });
+        expect_realtime_generation(&harness, "shared realtime starts", 1);
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("shared realtime connects");
+        poll_until(&harness.service, 1, 1, |event| {
+            matches!(event, envelope::Payload::SeriesState(state)
+                if state.state == SeriesLoadState::Live as i32)
+        });
+
+        harness
+            .service
+            .register_consumer(1, 1, 2)
+            .expect("split pane registers");
+        harness
+            .service
+            .set_demand(1, 2, 1, &btc())
+            .expect("split pane reuses live demand");
+        assert!(matches!(
+            poll_until(&harness.service, 1, 2, |event| matches!(
+                event,
+                envelope::Payload::SeriesSnapshot(snapshot) if snapshot.generation == 1
+            )),
+            envelope::Payload::SeriesSnapshot(snapshot) if snapshot.consumer_id == 2
+        ));
+        assert!(matches!(
+            poll_until(&harness.service, 1, 2, |event| matches!(
+                event,
+                envelope::Payload::SeriesState(state) if state.state == SeriesLoadState::Live as i32
+            )),
+            envelope::Payload::SeriesState(state) if state.consumer_id == 2
+        ));
+        assert_eq!(harness.history_fetches.load(Ordering::Acquire), 1);
+
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
+            .expect("shared trade streams");
+        for consumer_id in 1..=2 {
+            let update = poll_until(&harness.service, 1, consumer_id, |event| {
+                is_live_update(event, 1, 1, 200)
+            });
+            assert!(is_live_update(&update, 1, 1, 200));
+        }
     }
 
     #[test]
