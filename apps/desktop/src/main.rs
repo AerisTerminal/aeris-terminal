@@ -202,13 +202,13 @@ impl DesktopLifetimeMode {
     const fn description(self) -> &'static str {
         match self {
             Self::ExitWithDesktop => {
-                "Close the resident engine when the desktop exits. Provider connections stop and no markets continue updating."
+                "When you close Axiusflow, everything stops. Prices will not keep updating until you open Axiusflow again."
             }
             Self::KeepEngineWarm => {
-                "Keep the local engine running after the desktop closes so it can preserve warm state. Live market subscriptions do not continue."
+                "When you close Axiusflow, a small part of the app stays open so Axiusflow can start faster next time. Live prices do not keep updating."
             }
             Self::KeepMarketsLive => {
-                "Keep the engine and selected warm-market subscriptions running after the desktop closes. Requires Live retention permission."
+                "When you close Axiusflow, your selected markets keep receiving live prices in the background. This uses internet data and some computer resources. Turn on Live retention to use this option."
             }
         }
     }
@@ -240,39 +240,39 @@ impl DesktopLifetimeMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecycleToggle {
-    LoginStart,
+    AutoStart,
     LiveRetention,
 }
 
 impl LifecycleToggle {
     const fn id(self) -> &'static str {
         match self {
-            Self::LoginStart => "settings_login_start",
+            Self::AutoStart => "settings_start_automatically",
             Self::LiveRetention => "settings_live_retention",
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
-            Self::LoginStart => "Login start",
+            Self::AutoStart => "Start automatically",
             Self::LiveRetention => "Live retention",
         }
     }
 
     const fn description(self) -> &'static str {
         match self {
-            Self::LoginStart => {
-                "Start the resident Axiusflow engine automatically when you sign in to this computer."
+            Self::AutoStart => {
+                "Start Axiusflow's background service when you sign in to your computer, so Axiusflow is ready faster when you open it."
             }
             Self::LiveRetention => {
-                "Allow Markets live mode to keep selected market subscriptions updating after the desktop closes. Turning this off returns an active Markets live mode to Engine warm."
+                "Allow selected markets to keep receiving live prices after you close Axiusflow. This uses internet data and some computer resources in the background. Turning it off also turns off Markets live."
             }
         }
     }
 
     const fn toggle(self) -> fn(&mut TerminalApp, &mut Context<TerminalApp>) {
         match self {
-            Self::LoginStart => TerminalApp::toggle_engine_autostart,
+            Self::AutoStart => TerminalApp::toggle_engine_autostart,
             Self::LiveRetention => TerminalApp::toggle_markets_live_permission,
         }
     }
@@ -6232,7 +6232,7 @@ fn chart_settings_menu_layer(
             .child(menu_separator(theme))
             .child(settings_toggle_row(
                 terminal,
-                LifecycleToggle::LoginStart,
+                LifecycleToggle::AutoStart,
                 state.autostart_enabled,
                 !pending,
                 theme,
@@ -6301,7 +6301,7 @@ fn settings_mode_row(
                 .items_center()
                 .gap_2()
                 .child(mode.label())
-                .child(settings_info_button(id, mode.description(), theme)),
+                .child(settings_help_button(id, mode.description(), theme)),
         )
         .children(selected.then(|| {
             header_icon(HugeIcon::CheckIcon)
@@ -6341,7 +6341,7 @@ fn settings_toggle_row(
                 .items_center()
                 .gap_2()
                 .child(label)
-                .child(settings_info_button(id, setting.description(), theme)),
+                .child(settings_help_button(id, setting.description(), theme)),
         )
         .child(
             Toggle::new(format!("{id}_switch"), theme)
@@ -6356,7 +6356,7 @@ fn settings_toggle_row(
         )
 }
 
-fn settings_info_button(
+fn settings_help_button(
     id: &'static str,
     description: &'static str,
     theme: &AxiusflowTheme,
@@ -6386,7 +6386,7 @@ fn settings_info_button(
                     .text_color(gpui_color(colors.text_primary))
             })
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .child("i"),
+            .child("?"),
         theme,
     )
 }
@@ -11418,28 +11418,40 @@ mod tests {
         assert!(
             DesktopLifetimeMode::ExitWithDesktop
                 .description()
-                .contains("Provider connections stop")
+                .contains("Prices will not keep updating")
         );
         assert!(
             DesktopLifetimeMode::KeepEngineWarm
                 .description()
-                .contains("Live market subscriptions do not continue")
+                .contains("start faster")
         );
         assert!(
             DesktopLifetimeMode::KeepMarketsLive
                 .description()
-                .contains("Requires Live retention permission")
+                .contains("internet data")
         );
+        assert_eq!(LifecycleToggle::AutoStart.label(), "Start automatically");
         assert!(
-            LifecycleToggle::LoginStart
+            LifecycleToggle::AutoStart
                 .description()
-                .contains("automatically")
+                .contains("when you sign in")
         );
         assert!(
             LifecycleToggle::LiveRetention
                 .description()
-                .contains("after the desktop closes")
+                .contains("after you close Axiusflow")
         );
+
+        for description in [
+            DesktopLifetimeMode::ExitWithDesktop.description(),
+            DesktopLifetimeMode::KeepEngineWarm.description(),
+            DesktopLifetimeMode::KeepMarketsLive.description(),
+            LifecycleToggle::AutoStart.description(),
+            LifecycleToggle::LiveRetention.description(),
+        ] {
+            assert!(!description.contains("resident engine"));
+            assert!(!description.contains("resource mode"));
+        }
 
         let mut workspace = WorkspaceState {
             lifetime_mode: EngineLifetimeMode::KeepMarketsLive as i32,
