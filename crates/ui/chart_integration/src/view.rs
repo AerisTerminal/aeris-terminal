@@ -2029,8 +2029,28 @@ impl NucleusChartView {
             .min(18);
         let min_move = price_format_min_move(precision);
         let json = format!(r#"{{"type":"price","precision":{precision},"min_move":{min_move}}}"#);
-        let applied = self.engine.series_apply_price_format_json(0, &json);
-        debug_assert!(applied);
+        let Some((pane, target)) = self
+            .engine
+            .series_entries()
+            .iter()
+            .find(|series| series.id == 0 && !series.removed)
+            .map(|series| (series.pane_index, series.price_scale_target))
+        else {
+            return;
+        };
+        let series_ids = self
+            .engine
+            .series_entries()
+            .iter()
+            .filter(|series| {
+                !series.removed && series.pane_index == pane && series.price_scale_target == target
+            })
+            .map(|series| series.id)
+            .collect::<Vec<_>>();
+        for id in series_ids {
+            let applied = self.engine.series_apply_price_format_json(id, &json);
+            debug_assert!(applied);
+        }
     }
 
     fn primary_series_id_on_scale(&self, pane: usize, target: PriceScaleTarget) -> Option<u32> {
@@ -3939,6 +3959,9 @@ mod tests {
         let sma = chart
             .add_indicator(ChartIndicator::Sma)
             .expect("sma is available");
+        let volume_precision = series_entry(&chart, chart.volume_series)
+            .price_format
+            .precision;
         let state = chart
             .price_axis_menu_state(0, false)
             .expect("right price scale");
@@ -3998,13 +4021,31 @@ mod tests {
         assert!(chart.apply_price_axis_menu_action(
             0,
             true,
-            PriceAxisMenuAction::SetPrecision(Some(4))
+            PriceAxisMenuAction::SetPrecision(Some(0))
         ));
         assert_eq!(
             chart.price_axis_menu_state(0, true).unwrap().precision,
-            Some(4)
+            Some(0)
         );
-        assert_eq!(series_entry(&chart, 0).price_format.precision, 4);
+        assert_eq!(series_entry(&chart, 0).price_format.precision, 0);
+        assert_eq!(series_entry(&chart, sma[0]).price_format.precision, 0);
+        assert_eq!(
+            series_entry(&chart, chart.volume_series)
+                .price_format
+                .precision,
+            volume_precision,
+            "the main price-axis choice must not overwrite the overlay volume format"
+        );
+
+        let ribbon = chart
+            .add_indicator(ChartIndicator::EmaRibbon)
+            .expect("EMA ribbon is available after selecting an explicit precision");
+        assert!(
+            ribbon
+                .iter()
+                .all(|id| series_entry(&chart, *id).price_format.precision == 0),
+            "new price indicators must inherit the selected main-axis precision"
+        );
     }
 
     #[test]
