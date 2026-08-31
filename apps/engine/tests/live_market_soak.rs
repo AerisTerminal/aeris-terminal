@@ -351,7 +351,12 @@ fn start_series(
     if provider == "coinbase" && !in_the_bucket_roll_grace(&fold) {
         assert!(
             carries_the_open_candle(&fold),
-            "the first visible Coinbase snapshot ends before the current bucket"
+            "the first visible Coinbase snapshot ends at {:?}, before current bucket {:?}",
+            fold.bars
+                .values()
+                .next_back()
+                .map(|bar| bar.exchange_timestamp_seconds),
+            open_bucket(fold.interval_seconds),
         );
     }
     // Switch latency is recorded, never asserted against an absolute duration:

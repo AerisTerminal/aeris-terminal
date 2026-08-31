@@ -1,6 +1,6 @@
 # Axiusflow Architecture and Authentication Migration Plan
 
-Status: proposed for maintainer approval
+Status: phases 1 and 2 implemented and verified on 2026-08-31; phases 3 through 5 remain proposed
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
@@ -115,6 +115,71 @@ Create proof that later structural moves preserve current behavior. This phase c
 - Workspace architecture checks pass.
 - The release desktop and engine are identified and can exercise the current Coinbase path; Rithmic evidence is recorded when credentials and the provider environment are available.
 - Every later move has an owning module, source path, destination path, and regression test.
+
+### Phase 1 execution record - 2026-08-31
+
+The behavior lock and ownership map were established against the current `main` implementation:
+
+- `MarketService::start_composed` is the process-composition boundary. Its only production
+  provider inputs are the Coinbase public account and Rithmic Test environment records installed
+  in `ProviderRuntimeRegistry`.
+- The bounded `Command` queue remains the only coordinator command/completion lane. Service
+  commands are `RestoreHotSet`, `SetResourceMode`, `Status`, `Attach`, and `Detach`; consumer
+  commands are `Register`, `Remove`, `Viewport`, `ResourceClass`, `Demand`, provider search and
+  selection, instrument installation, and `Poll`; history and storage workers return only the
+  declared completion variants. `Coordinator` owns every dispatch and state transition.
+- Each registry record owns one provider history sender and worker, its provider-specific live and
+  catalog controls/events, cancellation state, observed worker generation/reconnect/terminal
+  state, and worker handles. The registry rejects a duplicate provider identity before a second
+  runtime can become active.
+- Provider request queues remain capped at 8 history requests per provider; Coinbase and Rithmic
+  live event queues at 2,048; Coinbase live controls at 1; Rithmic live controls at 2; and catalog
+  and coordinator command lanes at 64. Full history and catalog queues return explicit capacity
+  errors. Live event overflow latches recovery and retires the affected generation. Consumer series
+  queues remain capped at 1,024 and recover with a covering snapshot.
+- `MarketEngine` remains the sole owner of demand, provider capabilities and accepted generations,
+  canonical series, shared subscription reference counts, resource policy, and publications.
+  `Coordinator` owns in-flight request bookkeeping, adapter-neutral catalog installation,
+  history/live seam state, consumer outboxes, storage orchestration, and presentation recovery; the
+  provider registry owns concrete worker lifecycle only.
+- Provider generations are verified by `MarketEngine` before dispatch and again on completion.
+  Consumer generation and client ownership are checked before viewport, demand, poll, and
+  publication. Catalog authorization/session/selection generations fence replaced searches and
+  selections. Shutdown first cancels in-flight requests and provider controls, then the registry
+  disconnects and joins its worker handles while `MarketRuntime` enforces the public deadline.
+- The behavior lock is covered by the existing engine regressions for symbol/timeframe session
+  reuse, rapid-demand cancellation, viewport/provider fencing, contiguous history/live handoff,
+  Coinbase reconnect and overflow, Rithmic reconnect/environment/catalog generations, independent
+  provider history workers, bounded depth/order flow, shutdown deadlines, and multi-client IPC
+  isolation. Phase 2 added a duplicate-runtime regression and an architecture assertion for the
+  registry boundary.
+
+The phase 3 move order is source `apps/engine/src/market_service.rs` into its internal module tree,
+with no forwarding layer: process channels/start/stop to `runtime`; catalog authorization and
+installation to `instrument_selection`; local-history dispatch/completions to `storage`; request,
+retry, viewport repair, and handoff state to `history`; live aggregation/depth/order flow to
+`realtime`; consumer outboxes/snapshots/load states to `publication`; and the remaining single event
+loop and generation transitions to `coordinator`. Each move carries the matching regressions named
+above, while cross-module session-reuse, handoff, recovery, shutdown, and multi-client tests remain
+at the coordinator boundary.
+
+Verification recorded for this execution:
+
+- `cargo fmt --all -- --check`: passed.
+- Phase-owned clippy (`axiusflow_engine`, all targets/features): passed with warnings denied.
+- `cargo build --workspace --all-targets --all-features`: passed.
+- `cargo test --workspace --all-features`: passed.
+- Architecture checks: 29 passed.
+- Release desktop and engine: built and launched; `/proc` executable inodes matched the newly built
+  release files, and closing the desktop stopped the matching resident engine.
+- Coinbase release soak: passed against the final registry implementation for 60 seconds with one
+  timeframe switch, three covering snapshots, and 246 live updates.
+- Rithmic release smoke: credentials and provider environment were available; ticker login, symbol
+  search, and instrument reference passed, after which the adapter stopped with the redacted
+  baseline failure `stream_read_failed=Rithmic protocol validation failed` before engine-registry
+  routing.
+- Workspace clippy remains blocked only by unchanged desktop baseline findings in
+  `apps/desktop/src`; the modified engine and architecture targets are clean.
 
 ## Phase 2 - Consolidate provider runtime ownership
 

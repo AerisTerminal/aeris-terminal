@@ -1078,6 +1078,60 @@ mod tests {
     }
 
     #[test]
+    fn provider_runtime_registry_remains_the_single_engine_dispatch_boundary() {
+        let coordinator = manifest("apps/engine/src/market_service.rs");
+        let production = production_prefix(&coordinator);
+        for contract in [
+            "struct ProviderRuntimeRegistry",
+            "records: BTreeMap<&'static str, ProviderRuntimeRecord>",
+            "struct ProviderRuntimeRecord",
+            "history: SyncSender<HistoryRequest>",
+            "cancellation: Arc<AtomicBool>",
+            "lifecycle: Arc<ProviderRuntimeLifecycle>",
+            "workers: Vec<thread::JoinHandle<()>>",
+            "providers: ProviderDispatch<'a>",
+            "self.providers.history(&series.provider_id)",
+        ] {
+            assert!(
+                production.contains(contract),
+                "engine provider runtime registry lost {contract}"
+            );
+        }
+        for retired in [
+            "enum HistorySources",
+            "coinbase_history: &'a SyncSender<HistoryRequest>",
+            "rithmic_history: &'a SyncSender<HistoryRequest>",
+            "realtime_control: &'a SyncSender<RealtimeControl>",
+        ] {
+            assert!(
+                !production.contains(retired),
+                "engine coordinator restored split provider dispatch through {retired}"
+            );
+        }
+
+        for root in [
+            "apps/desktop/src",
+            "crates/market_engine/src",
+            "crates/local_history/src",
+            "crates/local_storage/src",
+            "crates/ui",
+        ] {
+            for path in production_sources_under(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+                let production = production_prefix(&contents);
+                for constructor in ["CoinbaseSession::new(", "RithmicProviderRuntime::new("] {
+                    assert!(
+                        !production.contains(constructor),
+                        "{} constructs a provider runtime through {constructor}",
+                        relative_string(&path)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn local_clients_versions_and_workspace_writes_remain_fenced() {
         let engine_core = manifest("crates/market_engine/src/lib.rs");
         assert!(

@@ -1510,7 +1510,15 @@ impl FramedConnection {
             let count = self
                 .stream
                 .read(&mut chunk)
-                .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::NotConnected => {
+                        "ipc_receive failed: local engine connection closed".to_string()
+                    }
+                    _ => "ipc_receive failed: local transport is unavailable".to_string(),
+                })?;
             if count == 0 {
                 return Err("ipc_receive failed: local engine connection closed".to_string());
             }
