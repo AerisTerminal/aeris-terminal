@@ -489,9 +489,15 @@ struct LegendRow {
     title: String,
     /// One entry per readout (`O 77,876.69`, `%K 36.95`, …) so a legend that outgrows its pane
     /// wraps value by value instead of spilling over the price axis.
-    values: Vec<String>,
+    values: Vec<LegendValue>,
     values_tone: LegendValueTone,
     visible: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegendValue {
+    text: String,
+    color: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -546,12 +552,15 @@ fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], 
 fn legend_series_values(
     snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
     id: u32,
-) -> Vec<String> {
+) -> Vec<LegendValue> {
     let value = legend_series_value(snapshots, id);
     if value.is_empty() {
         Vec::new()
     } else {
-        vec![value]
+        vec![LegendValue {
+            text: value,
+            color: None,
+        }]
     }
 }
 
@@ -1520,6 +1529,9 @@ impl NucleusChartView {
                             value("L", &snapshot.formatted_low),
                             value("C", &snapshot.formatted_close),
                         ]
+                        .into_iter()
+                        .map(|text| LegendValue { text, color: None })
+                        .collect()
                     })
                     .unwrap_or_default(),
                 snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
@@ -1566,7 +1578,10 @@ impl NucleusChartView {
                 } else {
                     Vec::new()
                 },
-                values_tone: LegendValueTone::Neutral,
+                values_tone: snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.series_id == 0)
+                    .map_or(LegendValueTone::Neutral, asset_legend_value_tone),
                 visible: volume.visible,
             });
         }
@@ -1602,10 +1617,17 @@ impl NucleusChartView {
                         let value = legend_series_value(&snapshots, series.id);
                         if value.is_empty() {
                             None
-                        } else if output.output_count > 1 {
-                            Some(format!("{} {value}", output.output_name))
                         } else {
-                            Some(value)
+                            Some(LegendValue {
+                                text: if output.output_count > 1 && output.kind != "ema_ribbon" {
+                                    format!("{} {value}", output.output_name)
+                                } else {
+                                    value
+                                },
+                                color: Some(series.line_color.clone().unwrap_or_else(|| {
+                                    nucleuscharts_engine::DEFAULT_LINE_COLOR.to_css()
+                                })),
+                            })
                         }
                     })
                     .collect::<Vec<_>>()
@@ -1615,7 +1637,11 @@ impl NucleusChartView {
             rows.push(LegendRow {
                 item: LegendItem::Indicator(info.binding_id),
                 pane: first.pane_index,
-                title: first.title.clone(),
+                title: if info.kind == "ema_ribbon" {
+                    "EMA Ribbon".to_string()
+                } else {
+                    first.title.clone()
+                },
                 values,
                 values_tone: LegendValueTone::Neutral,
                 visible,
@@ -3290,13 +3316,18 @@ fn chart_legend_row(
         Vec::new()
     };
     let values = values.into_iter().map(|value| {
+        let color = value
+            .color
+            .as_deref()
+            .and_then(Color::parse_css)
+            .map_or(values_color, |color| rgba(color.0));
         div()
             .flex_none()
             .h(px(LEGEND_ROW_HEIGHT))
             .flex()
             .items_center()
-            .text_color(values_color)
-            .child(value)
+            .text_color(color)
+            .child(value.text)
             .into_any_element()
     });
     div()
@@ -3503,6 +3534,14 @@ mod tests {
             .iter()
             .find(|series| series.id == id && !series.removed)
             .expect("live series identity resolves")
+    }
+
+    fn legend_text(row: &LegendRow) -> String {
+        row.values
+            .iter()
+            .map(|value| value.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
@@ -4470,8 +4509,18 @@ mod tests {
         let asset = rows.first().expect("asset legend is always first");
         assert_eq!(asset.item, LegendItem::Asset);
         assert_eq!(asset.pane, 0);
-        assert!(asset.values.iter().any(|value| value.starts_with("O ")));
-        assert!(asset.values.iter().any(|value| value.starts_with("C ")));
+        assert!(
+            asset
+                .values
+                .iter()
+                .any(|value| value.text.starts_with("O "))
+        );
+        assert!(
+            asset
+                .values
+                .iter()
+                .any(|value| value.text.starts_with("C "))
+        );
         assert_eq!(
             rows.iter()
                 .filter(|row| row.item == LegendItem::Indicator(bollinger[0]))
@@ -4483,7 +4532,7 @@ mod tests {
             .find(|row| row.item == LegendItem::Indicator(macd[0]))
             .expect("grouped MACD legend");
         assert!(macd_row.pane > 0);
-        let macd_values = macd_row.values.join(" ");
+        let macd_values = legend_text(macd_row);
         assert!(macd_values.contains("MACD"));
         assert!(macd_values.contains("Signal"));
         assert!(macd_values.contains("Histogram"));
@@ -4493,13 +4542,12 @@ mod tests {
     fn asset_legend_shows_ohlc_only_on_candles_and_bars() {
         let mut chart = interactive_chart();
         let asset_values = |chart: &NucleusChartView| {
-            chart
+            let row = chart
                 .legend_rows()
                 .into_iter()
                 .find(|row| row.item == LegendItem::Asset)
-                .expect("asset legend")
-                .values
-                .join(" ")
+                .expect("asset legend");
+            legend_text(&row)
         };
         assert!(asset_values(&chart).contains("O "));
         assert!(asset_values(&chart).contains("C "));
@@ -4524,6 +4572,40 @@ mod tests {
         chart.set_chart_type(ChartType::Candles);
         assert!(asset_values(&chart).contains("O "));
         assert!(asset_values(&chart).contains("C "));
+    }
+
+    #[test]
+    fn legend_values_follow_volume_direction_and_indicator_series_colors() {
+        let mut chart = interactive_chart();
+        chart
+            .add_indicator(ChartIndicator::Volume)
+            .expect("volume is created");
+        let ribbon = chart
+            .add_indicator(ChartIndicator::EmaRibbon)
+            .expect("EMA ribbon is created");
+        let rows = chart.legend_rows();
+        let asset = rows
+            .iter()
+            .find(|row| row.item == LegendItem::Asset)
+            .expect("asset legend");
+        let volume = rows
+            .iter()
+            .find(|row| row.item == LegendItem::Volume)
+            .expect("volume legend");
+        assert_ne!(asset.values_tone, LegendValueTone::Neutral);
+        assert_eq!(volume.values_tone, asset.values_tone);
+
+        let ribbon_row = rows
+            .iter()
+            .find(|row| row.item == LegendItem::Indicator(ribbon[0]))
+            .expect("EMA ribbon legend");
+        assert_eq!(ribbon_row.title, "EMA Ribbon");
+        assert_eq!(ribbon_row.values.len(), ribbon.len());
+        for (value, id) in ribbon_row.values.iter().zip(ribbon) {
+            assert_eq!(value.color, series_entry(&chart, id).line_color);
+            assert!(!value.text.contains("EMA"));
+            assert!(!value.text.contains("Ribbon"));
+        }
     }
 
     #[test]

@@ -7291,6 +7291,9 @@ fn panel_toggle(
         app.update(cx, state.toggle);
     });
     chrome_button_style(button, theme, state.selected, state.enabled)
+        .when(state.selected, |button| {
+            button.bg(gpui_color(theme.colors.surface))
+        })
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
