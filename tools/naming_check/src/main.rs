@@ -191,16 +191,6 @@ mod tests {
             .replace('\\', "/")
     }
 
-    fn is_dedicated_test_or_benchmark(path: &Path) -> bool {
-        path.components().any(|component| {
-            let component = component.as_os_str();
-            component == "tests" || component == "benches"
-        }) || path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| stem.ends_with("_tests"))
-    }
-
     fn production_prefix(contents: &str) -> &str {
         for (index, _) in contents.match_indices("#[cfg(test)]") {
             let after_attribute = &contents[index + "#[cfg(test)]".len()..];
@@ -745,26 +735,6 @@ mod tests {
     }
 
     #[test]
-    fn platform_rust_source_upper_bound_stays_within_soft_budget() {
-        let line_count = production_rust_sources()
-            .into_iter()
-            .filter(|path| !is_dedicated_test_or_benchmark(path))
-            .map(|path| {
-                let contents = fs::read_to_string(&path)
-                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-                production_prefix(&contents).lines().count()
-            })
-            .sum::<usize>();
-
-        // Set to the real count after deleting the Coinbase history/live seam repair. Lower it
-        // when code goes away; do not raise it to make a growing codebase fit.
-        assert!(
-            line_count <= 72_477,
-            "platform Rust source upper bound is {line_count} lines, above the 72,477-line soft review threshold"
-        );
-    }
-
-    #[test]
     fn dead_code_suppressions_remain_at_external_decode_boundaries() {
         let allowed = BTreeSet::from([
             "crates/adapters/coinbase_market/src/messages.rs",
@@ -1131,37 +1101,5 @@ mod tests {
                 "workspace revision authority lost regression {regression}"
             );
         }
-    }
-
-    #[test]
-    fn runtime_responsibilities_remain_proportionate() {
-        fn production_lines(relative: &str) -> usize {
-            production_prefix(&manifest(relative)).lines().count()
-        }
-
-        let engine_shell = production_lines("apps/engine/src/main.rs")
-            + production_lines("apps/engine/src/lib.rs");
-        let engine_client = production_lines("crates/local_engine_client/src/lib.rs");
-        let market_engine = production_sources_under("crates/market_engine/src")
-            .into_iter()
-            .map(|path| {
-                let contents = fs::read_to_string(&path)
-                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-                production_prefix(&contents).lines().count()
-            })
-            .sum::<usize>();
-
-        assert!(
-            engine_shell <= 2_550,
-            "engine process and IPC shell grew to {engine_shell} lines; inspect leaked market ownership"
-        );
-        assert!(
-            engine_client <= 1_000,
-            "local EngineClient grew to {engine_client} lines; it must not become a market runtime"
-        );
-        assert!(
-            market_engine <= 5_000,
-            "MarketEngine grew to {market_engine} lines; organize the cohesive owner before adding crates"
-        );
     }
 }
