@@ -72,6 +72,8 @@ const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
+const LIVE_EDGE_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAXIMUM_LIVE_EDGE_REPAIR_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
@@ -168,7 +170,15 @@ enum Command {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HistoryRequestKind {
     Initial,
+    LiveEdgeRepair(u8),
     ViewportBackfill,
+}
+
+#[derive(Clone, Copy)]
+struct PendingLiveEdgeRepair {
+    range: HistoryRange,
+    attempt: u8,
+    ready_at: Instant,
 }
 
 struct HistoryRequest {
@@ -2274,6 +2284,7 @@ fn run_coordinator(
         consumer_clients: BTreeMap::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeMap::new(),
+        pending_live_edge_repairs: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
         history_coverage: BTreeMap::new(),
         viewport_history_ranges: BTreeMap::new(),
@@ -2326,6 +2337,7 @@ fn run_coordinator(
         coordinator.expire_local_history_reads();
         coordinator.retry_pending_empty_repairs();
         coordinator.retry_history();
+        coordinator.flush_coinbase_live_edge_repairs();
         coordinator.enforce_resource_policy();
         match channels.commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
@@ -2388,6 +2400,7 @@ struct Coordinator<'a> {
     consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
+    pending_live_edge_repairs: BTreeMap<(BarSeriesKey, ProviderGeneration), PendingLiveEdgeRepair>,
     history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
     history_coverage: BTreeMap<BarSeriesKey, Vec<HistoryRange>>,
     viewport_history_ranges: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
@@ -4472,6 +4485,7 @@ impl Coordinator<'_> {
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
         if current != Some(generation) {
+            self.pending_live_edge_repairs.remove(&key);
             let pending_viewport = self.viewport_history_ranges.remove(&key);
             if series.provider_id == "coinbase"
                 && let Some(current) = current
@@ -4485,6 +4499,7 @@ impl Coordinator<'_> {
             }
             return None;
         }
+        self.flush_coinbase_live_edge_repair(series, generation);
         let snapshot = match result {
             Ok(snapshot) => {
                 self.history_retries.remove(&key);
@@ -4507,19 +4522,21 @@ impl Coordinator<'_> {
                     if !retrying {
                         self.history_failed(series, generation);
                     }
-                } else {
+                } else if kind == HistoryRequestKind::ViewportBackfill {
                     self.viewport_backfill_failed(
                         series,
                         generation,
                         range,
                         "Visible history backfill is unavailable; retained data remains usable",
                     );
+                } else if let HistoryRequestKind::LiveEdgeRepair(attempt) = kind {
+                    self.retry_coinbase_live_edge_repair(series, generation, range, attempt);
                 }
                 return None;
             }
         };
         if cancelled
-            && kind != HistoryRequestKind::Initial
+            && kind == HistoryRequestKind::ViewportBackfill
             && self.viewport_history_ranges.get(&key).copied() != range
         {
             let _ = self.schedule_coinbase_history(
@@ -4546,6 +4563,12 @@ impl Coordinator<'_> {
         else {
             return;
         };
+        if let HistoryRequestKind::LiveEdgeRepair(attempt) = kind
+            && snapshot.bars.is_empty()
+        {
+            self.retry_coinbase_live_edge_repair(series, generation, range, attempt);
+            return;
+        }
         if snapshot.bars.is_empty()
             && self.handle_empty_history_snapshot(series, kind, &key, range, &snapshot)
         {
@@ -4573,7 +4596,9 @@ impl Coordinator<'_> {
         } else {
             snapshot.bars.clone()
         };
-        let publish = !replace_covering || self.coinbase_repair_publishes(series, range);
+        let publish = matches!(kind, HistoryRequestKind::LiveEdgeRepair(_))
+            || !replace_covering
+            || self.coinbase_repair_publishes(series, range);
         if publish {
             self.deferred_publications.remove(series);
         } else {
@@ -5758,15 +5783,24 @@ impl Coordinator<'_> {
             );
         }
         let mut interrupted = None;
-        for live in self.live.values_mut().filter(|live| {
+        let mut rolled = Vec::new();
+        for (series, live) in self.live.iter_mut().filter(|(_, live)| {
             live.generation == generation
                 && live.connected
                 && live.aggregator.product_id() == trade.product_id
         }) {
             if live.history_ready {
-                if live.aggregator.apply_trade(trade).is_err() {
-                    interrupted = Some("Coinbase realtime aggregation failed");
-                    break;
+                match live.aggregator.apply_trade(trade) {
+                    Ok(Some(completed)) => {
+                        if let Some(current) = live.aggregator.in_flight() {
+                            rolled.push((series.clone(), completed, current));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        interrupted = Some("Coinbase realtime aggregation failed");
+                        break;
+                    }
                 }
                 live.dirty = true;
             } else if live.buffered.len() == LIVE_BUFFER_CAPACITY {
@@ -5778,6 +5812,121 @@ impl Coordinator<'_> {
         }
         if let Some(detail) = interrupted {
             self.realtime_interrupted(FailureStage::Aggregation, detail);
+            return;
+        }
+        for (series, completed, current) in rolled {
+            self.schedule_coinbase_live_edge_repair(&series, generation, &completed, &current);
+        }
+    }
+
+    /// Reconciles every newly closed live candle with Coinbase's own OHLCV.
+    ///
+    /// Trades keep the forming candle responsive, but the public stream cannot
+    /// prove that it observed every trade in a bucket. A short provider page at
+    /// each roll replaces the closed edge before drift can accumulate into flat
+    /// candles followed by a discontinuous open.
+    fn schedule_coinbase_live_edge_repair(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        completed: &MarketBar,
+        current: &MarketBar,
+    ) {
+        let key = (series.clone(), generation);
+        let Ok(range) = coinbase_live_edge_repair_range(series, completed, current) else {
+            return;
+        };
+        self.pending_live_edge_repairs
+            .entry(key)
+            .and_modify(|pending| {
+                pending.range.start_unix_nanos =
+                    pending.range.start_unix_nanos.min(range.start_unix_nanos);
+                pending.range.end_unix_nanos =
+                    pending.range.end_unix_nanos.max(range.end_unix_nanos);
+                pending.attempt = 0;
+                pending.ready_at = Instant::now();
+            })
+            .or_insert(PendingLiveEdgeRepair {
+                range,
+                attempt: 0,
+                ready_at: Instant::now(),
+            });
+        self.flush_coinbase_live_edge_repair(series, generation);
+    }
+
+    fn retry_coinbase_live_edge_repair(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        attempt: u8,
+    ) {
+        let Some(range) = range else {
+            return;
+        };
+        let Some(next_attempt) = attempt.checked_add(1) else {
+            return;
+        };
+        if next_attempt > MAXIMUM_LIVE_EDGE_REPAIR_RETRIES {
+            return;
+        }
+        let delay =
+            LIVE_EDGE_REPAIR_RETRY_DELAY.saturating_mul(2_u32.saturating_pow(u32::from(attempt)));
+        let retry = PendingLiveEdgeRepair {
+            range,
+            attempt: next_attempt,
+            ready_at: Instant::now() + delay,
+        };
+        self.pending_live_edge_repairs
+            .entry((series.clone(), generation))
+            .and_modify(|pending| {
+                pending.range.start_unix_nanos =
+                    pending.range.start_unix_nanos.min(range.start_unix_nanos);
+                pending.range.end_unix_nanos =
+                    pending.range.end_unix_nanos.max(range.end_unix_nanos);
+                pending.attempt = pending.attempt.min(next_attempt);
+                pending.ready_at = pending.ready_at.min(retry.ready_at);
+            })
+            .or_insert(retry);
+    }
+
+    fn flush_coinbase_live_edge_repair(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        let key = (series.clone(), generation);
+        if self.history_inflight.contains_key(&key) {
+            return;
+        }
+        let Some(pending) = self.pending_live_edge_repairs.get(&key).copied() else {
+            return;
+        };
+        if pending.ready_at > Instant::now() {
+            return;
+        }
+        self.pending_live_edge_repairs.remove(&key);
+        if self
+            .enqueue_history_request(
+                series,
+                generation,
+                Some(pending.range),
+                HistoryRequestKind::LiveEdgeRepair(pending.attempt),
+            )
+            .is_err()
+        {
+            self.pending_live_edge_repairs.insert(key, pending);
+        }
+    }
+
+    fn flush_coinbase_live_edge_repairs(&mut self) {
+        let repairs = self
+            .pending_live_edge_repairs
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for (series, generation) in repairs {
+            self.flush_coinbase_live_edge_repair(&series, generation);
         }
     }
 
@@ -6356,6 +6505,15 @@ impl Coordinator<'_> {
                     .and_then(|status| status.generation)
                     == Some(*generation)
         });
+        self.pending_live_edge_repairs
+            .retain(|(series, generation), _| {
+                self.engine.has_subscription(series)
+                    && self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        == Some(*generation)
+            });
         self.deferred_publications
             .retain(|series| self.engine.has_subscription(series));
     }
@@ -7191,6 +7349,24 @@ fn recent_coinbase_history_range(
     })
 }
 
+fn coinbase_live_edge_repair_range(
+    series: &BarSeriesKey,
+    completed: &MarketBar,
+    current: &MarketBar,
+) -> Result<HistoryRange, String> {
+    let interval = coinbase_series_interval(series)?;
+    if !coinbase_bar_is_aligned(interval, completed)
+        || !coinbase_bar_is_aligned(interval, current)
+        || completed.exchange_timestamp_seconds >= current.exchange_timestamp_seconds
+    {
+        return Err("Coinbase live-edge repair range is invalid".to_string());
+    }
+    Ok(HistoryRange {
+        start_unix_nanos: completed.exchange_timestamp_unix_nanos,
+        end_unix_nanos: current.exchange_timestamp_unix_nanos,
+    })
+}
+
 fn viewport_coinbase_history_range(
     series: &BarSeriesKey,
     viewport: Viewport,
@@ -7917,6 +8093,7 @@ mod tests {
                 }],
             )]),
             history_inflight: BTreeMap::new(),
+            pending_live_edge_repairs: BTreeMap::new(),
             history_cancellations: BTreeMap::new(),
             history_coverage: BTreeMap::new(),
             viewport_history_ranges: BTreeMap::new(),
@@ -10578,6 +10755,41 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn coinbase_live_edge_repair_replaces_closed_bar_and_keeps_forming_bar() {
+        let series = internal_series(&btc()).expect("series");
+        let mut current_bars = coinbase_history(1, 3);
+        let forming = current_bars[2];
+        current_bars[1].open = 150;
+        current_bars[1].high = 160;
+        current_bars[1].close = 100;
+        let current = SeriesSnapshot {
+            series: series.clone(),
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 8,
+            forming: true,
+            bars: current_bars.into(),
+        };
+        let mut authoritative = coinbase_history(2, 1);
+        authoritative[0].open = 100;
+        authoritative[0].high = 160;
+        authoritative[0].close = 150;
+
+        let merged = reconcile_history_repair(
+            &current,
+            authoritative.clone(),
+            HISTORY_BARS_PER_SERIES,
+            Some(coinbase_series_interval(&series).expect("interval")),
+            HistoryPrecedence::Repair,
+        )
+        .expect("live edge repairs");
+
+        assert_eq!(merged[1], authoritative[0]);
+        assert_eq!(merged[2], forming);
+    }
+
     const fn align_down(value: i64, interval: i64) -> i64 {
         value - value.rem_euclid(interval)
     }
@@ -12961,6 +13173,90 @@ mod tests {
         assert!(
             !coinbase_history_edge_is_current(interval, 600, 660_000_000_000).expect("next bucket")
         );
+    }
+
+    #[test]
+    fn a_coinbase_bucket_roll_requests_authoritative_closed_ohlcv() {
+        let (history_tx, history_rx) = mpsc::sync_channel(1);
+        let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+        let realtime_stop = Arc::new(AtomicBool::new(false));
+        let series = internal_series(&btc()).expect("series");
+        let generation = ProviderGeneration(id(1).expect("provider generation"));
+        let consumer_id = ConsumerId(id(1).expect("consumer"));
+        let mut coordinator = retained_history_coordinator(
+            configured_engine().expect("engine configures"),
+            &history_tx,
+            &storage_tx,
+            &realtime_tx,
+            &realtime_stop,
+            consumer_id,
+            &series,
+        );
+        let completed = history_bar();
+        let current = MarketBar {
+            source_sequence: completed.source_sequence + 1,
+            exchange_timestamp_seconds: 120,
+            exchange_timestamp_unix_nanos: 120_000_000_000,
+            ..completed
+        };
+        let key = (series.clone(), generation);
+        coordinator.history_inflight.insert(key.clone(), None);
+
+        coordinator.schedule_coinbase_live_edge_repair(&series, generation, &completed, &current);
+
+        assert!(matches!(history_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(
+            coordinator
+                .pending_live_edge_repairs
+                .get(&key)
+                .map(|pending| pending.range),
+            Some(HistoryRange {
+                start_unix_nanos: 60_000_000_000,
+                end_unix_nanos: 120_000_000_000,
+            })
+        );
+        coordinator.history_inflight.remove(&key);
+        coordinator.flush_coinbase_live_edge_repair(&series, generation);
+
+        let request = history_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("live edge repair request");
+        assert_eq!(request.kind, HistoryRequestKind::LiveEdgeRepair(0));
+        assert_eq!(
+            request.range,
+            Some(HistoryRange {
+                start_unix_nanos: 60_000_000_000,
+                end_unix_nanos: 120_000_000_000,
+            })
+        );
+
+        coordinator.history_completed(
+            &series,
+            generation,
+            request.range,
+            request.kind,
+            Ok(backfill_snapshot(Vec::new())),
+        );
+
+        let retry = coordinator
+            .pending_live_edge_repairs
+            .get_mut(&key)
+            .expect("empty boundary response stays pending");
+        assert_eq!(retry.attempt, 1);
+        retry.ready_at = Instant::now();
+        coordinator.flush_coinbase_live_edge_repair(&series, generation);
+        assert!(matches!(
+            history_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(HistoryRequest {
+                kind: HistoryRequestKind::LiveEdgeRepair(1),
+                range: Some(HistoryRange {
+                    start_unix_nanos: 60_000_000_000,
+                    end_unix_nanos: 120_000_000_000,
+                }),
+                ..
+            })
+        ));
     }
 
     /// Both local reads have to agree about what a bar is called.

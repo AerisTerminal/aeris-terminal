@@ -81,6 +81,7 @@ const SYMBOLS: [&str; 2] = ["BTC-USD", "ETH-USD"];
 struct SeriesFold {
     generation: u64,
     interval_seconds: i64,
+    initial_open_bucket: Option<i64>,
     bars: BTreeMap<u64, MarketBar>,
     snapshots: u64,
     updates: u64,
@@ -93,6 +94,7 @@ impl SeriesFold {
         Self {
             generation,
             interval_seconds,
+            initial_open_bucket: None,
             bars: BTreeMap::new(),
             snapshots: 0,
             updates: 0,
@@ -345,6 +347,7 @@ fn start_series(
     };
     fold.apply_snapshot(snapshot.bars)
         .unwrap_or_else(|error| panic!("initial history is unusable: {error}"));
+    fold.initial_open_bucket = open_bucket(fold.interval_seconds);
     if provider == "coinbase" && !in_the_bucket_roll_grace(&fold) {
         assert!(
             carries_the_open_candle(&fold),
@@ -461,6 +464,19 @@ fn retire(fold: &SeriesFold, snapshots: &mut u64, updates: &mut u64) {
         fold.bars.len(),
         fold.started.elapsed()
     );
+    if fold.started.elapsed() >= SETTLE
+        && fold
+            .initial_open_bucket
+            .zip(open_bucket(fold.interval_seconds))
+            .is_some_and(|(initial, current)| current > initial)
+    {
+        assert!(
+            fold.snapshots > 1,
+            "generation {} crossed a {}s bucket without an authoritative correction snapshot",
+            fold.generation,
+            fold.interval_seconds
+        );
+    }
     *snapshots += fold.snapshots;
     *updates += fold.updates;
 }

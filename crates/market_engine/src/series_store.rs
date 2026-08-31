@@ -310,6 +310,16 @@ impl SeriesStore {
                     provider_generation,
                 ));
             }
+            let projected = self
+                .total_bars
+                .checked_add(1)
+                .ok_or(EngineError::CapacityOverflow)?;
+            if projected > self.maximum_bars.get() {
+                return Err(EngineError::BarLimitExceeded {
+                    maximum: self.maximum_bars,
+                    requested: projected,
+                });
+            }
             if let Some(tail) = current.tail.take() {
                 let mut completed = current.covering.bars.to_vec();
                 completed.push(tail.bar);
@@ -322,19 +332,8 @@ impl SeriesStore {
                     forming: false,
                     bars: completed.into(),
                 });
-            } else {
-                self.total_bars = self
-                    .total_bars
-                    .checked_add(1)
-                    .ok_or(EngineError::CapacityOverflow)?;
-                if self.total_bars > self.maximum_bars.get() {
-                    self.total_bars = self.total_bars.saturating_sub(1);
-                    return Err(EngineError::BarLimitExceeded {
-                        maximum: self.maximum_bars,
-                        requested: self.total_bars.saturating_add(1),
-                    });
-                }
             }
+            self.total_bars = projected;
             SeriesTailOperation::Append
         };
         let publication_generation = current

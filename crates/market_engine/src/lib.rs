@@ -1511,6 +1511,7 @@ mod tests {
         engine
             .install_realtime_tail(provider_generation(1), &btc, 2, 8, next, true)
             .expect("next bucket appends");
+        assert_eq!(engine.metrics().stored_bars, 4);
         assert!(!Arc::ptr_eq(
             &completed,
             &engine
@@ -1523,6 +1524,21 @@ mod tests {
             .expect("covering state materializes");
         assert_eq!(snapshot.bars.len(), 4);
         assert_eq!(snapshot.bars[2].close, 106);
+
+        let mut repaired = snapshot.bars.to_vec();
+        repaired[2].close = 107;
+        engine
+            .replace_covering_history(provider_generation(1), &btc, 2, 8, repaired, true)
+            .expect("closed tail repairs after a live bucket roll");
+        assert_eq!(engine.metrics().stored_bars, 4);
+        assert_eq!(
+            engine
+                .series_snapshot(&btc)
+                .expect("repaired series materializes")
+                .bars[2]
+                .close,
+            107
+        );
     }
 
     #[test]
