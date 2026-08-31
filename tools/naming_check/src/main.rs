@@ -613,6 +613,44 @@ mod tests {
     }
 
     #[test]
+    fn desktop_rendering_remains_component_owned() {
+        for relative in [
+            "apps/desktop/src/components/chart_context_menus.rs",
+            "apps/desktop/src/components/chart_surface.rs",
+            "apps/desktop/src/components/chart_toolbar_menus.rs",
+            "apps/desktop/src/components/chrome_menu.rs",
+            "apps/desktop/src/components/drawing_toolbar.rs",
+            "apps/desktop/src/components/indicator_menu.rs",
+            "apps/desktop/src/components/symbol_menu.rs",
+            "apps/desktop/src/components/terminal_chrome.rs",
+            "apps/desktop/src/components/terminal_view.rs",
+            "apps/desktop/src/components/workspace_layout.rs",
+        ] {
+            assert!(
+                repository_root().join(relative).is_file(),
+                "desktop component boundary {relative} is missing"
+            );
+        }
+
+        let main = manifest("apps/desktop/src/main.rs");
+        let production = production_prefix(&main);
+        for rendering_primitive in [
+            "impl Render for",
+            "Button::new(",
+            "Input::new(",
+            "Loader::",
+            "MenuRow::",
+            "compact_menu_panel(",
+            "div()",
+        ] {
+            assert!(
+                !production.contains(rendering_primitive),
+                "desktop main must compose component modules instead of rendering {rendering_primitive} inline"
+            );
+        }
+    }
+
+    #[test]
     fn market_core_manifests_exclude_ipc_and_runtime_dependencies() {
         assert_dependencies_are(
             "crates/application/Cargo.toml",

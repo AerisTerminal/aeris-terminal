@@ -1,0 +1,140 @@
+use super::*;
+
+use super::chrome_menu::{
+    CHROME_MENU_INDICATOR_SEARCH_HEIGHT, ChromeMenuExtent, chrome_menu_empty, chrome_menu_footer,
+    chrome_menu_group_heading, chrome_menu_scroll_body, chrome_menu_search_header,
+    chrome_menu_surface, scrollable_menu_body,
+};
+
+pub(super) fn indicator_selector(
+    app: Entity<WorkspaceSurface>,
+    _input: Entity<InputState>,
+    _message: Option<String>,
+    enabled: bool,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let trigger = Button::new("indicator_selector")
+        .icon(header_icon(HugeIcon::AnalyticsUpIcon))
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+        .w(px(chart_chrome::CHART_CONTROL_SIZE))
+        .h(px(chart_chrome::CHART_CONTROL_SIZE))
+        .rounded(px(f32::from(
+            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
+        )))
+        .disabled(!enabled)
+        .when(enabled, Button::cursor_pointer)
+        .when(!enabled, Button::cursor_not_allowed);
+    chrome_tooltip(
+        "indicator_selector",
+        "Indicators",
+        button_activation(
+            chrome_button_style(trigger, theme, false, enabled),
+            enabled,
+            move |window, cx| {
+                app.update(cx, |app, app_cx| {
+                    app.open_chrome_overlay(ChromeOverlay::Indicator, window, app_cx);
+                });
+            },
+        ),
+        theme,
+    )
+}
+
+pub(super) fn indicator_dialog_content(
+    app: &Entity<WorkspaceSurface>,
+    extent: ChromeMenuExtent,
+    input: &Entity<InputState>,
+    message: Option<&str>,
+    keyboard_selection: usize,
+    scroll: &ScrollHandle,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let indicator_specs = chart_chrome::filter_indicator_specs(input.read(cx).value().as_ref());
+    let result_count = indicator_specs.len();
+    let hint = message.map_or_else(|| format!("{result_count} native"), str::to_string);
+    let list = if indicator_specs.is_empty() {
+        chrome_menu_scroll_body().child(chrome_menu_empty(
+            "No matching indicators",
+            "Try “average”, “bands”, or a kind like SMA.",
+            &colors,
+        ))
+    } else {
+        chrome_menu_scroll_body()
+            .child(chrome_menu_group_heading("Indicators", &colors))
+            .children(
+                indicator_specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, spec)| {
+                        let row_app = app.clone();
+                        let add_app = app.clone();
+                        let indicator = native_indicator(spec.kind);
+                        MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
+                            .highlighted(keyboard_selection == index)
+                            .on_click(move |_, window, cx| {
+                                if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                                    row_app.update(cx, |app, app_cx| {
+                                        app.close_chrome_overlay(window, app_cx);
+                                    });
+                                }
+                            })
+                            .trailing(button_activation(
+                                Button::new(("add_indicator", index))
+                                    .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
+                                    .theme(theme)
+                                    .resting_fill(colors.surface)
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .compact()
+                                    .border_1()
+                                    .border_color(gpui_color(colors.border))
+                                    .cursor_pointer()
+                                    .tab_stop(false),
+                                true,
+                                move |window, cx| {
+                                    if add_app
+                                        .update(cx, |app, cx| app.add_indicator(indicator, cx))
+                                    {
+                                        add_app.update(cx, |app, app_cx| {
+                                            app.close_chrome_overlay(window, app_cx);
+                                        });
+                                    }
+                                },
+                            ))
+                    }),
+            )
+    };
+    chrome_menu_surface(&colors, extent)
+        .child(chrome_menu_search_header(
+            input,
+            theme,
+            app,
+            hint,
+            CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
+        ))
+        .child(scrollable_menu_body(
+            list,
+            scroll,
+            colors.text_secondary,
+            extent,
+        ))
+        .child(chrome_menu_footer(&colors, "Add", "Publisher: Native"))
+}
+
+pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {
+    match kind {
+        chart_chrome::IndicatorKind::Sma => ChartIndicator::Sma,
+        chart_chrome::IndicatorKind::Ema => ChartIndicator::Ema,
+        chart_chrome::IndicatorKind::EmaRibbon => ChartIndicator::EmaRibbon,
+        chart_chrome::IndicatorKind::Wma => ChartIndicator::Wma,
+        chart_chrome::IndicatorKind::BollingerBands => ChartIndicator::Bollinger,
+        chart_chrome::IndicatorKind::Vwap => ChartIndicator::Vwap,
+        chart_chrome::IndicatorKind::Volume => ChartIndicator::Volume,
+        chart_chrome::IndicatorKind::Rsi => ChartIndicator::Rsi,
+        chart_chrome::IndicatorKind::Macd => ChartIndicator::Macd,
+        chart_chrome::IndicatorKind::Stochastic => ChartIndicator::Stochastic,
+        chart_chrome::IndicatorKind::Atr => ChartIndicator::Atr,
+    }
+}
