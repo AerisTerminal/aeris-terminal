@@ -943,6 +943,14 @@ impl NucleusChartView {
         })
     }
 
+    /// Returns the explicit main price-axis precision selected by the host.
+    ///
+    /// `None` means the chart is intentionally following the instrument's automatic precision.
+    #[must_use]
+    pub const fn selected_price_precision(&self) -> Option<u8> {
+        self.price_precision_override
+    }
+
     /// Applies one Y-axis menu command through Nucleus's scale and series APIs.
     pub fn apply_price_axis_menu_action(
         &mut self,
@@ -3646,6 +3654,35 @@ mod tests {
             series_entry(&chart, chart.volume_series).kind,
             nucleuscharts_engine::SeriesKind::Histogram
         );
+    }
+
+    #[test]
+    fn selected_price_precision_survives_snapshot_install_and_restores_a_replacement_chart() {
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+            .expect("embedded replay validates");
+        let mut chart = NucleusChartView::empty();
+        assert!(chart.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::SetPrecision(Some(0))
+        ));
+
+        chart
+            .load_replay(&replay)
+            .expect("the first snapshot keeps chart presentation state");
+        assert_eq!(chart.selected_price_precision(), Some(0));
+        assert_eq!(series_entry(&chart, 0).price_format.precision, 0);
+
+        let retained_precision = chart.selected_price_precision();
+        let mut replacement = NucleusChartView::with_replay(&replay);
+        assert!(replacement.apply_price_axis_menu_action(
+            0,
+            false,
+            PriceAxisMenuAction::SetPrecision(retained_precision)
+        ));
+        assert_eq!(replacement.selected_price_precision(), Some(0));
+        assert_eq!(series_entry(&replacement, 0).price_format.precision, 0);
     }
 
     #[test]

@@ -799,13 +799,19 @@ struct WorkspaceSurface {
     pending_pane_activate: PaneActivationRequest,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
-    retained_indicators: Vec<ChartIndicatorState>,
+    retained_chart_presentation: RetainedChartPresentation,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
+}
+
+#[derive(Default)]
+struct RetainedChartPresentation {
+    indicators: Vec<ChartIndicatorState>,
+    price_precision: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1036,7 +1042,9 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                 cx.notify();
             }
             if chart.read(cx).has_market_data() {
-                app.retained_indicators = chart.read(cx).indicator_states();
+                app.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
+                app.retained_chart_presentation.price_precision =
+                    chart.read(cx).selected_price_precision();
             }
             if app.provider == TerminalProvider::Coinbase
                 && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
@@ -1544,7 +1552,7 @@ impl WorkspaceSurface {
             pending_pane_activate: PaneActivationRequest::None,
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
-            retained_indicators: Vec::new(),
+            retained_chart_presentation: RetainedChartPresentation::default(),
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
             #[cfg(feature = "diagnostics")]
@@ -2671,7 +2679,7 @@ impl WorkspaceSurface {
         } else {
             CoinbaseSwitchState::Idle
         };
-        self.retain_chart_indicators(cx);
+        self.retain_chart_presentation(cx);
         self.restored_viewport = None;
         self.last_persisted_viewport = None;
         self.chart_state = ChartState::Loading;
@@ -2872,14 +2880,21 @@ impl WorkspaceSurface {
                 self.chart_chrome.indicator_price_lines_visible,
             );
             chart.set_chart_type(self.chart_chrome.chart_type);
+            let _ = chart.apply_price_axis_menu_action(
+                0,
+                false,
+                PriceAxisMenuAction::SetPrecision(self.retained_chart_presentation.price_precision),
+            );
         });
     }
 
-    fn retain_chart_indicators(&mut self, cx: &App) {
+    fn retain_chart_presentation(&mut self, cx: &App) {
         if let Some(chart) = &self.chart
             && chart.read(cx).has_market_data()
         {
-            self.retained_indicators = chart.read(cx).indicator_states();
+            self.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
+            self.retained_chart_presentation.price_precision =
+                chart.read(cx).selected_price_precision();
         }
     }
 
@@ -2888,10 +2903,10 @@ impl WorkspaceSurface {
         chart: &Entity<NucleusChartView>,
         cx: &mut Context<Self>,
     ) {
-        if self.retained_indicators.is_empty() {
+        if self.retained_chart_presentation.indicators.is_empty() {
             return;
         }
-        let states = self.retained_indicators.clone();
+        let states = self.retained_chart_presentation.indicators.clone();
         let result = chart.update(cx, |chart, _| chart.restore_indicator_states(&states));
         if let Err(error) = result {
             eprintln!("Axiusflow chart indicators could not be restored: {error}");
@@ -3240,7 +3255,7 @@ impl WorkspaceSurface {
         // The chart for the previous contract stays on screen under a loading
         // notice until the new one's covering history arrives. Emptying it here
         // is what made every instrument switch blank the surface first.
-        self.retain_chart_indicators(cx);
+        self.retain_chart_presentation(cx);
         self.bridge_label = "bridge awaiting series selection".to_string();
         self.replay_label = "Selected instrument · choose a series".to_string();
         self.subscription_id = format!("{} · {}", instrument.display_symbol, instrument.venue_id);
@@ -3280,7 +3295,7 @@ impl WorkspaceSurface {
             // correct, and it is replaced only when the replacement's covering
             // history arrives. Emptying it here is what produced the blank
             // surface on every switch.
-            self.retain_chart_indicators(cx);
+            self.retain_chart_presentation(cx);
             self.bridge_label = "bridge awaiting visible history".to_string();
             self.series_message = format!("Loading {} visible history", series.label());
             self.set_chart_state(
@@ -3514,7 +3529,7 @@ impl WorkspaceSurface {
                     chart_cx.notify();
                 }
             });
-            self.retain_chart_indicators(cx);
+            self.retain_chart_presentation(cx);
             cx.notify();
         }
     }
@@ -3576,7 +3591,7 @@ impl WorkspaceSurface {
                     chart_cx.notify();
                 }
             });
-            self.retain_chart_indicators(cx);
+            self.retain_chart_presentation(cx);
             cx.notify();
         }
     }
@@ -3597,7 +3612,7 @@ impl WorkspaceSurface {
         match result {
             Ok(_) => {
                 self.indicator_message = None;
-                self.retain_chart_indicators(cx);
+                self.retain_chart_presentation(cx);
                 true
             }
             Err(error) => {
