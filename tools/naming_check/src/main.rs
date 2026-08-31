@@ -782,7 +782,7 @@ mod tests {
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            if production_prefix(&contents).contains("#[allow(dead_code") {
+            if contents.contains("#[allow(dead_code") {
                 let relative = relative_string(&path);
                 assert!(
                     allowed.contains(relative.as_str()),

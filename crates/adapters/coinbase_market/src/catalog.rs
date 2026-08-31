@@ -274,7 +274,7 @@ pub fn coinbase_instrument_id(product_id: &str) -> Result<String, CoinbaseError>
 
 #[cfg(test)]
 mod tests {
-    use super::{CoinbaseProductCatalog, CoinbaseSpotProduct};
+    use super::CoinbaseProductCatalog;
     use crate::CoinbaseHistoryTransport;
     use std::{
         collections::VecDeque,
@@ -414,7 +414,4 @@ mod tests {
             }
         }
     }
-
-    #[allow(dead_code)]
-    fn assert_send(_: CoinbaseSpotProduct) {}
 }
