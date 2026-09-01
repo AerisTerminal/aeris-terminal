@@ -659,6 +659,7 @@ fn finish_discovery_close(
 }
 
 fn map_protocol_error(error: ProtocolError) -> RithmicSessionError {
+    eprintln!("Rithmic protocol category: {error:?}");
     match error {
         ProtocolError::KitUnavailable => RithmicSessionError::KitUnavailable,
         ProtocolError::TemplateVersionMismatch => RithmicSessionError::SchemaMismatch,

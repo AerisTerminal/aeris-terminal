@@ -89,7 +89,7 @@ pub(super) fn clamp_price_axis_flyout_origin(
 
 pub(super) fn chart_context_menu_layer(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     state: ChartContextMenuState,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
@@ -118,7 +118,7 @@ pub(super) fn chart_context_menu_layer(
 
 pub(super) fn chart_context_menu_panel(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     state: ChartContextMenuState,
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
@@ -283,7 +283,7 @@ pub(super) fn copy_price_chip(
 
 pub(super) fn price_axis_menu_layer(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     state: PriceAxisMenuState,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
@@ -304,17 +304,11 @@ pub(super) fn price_axis_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(price_axis_menu_panel(
-            terminal,
-            menu.clone(),
-            state,
-            origin,
-            theme,
-        ));
+        .child(price_axis_menu_panel(terminal, menu, state, origin, theme));
     if menu.flyout != PriceAxisMenuFlyout::None {
         layer = layer.child(price_axis_flyout_panel(
             terminal,
-            menu.clone(),
+            menu,
             state,
             clamp_price_axis_flyout_origin(origin, viewport, menu.flyout),
             viewport,
@@ -326,7 +320,7 @@ pub(super) fn price_axis_menu_layer(
 
 pub(super) fn price_axis_menu_panel(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
@@ -345,7 +339,7 @@ pub(super) fn price_axis_menu_panel(
         }
         panel = panel.child(price_axis_menu_item(
             terminal,
-            menu.clone(),
+            menu,
             row,
             theme,
             index == 0,
@@ -357,7 +351,7 @@ pub(super) fn price_axis_menu_panel(
 
 pub(super) fn price_axis_flyout_panel(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
@@ -379,7 +373,7 @@ pub(super) fn price_axis_flyout_panel(
         }
         panel = panel.child(price_axis_menu_item(
             terminal,
-            menu.clone(),
+            menu,
             row,
             theme,
             index == 0,
@@ -582,7 +576,7 @@ impl PriceAxisMenuRow {
 
 pub(super) fn price_axis_menu_item(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     row: PriceAxisMenuRow,
     theme: &AxiusflowTheme,
     first: bool,
@@ -595,6 +589,7 @@ pub(super) fn price_axis_menu_item(
     let open = matches!(row, PriceAxisMenuRow::Flyout { open: true, .. });
     let chevron = matches!(row, PriceAxisMenuRow::Flyout { .. });
     let label = row.label();
+    let menu = menu.clone();
     let mut item = MenuRow::compact(label, label, theme)
         .highlighted(open)
         .disabled(!enabled)
@@ -602,7 +597,7 @@ pub(super) fn price_axis_menu_item(
         .on_click(move |_, _, cx| match row {
             PriceAxisMenuRow::Toggle { action, .. } => {
                 action_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.apply_price_axis_menu(menu.clone(), action, terminal_cx);
+                    terminal.apply_price_axis_menu(&menu, action, terminal_cx);
                 });
             }
             PriceAxisMenuRow::Flyout { flyout, .. } => {
@@ -635,7 +630,7 @@ pub(super) fn price_axis_menu_item(
 
 pub(super) fn chart_settings_menu_layer(
     terminal: &Entity<TerminalApp>,
-    menu: ChartContextMenu,
+    menu: &ChartContextMenu,
     state: LifecyclePresentation,
     error: Option<&str>,
     viewport: gpui::Size<Pixels>,

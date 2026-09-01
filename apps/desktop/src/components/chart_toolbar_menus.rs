@@ -53,9 +53,11 @@ pub(super) fn chrome_overlay_layer(
             .child(chrome_overlay_panel(
                 panel,
                 theme,
-                compact_panel,
-                dual_container,
-                quick_timeframe,
+                ChromeOverlayPanelStyle {
+                    interval_popup: compact_panel,
+                    dual_container,
+                    primary_surface: quick_timeframe,
+                },
                 closing,
                 generation,
                 phase,
@@ -123,13 +125,17 @@ pub(super) fn chrome_overlay_content(
                 label: terminal_instrument_label(app_state),
                 instruments: app_state.instrument_entries(cx),
                 input: app_state.symbol_input.clone(),
-                selection_pending: app_state.symbol_selection_pending,
-                enabled: true,
+                availability: InstrumentSelectorAvailability {
+                    selection_pending: app_state.market_state.symbol_selection_pending,
+                    enabled: true,
+                },
                 provider: app_state.provider,
                 catalog_exchange: app_state.instrument_exchange.exchange(),
-                exchange_menu_open: app_state.instrument_exchange.is_open(),
-                keyboard_selection: app_state.chrome_selection,
-                keyboard_active: app_state.chrome_list_keyboard,
+                menu: InstrumentSelectorMenu {
+                    exchange_open: app_state.instrument_exchange.is_open(),
+                    keyboard_selection: app_state.chrome_selection,
+                    keyboard_active: app_state.menu_state.chrome_list_keyboard,
+                },
                 scroll: app_state.scrolls.instrument.clone(),
             },
             theme,
@@ -137,11 +143,17 @@ pub(super) fn chrome_overlay_content(
         .into_any_element(),
         ChromeOverlay::Indicator => indicator_dialog_content(
             app,
-            chrome_menu_extent(viewport, chrome_height, CHROME_MENU_INDICATOR_SEARCH_HEIGHT),
-            &app_state.indicator_input,
-            app_state.indicator_message.as_deref(),
-            app_state.chrome_selection,
-            &app_state.scrolls.indicator,
+            IndicatorDialogState {
+                extent: chrome_menu_extent(
+                    viewport,
+                    chrome_height,
+                    CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
+                ),
+                input: &app_state.indicator_input,
+                message: app_state.indicator_message.as_deref(),
+                keyboard_selection: app_state.chrome_selection,
+                scroll: &app_state.scrolls.indicator,
+            },
             theme,
             cx,
         )
@@ -149,11 +161,13 @@ pub(super) fn chrome_overlay_content(
         ChromeOverlay::Timeframe => timeframe_overlay_content(
             app,
             app_state.available_intervals(),
-            app_state.selected_interval(),
-            app_state.timeframe_menu_flyout,
-            app_state.chrome_selection,
-            app_state.timeframe_flyout_keyboard,
-            pending,
+            TimeframeOverlayState {
+                selected: app_state.selected_interval(),
+                flyout: app_state.timeframe_menu_flyout,
+                keyboard_selection: app_state.chrome_selection,
+                keyboard_active: app_state.menu_state.timeframe_flyout_keyboard,
+                pending,
+            },
             theme,
         )
         .into_any_element(),
@@ -170,12 +184,17 @@ pub(super) fn chrome_overlay_content(
     }
 }
 
-pub(super) fn chrome_overlay_panel(
-    content: AnyElement,
-    theme: &AxiusflowTheme,
+#[derive(Clone, Copy)]
+pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     dual_container: bool,
     primary_surface: bool,
+}
+
+pub(super) fn chrome_overlay_panel(
+    content: AnyElement,
+    theme: &AxiusflowTheme,
+    style: ChromeOverlayPanelStyle,
     closing: bool,
     generation: u64,
     phase: ChromeOverlayPhase,
@@ -185,29 +204,29 @@ pub(super) fn chrome_overlay_panel(
         .id("chrome_overlay_panel")
         .relative()
         .flex_none()
-        .when(!dual_container, |panel| {
+        .when(!style.dual_container, |panel| {
             panel
                 .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                 .border_1()
-                .border_color(gpui_color(if primary_surface {
+                .border_color(gpui_color(if style.primary_surface {
                     colors.border
-                } else if interval_popup {
+                } else if style.interval_popup {
                     colors.border_secondary
                 } else {
                     colors.border
                 }))
-                .bg(gpui_color(if primary_surface {
+                .bg(gpui_color(if style.primary_surface {
                     colors.surface
-                } else if interval_popup {
+                } else if style.interval_popup {
                     colors.surface_secondary
                 } else {
                     colors.surface
                 }))
         })
-        .when(interval_popup && !dual_container, |panel| {
+        .when(style.interval_popup && !style.dual_container, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
-        .when(!interval_popup, |panel| {
+        .when(!style.interval_popup, |panel| {
             panel.max_h_full().overflow_hidden()
         })
         .occlude()
@@ -241,18 +260,22 @@ pub(super) fn timeframe_overlay_left(trigger_bounds: Option<Bounds<Pixels>>) -> 
 }
 
 pub(super) fn timeframe_flyout_offset(group_index: usize) -> f32 {
-    CHART_CONTEXT_MENU_ROW_HEIGHT * group_index as f32
+    CHART_CONTEXT_MENU_ROW_HEIGHT * bounded_menu_count(group_index)
 }
 
 pub(super) fn timeframe_flyout_height(interval_count: usize) -> f32 {
-    CHART_CONTEXT_MENU_ROW_HEIGHT * interval_count as f32 + 2.0
+    CHART_CONTEXT_MENU_ROW_HEIGHT * bounded_menu_count(interval_count) + 2.0
+}
+
+fn bounded_menu_count(count: usize) -> f32 {
+    f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
 pub(super) fn timeframe_overlay_extent(
     group_count: usize,
     flyout: Option<(usize, usize)>,
 ) -> (f32, f32) {
-    let root_height = overlay_height(group_count as f32, 0.0);
+    let root_height = overlay_height(bounded_menu_count(group_count), 0.0);
     let Some((group_index, interval_count)) = flyout else {
         return (TIMEFRAME_MENU_WIDTH, root_height);
     };
@@ -263,19 +286,24 @@ pub(super) fn timeframe_overlay_extent(
     )
 }
 
-pub(super) fn timeframe_overlay_content(
-    app: &Entity<WorkspaceSurface>,
-    intervals: &[ChartInterval],
+#[derive(Clone, Copy)]
+pub(super) struct TimeframeOverlayState {
     selected: ChartInterval,
     flyout: Option<TimeframeMenuGroup>,
     keyboard_selection: usize,
     keyboard_active: bool,
     pending: bool,
+}
+
+pub(super) fn timeframe_overlay_content(
+    app: &Entity<WorkspaceSurface>,
+    intervals: &[ChartInterval],
+    state: TimeframeOverlayState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let groups = timeframe_menu_groups(intervals);
-    let flyout_layout = flyout.and_then(|group| {
+    let flyout_layout = state.flyout.and_then(|group| {
         groups.iter().position(|item| *item == group).map(|index| {
             (
                 group,
@@ -307,18 +335,19 @@ pub(super) fn timeframe_overlay_content(
     for (index, group) in groups.into_iter().enumerate() {
         let active_in_group = timeframe_group_intervals(group, intervals)
             .into_iter()
-            .find(|interval| *interval == selected)
+            .find(|interval| *interval == state.selected)
             .map(ChartInterval::label);
-        let highlighted =
-            flyout == Some(group) || (flyout.is_none() && keyboard_selection == index);
+        let highlighted = state.flyout == Some(group)
+            || (state.flyout.is_none() && state.keyboard_selection == index);
         root = root.child(timeframe_group_row(
             app,
             group,
-            active_in_group,
-            highlighted,
-            pending,
-            index == 0,
-            index == last_group,
+            TimeframeGroupRowState {
+                active_label: active_in_group,
+                open: highlighted,
+                pending: state.pending,
+                position: MenuRowPosition::new(index, last_group),
+            },
             theme,
         ));
     }
@@ -363,10 +392,10 @@ pub(super) fn timeframe_overlay_content(
                     .child(timeframe_flyout_panel(
                         app,
                         intervals,
-                        selected,
+                        state.selected,
                         group,
-                        keyboard_active.then_some(keyboard_selection),
-                        pending,
+                        state.keyboard_active.then_some(state.keyboard_selection),
+                        state.pending,
                         theme,
                     )),
             );
@@ -405,13 +434,16 @@ pub(super) fn timeframe_flyout_panel(
             app,
             interval,
             index,
-            timeframe_flyout_row_is_active(interval, selected, keyboard_index, index),
-            interval == selected,
-            pending,
-            colors.surface_secondary,
-            true,
-            index == 0,
-            index == last,
+            TimeframeRowState {
+                active: timeframe_flyout_row_is_active(interval, selected, keyboard_index, index),
+                selected: interval == selected,
+                pending,
+            },
+            TimeframeRowStyle {
+                fill: colors.surface_secondary,
+                track_menu_hover: true,
+                position: MenuRowPosition::new(index, last),
+            },
             theme,
         ));
     }
@@ -470,10 +502,11 @@ pub(super) fn chart_type_overlay_content(
             app,
             chart_type,
             index,
-            selected == chart_type,
-            keyboard_selection == index,
-            index == 0,
-            index == last,
+            ChartTypeRowState {
+                selected: selected == chart_type,
+                keyboard: keyboard_selection == index,
+                position: MenuRowPosition::new(index, last),
+            },
             theme,
         ));
     }
@@ -615,21 +648,40 @@ pub(super) fn chrome_typeahead_char_from(
     }
 }
 
-pub(super) fn timeframe_group_row(
-    app: &Entity<WorkspaceSurface>,
-    group: TimeframeMenuGroup,
+#[derive(Clone, Copy)]
+pub(super) struct MenuRowPosition {
+    first: bool,
+    last: bool,
+}
+
+impl MenuRowPosition {
+    const fn new(index: usize, last: usize) -> Self {
+        Self {
+            first: index == 0,
+            last: index == last,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct TimeframeGroupRowState {
     active_label: Option<&'static str>,
     open: bool,
     pending: bool,
-    first: bool,
-    last: bool,
+    position: MenuRowPosition,
+}
+
+pub(super) fn timeframe_group_row(
+    app: &Entity<WorkspaceSurface>,
+    group: TimeframeMenuGroup,
+    state: TimeframeGroupRowState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let hover_app = app.clone();
     let click_app = app.clone();
     let mut trailing = div().flex().items_center().gap_1();
-    if let Some(label) = active_label {
+    if let Some(label) = state.active_label {
         trailing = trailing.child(
             div()
                 .text_xs()
@@ -648,10 +700,10 @@ pub(super) fn timeframe_group_row(
         theme,
     )
     .resting_fill(theme.colors.surface)
-    .highlighted(open)
-    .disabled(pending)
+    .highlighted(state.open)
+    .disabled(state.pending)
     .trailing(trailing)
-    .flush_in_panel(first, last)
+    .flush_in_panel(state.position.first, state.position.last)
     .on_hover(move |hovered, window, cx| {
         hover_app.update(cx, |app, app_cx| {
             if *hovered {
@@ -673,17 +725,26 @@ pub(super) fn timeframe_group_row(
         .child(row)
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct TimeframeRowState {
+    active: bool,
+    selected: bool,
+    pending: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct TimeframeRowStyle {
+    fill: ThemeColor,
+    track_menu_hover: bool,
+    position: MenuRowPosition,
+}
+
 pub(super) fn timeframe_overlay_row(
     app: &Entity<WorkspaceSurface>,
     interval: ChartInterval,
     index: usize,
-    active: bool,
-    selected: bool,
-    pending: bool,
-    fill: ThemeColor,
-    track_menu_hover: bool,
-    round_top: bool,
-    round_bottom: bool,
+    state: TimeframeRowState,
+    style: TimeframeRowStyle,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
@@ -692,18 +753,18 @@ pub(super) fn timeframe_overlay_row(
         timeframe_menu_row_label(interval),
         theme,
     )
-    .resting_fill(fill)
-    .highlighted(active)
-    .disabled(pending)
-    .flush_in_panel(round_top, round_bottom);
-    if selected {
+    .resting_fill(style.fill)
+    .highlighted(state.active)
+    .disabled(state.pending)
+    .flush_in_panel(style.position.first, style.position.last);
+    if state.selected {
         row = row.trailing(
             header_icon(HugeIcon::CheckIcon)
                 .with_size(px(16.0))
                 .color(gpui_color(theme.colors.icon)),
         );
     }
-    if track_menu_hover {
+    if style.track_menu_hover {
         let hover_app = app.clone();
         row = row.on_hover(move |hovered, window, cx| {
             hover_app.update(cx, |app, app_cx| {
@@ -720,28 +781,32 @@ pub(super) fn timeframe_overlay_row(
     })
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ChartTypeRowState {
+    selected: bool,
+    keyboard: bool,
+    position: MenuRowPosition,
+}
+
 pub(super) fn chart_type_overlay_row(
     app: &Entity<WorkspaceSurface>,
     chart_type: ChartType,
     index: usize,
-    selected: bool,
-    keyboard: bool,
-    first: bool,
-    last: bool,
+    state: ChartTypeRowState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
     let mut row = MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
-        .highlighted(keyboard)
-        .flush_in_panel(first, last)
+        .highlighted(state.keyboard)
+        .flush_in_panel(state.position.first, state.position.last)
         .on_click(move |_, window, cx| {
             row_app.update(cx, |app, app_cx| {
                 app.set_chart_type(chart_type, app_cx);
                 app.close_chrome_overlay(window, app_cx);
             });
         });
-    if selected {
+    if state.selected {
         row = row.trailing(
             header_icon(HugeIcon::CheckIcon)
                 .with_size(px(16.0))

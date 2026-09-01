@@ -44,9 +44,19 @@ pub(crate) struct MenuRow {
     trailing: Option<AnyElement>,
     activation: Option<Activation>,
     hover: Option<Hover>,
+    behavior: MenuRowBehavior,
+    edges: MenuRowEdges,
+}
+
+#[derive(Default)]
+struct MenuRowBehavior {
     highlighted: bool,
     disabled: bool,
     destructive: bool,
+}
+
+#[derive(Default)]
+struct MenuRowEdges {
     round_top: bool,
     round_bottom: bool,
     fill_width: bool,
@@ -95,12 +105,8 @@ impl MenuRow {
             trailing: None,
             activation: None,
             hover: None,
-            highlighted: false,
-            disabled: false,
-            destructive: false,
-            round_top: false,
-            round_bottom: false,
-            fill_width: false,
+            behavior: MenuRowBehavior::default(),
+            edges: MenuRowEdges::default(),
         }
     }
 
@@ -120,28 +126,28 @@ impl MenuRow {
     }
 
     pub(crate) fn highlighted(mut self, highlighted: bool) -> Self {
-        self.highlighted = highlighted;
+        self.behavior.highlighted = highlighted;
         self
     }
 
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
+        self.behavior.disabled = disabled;
         self
     }
 
     pub(crate) fn destructive(mut self, destructive: bool) -> Self {
-        self.destructive = destructive;
+        self.behavior.destructive = destructive;
         self
     }
 
     pub(crate) fn round_panel_ends(mut self, top: bool, bottom: bool) -> Self {
-        self.round_top = top;
-        self.round_bottom = bottom;
+        self.edges.round_top = top;
+        self.edges.round_bottom = bottom;
         self
     }
 
     pub(crate) fn fill_width(mut self) -> Self {
-        self.fill_width = true;
+        self.edges.fill_width = true;
         self
     }
 
@@ -169,8 +175,8 @@ impl MenuRow {
 impl RenderOnce for MenuRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
-        let enabled = accepts_input(self.disabled, self.activation.is_some());
-        let destructive = self.destructive;
+        let enabled = accepts_input(self.behavior.disabled, self.activation.is_some());
+        let destructive = self.behavior.destructive;
         let label_color = if destructive {
             if enabled {
                 colors.danger
@@ -201,9 +207,9 @@ impl RenderOnce for MenuRow {
         // Inner path of a 6px panel with a 1px border. Matching the outer radius
         // on the content box pulls the hover off the corners and leaves gaps.
         let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels()) - 1.0).max(0.0));
-        let round_top = self.round_top;
-        let round_bottom = self.round_bottom;
-        let fill_width = self.fill_width;
+        let round_top = self.edges.round_top;
+        let round_bottom = self.edges.round_bottom;
+        let fill_width = self.edges.fill_width;
         let label = div()
             .flex_1()
             .min_w_0()
@@ -217,7 +223,7 @@ impl RenderOnce for MenuRow {
             .when_some(hover, |row, hover| {
                 row.on_hover(move |hovered, window, cx| hover(hovered, window, cx))
             })
-            .when(fill_width, |row| row.w_full())
+            .when(fill_width, gpui::Styled::w_full)
             .h(height)
             .flex_none()
             .flex()
@@ -235,7 +241,7 @@ impl RenderOnce for MenuRow {
             .when(round_bottom, |row| {
                 row.rounded_bl(inner_radius).rounded_br(inner_radius)
             })
-            .when(self.highlighted, |row| {
+            .when(self.behavior.highlighted, |row| {
                 row.bg(theme_color(highlighted_fill))
                     .text_color(theme_color(label_color))
                     .when(round_top, |row| {
@@ -259,7 +265,7 @@ impl RenderOnce for MenuRow {
                     style
                 })
             })
-            .when(!enabled, |row| row.cursor_not_allowed())
+            .when(!enabled, gpui::Styled::cursor_not_allowed)
             .when_some(self.activation.filter(|_| enabled), |row, activation| {
                 row.on_click(move |event, window, cx| {
                     activation(event, window, cx);

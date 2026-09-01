@@ -35,10 +35,10 @@ pub(super) fn instrument_selector(
         .rounded(px(f32::from(
             chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
         )))
-        .disabled(!state.enabled)
-        .when(state.enabled, Button::cursor_pointer)
-        .when(!state.enabled, Button::cursor_not_allowed);
-    let trigger = trigger.when(!state.enabled, |trigger| {
+        .disabled(!state.availability.enabled)
+        .when(state.availability.enabled, Button::cursor_pointer)
+        .when(!state.availability.enabled, Button::cursor_not_allowed);
+    let trigger = trigger.when(!state.availability.enabled, |trigger| {
         trigger.text_color(gpui_color(theme.colors.text_muted))
     });
     chrome_tooltip(
@@ -51,8 +51,8 @@ pub(super) fn instrument_selector(
             }
         ),
         button_activation(
-            trigger.loading(state.selection_pending),
-            state.enabled,
+            trigger.loading(state.availability.selection_pending),
+            state.availability.enabled,
             move |window, cx| {
                 app.update(cx, |app, app_cx| {
                     app.open_chrome_overlay(ChromeOverlay::Instrument, window, app_cx);
@@ -67,14 +67,22 @@ pub(super) struct InstrumentSelectorState {
     pub(super) label: String,
     pub(super) instruments: Vec<InstrumentMenuEntry>,
     pub(super) input: Option<Entity<InputState>>,
-    pub(super) selection_pending: bool,
-    pub(super) enabled: bool,
+    pub(super) availability: InstrumentSelectorAvailability,
     pub(super) provider: TerminalProvider,
     pub(super) catalog_exchange: assets::ExchangeLogo,
-    pub(super) exchange_menu_open: bool,
+    pub(super) menu: InstrumentSelectorMenu,
+    pub(super) scroll: ScrollHandle,
+}
+
+pub(super) struct InstrumentSelectorAvailability {
+    pub(super) selection_pending: bool,
+    pub(super) enabled: bool,
+}
+
+pub(super) struct InstrumentSelectorMenu {
+    pub(super) exchange_open: bool,
     pub(super) keyboard_selection: usize,
     pub(super) keyboard_active: bool,
-    pub(super) scroll: ScrollHandle,
 }
 
 pub(super) fn instrument_dialog_content(
@@ -157,7 +165,7 @@ pub(super) fn instrument_dialog_content(
             extent,
         ))
         .child(chrome_menu_footer(&colors, "Select", trailing))
-        .when(state.exchange_menu_open, |surface| {
+        .when(state.menu.exchange_open, |surface| {
             surface.child(instrument_exchange_menu(app, state.catalog_exchange, theme))
         })
 }
@@ -180,10 +188,10 @@ pub(super) fn instrument_dialog_row(
     .highlighted(instrument_row_highlighted(
         checked,
         index,
-        state.keyboard_selection,
-        state.keyboard_active,
+        state.menu.keyboard_selection,
+        state.menu.keyboard_active,
     ))
-    .disabled(state.selection_pending)
+    .disabled(state.availability.selection_pending)
     .on_click(move |_, window, cx| {
         if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
             app.update(cx, |app, app_cx| {

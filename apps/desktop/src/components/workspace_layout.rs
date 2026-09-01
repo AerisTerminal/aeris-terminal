@@ -206,7 +206,7 @@ pub(super) fn workspace_pane_element(
         dom: surface.dom.clone(),
         side_panel: surface.side_panel,
         side_panel_width: surface.side_panel_width,
-        dom_column_menu_open: surface.dom_column_menu_open,
+        dom_column_menu_open: surface.menu_state.dom_column_open,
         dom_columns,
         chart_state: surface.chart_state,
         chart_status_detail: chart_status_detail(

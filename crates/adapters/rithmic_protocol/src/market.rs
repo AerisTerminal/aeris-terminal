@@ -138,6 +138,13 @@ fn decode_trade(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
     use prost::Message;
 
     let message = rti::LastTrade::decode(frame).map_err(|_| ProtocolError::Decode)?;
+    eprintln!(
+        "Rithmic trade field presence: last={} clear={} price={} size={}",
+        message.presence_bits.unwrap_or(0) & 1 != 0,
+        message.clear_bits.unwrap_or(0) & 1 != 0,
+        message.trade_price.is_some(),
+        message.trade_size.is_some(),
+    );
     let identity = identity(message.symbol, message.exchange)?;
     let price = finite_required("trade_price", message.trade_price)?;
     let size = nonnegative_required("trade_size", message.trade_size)?;
@@ -169,7 +176,7 @@ fn decode_quote(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
     let message = rti::BestBidOffer::decode(frame).map_err(|_| ProtocolError::Decode)?;
     let presence = message.presence_bits.unwrap_or(0);
     let clear = message.clear_bits.unwrap_or(0);
-    if presence & clear != 0 || presence & !0b111 != 0 || clear & !0b111 != 0 {
+    if presence & !0b111 != 0 || clear & !0b111 != 0 {
         return Err(ProtocolError::InvalidPresenceBits);
     }
     let bid = quote_level(
@@ -351,9 +358,12 @@ fn quote_level(
     size: Option<i32>,
     orders: Option<i32>,
 ) -> Result<QuoteSideUpdate, ProtocolError> {
-    if cleared {
-        if price.is_some() || size.is_some() || orders.is_some() {
-            return Err(ProtocolError::InconsistentFields(field));
+    if cleared && (price.is_none() || size.is_none()) {
+        if price.is_some_and(|price| !price.is_finite())
+            || size.is_some_and(|size| size < 0)
+            || orders.is_some_and(|orders| orders < 0)
+        {
+            return Err(ProtocolError::InvalidNumber(field));
         }
         return Ok(QuoteSideUpdate::Cleared);
     }
@@ -482,28 +492,7 @@ mod tests {
             })
         ));
 
-        let quote = rti::BestBidOffer {
-            template_id: 151,
-            symbol: Some("ESM7".to_string()),
-            exchange: Some("CME".to_string()),
-            presence_bits: Some(3),
-            clear_bits: Some(0),
-            is_snapshot: Some(true),
-            bid_price: Some(5_100.0),
-            bid_size: Some(10),
-            bid_orders: Some(2),
-            bid_implicit_size: None,
-            bid_time: None,
-            ask_price: Some(5_100.25),
-            ask_size: Some(12),
-            ask_orders: Some(3),
-            ask_implicit_size: None,
-            ask_time: None,
-            lean_price: None,
-            ssboe: Some(1_800_000_000),
-            usecs: Some(123_457),
-        }
-        .encode_to_vec();
+        let quote = quote_message().encode_to_vec();
         assert!(matches!(
             codec.decode_market(&quote).expect("quote decodes"),
             DecodedMarketMessage::Quote(QuoteUpdate {
@@ -521,6 +510,45 @@ mod tests {
                 bids,
                 ..
             }) if bids.len() == 1
+        ));
+    }
+
+    #[test]
+    fn quote_clear_bits_support_snapshot_replacement_and_empty_side_removal() {
+        let codec = RithmicProtocolCodec;
+        let mut snapshot_clear = quote_message();
+        snapshot_clear.clear_bits = Some(3);
+        assert!(matches!(
+            codec
+                .decode_market(&snapshot_clear.encode_to_vec())
+                .expect("snapshot clear-and-set decodes"),
+            DecodedMarketMessage::Quote(QuoteUpdate {
+                bid: QuoteSideUpdate::Value(_),
+                ask: QuoteSideUpdate::Value(_),
+                ..
+            })
+        ));
+
+        let clear_bid = rti::BestBidOffer {
+            presence_bits: Some(0),
+            clear_bits: Some(1),
+            bid_price: None,
+            bid_size: None,
+            bid_orders: Some(0),
+            ask_price: None,
+            ask_size: None,
+            ask_orders: None,
+            ..snapshot_clear
+        };
+        assert!(matches!(
+            codec
+                .decode_market(&clear_bid.encode_to_vec())
+                .expect("clear-only quote decodes"),
+            DecodedMarketMessage::Quote(QuoteUpdate {
+                bid: QuoteSideUpdate::Cleared,
+                ask: QuoteSideUpdate::Unchanged,
+                ..
+            })
         ));
     }
 
@@ -570,6 +598,30 @@ mod tests {
 
     fn order_book(bid_price: Vec<f64>, bid_size: Vec<i32>) -> Vec<u8> {
         order_book_message(bid_price, bid_size).encode_to_vec()
+    }
+
+    fn quote_message() -> rti::BestBidOffer {
+        rti::BestBidOffer {
+            template_id: 151,
+            symbol: Some("ESM7".to_string()),
+            exchange: Some("CME".to_string()),
+            presence_bits: Some(3),
+            clear_bits: Some(0),
+            is_snapshot: Some(true),
+            bid_price: Some(5_100.0),
+            bid_size: Some(10),
+            bid_orders: Some(2),
+            bid_implicit_size: None,
+            bid_time: None,
+            ask_price: Some(5_100.25),
+            ask_size: Some(12),
+            ask_orders: Some(3),
+            ask_implicit_size: None,
+            ask_time: None,
+            lean_price: None,
+            ssboe: Some(1_800_000_000),
+            usecs: Some(123_457),
+        }
     }
 
     fn order_book_message(bid_price: Vec<f64>, bid_size: Vec<i32>) -> rti::OrderBook {

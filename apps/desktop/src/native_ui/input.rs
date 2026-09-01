@@ -674,7 +674,7 @@ impl RenderOnce for Input {
             .items_center()
             .when(self.has_presentation(Self::GROW), gpui::Styled::flex_1)
             .when(self.has_presentation(Self::APPEARANCE), gpui::Styled::px_2)
-            .when_some(self.fill, |element, fill| element.bg(fill))
+            .when_some(self.fill, gpui::Styled::bg)
             .when(self.has_presentation(Self::BORDERED), |element| {
                 element
                     .when(

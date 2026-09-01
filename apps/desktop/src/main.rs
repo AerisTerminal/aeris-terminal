@@ -94,7 +94,9 @@ use gpui::{
     actions, canvas, div, ease_out_quint, img, point, prelude::*, px, relative, size,
 };
 use gpui_platform::application;
-use indicator_menu::{indicator_dialog_content, indicator_selector, native_indicator};
+use indicator_menu::{
+    IndicatorDialogState, indicator_dialog_content, indicator_selector, native_indicator,
+};
 use native_ui::{
     control::Button,
     icon::Icon,
@@ -120,7 +122,10 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
     time::Duration,
 };
-use symbol_menu::{InstrumentSelectorState, instrument_dialog_content, instrument_selector};
+use symbol_menu::{
+    InstrumentSelectorAvailability, InstrumentSelectorMenu, InstrumentSelectorState,
+    instrument_dialog_content, instrument_selector,
+};
 #[cfg(test)]
 use terminal_chrome::{
     CaptionPlatform, CaptionPointerOwner, DrawingHistoryControl, WindowMoveGestureTransition,
@@ -865,7 +870,7 @@ struct WorkspaceSurface {
     side_panel: Option<SidePanel>,
     side_panel_width: f32,
     side_panel_resize: Option<SidePanelResize>,
-    dom_column_menu_open: bool,
+    menu_state: WorkspaceMenuState,
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
@@ -881,10 +886,9 @@ struct WorkspaceSurface {
     connection_message: Option<String>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
-    symbol_selection_pending: bool,
+    market_state: WorkspaceMarketState,
     series_browser: rithmic_history::RithmicSeriesBrowser,
     series_message: String,
-    rithmic_autoload_started: bool,
     rithmic_reconnect: RithmicReconnectState,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
@@ -895,8 +899,6 @@ struct WorkspaceSurface {
     chrome_overlay_generation: u64,
     timeframe_menu_flyout: Option<TimeframeMenuGroup>,
     timeframe_flyout_close_token: u64,
-    timeframe_flyout_keyboard: bool,
-    chrome_list_keyboard: bool,
     timeframe_hover_regions: u32,
     timeframe_trigger_bounds: Option<Bounds<Pixels>>,
     chart_type_trigger_bounds: Option<Bounds<Pixels>>,
@@ -928,6 +930,19 @@ struct WorkspaceSurface {
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
+}
+
+#[derive(Default)]
+struct WorkspaceMenuState {
+    dom_column_open: bool,
+    timeframe_flyout_keyboard: bool,
+    chrome_list_keyboard: bool,
+}
+
+#[derive(Default)]
+struct WorkspaceMarketState {
+    symbol_selection_pending: bool,
+    rithmic_autoload_started: bool,
 }
 
 #[derive(Default)]
@@ -1446,7 +1461,7 @@ fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
                 selection.instrument.exchange.as_str(),
             )
         }),
-        app.symbol_selection_pending,
+        app.market_state.symbol_selection_pending,
     )
 }
 
@@ -1614,7 +1629,7 @@ impl WorkspaceSurface {
             side_panel: None,
             side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
             side_panel_resize: None,
-            dom_column_menu_open: false,
+            menu_state: WorkspaceMenuState::default(),
             scrolls: WorkspaceScrollHandles::default(),
             chart_state,
             chart_state_message,
@@ -1637,10 +1652,9 @@ impl WorkspaceSurface {
                 rithmic_shell::RithmicSymbolBrowser::default()
             },
             symbol_message: initial_symbol_message(provider),
-            symbol_selection_pending: false,
+            market_state: WorkspaceMarketState::default(),
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
-            rithmic_autoload_started: false,
             rithmic_reconnect: RithmicReconnectState::Idle,
             symbol_input,
             indicator_input,
@@ -1651,8 +1665,6 @@ impl WorkspaceSurface {
             chrome_overlay_generation: 0,
             timeframe_menu_flyout: None,
             timeframe_flyout_close_token: 0,
-            timeframe_flyout_keyboard: false,
-            chrome_list_keyboard: false,
             timeframe_hover_regions: 0,
             timeframe_trigger_bounds: None,
             chart_type_trigger_bounds: None,
@@ -1724,7 +1736,7 @@ impl WorkspaceSurface {
 
     fn sync_timeframe_menu_selection(&mut self) {
         self.timeframe_menu_flyout = None;
-        self.timeframe_flyout_keyboard = false;
+        self.menu_state.timeframe_flyout_keyboard = false;
         self.timeframe_hover_regions = 0;
         let selected_group = timeframe_interval_group(self.selected_interval());
         self.chrome_selection = timeframe_menu_groups(self.available_intervals())
@@ -1748,8 +1760,8 @@ impl WorkspaceSurface {
                 .position(|interval| *interval == self.selected_interval())
                 .unwrap_or(0);
         }
-        if self.timeframe_flyout_keyboard != from_keyboard || !already_open {
-            self.timeframe_flyout_keyboard = from_keyboard;
+        if self.menu_state.timeframe_flyout_keyboard != from_keyboard || !already_open {
+            self.menu_state.timeframe_flyout_keyboard = from_keyboard;
             cx.notify();
         }
     }
@@ -1800,7 +1812,7 @@ impl WorkspaceSurface {
         let Some(group) = self.timeframe_menu_flyout.take() else {
             return;
         };
-        self.timeframe_flyout_keyboard = false;
+        self.menu_state.timeframe_flyout_keyboard = false;
         self.timeframe_hover_regions = 0;
         self.chrome_selection = timeframe_menu_groups(self.available_intervals())
             .iter()
@@ -1972,12 +1984,12 @@ impl WorkspaceSurface {
             self.chrome_overlay,
             Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator)
         ) {
-            self.chrome_list_keyboard = true;
+            self.menu_state.chrome_list_keyboard = true;
         }
     }
 
     fn sync_instrument_menu_keyboard(&mut self, cx: &App) {
-        if self.chrome_list_keyboard {
+        if self.menu_state.chrome_list_keyboard {
             return;
         }
         self.chrome_selection =
@@ -1994,7 +2006,7 @@ impl WorkspaceSurface {
         let selected = (|| match selection {
             InstrumentMenuSelection::Rithmic(index) => self.select_rithmic_symbol(index, cx),
             InstrumentMenuSelection::Coinbase(index) => {
-                if self.symbol_selection_pending {
+                if self.market_state.symbol_selection_pending {
                     self.symbol_message =
                         "A Coinbase market selection is already in progress".to_string();
                     cx.notify();
@@ -2019,7 +2031,7 @@ impl WorkspaceSurface {
                     cx.notify();
                     return false;
                 }
-                self.symbol_selection_pending = true;
+                self.market_state.symbol_selection_pending = true;
                 self.symbol_message = format!("Selecting {}", selection.instrument.symbol);
                 cx.notify();
                 true
@@ -2047,10 +2059,10 @@ impl WorkspaceSurface {
         }
         if overlay != ChromeOverlay::Timeframe {
             self.timeframe_menu_flyout = None;
-            self.timeframe_flyout_keyboard = false;
+            self.menu_state.timeframe_flyout_keyboard = false;
             self.timeframe_hover_regions = 0;
         }
-        self.chrome_list_keyboard = false;
+        self.menu_state.chrome_list_keyboard = false;
         self.chrome_selection = match overlay {
             ChromeOverlay::Timeframe => {
                 self.sync_timeframe_menu_selection();
@@ -2119,8 +2131,8 @@ impl WorkspaceSurface {
         if cx.reduce_motion() {
             self.chrome_overlay = None;
             self.timeframe_menu_flyout = None;
-            self.timeframe_flyout_keyboard = false;
-            self.chrome_list_keyboard = false;
+            self.menu_state.timeframe_flyout_keyboard = false;
+            self.menu_state.chrome_list_keyboard = false;
             self.timeframe_hover_regions = 0;
             cx.notify();
             return;
@@ -2141,8 +2153,8 @@ impl WorkspaceSurface {
                 ) {
                     app.chrome_overlay = None;
                     app.timeframe_menu_flyout = None;
-                    app.timeframe_flyout_keyboard = false;
-                    app.chrome_list_keyboard = false;
+                    app.menu_state.timeframe_flyout_keyboard = false;
+                    app.menu_state.chrome_list_keyboard = false;
                     app.timeframe_hover_regions = 0;
                     app.chrome_overlay_phase = ChromeOverlayPhase::Opening;
                     app_cx.notify();
@@ -2206,9 +2218,9 @@ impl WorkspaceSurface {
             "up" => {
                 if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
                     && self.timeframe_menu_flyout.is_some()
-                    && !self.timeframe_flyout_keyboard
+                    && !self.menu_state.timeframe_flyout_keyboard
                 {
-                    self.timeframe_flyout_keyboard = true;
+                    self.menu_state.timeframe_flyout_keyboard = true;
                     cx.notify();
                     return true;
                 }
@@ -2219,9 +2231,9 @@ impl WorkspaceSurface {
             "down" => {
                 if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
                     && self.timeframe_menu_flyout.is_some()
-                    && !self.timeframe_flyout_keyboard
+                    && !self.menu_state.timeframe_flyout_keyboard
                 {
-                    self.timeframe_flyout_keyboard = true;
+                    self.menu_state.timeframe_flyout_keyboard = true;
                     cx.notify();
                     return true;
                 }
@@ -2252,32 +2264,37 @@ impl WorkspaceSurface {
                     self.open_timeframe_group(group, true, cx);
                 }
             }
-            "enter" => match self.chrome_overlay {
-                Some(ChromeOverlay::Timeframe) => {
-                    if let Some(group) = self.timeframe_menu_flyout {
-                        if !self.timeframe_flyout_keyboard {
-                            self.timeframe_flyout_keyboard = true;
-                            cx.notify();
-                        } else {
-                            let intervals =
-                                timeframe_group_intervals(group, self.available_intervals());
-                            self.apply_highlighted_interval(&intervals, window, cx);
-                        }
-                    } else if let Some(group) = timeframe_menu_groups(self.available_intervals())
-                        .get(self.chrome_selection)
-                        .copied()
-                    {
-                        self.open_timeframe_group(group, true, cx);
-                    }
-                }
-                Some(ChromeOverlay::ChartType) => self.apply_highlighted_chart_type(window, cx),
-                Some(ChromeOverlay::QuickTimeframe) => {
-                    let intervals = self.quick_timeframe_matches(cx);
-                    self.apply_highlighted_interval(&intervals, window, cx);
-                }
-                Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator) | None => return false,
-            },
+            "enter" => return self.handle_chrome_enter(window, cx),
             _ => return false,
+        }
+        true
+    }
+
+    fn handle_chrome_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match self.chrome_overlay {
+            Some(ChromeOverlay::Timeframe) => {
+                if let Some(group) = self.timeframe_menu_flyout {
+                    if self.menu_state.timeframe_flyout_keyboard {
+                        let intervals =
+                            timeframe_group_intervals(group, self.available_intervals());
+                        self.apply_highlighted_interval(&intervals, window, cx);
+                    } else {
+                        self.menu_state.timeframe_flyout_keyboard = true;
+                        cx.notify();
+                    }
+                } else if let Some(group) = timeframe_menu_groups(self.available_intervals())
+                    .get(self.chrome_selection)
+                    .copied()
+                {
+                    self.open_timeframe_group(group, true, cx);
+                }
+            }
+            Some(ChromeOverlay::ChartType) => self.apply_highlighted_chart_type(window, cx),
+            Some(ChromeOverlay::QuickTimeframe) => {
+                let intervals = self.quick_timeframe_matches(cx);
+                self.apply_highlighted_interval(&intervals, window, cx);
+            }
+            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator) | None => return false,
         }
         true
     }
@@ -2485,7 +2502,7 @@ impl WorkspaceSurface {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = "market snapshot is current".to_string();
             if self.provider == TerminalProvider::Coinbase {
-                self.symbol_selection_pending = false;
+                self.market_state.symbol_selection_pending = false;
                 self.symbol_message = self.coinbase_product.as_ref().map_or_else(
                     || "Coinbase market ready".to_string(),
                     |product| format!("{} · Coinbase spot", product.provider_symbol),
@@ -2661,7 +2678,7 @@ impl WorkspaceSurface {
                     self.coinbase_pending_interval = None;
                     self.coinbase_pending_product = None;
                     self.coinbase_pending_sequence = None;
-                    self.symbol_selection_pending = false;
+                    self.market_state.symbol_selection_pending = false;
                     self.connection_state = Some(FeedConnectionState::Disconnected);
                     self.connection_message = Some(message.clone());
                     if swapping {
@@ -2678,7 +2695,7 @@ impl WorkspaceSurface {
                 {
                     self.coinbase_switch = CoinbaseSwitchState::Idle;
                     self.coinbase_previous_selection = None;
-                    self.symbol_selection_pending = false;
+                    self.market_state.symbol_selection_pending = false;
                     self.symbol_message = self.coinbase_product.as_ref().map_or_else(
                         || "Coinbase market ready".to_string(),
                         |product| format!("{} · Coinbase spot", product.provider_symbol),
@@ -2938,7 +2955,7 @@ impl WorkspaceSurface {
             state,
             &message,
             &self.rithmic_reconnect,
-            self.rithmic_autoload_started,
+            self.market_state.rithmic_autoload_started,
         );
         self.connection_message = Some(message);
         match ready_action {
@@ -2950,7 +2967,7 @@ impl WorkspaceSurface {
                 }
             }
             RithmicReadyAction::Autoload => {
-                self.rithmic_autoload_started = true;
+                self.market_state.rithmic_autoload_started = true;
                 let _ = self.search_symbol_query(DEFAULT_RITHMIC_LISTING_QUERY, cx);
             }
             RithmicReadyAction::None => {}
@@ -3063,7 +3080,10 @@ impl WorkspaceSurface {
     }
 
     fn refresh_default_instrument_listing(&mut self, cx: &mut Context<Self>) {
-        if !instrument_listing_refresh_needed(&self.symbol_browser, self.symbol_selection_pending) {
+        if !instrument_listing_refresh_needed(
+            &self.symbol_browser,
+            self.market_state.symbol_selection_pending,
+        ) {
             return;
         }
         let query = if self.provider == TerminalProvider::Coinbase {
@@ -3075,7 +3095,7 @@ impl WorkspaceSurface {
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
-        if self.symbol_browser.search_pending() || self.symbol_selection_pending {
+        if self.symbol_browser.search_pending() || self.market_state.symbol_selection_pending {
             match self.symbol_browser.retain_latest_search(query) {
                 Ok(already_dispatched) => {
                     if !already_dispatched {
@@ -3143,7 +3163,7 @@ impl WorkspaceSurface {
     }
 
     fn dispatch_retained_symbol_search(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.symbol_selection_pending {
+        if self.market_state.symbol_selection_pending {
             return false;
         }
         if let Some(request) = self.symbol_browser.begin_retained_search() {
@@ -3201,13 +3221,13 @@ impl WorkspaceSurface {
             false
         };
         if no_retired_selection {
-            self.rithmic_autoload_started = false;
+            self.market_state.rithmic_autoload_started = false;
         }
         self.retire_rithmic_session(cx);
     }
 
     fn retire_rithmic_session(&mut self, cx: &mut Context<Self>) {
-        self.symbol_selection_pending = false;
+        self.market_state.symbol_selection_pending = false;
         self.symbol_browser.invalidate_session();
         self.series_browser.reset();
         self.dom
@@ -3215,7 +3235,7 @@ impl WorkspaceSurface {
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        if self.symbol_selection_pending {
+        if self.market_state.symbol_selection_pending {
             self.symbol_message = "A contract selection is already in progress".to_string();
             cx.notify();
             return false;
@@ -3237,7 +3257,7 @@ impl WorkspaceSurface {
             entitlement_id,
         };
         let dispatched = if self.market_worker.try_select_provider(request).is_ok() {
-            self.symbol_selection_pending = true;
+            self.market_state.symbol_selection_pending = true;
             self.dom
                 .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
             self.symbol_message = format!(
@@ -3288,7 +3308,7 @@ impl WorkspaceSurface {
                                 .to_string();
                     }
                 } else if !coinbase
-                    && self.rithmic_autoload_started
+                    && self.market_state.rithmic_autoload_started
                     && self.symbol_browser.selected().is_none()
                     && let Some(index) =
                         default_rithmic_contract_index(self.symbol_browser.results())
@@ -3312,7 +3332,7 @@ impl WorkspaceSurface {
                     .market_worker
                     .try_select_coinbase(instrument.clone(), interval)
                 else {
-                    self.symbol_selection_pending = false;
+                    self.market_state.symbol_selection_pending = false;
                     self.symbol_message = "Coinbase market history could not start".to_string();
                     return;
                 };
@@ -3341,7 +3361,7 @@ impl WorkspaceSurface {
                     return;
                 }
                 if coinbase || selection {
-                    self.symbol_selection_pending = false;
+                    self.market_state.symbol_selection_pending = false;
                 }
                 let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
                     .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
@@ -3365,7 +3385,7 @@ impl WorkspaceSurface {
         if !self.confirm_catalog_selection(instrument.selection_generation) {
             return;
         }
-        self.symbol_selection_pending = false;
+        self.market_state.symbol_selection_pending = false;
         let recovered_series = self
             .rithmic_reconnect
             .target()
@@ -3568,27 +3588,27 @@ impl WorkspaceSurface {
         if self.has_market_selection() {
             self.side_panel = (self.side_panel != Some(SidePanel::Dom)).then_some(SidePanel::Dom);
             if self.side_panel.is_none() {
-                self.dom_column_menu_open = false;
+                self.menu_state.dom_column_open = false;
             }
             cx.notify();
         }
     }
 
     fn toggle_dom_column_menu(&mut self, cx: &mut Context<Self>) {
-        self.dom_column_menu_open = !self.dom_column_menu_open;
+        self.menu_state.dom_column_open = !self.menu_state.dom_column_open;
         cx.notify();
     }
 
     fn close_dom_column_menu(&mut self, cx: &mut Context<Self>) {
-        if self.dom_column_menu_open {
-            self.dom_column_menu_open = false;
+        if self.menu_state.dom_column_open {
+            self.menu_state.dom_column_open = false;
             cx.notify();
         }
     }
 
     fn close_side_panel(&mut self, cx: &mut Context<Self>) {
         self.side_panel_resize = None;
-        self.dom_column_menu_open = false;
+        self.menu_state.dom_column_open = false;
         if self.side_panel.take().is_some() {
             cx.notify();
         }
@@ -4003,7 +4023,7 @@ fn subscribe_symbol_input(
                             .symbol_input
                             .as_ref()
                             .is_some_and(|input| !input.read(cx).value().trim().is_empty());
-                        app.chrome_list_keyboard = typed;
+                        app.menu_state.chrome_list_keyboard = typed;
                         app.chrome_selection = if typed {
                             0
                         } else {
@@ -4747,13 +4767,13 @@ impl TerminalApp {
                 }
             }
             ChartContextAction::Reset => {
-                self.update_context_menu_pane(menu, WorkspaceSurface::reset_chart_view, cx);
+                self.update_context_menu_pane(&menu, WorkspaceSurface::reset_chart_view, cx);
             }
             ChartContextAction::ClearDrawings => {
-                self.update_context_menu_pane(menu, WorkspaceSurface::clear_drawings, cx);
+                self.update_context_menu_pane(&menu, WorkspaceSurface::clear_drawings, cx);
             }
             ChartContextAction::ClearIndicators => {
-                self.update_context_menu_pane(menu, WorkspaceSurface::clear_indicators, cx);
+                self.update_context_menu_pane(&menu, WorkspaceSurface::clear_indicators, cx);
             }
             ChartContextAction::Split(direction) => {
                 self.split_active_pane(direction, window, cx);
@@ -4770,7 +4790,7 @@ impl TerminalApp {
 
     fn update_context_menu_pane(
         &self,
-        menu: ChartContextMenu,
+        menu: &ChartContextMenu,
         update: impl FnOnce(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         cx: &mut Context<Self>,
     ) {
@@ -4784,7 +4804,7 @@ impl TerminalApp {
         }
     }
 
-    fn context_menu_chart_objects(&self, menu: ChartContextMenu, cx: &App) -> (bool, bool) {
+    fn context_menu_chart_objects(&self, menu: &ChartContextMenu, cx: &App) -> (bool, bool) {
         self.workspaces
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
@@ -4798,7 +4818,7 @@ impl TerminalApp {
 
     fn context_menu_price_axis_state(
         &self,
-        menu: ChartContextMenu,
+        menu: &ChartContextMenu,
         pane: usize,
         left: bool,
         cx: &App,
@@ -4813,7 +4833,7 @@ impl TerminalApp {
 
     fn apply_price_axis_menu(
         &mut self,
-        menu: ChartContextMenu,
+        menu: &ChartContextMenu,
         action: PriceAxisMenuAction,
         cx: &mut Context<Self>,
     ) {
@@ -4822,7 +4842,7 @@ impl TerminalApp {
         };
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         self.update_context_menu_pane(
-            menu.clone(),
+            menu,
             |surface, surface_cx| {
                 if let Some(chart) = &surface.chart {
                     chart.update(surface_cx, |chart, chart_cx| {
@@ -4863,7 +4883,7 @@ impl TerminalApp {
         }
     }
 
-    fn broadcast_indicator_chrome(&mut self, menu: ChartContextMenu, cx: &mut Context<Self>) {
+    fn broadcast_indicator_chrome(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {
         let (names, values, price_lines) = self
             .workspaces
             .iter()
@@ -5678,7 +5698,7 @@ impl TerminalApp {
         let context_menu = self.chart_context_menu.clone().map(|menu| {
             if let ChartContextKind::PriceAxis { pane, left } = menu.kind {
                 let state = self
-                    .context_menu_price_axis_state(menu.clone(), pane, left, cx)
+                    .context_menu_price_axis_state(&menu, pane, left, cx)
                     .unwrap_or(PriceAxisMenuState {
                         flags: PriceAxisMenuState::PRICE_LINE
                             | PriceAxisMenuState::LAST_VALUE
@@ -5693,9 +5713,9 @@ impl TerminalApp {
                         left,
                         precision: None,
                     });
-                return price_axis_menu_layer(terminal, menu, state, viewport, &self.theme);
+                return price_axis_menu_layer(terminal, &menu, state, viewport, &self.theme);
             }
-            let (has_drawings, has_indicators) = self.context_menu_chart_objects(menu.clone(), cx);
+            let (has_drawings, has_indicators) = self.context_menu_chart_objects(&menu, cx);
             let mut flags = 0;
             if menu.copy_price.is_some() {
                 flags |= ChartContextMenuState::COPY_PRICE;
@@ -5714,7 +5734,7 @@ impl TerminalApp {
             }
             chart_context_menu_layer(
                 terminal,
-                menu,
+                &menu,
                 ChartContextMenuState { pane_count, flags },
                 viewport,
                 &self.theme,
@@ -5724,7 +5744,7 @@ impl TerminalApp {
         let settings_menu = self.chart_settings_menu.clone().map(|menu| {
             chart_settings_menu_layer(
                 terminal,
-                menu,
+                &menu,
                 self.lifecycle.presentation(),
                 preference_error.as_deref(),
                 viewport,
@@ -6270,21 +6290,21 @@ mod tests {
                 .all(|group| !timeframe_group_intervals(group, COINBASE_INTERVALS).is_empty()),
             "a hovered group owns its submenu; the root list does not keep a flyout open"
         );
-        assert_eq!(timeframe_flyout_offset(1), CHART_CONTEXT_MENU_ROW_HEIGHT);
-        assert_eq!(
-            timeframe_flyout_height(1),
-            CHART_CONTEXT_MENU_ROW_HEIGHT + 2.0,
+        assert!((timeframe_flyout_offset(1) - CHART_CONTEXT_MENU_ROW_HEIGHT).abs() < f32::EPSILON);
+        assert!(
+            (timeframe_flyout_height(1) - (CHART_CONTEXT_MENU_ROW_HEIGHT + 2.0)).abs()
+                < f32::EPSILON,
             "submenu height is the rows plus the 1px border"
         );
-        assert_eq!(
-            timeframe_overlay_extent(5, None).0,
-            TIMEFRAME_MENU_WIDTH,
+        assert!(
+            (timeframe_overlay_extent(5, None).0 - TIMEFRAME_MENU_WIDTH).abs() < f32::EPSILON,
             "closed menu must not reserve a dead gap beside the root list"
         );
         let hours = timeframe_overlay_extent(5, Some((1, 5)));
-        assert_eq!(
-            hours.0,
-            TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP + TIMEFRAME_FLYOUT_WIDTH
+        assert!(
+            (hours.0 - (TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP + TIMEFRAME_FLYOUT_WIDTH))
+                .abs()
+                < f32::EPSILON
         );
         assert!(hours.1 >= timeframe_flyout_offset(1) + timeframe_flyout_height(5));
         assert!(

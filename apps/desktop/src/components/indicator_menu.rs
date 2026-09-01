@@ -40,20 +40,28 @@ pub(super) fn indicator_selector(
     )
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct IndicatorDialogState<'a> {
+    pub(super) extent: ChromeMenuExtent,
+    pub(super) input: &'a Entity<InputState>,
+    pub(super) message: Option<&'a str>,
+    pub(super) keyboard_selection: usize,
+    pub(super) scroll: &'a ScrollHandle,
+}
+
 pub(super) fn indicator_dialog_content(
     app: &Entity<WorkspaceSurface>,
-    extent: ChromeMenuExtent,
-    input: &Entity<InputState>,
-    message: Option<&str>,
-    keyboard_selection: usize,
-    scroll: &ScrollHandle,
+    state: IndicatorDialogState<'_>,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let indicator_specs = chart_chrome::filter_indicator_specs(input.read(cx).value().as_ref());
+    let indicator_specs =
+        chart_chrome::filter_indicator_specs(state.input.read(cx).value().as_ref());
     let result_count = indicator_specs.len();
-    let hint = message.map_or_else(|| format!("{result_count} native"), str::to_string);
+    let hint = state
+        .message
+        .map_or_else(|| format!("{result_count} native"), str::to_string);
     let list = if indicator_specs.is_empty() {
         chrome_menu_scroll_body().child(chrome_menu_empty(
             "No matching indicators",
@@ -72,7 +80,7 @@ pub(super) fn indicator_dialog_content(
                         let add_app = app.clone();
                         let indicator = native_indicator(spec.kind);
                         MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
-                            .highlighted(keyboard_selection == index)
+                            .highlighted(state.keyboard_selection == index)
                             .on_click(move |_, window, cx| {
                                 if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
                                     row_app.update(cx, |app, app_cx| {
@@ -106,9 +114,9 @@ pub(super) fn indicator_dialog_content(
                     }),
             )
     };
-    chrome_menu_surface(&colors, extent)
+    chrome_menu_surface(&colors, state.extent)
         .child(chrome_menu_search_header(
-            input,
+            state.input,
             theme,
             app,
             hint,
@@ -116,9 +124,9 @@ pub(super) fn indicator_dialog_content(
         ))
         .child(scrollable_menu_body(
             list,
-            scroll,
+            state.scroll,
             colors.text_secondary,
-            extent,
+            state.extent,
         ))
         .child(chrome_menu_footer(&colors, "Add", "Publisher: Native"))
 }
