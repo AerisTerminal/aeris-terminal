@@ -1,6 +1,6 @@
 # Axiusflow Architecture and Authentication Migration Plan
 
-Status: phases 1 and 2 implemented and verified on 2026-08-31; phases 3 through 5 remain proposed
+Status: phases 1 through 3 implemented; cross-platform release qualification and phases 4 through 5 remain incomplete
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
@@ -24,6 +24,7 @@ The completed system has:
 - durable local history behind `local_history`;
 - signed, transactional release delivery that activates one matching desktop/engine build and removes the superseded build;
 - a complete native uninstall that removes every Axiusflow-owned local artifact and credential;
+- equal end-to-end product support and release qualification on Windows, macOS, and Linux;
 - an engine-owned user session backed by standard native OIDC;
 - Axiusflow-owned account, billing, and entitlement truth; and
 - no dependency by the desktop or market core on Better Auth, Stripe, Dodo, Cloudflare, or provider wire types.
@@ -44,6 +45,144 @@ The completed system has:
 - The installed desktop and resident engine always come from one verified release identity. A stale engine, autostart entry, launcher target, or executable cannot remain active after an update.
 - An update is not complete until the new release passes a desktop/engine handshake and superseded binaries and staging files are removed. An uninstall is not complete while any Axiusflow-owned process, service registration, credential, market-data file, cache, setting, log, or update artifact remains.
 - `unsafe_code` remains forbidden workspace-wide.
+
+## Cross-platform support is a product requirement
+
+Windows, macOS, and Linux are equal, first-class Axiusflow targets. The intended outcome is not
+source compatibility, successful cross-compilation, or a desktop window that opens on all three
+platforms. It is complete end-to-end support for the real installed product on every target:
+
+- the packaged desktop starts the matching resident engine and authenticates over the native IPC
+  transport;
+- provider sessions, live publications, history, workspace restoration, and reconnect recovery
+  behave identically at the application-contract boundary;
+- credentials, autostart, install, update, rollback, and complete uninstall use correct native OS
+  facilities and survive interruption;
+- window controls, input, scaling, multi-monitor movement, rendering, and frame pacing meet the same
+  acceptance standard;
+- offline startup, online/offline transitions, suspend/resume, display changes, process replacement,
+  desktop close, user sign-out, and operating-system shutdown resolve safely;
+- bounded queues, cancellation, generation fencing, security, and data-integrity invariants remain
+  intact; and
+- diagnostics and actionable terminal errors are available on every target without exposing secret
+  material.
+
+A change that passes Linux CI while breaking or leaving Windows or macOS unverified is not an
+acceptable development result. Neither "works on Linux" nor "compiles on all targets" is evidence
+of cross-platform support. Platform-specific code, tests, packaging, and physical validation are
+part of the feature itself and must land in the same completed batch. A target may be called
+supported only when its required automated and native release gates pass.
+
+### Required development policy
+
+- Every pull request and push to `main` runs formatting, clippy, build, and deterministic workspace
+  tests on Windows, macOS, and Linux. All three jobs are required and none may be represented by a
+  cross-compile-only substitute.
+- Any change to GPUI, Nucleus Charts, IPC, filesystem persistence, process lifecycle, credential
+  storage, networking, power handling, packaging, or native window behavior must include the
+  relevant target-specific tests and native release verification.
+- Tests may be platform-specific where the OS contract differs, but fixtures and assertions must
+  use valid native paths, executable names, error semantics, and lifecycle behavior. A Unix fixture
+  running under `cfg(windows)` is not Windows coverage.
+- Required native tests cannot remain permanently ignored. Credentialed or physical tests may run
+  in scheduled/self-hosted lanes, but their most recent provenance-bound result must be available
+  and current before a release is approved.
+- A failing target blocks completion. Do not weaken, suppress, skip, or relabel the failure as a
+  platform limitation unless the maintainer explicitly removes that target from product support.
+- Platform parity is evaluated at the user-visible contract. Implementations should use the native
+  mechanism appropriate to each OS rather than forcing one OS's mechanism onto the others.
+
+## Cross-platform stabilization plan
+
+### Current Windows audit - 2026-09-03
+
+The Windows workspace compiles, and native display enumeration, DWM timing, credential-vault,
+power, network, local-history, and architecture checks have substantial coverage. It is not yet a
+qualified release target. The audit found these concrete blockers:
+
+1. The local-engine client falls back from unsupported named-pipe receive timeouts to
+   `PIPE_NOWAIT`, then interprets a zero-byte empty read as EOF. Windows connection, replacement,
+   shutdown, and desktop supervisor tests fail deterministically with premature connection closure
+   or `BrokenPipe`. This can surface as intermittent startup, reconnect, and initial-market-state
+   failures in the real product.
+2. Transactional lifecycle code opens and synchronizes directories using Unix filesystem
+   semantics. Windows returns `StagingFailed`, causing the install, update, rollback, recovery, and
+   uninstall lifecycle suite to fail before those guarantees can be established.
+3. One autostart test uses an absolute Unix path even when compiled on Windows. It therefore fails
+   before exercising the Windows launcher contract and does not constitute Windows coverage.
+4. The required CI workflow runs only on Ubuntu. Deterministic Windows regressions can merge to
+   `main` without being observed, and there is no equivalent required macOS lane.
+5. Native installed-binary, provider, physical transition, physical scanout, window-control, and
+   eight-hour endurance probes are not part of the required continuous gate. Tooling alone is not
+   evidence that the product passed.
+6. The Windows renderer uses GPUI's Direct3D 11 and DirectComposition path, while Linux uses a
+   different backend. Recent GPUI and Nucleus revisions have not been qualified through a complete
+   Windows physical-pacing and endurance matrix. Hybrid and virtual display adapters must be
+   included because adapter selection and device-loss behavior can differ materially from a
+   single-GPU machine.
+
+The audit baseline was a clean `main` worktree at `86bf390`. `cargo check --workspace
+--all-targets --all-features` passed. The Windows desktop tests passed 137 of 139, with both failures
+in resident-engine reconnect/restore. `axiusflow_platform_runtime` passed 31 of 41, with the ten
+failures in lifecycle/autostart coverage. `axiusflow_local_engine_client` had one deterministic IPC
+failure and five ignored installed-engine probes. Local storage passed 23 of 23 tests and the
+architecture checker passed 31 of 31. These results are a failure baseline, not release evidence.
+
+### Stabilization work order
+
+1. **Make IPC correct on Windows.** Replace the `PIPE_NOWAIT`/zero-read polling behavior with a
+   cancellable Windows transport strategy that distinguishes temporary lack of data from peer
+   closure. Preserve bounded shutdown. Add repeated handshake, duplex command/reply, burst,
+   disconnect, reconnect, incompatible-engine replacement, and shutdown-acknowledgement tests.
+2. **Make lifecycle durability native.** Define the durability guarantee per platform. Use correct
+   Windows file flush, atomic replacement, sharing, reparse-point, locked-file, and reboot-required
+   behavior instead of attempting Unix directory `fsync`. Repair every lifecycle fixture to use
+   native executable names and paths.
+3. **Establish the three-OS CI matrix.** Add required Windows and macOS jobs alongside Linux for the
+   complete deterministic workspace gates. Keep platform-specific failures visible and fail the
+   workflow if any target is skipped unexpectedly.
+4. **Qualify installed release pairs.** Build release packages on each OS; launch the packaged
+   desktop; verify its executable identity and the matching engine release/generation; exercise
+   authenticated IPC, workspace restoration, Coinbase, available credentialed Rithmic, clean
+   shutdown, relaunch, update, rollback, and uninstall.
+5. **Qualify native transitions.** On each target, capture offline startup, loss and restoration of
+   network availability, suspend/resume, display disconnect/reconnect, DPI and monitor changes,
+   desktop close modes, session sign-out, and OS shutdown. Require data continuity or explicit
+   bounded recovery after every transition.
+6. **Qualify rendering and input.** Exercise native window controls, IME, keyboard, pointer,
+   drag/resize, fullscreen, multi-monitor movement, mixed DPI, and long chart/DOM interaction. On
+   Windows capture external physical scanout at 60, 120, and 144 Hz, including single-GPU,
+   hybrid-GPU, and virtual-display configurations. Equivalent platform-appropriate pacing evidence
+   is required on macOS and Linux.
+7. **Run endurance and fault campaigns.** Complete at least eight continuous hours per OS with the
+   real release desktop, resident engine, and live public market path. Inject bounded IPC pressure,
+   provider silence, reconnects, process replacement, disk-full/locked-file failures, and device
+   loss where supported. Record memory high-water marks, queue overflow/recovery, frame pacing,
+   worker shutdown, and terminal errors.
+8. **Prevent recurrence.** Make all automated gates required for `main`, retain provenance-bound
+   physical and credentialed results for release approval, and add architecture checks that reject
+   unguarded Unix-only filesystem or process assumptions in shared platform code.
+
+### Cross-platform exit gate
+
+Cross-platform stabilization is complete only when all of the following are true for Windows,
+macOS, and Linux:
+
+- the complete deterministic workspace gates pass on native runners;
+- no required platform or installed-binary test is ignored or represented by another OS;
+- packaged desktop/engine identity, authenticated IPC, reconnect, replacement, and shutdown pass;
+- install, update interruption, rollback, stale-binary prevention, and complete uninstall pass;
+- Coinbase and every available credentialed provider pass the real engine path;
+- offline, network, power, display, session, and process lifecycle transitions recover correctly;
+- window controls, input, mixed-DPI behavior, and physical frame pacing meet their acceptance
+  thresholds;
+- the eight-hour release endurance run completes without unbounded growth, silent data loss,
+  stuck loading, leaked workers, or an unexplained process exit; and
+- the evidence names the exact source revision, dependency lock, package, executable hashes,
+  hardware/display configuration, OS version, and test result.
+
+Phase 4 cannot pass, phase 5 cannot begin, and a production release cannot be approved while this
+cross-platform gate is incomplete.
 
 ## Target ownership after migration
 
