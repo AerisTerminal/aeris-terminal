@@ -128,6 +128,34 @@ failures in lifecycle/autostart coverage. `axiusflow_local_engine_client` had on
 failure and five ignored installed-engine probes. Local storage passed 23 of 23 tests and the
 architecture checker passed 31 of 31. These results are a failure baseline, not release evidence.
 
+### Confirmed Windows IPC reproduction - 2026-09-03
+
+The desktop launch failure was reproduced from a clean engine process with debug and release
+binaries:
+
+```text
+Axiusflow market worker could not start: ipc_receive failed: local engine connection closed
+```
+
+The resident engine starts and remains alive. The raw synchronous local-socket handshake passes,
+but the real `EngineClient` framed handshake fails deterministically on Windows. The same failure
+appears in `apps/engine/tests/handshake.rs` when an authenticated client connects and requests the
+engine-owned workspace. This isolates the defect to the Windows local IPC session lifecycle after
+transport connection and before the first authenticated command reply.
+
+The boundary is `crates/local_engine_client` and the matching `apps/engine` `FramedConnection`:
+the client uses a split stream with a background reader, while the engine uses a split stream with
+a background writer. Windows named-pipe behavior is not currently equivalent to Unix socket
+behavior at this boundary. A trial nonblocking-only change did not resolve it and was reverted;
+retry and timeout workarounds are not considered fixes.
+
+The proper remediation is an explicit Windows transport contract covering framed read/write,
+readiness, temporary no-data, peer closure, half-close, cancellation, and writer shutdown. It must
+preserve a duplex session through `EngineReady`, authenticated attach, workspace restore, the first
+market command, reconnect, replacement, and shutdown acknowledgement. Add a native Windows
+regression test for that complete sequence and run the same contract on macOS and Linux before
+release approval.
+
 ### Stabilization work order
 
 1. **Make IPC correct on Windows.** Replace the `PIPE_NOWAIT`/zero-read polling behavior with a
