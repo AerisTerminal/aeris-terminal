@@ -160,6 +160,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::close_window))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
+            .font_family("HK Grotesk")
             .children(title_bar)
             .child(header)
             .child(

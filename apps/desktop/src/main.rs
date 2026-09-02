@@ -5918,10 +5918,15 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             cx.text_system()
-                .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                    "../../../crates/ui/design_system/inter_400.ttf"
-                ))])
-                .expect("the bundled Inter Regular font is valid");
+                .add_fonts(vec![
+                    Cow::Borrowed(include_bytes!(
+                        "../../../crates/ui/design_system/HKGrotesk-Regular.ttf"
+                    )),
+                    Cow::Borrowed(include_bytes!(
+                        "../../../crates/ui/design_system/HKGrotesk-Bold.ttf"
+                    )),
+                ])
+                .expect("the bundled HK Grotesk fonts are valid");
             cx.bind_keys([
                 KeyBinding::new("f11", ToggleFullscreen, None),
                 KeyBinding::new("alt-enter", ToggleFullscreen, None),

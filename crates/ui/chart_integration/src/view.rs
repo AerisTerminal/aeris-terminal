@@ -652,6 +652,10 @@ impl NucleusChartView {
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
+        engine
+            .options
+            .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
+            .expect("the default chart font options are valid");
         let volume_series = install_volume_series(&mut engine);
         let retention_applied =
             engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
@@ -734,6 +738,10 @@ impl NucleusChartView {
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
+        engine
+            .options
+            .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
+            .expect("the default chart font options are valid");
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
@@ -1013,6 +1021,10 @@ impl NucleusChartView {
     pub fn set_theme(&mut self, theme: ChartTheme) {
         self.theme = theme;
         self.engine.set_theme(theme);
+        self.engine
+            .options
+            .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
+            .expect("the default chart font options are valid");
         self.invalidate_series_layout();
     }
 
@@ -3580,10 +3592,7 @@ mod tests {
         let options = chart.engine.options.get();
         assert_eq!(options.layout.background.color, surface);
         assert_eq!(options.layout.text_color, foreground);
-        assert_eq!(
-            options.layout.font_family,
-            "-apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif"
-        );
+        assert_eq!(options.layout.font_family, "HK Grotesk, sans-serif");
         assert_eq!(options.grid.vert_lines.color, border);
         assert_eq!(options.crosshair.vert_line.color, crosshair);
         assert_eq!(
