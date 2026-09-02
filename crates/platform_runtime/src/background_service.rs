@@ -412,8 +412,10 @@ mod tests {
     fn absolute_engine() -> PathBuf {
         if cfg!(target_os = "windows") {
             PathBuf::from(r"C:\Program Files\Axiusflow\axiusflow_engine.exe")
-        } else {
+        } else if cfg!(target_os = "macos") {
             PathBuf::from("/Applications/Axiusflow/axiusflow_engine")
+        } else {
+            PathBuf::from("/opt/axiusflow/axiusflow_engine")
         }
     }
 
@@ -443,19 +445,54 @@ mod tests {
         assert!(launch_agent.contains("&quot;quoted&quot;"));
     }
 
+    #[cfg(target_os = "windows")]
+    fn versioned_engine_fixture() -> PathBuf {
+        PathBuf::from(
+            r"C:\Program Files\Axiusflow\versions\00000000000000000002-release-2\axiusflow_engine.exe",
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn versioned_engine_fixture() -> PathBuf {
+        PathBuf::from("/opt/axiusflow/versions/00000000000000000002-release-2/axiusflow_engine")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn stable_launcher_fixture() -> PathBuf {
+        PathBuf::from(r"C:\Program Files\Axiusflow\axiusflow_launcher.exe")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn stable_launcher_fixture() -> PathBuf {
+        PathBuf::from("/opt/axiusflow/axiusflow_launcher")
+    }
+
     #[test]
     fn versioned_engine_autostart_always_targets_the_stable_launcher() {
-        let engine =
-            Path::new("/opt/axiusflow/versions/00000000000000000002-release-2/axiusflow_engine");
-        let service = BackgroundService::new(engine).expect("versioned engine service");
-        assert_eq!(
-            service.autostart_executable,
-            Path::new("/opt/axiusflow/axiusflow_launcher")
-        );
+        let engine = versioned_engine_fixture();
+        let service = BackgroundService::new(&engine).expect("versioned engine service");
+        assert_eq!(service.autostart_executable, stable_launcher_fixture());
         assert_eq!(service.autostart_argument, Some("--launch-engine"));
-        let desktop =
-            linux_desktop_entry(&service.autostart_executable, service.autostart_argument);
-        assert!(desktop.contains("/opt/axiusflow/axiusflow_launcher\" --launch-engine"));
-        assert!(!desktop.contains("release-2"));
+        let launcher = stable_launcher_fixture();
+        let launcher_display = launcher.display().to_string();
+        assert!(
+            !service
+                .autostart_executable
+                .display()
+                .to_string()
+                .contains("release-2")
+        );
+        if cfg!(target_os = "windows") {
+            let command =
+                quoted_windows_command(&service.autostart_executable, service.autostart_argument);
+            assert!(command.contains(&launcher_display));
+            assert!(command.ends_with("--launch-engine"));
+            assert!(!command.contains("release-2"));
+        } else {
+            let desktop =
+                linux_desktop_entry(&service.autostart_executable, service.autostart_argument);
+            assert!(desktop.contains(&format!("{launcher_display}\" --launch-engine")));
+            assert!(!desktop.contains("release-2"));
+        }
     }
 }

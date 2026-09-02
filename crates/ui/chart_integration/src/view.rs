@@ -648,6 +648,11 @@ impl NucleusChartView {
     }
 
     /// Creates an empty chart using Nucleus's canonical theme tokens.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the hard-coded default font options stop parsing, which can
+    /// only happen if the default chart font JSON itself becomes invalid.
     #[must_use]
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
@@ -734,6 +739,11 @@ impl NucleusChartView {
     }
 
     /// Creates a replay-backed chart using Nucleus's canonical theme tokens.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the hard-coded default font options stop parsing, which can
+    /// only happen if the default chart font JSON itself becomes invalid.
     #[must_use]
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
@@ -1018,6 +1028,11 @@ impl NucleusChartView {
     }
 
     /// Selects a Nucleus-owned theme without changing chart data or viewport.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the hard-coded default font options stop parsing, which can
+    /// only happen if the default chart font JSON itself becomes invalid.
     pub fn set_theme(&mut self, theme: ChartTheme) {
         self.theme = theme;
         self.engine.set_theme(theme);

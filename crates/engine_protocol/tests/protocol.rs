@@ -12,8 +12,8 @@ use axiusflow_engine_protocol::{
     RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
     SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineLifecycle, SetEngineResourceMode,
-    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ShutdownEngine, ViewportDemand,
-    VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ShutdownEngine, StreamRole,
+    ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
     WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_transport::encode_binary_frame;
@@ -32,7 +32,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 15);
+    assert_eq!(PROTOCOL_VERSION, 16);
 }
 
 fn workspace_payloads() -> Vec<envelope::Payload> {
@@ -44,6 +44,8 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
             client_kind: ClientKind::Ui as i32,
             release_identity: "release-1".to_string(),
             install_generation: 1,
+            session_nonce: 9,
+            stream_role: StreamRole::Command as i32,
         }),
         envelope::Payload::EngineReady(EngineReady {
             protocol_version: PROTOCOL_VERSION,

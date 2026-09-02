@@ -203,6 +203,22 @@ pub enum SeriesCadence {
     CalendarMonths = 5,
 }
 
+/// Direction of one physical stream inside a paired client session.
+///
+/// A session owns two streams so blocking reads never share a transport
+/// handle with writes: the command stream is write-only for the client and
+/// the event stream is read-only. Both hellos carry the same session nonce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum StreamRole {
+    /// No direction claimed; rejected during session pairing.
+    Unspecified = 0,
+    /// Client-to-engine commands and session negotiation.
+    Command = 1,
+    /// Engine-to-client replies, readiness, and pushed market events.
+    Event = 2,
+}
+
 /// First authenticated client message.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct ClientHello {
@@ -221,6 +237,12 @@ pub struct ClientHello {
     /// Monotonic installation generation embedded in the client binary.
     #[prost(uint64, tag = "5")]
     pub install_generation: u64,
+    /// Random session nonce pairing this stream with its sibling stream.
+    #[prost(uint64, tag = "6")]
+    pub session_nonce: u64,
+    /// Direction of this physical stream inside the session.
+    #[prost(enumeration = "StreamRole", tag = "7")]
+    pub stream_role: i32,
 }
 
 /// Engine readiness reply.

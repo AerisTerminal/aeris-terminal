@@ -23,15 +23,21 @@ pub use messages::{
     SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
     SeriesSnapshot, SeriesState, SeriesUpdate, SeriesUpdateOperation, SetEngineLifecycle,
     SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout,
-    ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, envelope,
+    ShutdownEngine, StreamRole, ViewportDemand, VisibilityDemand, WorkspaceLayoutState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    envelope,
 };
 
 /// Current compatible lifecycle contract revision advertised during readiness.
 pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 
 /// Protocol version carried by every envelope; mismatches are rejected at decode time.
-pub const PROTOCOL_VERSION: u32 = 15;
+///
+/// Revision 16 adds the paired-session `session_nonce` and `stream_role` to
+/// `ClientHello`: every session owns a write-only command stream and a
+/// read-only event stream so blocking reads never share a transport handle
+/// with writes.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Maximum prost payload accepted in one frame (3 MiB).
 pub const MAX_FRAME_BYTES: usize = 3 * 1_048_576;

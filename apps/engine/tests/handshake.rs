@@ -7,11 +7,13 @@ use std::{
     thread,
 };
 
-use axiusflow_engine::{EngineState, bind_listener, serve_client, serve_client_with_state};
+use axiusflow_engine::{
+    EngineState, SessionPairer, bind_listener, serve_client, serve_client_with_state,
+};
 use axiusflow_engine_protocol::{
     ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, HotSeries,
-    PROTOCOL_VERSION, ResourceMode, WorkspaceLayoutState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceTabState, encode_envelope, envelope,
+    PROTOCOL_VERSION, ResourceMode, StreamRole, WorkspaceLayoutState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
 use axiusflow_platform_runtime::CredentialVault;
@@ -64,12 +66,24 @@ fn unique_name() -> String {
     )
 }
 
-fn hello(token: &[u8]) -> Vec<u8> {
+fn hello(token: &[u8], nonce: u64, role: StreamRole) -> Vec<u8> {
     let release = axiusflow_platform_runtime::current_release_identity();
-    hello_for(token, &release.release_identity, release.install_generation)
+    hello_for(
+        token,
+        &release.release_identity,
+        release.install_generation,
+        nonce,
+        role,
+    )
 }
 
-fn hello_for(token: &[u8], release_identity: &str, install_generation: u64) -> Vec<u8> {
+fn hello_for(
+    token: &[u8],
+    release_identity: &str,
+    install_generation: u64,
+    nonce: u64,
+    role: StreamRole,
+) -> Vec<u8> {
     encode_envelope(&Envelope {
         protocol_version: PROTOCOL_VERSION,
         target_consumer_id: 0,
@@ -79,31 +93,89 @@ fn hello_for(token: &[u8], release_identity: &str, install_generation: u64) -> V
             client_kind: ClientKind::Ui as i32,
             release_identity: release_identity.to_string(),
             install_generation,
+            session_nonce: nonce,
+            stream_role: role as i32,
         })),
     })
     .expect("encode hello")
 }
 
-fn exchange(token: &[u8], client_token: &[u8]) -> envelope::Payload {
-    exchange_hello(token, &hello(client_token))
+fn connect_pair(name: &str) -> (LocalSocketStream, LocalSocketStream) {
+    let socket_name = name
+        .to_ns_name::<GenericNamespaced>()
+        .expect("create socket name");
+    let command = LocalSocketStream::connect(socket_name).expect("connect command stream");
+    let socket_name = name
+        .to_ns_name::<GenericNamespaced>()
+        .expect("create socket name");
+    let event = LocalSocketStream::connect(socket_name).expect("connect event stream");
+    (command, event)
 }
 
-fn exchange_hello(token: &[u8], hello: &[u8]) -> envelope::Payload {
+/// Serves one paired session on a bound listener: accepts both streams in any
+/// arrival order, pairs them by nonce, and serves the completed session.
+fn serve_one_pair(listener: &LocalSocketListener, token: &[u8], epoch: u64) {
+    serve_one_pair_with_state(listener, token, epoch, &EngineState::default());
+}
+
+fn serve_one_pair_with_state(
+    listener: &LocalSocketListener,
+    token: &[u8],
+    epoch: u64,
+    state: &EngineState,
+) {
+    let pairer = SessionPairer::new();
+    let mut pair = None;
+    for _ in 0..2 {
+        let stream = listener.accept().expect("accept client stream");
+        if let Some(completed) = pairer
+            .accept_one(stream, token)
+            .expect("pair client stream")
+        {
+            pair = Some(completed);
+            break;
+        }
+    }
+    let pair = pair.expect("session paired");
+    serve_client_with_state(pair, epoch, state).expect("serve client");
+}
+
+fn exchange(token: &[u8], client_token: &[u8]) -> envelope::Payload {
+    let nonce = NEXT_NAME.fetch_add(1, Ordering::Relaxed);
+    exchange_hello(
+        token,
+        &hello(client_token, nonce, StreamRole::Command),
+        &hello(client_token, nonce, StreamRole::Event),
+    )
+}
+
+fn exchange_hello(token: &[u8], command_hello: &[u8], event_hello: &[u8]) -> envelope::Payload {
     let name = unique_name();
     let listener = bind_listener(&name).expect("bind engine listener");
     let expected = token.to_vec();
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client(stream, &expected, 41).expect("serve client");
+        let pairer = SessionPairer::new();
+        // Both arrivals are always drained so every offending stream receives
+        // its fault regardless of arrival order; a completed pair is served.
+        let mut pair = None;
+        for _ in 0..2 {
+            let stream = listener.accept().expect("accept client stream");
+            if let Ok(Some(completed)) = pairer.accept_one(stream, &expected) {
+                pair = Some(completed);
+                break;
+            }
+        }
+        if let Some(pair) = pair {
+            serve_client(pair, 41).expect("serve client");
+        }
     });
-    let socket_name = name
-        .to_ns_name::<GenericNamespaced>()
-        .expect("create socket name");
-    let mut stream = LocalSocketStream::connect(socket_name).expect("connect client");
-    stream.write_all(hello).expect("write hello");
+    let (mut command, mut event) = connect_pair(&name);
+    command.write_all(command_hello).expect("write hello");
+    event.write_all(event_hello).expect("write hello");
     let mut bytes = [0_u8; 4096];
-    let count = stream.read(&mut bytes).expect("read reply");
-    drop(stream);
+    let count = command.read(&mut bytes).expect("read reply");
+    drop(command);
+    drop(event);
     server.join().expect("join server");
     let mut decoder = EnvelopeDecoder::try_new().expect("create decoder");
     decoder
@@ -135,9 +207,12 @@ fn invalid_installation_token_is_rejected_without_readiness() {
 #[test]
 fn mismatched_release_identity_is_rejected_before_readiness() {
     let token = [7_u8; 32];
-    let envelope::Payload::Fault(fault) =
-        exchange_hello(&token, &hello_for(&token, "superseded-release", 99))
-    else {
+    let nonce = NEXT_NAME.fetch_add(1, Ordering::Relaxed);
+    let envelope::Payload::Fault(fault) = exchange_hello(
+        &token,
+        &hello_for(&token, "superseded-release", 99, nonce, StreamRole::Command),
+        &hello_for(&token, "superseded-release", 99, nonce, StreamRole::Event),
+    ) else {
         panic!("expected release identity fault");
     };
     assert_eq!(fault.code, EngineFaultCode::VersionMismatch as i32);
@@ -181,8 +256,7 @@ fn authenticated_client_restores_engine_owned_workspace() {
     let listener = bind_listener(&name).expect("bind engine listener");
     let token = [9_u8; 32];
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client(stream, &token, 73).expect("serve client");
+        serve_one_pair(&listener, &token, 73);
     });
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     assert_eq!(client.ready().engine_epoch, 73);
@@ -198,6 +272,32 @@ fn authenticated_client_restores_engine_owned_workspace() {
     assert_eq!(instrument.quantity_scale, 8);
     drop(client);
     server.join().expect("join server");
+}
+
+#[test]
+fn framed_session_survives_repeated_handshake_burst_and_reconnect() {
+    // Windows transport contract: the framed session must survive repeated
+    // handshakes, duplex command/reply bursts, disconnect, and reconnect
+    // without interpreting temporary no-data as peer closure.
+    for round in 0..5_u64 {
+        let name = unique_name();
+        let listener = bind_listener(&name).expect("bind engine listener");
+        let token = [9_u8; 32];
+        let server = thread::spawn(move || {
+            serve_one_pair(&listener, &token, 73 + round);
+        });
+        let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
+        assert_eq!(client.ready().engine_epoch, 73 + round);
+        for _ in 0..16 {
+            let workspace = client
+                .restore_workspace()
+                .expect("restore workspace in burst");
+            assert_eq!(workspace.provider, "coinbase");
+            assert_eq!(workspace.market, "BTC-USD");
+        }
+        drop(client);
+        server.join().expect("join server");
+    }
 }
 
 #[test]
@@ -258,8 +358,7 @@ fn workspace_selection_is_durable_across_engine_restart() {
     let listener = bind_listener(&name).expect("bind engine listener");
     let token = [11_u8; 32];
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client_with_state(stream, &token, 91, &state).expect("serve client");
+        serve_one_pair_with_state(&listener, &token, 91, &state);
     });
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     let restored = client.restore_workspace().expect("restore workspace");
@@ -295,8 +394,7 @@ fn chart_viewport_is_generation_fenced_and_persisted_independently() {
     let listener = bind_listener(&name).expect("bind engine listener");
     let token = [12_u8; 32];
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client_with_state(stream, &token, 92, &state).expect("serve client");
+        serve_one_pair_with_state(&listener, &token, 92, &state);
     });
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     let restored = client.restore_workspace().expect("restore workspace");
@@ -361,8 +459,7 @@ fn shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation() {
     let listener = bind_listener(&name).expect("bind engine listener");
     let token = [14_u8; 32];
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client_with_state(stream, &token, 94, &state).expect("serve client");
+        serve_one_pair_with_state(&listener, &token, 94, &state);
     });
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     let restored = client.restore_workspace().expect("restore workspace");
@@ -405,8 +502,7 @@ fn shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation() {
     let listener = bind_listener(&name).expect("bind shutdown listener");
     let blocked_state = shutdown_state.clone();
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept shutdown client");
-        serve_client_with_state(stream, &token, 95, &blocked_state).expect("serve shutdown client");
+        serve_one_pair_with_state(&listener, &token, 95, &blocked_state);
     });
     let mut client = EngineClient::connect(&name, &token).expect("connect shutdown client");
     let current = client
@@ -610,8 +706,7 @@ fn workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_write
     let listener = bind_listener(&name).expect("bind engine listener");
     let token = [15_u8; 32];
     let server = thread::spawn(move || {
-        let stream = listener.accept().expect("accept client");
-        serve_client_with_state(stream, &token, 96, &state).expect("serve client");
+        serve_one_pair_with_state(&listener, &token, 96, &state);
     });
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     let restored = client.restore_workspace().expect("restore workspace");

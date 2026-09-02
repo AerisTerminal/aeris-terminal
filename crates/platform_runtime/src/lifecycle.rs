@@ -669,9 +669,15 @@ impl ReleaseInstaller {
             fs::create_dir_all(parent).map_err(|_| LifecycleError::StagingFailed)?;
             copy_new_file(&source, &destination)?;
             verify_file(&destination, expected)?;
+            #[cfg(unix)]
             set_executable(&destination, expected.executable)?;
+            #[cfg(not(unix))]
+            set_executable(&destination, expected.executable);
         }
+        #[cfg(unix)]
         sync_directory(candidate_root)?;
+        #[cfg(not(unix))]
+        sync_directory(candidate_root);
         Ok(())
     }
 
@@ -1013,7 +1019,10 @@ fn verify_candidate_inventory(root: &Path, expected: &[ReleaseFile]) -> Result<(
     for file in expected {
         let path = root.join(&file.path);
         verify_file(&path, file)?;
+        #[cfg(unix)]
         verify_executable(&path, file.executable)?;
+        #[cfg(not(unix))]
+        verify_executable(&path, file.executable);
     }
     Ok(())
 }
@@ -1065,8 +1074,10 @@ fn verify_executable(path: &Path, executable: bool) -> Result<(), LifecycleError
 }
 
 #[cfg(not(unix))]
-fn verify_executable(_path: &Path, _executable: bool) -> Result<(), LifecycleError> {
-    Ok(())
+fn verify_executable(_path: &Path, _executable: bool) {
+    // Windows has no executable permission bit; launchability is established
+    // by the verified file inventory, native executable names, and OS
+    // execution semantics instead.
 }
 
 #[cfg(unix)]
@@ -1078,15 +1089,25 @@ fn set_executable(path: &Path, executable: bool) -> Result<(), LifecycleError> {
 }
 
 #[cfg(not(unix))]
-fn set_executable(_path: &Path, _executable: bool) -> Result<(), LifecycleError> {
-    Ok(())
+fn set_executable(_path: &Path, _executable: bool) {
+    // Windows carries no POSIX executable bit to set; see `verify_executable`.
 }
 
+// Durability guarantee per platform: on Unix, directory `fsync` ensures the
+// staged file inventory and atomic pointer rename survive a crash. Windows
+// cannot open a directory with `File::open` and offers no directory `fsync`;
+// durability there rests on per-file `sync_all` plus an atomic same-directory
+// rename, which NTFS orders before the handle closes. Keep this a typed
+// no-op so no caller can mistake it for a synced Unix directory.
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| LifecycleError::StagingFailed)
 }
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) {}
 
 fn write_json_atomic<T: Serialize>(
     directory: &Path,
@@ -1113,7 +1134,13 @@ fn write_json_atomic<T: Serialize>(
         remove_file_if_present(&destination).map_err(|_| LifecycleError::StagingFailed)?;
     }
     fs::rename(&temporary, &destination).map_err(|_| LifecycleError::StagingFailed)?;
-    sync_directory(directory)
+    #[cfg(unix)]
+    return sync_directory(directory);
+    #[cfg(not(unix))]
+    {
+        sync_directory(directory);
+        Ok(())
+    }
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LifecycleError> {

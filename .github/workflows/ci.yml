@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  workspace:
+  workspace-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -31,6 +31,38 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-          name: market-data-performance
+          name: market-data-performance-linux
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
+
+  workspace-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Build workspace
+        run: cargo build --workspace --all-targets --all-features
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+  workspace-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Build workspace
+        run: cargo build --workspace --all-targets --all-features
+      - name: Test workspace
+        run: cargo test --workspace --all-features

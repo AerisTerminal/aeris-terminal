@@ -15,8 +15,8 @@ use std::{
 };
 
 use axiusflow_engine::{
-    EngineShutdown, EngineState, MarketService, bind_listener, default_engine_state_root,
-    serve_client_with_market_and_shutdown,
+    EngineShutdown, EngineState, MarketService, SessionPairer, bind_listener,
+    default_engine_state_root, serve_client_with_market_and_shutdown,
 };
 use axiusflow_engine_protocol::{EngineLifetimeMode, ResourceMode};
 use axiusflow_local_engine_client::{
@@ -68,7 +68,9 @@ fn parse_command(mut arguments: impl Iterator<Item = OsString>) -> Result<Engine
 }
 
 fn run() -> Result<(), String> {
-    const MAXIMUM_CLIENTS: usize = 4;
+    // Each session owns two streams, so the connection budget counts both
+    // halves of up to four concurrent paired sessions.
+    const MAXIMUM_CLIENTS: usize = 8;
     const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
     const ENGINE_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -86,6 +88,7 @@ fn run() -> Result<(), String> {
     let market = MarketService::start(&workspace)?;
     market.set_resource_mode(lifetime_resource_mode(&workspace)?)?;
     let active_clients = Arc::new(AtomicUsize::new(0));
+    let pairer = SessionPairer::new();
     let shutdown = EngineShutdown::default();
     let session_shutdown = match start_session_shutdown_monitor(shutdown.clone()) {
         Ok(runtime) => Some(runtime),
@@ -117,19 +120,27 @@ fn run() -> Result<(), String> {
         let state = state.clone();
         let market = market.clone();
         let active_clients = Arc::clone(&active_clients);
+        let pairer = pairer.clone();
         let shutdown = shutdown.clone();
         thread::Builder::new()
             .name("axiusflow-engine-client".to_string())
             .spawn(move || {
-                if let Err(error) = serve_client_with_market_and_shutdown(
-                    stream,
-                    token.as_slice(),
-                    engine_epoch,
-                    &state,
-                    &market,
-                    &shutdown,
-                ) {
-                    eprintln!("Axiusflow engine rejected a local client: {error}");
+                match pairer.accept_one(stream, token.as_slice()) {
+                    Ok(Some(pair)) => {
+                        if let Err(error) = serve_client_with_market_and_shutdown(
+                            pair,
+                            engine_epoch,
+                            &state,
+                            &market,
+                            &shutdown,
+                        ) {
+                            eprintln!("Axiusflow engine rejected a local client: {error}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("Axiusflow engine rejected a local client: {error}");
+                    }
                 }
                 active_clients.fetch_sub(1, Ordering::AcqRel);
             })

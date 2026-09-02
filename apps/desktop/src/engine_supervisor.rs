@@ -567,7 +567,8 @@ mod tests {
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 
     struct FixtureServer {
-        stream: LocalSocketStream,
+        command: LocalSocketStream,
+        event: LocalSocketStream,
         decoder: EnvelopeDecoder,
         pending: VecDeque<Envelope>,
     }
@@ -579,7 +580,7 @@ mod tests {
                     return envelope.payload.expect("fixture payload");
                 }
                 let mut bytes = [0_u8; 16 * 1024];
-                let count = self.stream.read(&mut bytes).expect("fixture read");
+                let count = self.command.read(&mut bytes).expect("fixture read");
                 assert!(count > 0, "fixture client remains connected");
                 self.pending.extend(
                     self.decoder
@@ -600,8 +601,75 @@ mod tests {
                 payload: Some(payload),
             })
             .expect("encode fixture frame");
-            self.stream.write_all(&frame).expect("fixture write");
+            self.event.write_all(&frame).expect("fixture write");
+            self.event.flush().expect("fixture flush");
         }
+
+        fn send_ready(&mut self, epoch: u64) {
+            let frame = encode_envelope(&Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                target_consumer_id: 0,
+                payload: Some(envelope::Payload::EngineReady(EngineReady {
+                    protocol_version: PROTOCOL_VERSION,
+                    engine_epoch: epoch,
+                    workspace_revision: 0,
+                    lifecycle_contract_revision:
+                        axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
+                    release_identity: axiusflow_platform_runtime::current_release_identity()
+                        .release_identity,
+                    install_generation: axiusflow_platform_runtime::current_release_identity()
+                        .install_generation,
+                })),
+            })
+            .expect("encode fixture readiness");
+            self.command
+                .write_all(&frame)
+                .expect("fixture readiness write");
+            self.command.flush().expect("fixture readiness flush");
+        }
+    }
+
+    /// Accepts both session streams in any arrival order and pairs them by
+    /// nonce, mirroring the resident engine pairing contract.
+    fn accept_fixture_pair(
+        listener: &LocalSocketListener,
+    ) -> (LocalSocketStream, LocalSocketStream) {
+        let mut command = None;
+        let mut event = None;
+        let mut nonce = None;
+        for _ in 0..2 {
+            let mut stream = listener.accept().expect("accept fixture client");
+            let mut decoder = EnvelopeDecoder::try_new().expect("fixture decoder");
+            let hello = loop {
+                let mut bytes = [0_u8; 16 * 1024];
+                let count = stream.read(&mut bytes).expect("fixture hello read");
+                assert!(count > 0, "fixture client sends its hello");
+                let mut envelopes = decoder.push(&bytes[..count]).expect("decode fixture hello");
+                if let Some(envelope) = envelopes.pop() {
+                    break match envelope.payload {
+                        Some(envelope::Payload::ClientHello(hello)) => hello,
+                        _ => panic!("fixture expects a client hello"),
+                    };
+                }
+            };
+            if let Some(previous) = nonce.replace(hello.session_nonce) {
+                assert_eq!(
+                    previous, hello.session_nonce,
+                    "paired fixture streams share one nonce"
+                );
+            }
+            if hello.stream_role == axiusflow_engine_protocol::StreamRole::Command as i32 {
+                assert!(command.replace(stream).is_none());
+            } else if hello.stream_role == axiusflow_engine_protocol::StreamRole::Event as i32 {
+                assert!(event.replace(stream).is_none());
+            } else {
+                panic!("fixture expects a directed stream hello");
+            }
+        }
+        (
+            command.expect("paired fixture command stream"),
+            event.expect("paired fixture event stream"),
+        )
     }
 
     fn start_fixture(
@@ -629,26 +697,14 @@ mod tests {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&commands);
         let worker = thread::spawn(move || {
-            let stream = listener.accept().expect("accept fixture client");
+            let (command, event) = accept_fixture_pair(&listener);
             let mut server = FixtureServer {
-                stream,
+                command,
+                event,
                 decoder: EnvelopeDecoder::try_new().expect("fixture decoder"),
                 pending: VecDeque::new(),
             };
-            assert!(matches!(
-                server.receive(),
-                envelope::Payload::ClientHello(_)
-            ));
-            server.send(envelope::Payload::EngineReady(EngineReady {
-                protocol_version: PROTOCOL_VERSION,
-                engine_epoch: epoch,
-                workspace_revision: 0,
-                lifecycle_contract_revision: axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
-                release_identity: axiusflow_platform_runtime::current_release_identity()
-                    .release_identity,
-                install_generation: axiusflow_platform_runtime::current_release_identity()
-                    .install_generation,
-            }));
+            server.send_ready(epoch);
             let mut registered_consumers = 0_usize;
             let mut visibility_demands = 0_usize;
             loop {

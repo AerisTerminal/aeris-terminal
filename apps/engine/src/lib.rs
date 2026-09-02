@@ -20,19 +20,19 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axiusflow_coinbase_market_adapter::{COINBASE_PUBLIC_ACCOUNT_ID, ENTITLEMENT_CLASS};
 use axiusflow_engine_protocol::{
-    ClientKind, ConsumerResourceClass as IpcConsumerResourceClass, EngineFaultCode,
+    ClientHello, ClientKind, ConsumerResourceClass as IpcConsumerResourceClass, EngineFaultCode,
     EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder,
     Fault, Goodbye, HotSeries, InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION,
     MAX_FRAME_BYTES, PROTOCOL_VERSION, ProviderInstrumentInstalled, RegisterConsumer,
     RemoveConsumer, ResourceMode, SeriesCadence, SeriesDemand, SeriesKey, SetEngineLifecycle,
-    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ViewportDemand, VisibilityDemand,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, StreamRole, ViewportDemand,
+    VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::INSTALLATION_TOKEN_BYTES;
 use axiusflow_market_data::{BarPeriod, BarSeriesKey};
@@ -1463,8 +1463,269 @@ pub fn default_engine_state_root() -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+/// One fully paired client session: a write-only command stream is never
+/// read and a read-only event stream is never written.
+///
+/// Neither stream is ever split: each transport handle has exactly one owner
+/// and one direction, so a blocking read can never stall a concurrent write
+/// on any platform.
+pub struct SessionStreams {
+    /// Client-to-engine commands, owned by the serving thread.
+    pub command: LocalSocketStream,
+    /// Engine-to-client replies and pushed events, owned by the writer thread.
+    pub event: LocalSocketStream,
+}
+
+struct PendingStream {
+    stream: LocalSocketStream,
+    first_seen: Instant,
+}
+
+struct PendingPair {
+    command: Option<PendingStream>,
+    event: Option<PendingStream>,
+}
+
+/// Pairs the two authenticated streams of each client session by nonce.
+///
+/// Every accepted connection carries one hello; the first arrival pends until
+/// its sibling arrives. The map stays bounded by entry count and age.
+#[derive(Clone, Default)]
+pub struct SessionPairer {
+    pending: Arc<Mutex<BTreeMap<u64, PendingPair>>>,
+}
+
+/// Maximum half-open sessions retained while waiting for a sibling stream.
+const MAX_PENDING_PAIRS: usize = 16;
+/// Maximum time one half-open session waits for its sibling stream.
+const MAX_PENDING_AGE: Duration = Duration::from_secs(30);
+/// Maximum time one accepted connection may take to send its hello. A live
+/// local client answers in milliseconds; expiry drops slow-loris connections
+/// before they can hold a session thread.
+const SESSION_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl SessionPairer {
+    /// Creates an empty session pairing registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Authenticates one accepted connection and pairs it by session nonce.
+    ///
+    /// Returns the completed pair when this arrival completes a session, or
+    /// `None` when this half pends for its sibling. Authentication and
+    /// pairing faults are reported to the offending stream before returning
+    /// an error.
+    ///
+    /// # Errors
+    /// Returns an error for I/O, framing, authentication, pairing, or
+    /// malformed-message failures.
+    pub fn accept_one(
+        &self,
+        mut stream: LocalSocketStream,
+        installation_token: &[u8],
+    ) -> Result<Option<SessionStreams>, String> {
+        if installation_token.len() != INSTALLATION_TOKEN_BYTES {
+            return Err("installation credential has an invalid length".to_string());
+        }
+        // The hello poll never shares this handle: pairing has not seen it
+        // yet, and it returns to blocking before the session threads own it.
+        stream
+            .set_nonblocking(true)
+            .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
+        let hello = read_session_hello(&mut stream)?;
+        stream
+            .set_nonblocking(false)
+            .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
+        if ClientKind::try_from(hello.client_kind).is_err() {
+            reject_session_stream(stream);
+            return Err("client kind is invalid".to_string());
+        }
+        if !matches!(
+            StreamRole::try_from(hello.stream_role),
+            Ok(StreamRole::Command | StreamRole::Event)
+        ) {
+            reject_session_stream(stream);
+            return Err("stream role is invalid".to_string());
+        }
+        let role = hello.stream_role;
+        if hello.session_nonce == 0 {
+            reject_session_stream(stream);
+            return Err("session nonce is invalid".to_string());
+        }
+        let release = current_release_identity();
+        if hello.release_identity != release.release_identity
+            || hello.install_generation != release.install_generation
+        {
+            send_session_fault(
+                &mut stream,
+                EngineFaultCode::VersionMismatch,
+                "desktop and resident engine release identities do not match",
+            )?;
+            return Err("session release identity does not match".to_string());
+        }
+        if !constant_time_equals(&hello.installation_token, installation_token) {
+            send_session_fault(
+                &mut stream,
+                EngineFaultCode::Unauthenticated,
+                "local engine authentication failed",
+            )?;
+            return Err("session authentication failed".to_string());
+        }
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reap_stale_pairs(&mut pending);
+        if pending.len() >= MAX_PENDING_PAIRS {
+            evict_oldest_pair(&mut pending);
+        }
+        let entry = pending
+            .entry(hello.session_nonce)
+            .or_insert_with(|| PendingPair {
+                command: None,
+                event: None,
+            });
+        let slot = if role == StreamRole::Command as i32 {
+            &mut entry.command
+        } else {
+            &mut entry.event
+        };
+        if slot.is_some() {
+            reject_session_stream(stream);
+            return Err("duplicate session stream".to_string());
+        }
+        *slot = Some(PendingStream {
+            stream,
+            first_seen: Instant::now(),
+        });
+        let complete = entry.command.is_some() && entry.event.is_some();
+        if !complete {
+            return Ok(None);
+        }
+        let Some(pair) = pending.remove(&hello.session_nonce) else {
+            return Err("paired session vanished during pairing".to_string());
+        };
+        let Some(command) = pair.command else {
+            return Err("paired session has no command stream".to_string());
+        };
+        let Some(event) = pair.event else {
+            return Err("paired session has no event stream".to_string());
+        };
+        // Session streams are blocking from here on: the command stream is
+        // read by exactly one serving thread and the event stream is written
+        // by exactly one writer thread, so neither handle is ever shared.
+        let pair = SessionStreams {
+            command: command.stream,
+            event: event.stream,
+        };
+        pair.command
+            .set_nonblocking(false)
+            .map_err(|_| "ipc_receive failed: local transport is unavailable".to_string())?;
+        pair.event
+            .set_nonblocking(false)
+            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())?;
+        Ok(Some(pair))
+    }
+}
+
+fn reap_stale_pairs(pending: &mut BTreeMap<u64, PendingPair>) {
+    let now = Instant::now();
+    pending.retain(|_, pair| {
+        let newest = pair
+            .command
+            .as_ref()
+            .map(|stream| stream.first_seen)
+            .into_iter()
+            .chain(pair.event.as_ref().map(|stream| stream.first_seen))
+            .max();
+        newest.is_some_and(|seen| now.duration_since(seen) < MAX_PENDING_AGE)
+    });
+}
+
+fn evict_oldest_pair(pending: &mut BTreeMap<u64, PendingPair>) {
+    let oldest = pending
+        .iter()
+        .min_by_key(|(_, pair)| {
+            pair.command
+                .as_ref()
+                .map(|stream| stream.first_seen)
+                .into_iter()
+                .chain(pair.event.as_ref().map(|stream| stream.first_seen))
+                .min()
+        })
+        .map(|(nonce, _)| *nonce);
+    if let Some(nonce) = oldest {
+        pending.remove(&nonce);
+    }
+}
+
+fn read_session_hello(stream: &mut LocalSocketStream) -> Result<ClientHello, String> {
+    let deadline = Instant::now()
+        .checked_add(SESSION_HELLO_TIMEOUT)
+        .ok_or_else(|| "ipc_receive failed: local engine connection closed".to_string())?;
+    let mut decoder = EnvelopeDecoder::try_new().map_err(|error| error.to_string())?;
+    loop {
+        let mut chunk = [0_u8; 16 * 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => {}
+            Ok(count) => {
+                let mut envelopes = decoder
+                    .push(&chunk[..count])
+                    .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?;
+                if let Some(envelope) = envelopes.pop() {
+                    return match envelope.payload {
+                        Some(envelope::Payload::ClientHello(hello)) => Ok(hello),
+                        _ => Err("client hello must be the first engine message".to_string()),
+                    };
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                return Err("ipc_receive failed: local engine connection closed".to_string());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("ipc_receive failed: local engine connection closed".to_string());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn send_session_fault(
+    stream: &mut LocalSocketStream,
+    code: EngineFaultCode,
+    redacted_detail: &str,
+) -> Result<(), String> {
+    let frame = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
+        payload: Some(envelope::Payload::Fault(Fault {
+            code: code as i32,
+            redacted_detail: redacted_detail.to_string(),
+        })),
+    })
+    .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
+    // Faulted streams never join a session, so restoring blocking mode here
+    // keeps the fault write reliable without sharing the handle.
+    stream
+        .set_nonblocking(false)
+        .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())?;
+    stream
+        .write_all(&frame)
+        .and_then(|()| stream.flush())
+        .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
+}
+
+fn reject_session_stream(stream: LocalSocketStream) {
+    drop(stream);
+}
+
 struct FramedConnection {
-    stream: interprocess::local_socket::RecvHalf,
+    command: LocalSocketStream,
     outgoing: Option<SyncSender<(u64, envelope::Payload)>>,
     writer: Option<thread::JoinHandle<()>>,
     decoder: EnvelopeDecoder,
@@ -1472,20 +1733,32 @@ struct FramedConnection {
 }
 
 impl FramedConnection {
-    fn new(stream: LocalSocketStream, state: EngineState) -> Result<Self, String> {
-        let (stream, writer) = stream.split();
+    fn new(pair: SessionStreams, state: EngineState) -> Result<Self, String> {
         let (outgoing, messages) = mpsc::sync_channel(IPC_OUTBOX_CAPACITY);
         let writer = thread::Builder::new()
             .name("axiusflow-engine-ipc-writer".to_string())
-            .spawn(move || write_ipc_messages(writer, &messages, &state))
+            .spawn(move || write_ipc_messages(pair.event, &messages, &state))
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            stream,
+            command: pair.command,
             outgoing: Some(outgoing),
             writer: Some(writer),
             decoder: EnvelopeDecoder::try_new().map_err(|error| error.to_string())?,
             pending: VecDeque::new(),
         })
+    }
+
+    fn send_ready(&mut self, ready: envelope::Payload) -> Result<(), String> {
+        let frame = encode_envelope(&Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            target_consumer_id: 0,
+            payload: Some(ready),
+        })
+        .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
+        self.command
+            .write_all(&frame)
+            .and_then(|()| self.command.flush())
+            .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
     }
 
     fn send(&mut self, payload: envelope::Payload) -> Result<(), String> {
@@ -1511,7 +1784,7 @@ impl FramedConnection {
             }
             let mut chunk = [0_u8; 16 * 1024];
             let count = self
-                .stream
+                .command
                 .read(&mut chunk)
                 .map_err(|error| match error.kind() {
                     io::ErrorKind::UnexpectedEof
@@ -1546,7 +1819,7 @@ impl Drop for FramedConnection {
 }
 
 fn write_ipc_messages(
-    mut writer: interprocess::local_socket::SendHalf,
+    mut writer: LocalSocketStream,
     messages: &Receiver<(u64, envelope::Payload)>,
     state: &EngineState,
 ) {
@@ -1599,116 +1872,74 @@ pub fn bind_listener(name: &str) -> io::Result<LocalSocketListener> {
     ListenerOptions::new().name(name).create_sync()
 }
 
-/// Handles one client against isolated default state. Intended for probes and tests.
+/// Handles one paired client session against isolated default state.
+/// Intended for probes and tests.
+///
+/// The pair must already be authenticated (see [`SessionPairer`]).
 ///
 /// # Errors
 /// Returns an error for I/O, framing, or malformed-message failures.
-pub fn serve_client(
-    stream: LocalSocketStream,
-    installation_token: &[u8],
-    engine_epoch: u64,
-) -> Result<(), String> {
-    serve_client_with_state(
-        stream,
-        installation_token,
-        engine_epoch,
-        &EngineState::default(),
-    )
+pub fn serve_client(pair: SessionStreams, engine_epoch: u64) -> Result<(), String> {
+    serve_client_with_state(pair, engine_epoch, &EngineState::default())
 }
 
-/// Serves one authenticated client against shared resident-engine state.
+/// Serves one paired client session against shared resident-engine state.
+///
+/// The pair must already be authenticated (see [`SessionPairer`]).
 ///
 /// # Errors
 /// Returns an error for I/O, framing, authentication setup, or malformed requests.
 pub fn serve_client_with_state(
-    stream: LocalSocketStream,
-    installation_token: &[u8],
+    pair: SessionStreams,
     engine_epoch: u64,
     state: &EngineState,
 ) -> Result<(), String> {
-    serve_client_with_services(stream, installation_token, engine_epoch, state, None, None)
+    serve_client_with_services(pair, engine_epoch, state, None, None)
 }
 
-/// Serves one authenticated client with workspace and resident market ownership.
+/// Serves one paired client session with workspace and resident market ownership.
+///
+/// The pair must already be authenticated (see [`SessionPairer`]).
 ///
 /// # Errors
 /// Returns an error for I/O, framing, authentication setup, or malformed requests.
 pub fn serve_client_with_market(
-    stream: LocalSocketStream,
-    installation_token: &[u8],
+    pair: SessionStreams,
     engine_epoch: u64,
     state: &EngineState,
     market: &MarketService,
 ) -> Result<(), String> {
-    serve_client_with_services(
-        stream,
-        installation_token,
-        engine_epoch,
-        state,
-        Some(market),
-        None,
-    )
+    serve_client_with_services(pair, engine_epoch, state, Some(market), None)
 }
 
-/// Serves one authenticated client with market ownership and process shutdown control.
+/// Serves one paired client session with market ownership and process shutdown control.
+///
+/// The pair must already be authenticated (see [`SessionPairer`]).
 ///
 /// # Errors
 /// Returns an error for I/O, framing, authentication setup, or malformed requests.
 pub fn serve_client_with_market_and_shutdown(
-    stream: LocalSocketStream,
-    installation_token: &[u8],
+    pair: SessionStreams,
     engine_epoch: u64,
     state: &EngineState,
     market: &MarketService,
     shutdown: &EngineShutdown,
 ) -> Result<(), String> {
-    serve_client_with_services(
-        stream,
-        installation_token,
-        engine_epoch,
-        state,
-        Some(market),
-        Some(shutdown),
-    )
+    serve_client_with_services(pair, engine_epoch, state, Some(market), Some(shutdown))
 }
 
 fn serve_client_with_services(
-    stream: LocalSocketStream,
-    installation_token: &[u8],
+    pair: SessionStreams,
     engine_epoch: u64,
     state: &EngineState,
     market: Option<&MarketService>,
     shutdown: Option<&EngineShutdown>,
 ) -> Result<(), String> {
-    if installation_token.len() != INSTALLATION_TOKEN_BYTES {
-        return Err("installation credential has an invalid length".to_string());
-    }
-    let mut connection = FramedConnection::new(stream, state.clone())?;
-    let envelope::Payload::ClientHello(hello) = connection.receive()? else {
-        return Err("client hello must be the first engine message".to_string());
-    };
-    if ClientKind::try_from(hello.client_kind).is_err() {
-        return Err("client kind is invalid".to_string());
-    }
+    let mut connection = FramedConnection::new(pair, state.clone())?;
     let release = current_release_identity();
-    if hello.release_identity != release.release_identity
-        || hello.install_generation != release.install_generation
-    {
-        connection.send(envelope::Payload::Fault(Fault {
-            code: EngineFaultCode::VersionMismatch as i32,
-            redacted_detail: "desktop and resident engine release identities do not match"
-                .to_string(),
-        }))?;
-        return Ok(());
-    }
-    if !constant_time_equals(&hello.installation_token, installation_token) {
-        connection.send(envelope::Payload::Fault(Fault {
-            code: EngineFaultCode::Unauthenticated as i32,
-            redacted_detail: "local engine authentication failed".to_string(),
-        }))?;
-        return Ok(());
-    }
-    connection.send(envelope::Payload::EngineReady(EngineReady {
+    // Readiness is published on the command stream only; the event stream
+    // carries replies and pushed market events.
+    connection.send_ready(envelope::Payload::EngineReady(EngineReady {
         protocol_version: PROTOCOL_VERSION,
         engine_epoch,
         workspace_revision: state.workspace().workspace_revision,
@@ -2288,7 +2519,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use interprocess::local_socket::traits::Listener as _;
+    use interprocess::local_socket::{prelude::LocalSocketListener, traits::Listener as _};
     use sysinfo::{Pid, ProcessesToUpdate, System};
 
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
@@ -2301,8 +2532,9 @@ mod tests {
 
     use super::{
         COINBASE_PRICE_SCALE, COINBASE_QUANTITY_SCALE, EngineShutdown, EngineState, MarketService,
-        RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, bind_listener, default_workspace, migrate_workspace,
-        serve_client_with_market, serve_client_with_market_and_shutdown, sync_layout_hot_series,
+        RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, SessionPairer, SessionStreams, bind_listener,
+        default_workspace, migrate_workspace, serve_client_with_market,
+        serve_client_with_market_and_shutdown, sync_layout_hot_series,
     };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
@@ -2320,6 +2552,24 @@ mod tests {
             std::process::id(),
             NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    /// Accepts both streams of one paired test session in any arrival order.
+    fn accept_session_pair(
+        listener: &LocalSocketListener,
+        installation_token: &[u8],
+    ) -> SessionStreams {
+        let pairer = SessionPairer::new();
+        for _ in 0..2 {
+            let stream = listener.accept().expect("accept session stream");
+            if let Some(pair) = pairer
+                .accept_one(stream, installation_token)
+                .expect("pair session stream")
+            {
+                return pair;
+            }
+        }
+        panic!("paired session never completed");
     }
 
     #[derive(Clone, Copy)]
@@ -2616,7 +2866,7 @@ mod tests {
         let token = [11_u8; 32];
         let server_market = market.clone();
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept performance client");
+            let pair = accept_session_pair(&listener, &token);
             let state = EngineState::default();
             state.record_installed_instrument(&InstallProviderInstrument {
                 provider: "coinbase".to_string(),
@@ -2630,7 +2880,7 @@ mod tests {
                 quantity_scale: COINBASE_QUANTITY_SCALE,
                 entitlement_id: ENTITLEMENT_CLASS.to_string(),
             });
-            serve_client_with_market(stream, &token, 1, &state, &server_market)
+            serve_client_with_market(pair, 1, &state, &server_market)
                 .expect("serve performance client");
         });
         let mut client = EngineClient::connect(&performance_socket_name, &token)
@@ -2717,8 +2967,8 @@ mod tests {
         let attach_server = thread::spawn(move || {
             let state = EngineState::default();
             for _ in 0..attach_samples {
-                let stream = attach_listener.accept().expect("accept attach client");
-                serve_client_with_market(stream, &token, 1, &state, &attach_market)
+                let pair = accept_session_pair(&attach_listener, &token);
+                serve_client_with_market(pair, 1, &state, &attach_market)
                     .expect("serve attach client");
             }
         });
@@ -2835,10 +3085,9 @@ mod tests {
         let market =
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept lifecycle client");
+            let pair = accept_session_pair(&listener, &token);
             serve_client_with_market_and_shutdown(
-                stream,
-                &token,
+                pair,
                 17,
                 &server_state,
                 &market,
@@ -2888,8 +3137,8 @@ mod tests {
         let market = MarketService::start_fixture(fixture_history())
             .expect("engine market owner starts without a realtime provider");
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept pre-provider client");
-            serve_client_with_market(stream, &token, 41, &EngineState::default(), &market)
+            let pair = accept_session_pair(&listener, &token);
+            serve_client_with_market(pair, 41, &EngineState::default(), &market)
                 .expect("serve pre-provider client");
         });
 
@@ -2916,8 +3165,8 @@ mod tests {
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
         let server_market = market.clone();
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept consumer cleanup client");
-            serve_client_with_market(stream, &token, 21, &EngineState::default(), &server_market)
+            let pair = accept_session_pair(&listener, &token);
+            serve_client_with_market(pair, 21, &EngineState::default(), &server_market)
                 .expect("serve consumer cleanup client");
         });
 
@@ -2970,8 +3219,8 @@ mod tests {
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
         let server_market = market.clone();
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept realignment client");
-            serve_client_with_market(stream, &token, 23, &EngineState::default(), &server_market)
+            let pair = accept_session_pair(&listener, &token);
+            serve_client_with_market(pair, 23, &EngineState::default(), &server_market)
                 .expect("serve realignment client");
         });
 
@@ -3019,8 +3268,8 @@ mod tests {
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
         let server_market = market.clone();
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept disconnect cleanup client");
-            serve_client_with_market(stream, &token, 23, &EngineState::default(), &server_market)
+            let pair = accept_session_pair(&listener, &token);
+            serve_client_with_market(pair, 23, &EngineState::default(), &server_market)
                 .expect("serve disconnect cleanup client");
         });
 
@@ -3061,15 +3310,22 @@ mod tests {
             MarketService::start_fixture(fixture_history()).expect("fixture market starts");
         let server_market = market.clone();
         let server = thread::spawn(move || {
+            let pairer = SessionPairer::new();
             let mut sessions = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..4 {
                 let stream = listener.accept().expect("accept local client");
-                let state = server_state.clone();
-                let market = server_market.clone();
-                sessions.push(thread::spawn(move || {
-                    serve_client_with_market(stream, &token, 29, &state, &market)
-                        .expect("serve local client");
-                }));
+                let pairer = pairer.clone();
+                if let Some(pair) = pairer
+                    .accept_one(stream, &token)
+                    .expect("pair local client session")
+                {
+                    let state = server_state.clone();
+                    let market = server_market.clone();
+                    sessions.push(thread::spawn(move || {
+                        serve_client_with_market(pair, 29, &state, &market)
+                            .expect("serve local client");
+                    }));
+                }
             }
             for session in sessions {
                 session.join().expect("join local client session");
@@ -3133,9 +3389,8 @@ mod tests {
         let state = EngineState::default();
         let server_state = state.clone();
         let server = thread::spawn(move || {
-            let stream = listener.accept().expect("accept market client");
-            serve_client_with_market(stream, &token, 9, &server_state, &market)
-                .expect("serve market client");
+            let pair = accept_session_pair(&listener, &token);
+            serve_client_with_market(pair, 9, &server_state, &market).expect("serve market client");
         });
         let mut client =
             EngineClient::connect(&socket_name, &token).expect("connect market client");

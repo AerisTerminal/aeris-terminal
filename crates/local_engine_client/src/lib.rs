@@ -24,13 +24,13 @@ use axiusflow_engine_protocol::{
     ProviderInstrumentInstalled, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
     SearchProviderInstruments, SelectProviderInstrument, SeriesDemand, SeriesKey,
     SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWorkspaceLayout,
-    ShutdownEngine, ViewportDemand, VisibilityDemand, WorkspaceState, WorkspaceTabState,
-    encode_envelope, envelope,
+    ShutdownEngine, StreamRole, ViewportDemand, VisibilityDemand, WorkspaceState,
+    WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{
     BackgroundService, CredentialVault, NativeCredentialVault, current_release_identity,
 };
-use interprocess::local_socket::{GenericNamespaced, ToNsName as _, prelude::*};
+use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*};
 use zeroize::Zeroizing;
 
 /// Stable per-user local socket endpoint generation.
@@ -39,6 +39,13 @@ pub const ENGINE_SOCKET_NAME: &str = "axiusflow-engine-v10";
 pub const INSTALLATION_TOKEN_BYTES: usize = 32;
 /// Maximum time allowed for a newly spawned engine to publish readiness.
 pub const ENGINE_START_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum time allowed for one local handshake round trip (hello, readiness,
+/// legacy shutdown). A live resident answers in milliseconds; expiry means
+/// the endpoint is wedged or gone.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time allowed for one session frame write. Frames are small and a
+/// live resident always drains its command stream; expiry means it is wedged.
+const SESSION_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const IPC_INBOX_CAPACITY: usize = 256;
@@ -103,6 +110,7 @@ pub struct EngineClient {
 struct EngineConnectionFailure {
     detail: String,
     endpoint_reached: bool,
+    legacy_stopped: bool,
 }
 
 impl EngineClient {
@@ -118,51 +126,103 @@ impl EngineClient {
         name: &str,
         installation_token: &[u8],
     ) -> Result<Self, EngineConnectionFailure> {
-        let name =
+        let ns_name =
             name.to_ns_name::<GenericNamespaced>()
                 .map_err(|error| EngineConnectionFailure {
                     detail: error.to_string(),
                     endpoint_reached: false,
+                    legacy_stopped: false,
                 })?;
-        let stream = LocalSocketStream::connect(name).map_err(|error| EngineConnectionFailure {
-            detail: error.to_string(),
-            endpoint_reached: false,
-        })?;
-        let mut connection = FramedConnection::new(stream).map_err(reached_failure)?;
         let release = current_release_identity();
-        connection
-            .send(envelope::Payload::ClientHello(ClientHello {
-                protocol_version: PROTOCOL_VERSION,
-                installation_token: installation_token.to_vec(),
-                client_kind: ClientKind::Ui as i32,
-                release_identity: release.release_identity.clone(),
-                install_generation: release.install_generation,
-            }))
-            .map_err(reached_failure)?;
-        let ready = match connection.receive().map_err(reached_failure)? {
-            envelope::Payload::EngineReady(ready) => ready,
-            envelope::Payload::Fault(fault) => {
-                return Err(EngineConnectionFailure {
-                    detail: fault.redacted_detail,
-                    endpoint_reached: true,
-                });
+        let session_nonce = fresh_session_nonce()?;
+        // The command stream is required: a missing endpoint means no resident
+        // engine is listening at all.
+        let mut command = open_session_stream(
+            ns_name.clone(),
+            installation_token,
+            &release,
+            session_nonce,
+            StreamRole::Command,
+            false,
+        )?
+        .expect("command stream is required");
+        // The event stream is optional at this point: a legacy single-stream
+        // resident never accepts it, and the readiness reply below reveals
+        // which generation answered. A few attempts cover transient pipe
+        // instance exhaustion; a persistent refusal means a legacy resident.
+        let mut event = None;
+        for _ in 0..3 {
+            match open_session_stream(
+                ns_name.clone(),
+                installation_token,
+                &release,
+                session_nonce,
+                StreamRole::Event,
+                true,
+            )? {
+                Some(stream) => {
+                    event = Some(stream);
+                    break;
+                }
+                None => thread::sleep(Duration::from_millis(20)),
             }
-            _ => {
-                return Err(EngineConnectionFailure {
-                    detail: "engine did not complete readiness negotiation".to_string(),
+        }
+        // Readiness always arrives on the command stream, for both paired and
+        // legacy sessions. Handshake I/O polls the nonblocking command stream
+        // with a deadline so a wedged endpoint fails bounded; no reader thread
+        // exists yet, so no transport handle is ever shared.
+        let handshake_deadline =
+            Instant::now()
+                .checked_add(HANDSHAKE_TIMEOUT)
+                .ok_or_else(|| EngineConnectionFailure {
+                    detail: "handshake deadline overflowed".to_string(),
                     endpoint_reached: true,
-                });
-            }
-        };
-        if ready.release_identity != release.release_identity
-            || ready.install_generation != release.install_generation
-        {
-            return Err(EngineConnectionFailure {
-                detail: "resident engine release identity does not match the active desktop"
-                    .to_string(),
+                    legacy_stopped: false,
+                })?;
+        let mut handshake_decoder =
+            EnvelopeDecoder::try_new().map_err(|error| EngineConnectionFailure {
+                detail: error.to_string(),
                 endpoint_reached: true,
+                legacy_stopped: false,
+            })?;
+        let ready = read_session_ready(
+            &mut command,
+            &mut handshake_decoder,
+            &release,
+            handshake_deadline,
+        )?;
+        if ready.lifecycle_contract_revision == 0 {
+            // A legacy single-stream resident answered. Shut it down over the
+            // same strictly sequential command stream, then report replacement
+            // so the caller starts the paired generation.
+            drop(event);
+            shutdown_legacy_engine(&mut command, &mut handshake_decoder, handshake_deadline)
+                .map_err(|detail| EngineConnectionFailure {
+                    detail,
+                    endpoint_reached: true,
+                    legacy_stopped: false,
+                })?;
+            return Err(EngineConnectionFailure {
+                detail: "resident engine is stopping for a compatible replacement".to_string(),
+                endpoint_reached: true,
+                legacy_stopped: true,
             });
         }
+        if !compatible_lifecycle_contract_ready(&ready) {
+            return Err(EngineConnectionFailure {
+                detail: "resident engine lifecycle contract is newer than this desktop".to_string(),
+                endpoint_reached: true,
+                legacy_stopped: false,
+            });
+        }
+        let Some(event) = event else {
+            return Err(EngineConnectionFailure {
+                detail: "resident engine did not pair the event stream".to_string(),
+                endpoint_reached: true,
+                legacy_stopped: false,
+            });
+        };
+        let connection = FramedConnection::new(command, event).map_err(reached_failure)?;
         Ok(Self {
             connection,
             ready,
@@ -610,7 +670,220 @@ fn reached_failure(detail: String) -> EngineConnectionFailure {
     EngineConnectionFailure {
         detail,
         endpoint_reached: true,
+        legacy_stopped: false,
     }
+}
+
+fn unreached_failure(detail: String) -> EngineConnectionFailure {
+    EngineConnectionFailure {
+        detail,
+        endpoint_reached: false,
+        legacy_stopped: false,
+    }
+}
+
+fn fresh_session_nonce() -> Result<u64, EngineConnectionFailure> {
+    let mut nonce_bytes = [0_u8; 8];
+    getrandom::fill(&mut nonce_bytes)
+        .map_err(|_| unreached_failure("system CSPRNG unavailable".to_string()))?;
+    Ok(u64::from_le_bytes(nonce_bytes).max(1))
+}
+
+/// Opens one directed session stream and sends its hello.
+///
+/// The command stream is nonblocking from birth: handshake reads poll it with
+/// a deadline because a wedged endpoint must fail bounded instead of hanging
+/// a blocking read. The event stream stays blocking for prompt close
+/// detection once its reader thread owns it; its hello is written before any
+/// thread shares the handle.
+///
+/// When `optional` is set, a refused connection resolves to `None` instead of
+/// an error so a legacy single-stream resident can still be replaced.
+fn open_session_stream(
+    name: interprocess::local_socket::Name<'_>,
+    installation_token: &[u8],
+    release: &axiusflow_platform_runtime::ReleaseIdentity,
+    session_nonce: u64,
+    stream_role: StreamRole,
+    optional: bool,
+) -> Result<Option<LocalSocketStream>, EngineConnectionFailure> {
+    let mut stream = match LocalSocketStream::connect(name) {
+        Ok(stream) => stream,
+        Err(_) if optional => return Ok(None),
+        Err(error) => return Err(unreached_failure(error.to_string())),
+    };
+    if stream_role == StreamRole::Command {
+        stream
+            .set_nonblocking(true)
+            .map_err(|error| reached_failure(error.to_string()))?;
+    }
+    let deadline = Instant::now()
+        .checked_add(HANDSHAKE_TIMEOUT)
+        .ok_or_else(|| reached_failure("handshake deadline overflowed".to_string()))?;
+    send_hello(
+        &mut stream,
+        installation_token,
+        release,
+        session_nonce,
+        stream_role,
+        deadline,
+    )
+    .map_err(reached_failure)?;
+    Ok(Some(stream))
+}
+
+/// Reads the readiness reply on the command stream and checks release identity.
+fn read_session_ready(
+    command: &mut LocalSocketStream,
+    decoder: &mut EnvelopeDecoder,
+    release: &axiusflow_platform_runtime::ReleaseIdentity,
+    deadline: Instant,
+) -> Result<EngineReady, EngineConnectionFailure> {
+    let ready = match read_one_payload(command, decoder, deadline).map_err(reached_failure)? {
+        envelope::Payload::EngineReady(ready) => ready,
+        envelope::Payload::Fault(fault) => {
+            return Err(EngineConnectionFailure {
+                detail: fault.redacted_detail,
+                endpoint_reached: true,
+                legacy_stopped: false,
+            });
+        }
+        _ => {
+            return Err(EngineConnectionFailure {
+                detail: "engine did not complete readiness negotiation".to_string(),
+                endpoint_reached: true,
+                legacy_stopped: false,
+            });
+        }
+    };
+    if ready.release_identity != release.release_identity
+        || ready.install_generation != release.install_generation
+    {
+        return Err(EngineConnectionFailure {
+            detail: "resident engine release identity does not match the active desktop"
+                .to_string(),
+            endpoint_reached: true,
+            legacy_stopped: false,
+        });
+    }
+    Ok(ready)
+}
+
+fn send_hello(
+    stream: &mut LocalSocketStream,
+    installation_token: &[u8],
+    release: &axiusflow_platform_runtime::ReleaseIdentity,
+    session_nonce: u64,
+    stream_role: StreamRole,
+    deadline: Instant,
+) -> Result<(), String> {
+    let frame = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
+        payload: Some(envelope::Payload::ClientHello(ClientHello {
+            protocol_version: PROTOCOL_VERSION,
+            installation_token: installation_token.to_vec(),
+            client_kind: ClientKind::Ui as i32,
+            release_identity: release.release_identity.clone(),
+            install_generation: release.install_generation,
+            session_nonce,
+            stream_role: stream_role as i32,
+        })),
+    })
+    .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
+    write_frame(stream, &frame, deadline)
+}
+
+/// Writes one complete frame without ever blocking the transport handle:
+/// temporary backpressure is retried until the deadline, anything else fails.
+fn write_frame(
+    stream: &mut LocalSocketStream,
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut written = 0;
+    while written < frame.len() {
+        match stream.write(&frame[written..]) {
+            Ok(0) => {}
+            Ok(count) => written += count,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                return Err("ipc_send failed: local transport is unavailable".to_string());
+            }
+        }
+        if written < frame.len() {
+            if Instant::now() >= deadline {
+                return Err("ipc_send failed: local transport is busy".to_string());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    stream
+        .flush()
+        .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
+}
+
+/// Reads one complete payload, polling a nonblocking handshake stream until
+/// the deadline. A zero-byte read here is temporary no-data, not peer
+/// closure: the deadline bounds a wedged or departed peer.
+fn read_one_payload(
+    stream: &mut LocalSocketStream,
+    decoder: &mut EnvelopeDecoder,
+    deadline: Instant,
+) -> Result<envelope::Payload, String> {
+    loop {
+        let mut chunk = [0_u8; 16 * 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => {}
+            Ok(count) => {
+                let mut envelopes = decoder
+                    .push(&chunk[..count])
+                    .map_err(|_| "ipc_receive failed: local message is invalid".to_string())?;
+                if let Some(envelope) = envelopes.pop() {
+                    return envelope.payload.ok_or_else(|| {
+                        "ipc_receive failed: engine message has no payload".to_string()
+                    });
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                return Err("ipc_receive failed: local engine connection closed".to_string());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("ipc_receive failed: local engine connection closed".to_string());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Shuts down a legacy single-stream resident over an already-authenticated
+/// command stream: the readiness reply was already consumed by the caller.
+fn shutdown_legacy_engine(
+    command: &mut LocalSocketStream,
+    decoder: &mut EnvelopeDecoder,
+    deadline: Instant,
+) -> Result<(), String> {
+    let frame = encode_envelope(&Envelope {
+        protocol_version: PROTOCOL_VERSION,
+        target_consumer_id: 0,
+        payload: Some(envelope::Payload::ShutdownEngine(ShutdownEngine {})),
+    })
+    .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
+    write_frame(command, &frame, deadline)?;
+    match read_one_payload(command, decoder, deadline)? {
+        envelope::Payload::Goodbye(_) => Ok(()),
+        envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+        _ => Err("engine returned an unexpected shutdown reply".to_string()),
+    }
+}
+
+fn compatible_lifecycle_contract_ready(ready: &EngineReady) -> bool {
+    ready.lifecycle_contract_revision == LIFECYCLE_CONTRACT_REVISION
 }
 
 /// Resolves the engine executable installed beside the current desktop binary.
@@ -648,19 +921,18 @@ fn connect_or_start_engine_named(
     start_timeout: Duration,
 ) -> Result<EngineClient, String> {
     let mut engine_started = false;
-    let mut replacement_requested = false;
+    let deadline = Instant::now() + start_timeout;
     let mut last_error =
         match EngineClient::connect_with_reachability(socket_name, installation_token) {
-            Ok(client) if compatible_lifecycle_contract(&client) => return Ok(client),
-            Ok(client) if client.ready().lifecycle_contract_revision == 0 => {
-                client.shutdown_engine()?;
-                replacement_requested = true;
-                "resident engine is stopping for a compatible replacement".to_string()
-            }
-            Ok(_) => {
-                return Err(
-                    "resident engine lifecycle contract is newer than this desktop".to_string(),
-                );
+            Ok(client) => return Ok(client),
+            Err(failure) if failure.legacy_stopped => {
+                replace_legacy_engine(
+                    socket_name,
+                    engine_executable,
+                    &mut engine_started,
+                    deadline,
+                )?;
+                failure.detail
             }
             Err(failure) => {
                 if !failure.endpoint_reached {
@@ -670,21 +942,17 @@ fn connect_or_start_engine_named(
                 failure.detail
             }
         };
-    let deadline = Instant::now() + start_timeout;
     while Instant::now() < deadline {
         match EngineClient::connect_with_reachability(socket_name, installation_token) {
-            Ok(client) if compatible_lifecycle_contract(&client) => return Ok(client),
-            Ok(client) if client.ready().lifecycle_contract_revision == 0 => {
-                if !replacement_requested {
-                    client.shutdown_engine()?;
-                    replacement_requested = true;
-                }
-                last_error = "resident engine is stopping for a compatible replacement".to_string();
-            }
-            Ok(_) => {
-                return Err(
-                    "resident engine lifecycle contract is newer than this desktop".to_string(),
-                );
+            Ok(client) => return Ok(client),
+            Err(failure) if failure.legacy_stopped => {
+                replace_legacy_engine(
+                    socket_name,
+                    engine_executable,
+                    &mut engine_started,
+                    deadline,
+                )?;
+                last_error = failure.detail;
             }
             Err(failure) => {
                 if !failure.endpoint_reached && !engine_started {
@@ -699,8 +967,36 @@ fn connect_or_start_engine_named(
     Err(last_error)
 }
 
-fn compatible_lifecycle_contract(client: &EngineClient) -> bool {
-    client.ready().lifecycle_contract_revision == LIFECYCLE_CONTRACT_REVISION
+/// Waits for a stopped legacy engine to release its endpoint, then starts the
+/// installed replacement once the endpoint is free.
+///
+/// Probing the endpoint by binding avoids blind reconnects against a dying
+/// resident whose accepted connections no longer answer.
+fn replace_legacy_engine(
+    socket_name: &str,
+    engine_executable: &Path,
+    engine_started: &mut bool,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut released = false;
+    while Instant::now() < deadline {
+        let probe = socket_name
+            .to_ns_name::<GenericNamespaced>()
+            .map(|name| ListenerOptions::new().name(name).create_sync());
+        match probe {
+            Ok(listener) => {
+                drop(listener);
+                released = true;
+                break;
+            }
+            Err(_) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    if released && !*engine_started {
+        start_engine_process(engine_executable)?;
+        *engine_started = true;
+    }
+    Ok(())
 }
 
 fn start_engine_process(engine_executable: &Path) -> Result<(), String> {
@@ -712,38 +1008,36 @@ fn start_engine_process(engine_executable: &Path) -> Result<(), String> {
 }
 
 struct FramedConnection {
-    writer: interprocess::local_socket::SendHalf,
+    command: LocalSocketStream,
     incoming: Receiver<Result<Envelope, String>>,
     stop: Arc<AtomicBool>,
-    nonblocking_writer: bool,
 }
 
 impl FramedConnection {
-    fn new(stream: LocalSocketStream) -> Result<Self, String> {
-        let nonblocking_writer = if stream
-            .set_recv_timeout(Some(Duration::from_millis(100)))
-            .is_ok()
-        {
-            false
-        } else {
-            stream
-                .set_nonblocking(true)
-                .map_err(|error| error.to_string())?;
-            true
-        };
-        let (reader, writer) = stream.split();
+    /// Forms a paired session from a write-only command stream and a
+    /// read-only event stream.
+    ///
+    /// Neither stream is ever split: each transport handle has exactly one
+    /// owner and one direction, so a blocking read can never stall a
+    /// concurrent write on any platform.
+    fn new(command: LocalSocketStream, event: LocalSocketStream) -> Result<Self, String> {
+        // Where the platform supports receive timeouts the event reader wakes
+        // periodically to observe `stop`; elsewhere the blocked read unblocks
+        // on data or peer closure. `set_recv_timeout` is unsupported on
+        // Windows named pipes, so it is only attempted where it exists.
+        #[cfg(unix)]
+        let _ = event.set_recv_timeout(Some(Duration::from_millis(100)));
         let (incoming_tx, incoming) = mpsc::sync_channel(IPC_INBOX_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
         thread::Builder::new()
             .name("axiusflow-desktop-ipc-reader".to_string())
-            .spawn(move || read_ipc_messages(reader, &incoming_tx, &reader_stop))
+            .spawn(move || read_ipc_messages(event, &incoming_tx, &reader_stop))
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            writer,
+            command,
             incoming,
             stop,
-            nonblocking_writer,
         })
     }
 
@@ -754,26 +1048,10 @@ impl FramedConnection {
             payload: Some(payload),
         })
         .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
-        if self.nonblocking_writer {
-            write_nonblocking_frame(&mut self.writer, &frame)
-        } else {
-            self.writer
-                .write_all(&frame)
-                .and_then(|()| self.writer.flush())
-                .map_err(|_| "ipc_send failed: local transport is unavailable".to_string())
-        }
-    }
-
-    fn receive(&mut self) -> Result<envelope::Payload, String> {
-        let (consumer_id, payload) = self.receive_routed()?;
-        if consumer_id == 0 {
-            Ok(payload)
-        } else {
-            Err(
-                "ipc_receive failed: market event arrived while awaiting a command reply"
-                    .to_string(),
-            )
-        }
+        let deadline = Instant::now()
+            .checked_add(SESSION_SEND_TIMEOUT)
+            .ok_or_else(|| "ipc_send failed: local transport is busy".to_string())?;
+        write_frame(&mut self.command, &frame, deadline)
     }
 
     fn receive_routed(&mut self) -> Result<(u64, envelope::Payload), String> {
@@ -803,28 +1081,6 @@ impl Drop for FramedConnection {
     }
 }
 
-fn write_nonblocking_frame(
-    writer: &mut interprocess::local_socket::SendHalf,
-    frame: &[u8],
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut written = 0;
-    while written < frame.len() {
-        match writer.write(&frame[written..]) {
-            Ok(0) => return Err("ipc_send failed: local engine connection closed".to_string()),
-            Ok(count) => written += count,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err("ipc_send failed: local transport is busy".to_string());
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err(_) => return Err("ipc_send failed: local transport is unavailable".to_string()),
-        }
-    }
-    Ok(())
-}
-
 fn routed_payload(message: Envelope) -> Result<(u64, envelope::Payload), String> {
     let payload = message
         .payload
@@ -833,7 +1089,7 @@ fn routed_payload(message: Envelope) -> Result<(u64, envelope::Payload), String>
 }
 
 fn read_ipc_messages(
-    mut reader: interprocess::local_socket::RecvHalf,
+    mut reader: LocalSocketStream,
     incoming: &mpsc::SyncSender<Result<Envelope, String>>,
     stop: &AtomicBool,
 ) {
@@ -850,6 +1106,9 @@ fn read_ipc_messages(
         }
         let mut chunk = [0_u8; 16 * 1024];
         let count = match reader.read(&mut chunk) {
+            // The reader is always blocking (see `FramedConnection::new`), so
+            // a zero-byte read genuinely means the peer closed, on every
+            // platform. Never treat it as temporary no-data.
             Ok(0) => {
                 let _ = incoming.send(Err(
                     "ipc_receive failed: local engine connection closed".to_string()
@@ -904,7 +1163,7 @@ mod tests {
     };
 
     use interprocess::local_socket::{
-        GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*,
+        GenericNamespaced, ListenerNonblockingMode, ListenerOptions, ToNsName as _, prelude::*,
     };
 
     #[cfg(target_os = "windows")]
@@ -914,7 +1173,8 @@ mod tests {
         WorkspaceState,
     };
     use axiusflow_engine_protocol::{
-        EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, encode_envelope, envelope,
+        EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, StreamRole, encode_envelope,
+        envelope,
     };
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -977,6 +1237,45 @@ mod tests {
         server.join().expect("join accepting server");
     }
 
+    /// Drains one legacy fixture listener and returns its command-role
+    /// arrival. Arrival order is not deterministic under load, and a legacy
+    /// client may only ever open its command stream, so arrivals are polled
+    /// with a bound instead of being awaited unconditionally.
+    fn accept_legacy_command_stream(listener: &LocalSocketListener) -> LocalSocketStream {
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .expect("poll replacement arrivals");
+        let mut command = None;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while command.is_none() && Instant::now() < deadline {
+            match listener.accept() {
+                Ok(mut stream) => {
+                    let mut decoder = EnvelopeDecoder::try_new().expect("decoder");
+                    let mut bytes = [0_u8; 4096];
+                    let count = stream.read(&mut bytes).expect("read client hello");
+                    let hello = decoder.push(&bytes[..count]).expect("decode hello");
+                    let payload = hello.first().and_then(|message| message.payload.as_ref());
+                    assert!(
+                        matches!(payload, Some(envelope::Payload::ClientHello(_))),
+                        "legacy resident expects a client hello"
+                    );
+                    if matches!(
+                        payload,
+                        Some(envelope::Payload::ClientHello(hello))
+                            if hello.stream_role == StreamRole::Command as i32
+                    ) {
+                        assert!(command.replace(stream).is_none());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept replacement probe: {error}"),
+            }
+        }
+        command.expect("legacy command stream arrives")
+    }
+
     #[test]
     fn lifecycle_revision_zero_resident_is_shutdown_before_replacement_start() {
         let socket_name = format!(
@@ -995,15 +1294,9 @@ mod tests {
         let shutdown_received = Arc::new(AtomicBool::new(false));
         let server_shutdown = Arc::clone(&shutdown_received);
         let server = thread::spawn(move || {
-            let mut stream = listener.accept().expect("accept replacement probe");
+            let mut stream = accept_legacy_command_stream(&listener);
             let mut decoder = EnvelopeDecoder::try_new().expect("decoder");
             let mut bytes = [0_u8; 4096];
-            let count = stream.read(&mut bytes).expect("read client hello");
-            let hello = decoder.push(&bytes[..count]).expect("decode hello");
-            assert!(matches!(
-                hello.first().and_then(|message| message.payload.as_ref()),
-                Some(envelope::Payload::ClientHello(_))
-            ));
             let ready = encode_envelope(&Envelope {
                 protocol_version: PROTOCOL_VERSION,
                 target_consumer_id: 0,
@@ -1074,25 +1367,54 @@ mod tests {
             .create_sync()
             .expect("bind mismatched endpoint");
         let server = thread::spawn(move || {
-            let mut stream = listener.accept().expect("accept release probe");
-            let mut bytes = [0_u8; 4096];
-            let count = stream.read(&mut bytes).expect("read client hello");
-            assert!(count > 0);
-            let ready = encode_envelope(&Envelope {
-                protocol_version: PROTOCOL_VERSION,
-                target_consumer_id: 0,
-                payload: Some(envelope::Payload::EngineReady(EngineReady {
-                    protocol_version: PROTOCOL_VERSION,
-                    engine_epoch: 1,
-                    workspace_revision: 0,
-                    lifecycle_contract_revision:
-                        axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
-                    release_identity: "superseded-release".to_string(),
-                    install_generation: 99,
-                })),
-            })
-            .expect("encode mismatched readiness");
-            stream.write_all(&ready).expect("send mismatched readiness");
+            // Answer every arrival: arrival order is not deterministic under
+            // load, and the client reads its verdict on the command stream.
+            // Arrivals are polled with a bound because a legacy client may
+            // only ever open one stream.
+            listener
+                .set_nonblocking(ListenerNonblockingMode::Accept)
+                .expect("poll release arrivals");
+            let mut answered = 0_usize;
+            let mut quiet_since = None;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok(mut stream) => {
+                        let mut bytes = [0_u8; 4096];
+                        let count = stream.read(&mut bytes).expect("read client hello");
+                        assert!(count > 0);
+                        let ready = encode_envelope(&Envelope {
+                            protocol_version: PROTOCOL_VERSION,
+                            target_consumer_id: 0,
+                            payload: Some(envelope::Payload::EngineReady(EngineReady {
+                                protocol_version: PROTOCOL_VERSION,
+                                engine_epoch: 1,
+                                workspace_revision: 0,
+                                lifecycle_contract_revision:
+                                    axiusflow_engine_protocol::LIFECYCLE_CONTRACT_REVISION,
+                                release_identity: "superseded-release".to_string(),
+                                install_generation: 99,
+                            })),
+                        })
+                        .expect("encode mismatched readiness");
+                        let _ = stream.write_all(&ready);
+                        answered += 1;
+                        quiet_since = None;
+                        if answered >= 2 {
+                            return;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        let quiet = *quiet_since.get_or_insert_with(Instant::now);
+                        if answered > 0 && quiet.elapsed() > Duration::from_millis(200) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept release probe: {error}"),
+                }
+            }
+            assert!(answered > 0, "mismatched probe arrives");
         });
         assert_eq!(
             EngineClient::connect(&socket_name, &[9_u8; 32])
