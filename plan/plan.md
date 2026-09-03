@@ -874,6 +874,18 @@ Rithmic feed, the self-hosted `[rithmic-credentials]` runner, and
 maintainer approval — so the exit gate stays closed and phase 5 remains
 blocked.
 
+Maintainer launch handover (same day, this batch): the release desktop and
+engine were rebuilt from `d5da944` with `AXIUSFLOW_INSTALL_GENERATION=44`
+and launched from the exact binaries (engine PID 16880 resident, desktop
+PID 16980 with a responding native window). The authenticated status probe
+confirms the intended pair: PID match, one attached desktop client,
+`coinbase:2:gen1` Online with 9 retained series and 28,368 bars,
+`rithmic:0:gen0` with no demand yet, shutdown `Running`. Rithmic vault
+credentials remain provisioned, so `--rithmic-test` or in-window Rithmic
+selection will run the live engine path; tick bars and history still
+resolve only when the test feed carries prints. Handed over running for
+maintainer-driven use; no graceful shutdown was issued.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
