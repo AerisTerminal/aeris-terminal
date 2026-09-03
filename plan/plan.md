@@ -609,6 +609,14 @@ once CI authentication is repaired; it does not itself constitute packaging,
 launch, update, rollback, or uninstall evidence. Verification on Windows:
 formatting passes and architecture checks pass 35/35.
 
+Release-pair CI execution evidence (same day, run `33715438347`): all three
+native jobs reached checkout, private-dependency authentication setup, and
+formatting, then failed during workspace clippy while fetching the pinned
+private Nucleus revision with `Invalid username or token`. Consequently the
+new release build and upload steps were not reached. This is the same
+credential-only failure observed in the prior run, now confirmed after the
+release-pair workflow change; no release artifact exists from CI yet.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
