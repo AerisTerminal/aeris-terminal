@@ -191,6 +191,50 @@ release approval.
    physical and credentialed results for release approval, and add architecture checks that reject
    unguarded Unix-only filesystem or process assumptions in shared platform code.
 
+### Windows stabilization execution record - 2026-09-03
+
+Work-order items 1 through 3 are implemented on `main` at `9ba934c`; items 4
+through 8 remain open, so the cross-platform exit gate below is still closed
+and phase 5 remains blocked.
+
+- Item 1: the split-stream IPC is replaced by paired sessions. Each session
+  owns a write-only command stream and a read-only event stream correlated by
+  `session_nonce` and `StreamRole` in `ClientHello` (`PROTOCOL_VERSION` 16, a
+  deliberate wire change). No stream is ever split, so a blocking read never
+  shares a transport handle with a concurrent write; temporary no-data is
+  distinguished from peer closure on every platform, handshakes are bounded,
+  and a legacy single-stream resident shuts down over the raw command stream
+  before the replacement starts. Regression coverage: repeated handshake,
+  duplex command/reply burst, disconnect, reconnect
+  (`framed_session_survives_repeated_handshake_burst_and_reconnect`),
+  incompatible-engine replacement, and shutdown acknowledgement through the
+  handshake, supervisor, lifecycle, and client suites. The confirmed
+  reproduction above no longer occurs: the framed handshake, workspace
+  restore, reconnect, and replacement paths pass deterministically on
+  Windows.
+- Item 2: lifecycle durability is per-platform (Unix directory `fsync`;
+  Windows per-file sync plus atomic same-directory rename). Lifecycle and
+  autostart fixtures use native executable names and paths.
+- Item 3: `ci.yml` runs the deterministic workspace gates on Linux, Windows,
+  and macOS runners. The new Windows and macOS lanes have not executed
+  remotely yet; only the Windows lane is verified locally.
+- Item 8 (partial): the architecture check pins the deliberate protocol
+  revision. Checks rejecting unguarded Unix-only assumptions and
+  provenance-bound physical or credentialed results are still missing.
+
+Verification on Windows (this machine, commit `9ba934c`):
+
+- `cargo fmt --all -- --check`, workspace clippy with warnings denied,
+  workspace build, and `cargo test --workspace --all-features` all pass.
+  Desktop 139 of 139 (both reconnect/restore baseline failures resolved),
+  `axiusflow_platform_runtime` 41 of 41, `axiusflow_local_engine_client`
+  4 of 4, handshake 17 of 17, architecture checks 31 of 31.
+- The release desktop and resident engine built from the same tree were
+  launched and probed over the real paired IPC: engine status reported two
+  providers and 1082 retained bars, and a Coinbase BTC-USD snapshot returned
+  581 bars. Rithmic, installed packaging, transitions, rendering, endurance,
+  and uninstall evidence required by the exit gate are still outstanding.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
