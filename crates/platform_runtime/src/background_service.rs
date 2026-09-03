@@ -14,6 +14,7 @@ use sysinfo::{ProcessesToUpdate, System};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::fs;
 
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 const SERVICE_NAME: &str = "Axiusflow Engine";
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 

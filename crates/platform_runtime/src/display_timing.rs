@@ -219,11 +219,15 @@ impl NativeDisplayProbe {
     /// [`Self::probe`] with [`DisplayTimingError::NoSession`].
     #[must_use]
     pub const fn availability() -> CapabilityAvailability {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        return CapabilityAvailability::Available;
-
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        CapabilityAvailability::Unavailable
+        if cfg!(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows"
+        )) {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        }
     }
 
     /// Reads the current outputs and presentation clock from the native

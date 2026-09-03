@@ -584,6 +584,13 @@ warnings denied). This establishes the native code path but is not physical
 macOS rendering or scanout evidence; those release qualifications remain open
 under exit-gate items 4 through 7.
 
+Cross-target compile follow-up (same day, this batch): `cargo clippy -p
+axiusflow_platform_runtime --target x86_64-apple-darwin --all-targets
+--all-features -- -D warnings` passes from the Windows host, confirming the
+new macOS code path is warning-clean even though it cannot provide native
+runtime or physical-display evidence here. The Windows test suite remains
+44/44 green.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
