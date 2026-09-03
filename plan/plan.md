@@ -295,6 +295,26 @@ Verification on Windows (this machine): workspace gates all pass
 (architecture checks 34 of 34). Items 4 through 7 and remote-lane execution
 remain open, so the exit gate stays closed and phase 5 remains blocked.
 
+Live release verification of wire revision 17 (same day, this batch): a
+stale pre-v17 resident engine (PID 32500, binary dated 6:07) was found
+running and was stopped gracefully through authenticated IPC
+(`--shutdown`, exit 0). The release engine was rebuilt from current `main`
+and started resident. Over the real paired IPC, the release probes passed:
+`native_release_status_probe` completed the v17 handshake against the
+intended binary (PID match) reporting 2 providers, 5280 retained bars, and
+`Running` shutdown state; `native_release_market_snapshot_probe` restored
+the workspace, demanded the hot Coinbase series, and received a 5282-bar
+BTC-USD snapshot with sequence, timestamp, close, and volume populated,
+then removed its consumer. The engine was then shut down gracefully (exit
+0); no Axiusflow processes remain. One state change to note: engine startup
+reconciled autostart against the persisted workspace (which records
+autostart disabled) and removed the stale `HKCU...Run\Axiusflow Engine`
+entry that pointed at the dev-path `target\release` binary. That removal is
+the designed reconciliation behavior, not a manual edit; re-enable autostart
+from the desktop lifecycle settings if it is wanted. Rithmic credentialed
+probes, installed packaging, transitions, rendering, and endurance remain
+open, so the exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
