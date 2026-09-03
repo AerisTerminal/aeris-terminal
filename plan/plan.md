@@ -756,6 +756,24 @@ journal rather than rewriting it. This removes the Windows delete-before-rename
 gap from update state transitions while keeping the lifecycle lock and
 fail-closed recovery semantics. The focused platform suite remains 43/43.
 
+Locked old-release cleanup coverage (same day, this batch): the exit gate
+names locked executables explicitly, but the suite proved only journal-file
+locking, never a locked file inside the superseded version directory during
+update cleanup. The new Windows-native
+`locked_old_release_defers_cleanup_without_completing_update` regression holds
+the old engine file with read-sharing but no delete-sharing (pre-install audit
+reads still pass, deletion fails as with a locked executable), proves the
+upgrade fails closed with `UpdatePendingCleanup` while the candidate pointer
+is active and the journal remains, then proves `recover` completes cleanup
+after the lock releases leaving one version directory and no journal. No
+production behavior changed; the test pins the existing fail-closed and
+resumable recovery path. Verification on Windows (this machine):
+`cargo fmt --all -- --check`, warnings-denied platform clippy, focused
+`axiusflow_platform_runtime` 47/47, architecture checks 35/35. Items 4 through
+7, remote-lane execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
+`[rithmic-credentials]` runner remain open, so the exit gate stays closed and
+phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

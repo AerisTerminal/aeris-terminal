@@ -1846,6 +1846,63 @@ mod tests {
         let _ = remove_owned_path(&root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn locked_old_release_defers_cleanup_without_completing_update() {
+        let root = temporary_root("old-release-locked");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let previous = installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install")
+            .active;
+        let old_engine = installer
+            .release_directory(&previous)
+            .expect("old release directory")
+            .join("axiusflow_engine");
+        // FILE_SHARE_READ lets the pre-install audit read the old release
+        // while still blocking its deletion, mirroring a locked executable.
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&old_engine)
+            .expect("hold old engine without delete sharing");
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        assert_eq!(
+            installer.install(&second, &second_bundle, &Hooks::default()),
+            Err(LifecycleError::UpdatePendingCleanup)
+        );
+        assert_eq!(
+            installer
+                .active_release()
+                .expect("active state")
+                .expect("candidate pointer"),
+            ActiveRelease {
+                release_identity: second.manifest.release_identity.clone(),
+                install_generation: second.manifest.install_generation,
+                directory_name: format!(
+                    "{:020}-{}",
+                    second.manifest.install_generation, second.manifest.release_identity
+                ),
+            }
+        );
+        assert!(installer.update_journal_exists());
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(2));
+        drop(lock);
+        installer
+            .recover(&Hooks::default())
+            .expect("resume cleanup");
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert!(!installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
     #[test]
     fn shutdown_failure_preserves_current_release_for_recovery() {
         let root = temporary_root("shutdown-failure");
