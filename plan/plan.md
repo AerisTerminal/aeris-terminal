@@ -554,6 +554,18 @@ execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
 `[rithmic-credentials]` runner remain open, so the exit gate stays
 closed and phase 5 remains blocked.
 
+Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
+previously deleted an existing active pointer or manifest before renaming the
+new record into place. That created a real absence window on Unix and macOS,
+which could make a crash or concurrent launch observe no active release. The
+replacement now uses the POSIX atomic rename-over-destination path; Windows
+retains its required remove-then-rename fallback under the lifecycle lock,
+with the platform difference documented at the helper boundary. The focused
+`axiusflow_platform_runtime` suite passes 43/43. This improves the durable
+POSIX activation guarantee but does not close the native Windows atomic
+replacement, physical-transition, remote-lane, credentialed-feed, packaging,
+or endurance evidence gates; phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

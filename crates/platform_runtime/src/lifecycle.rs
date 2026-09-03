@@ -1130,10 +1130,7 @@ fn write_json_atomic<T: Serialize>(
         .and_then(|()| file.sync_all())
         .map_err(|_| LifecycleError::StagingFailed)?;
     let destination = directory.join(name);
-    if destination.exists() {
-        remove_file_if_present(&destination).map_err(|_| LifecycleError::StagingFailed)?;
-    }
-    fs::rename(&temporary, &destination).map_err(|_| LifecycleError::StagingFailed)?;
+    replace_file_atomic(&temporary, &destination)?;
     #[cfg(unix)]
     return sync_directory(directory);
     #[cfg(not(unix))]
@@ -1141,6 +1138,25 @@ fn write_json_atomic<T: Serialize>(
         sync_directory(directory);
         Ok(())
     }
+}
+
+/// Replaces a small lifecycle record without exposing a partially written file.
+///
+/// POSIX rename replaces an existing destination atomically. Windows does not
+/// expose that guarantee through `std::fs`; its destination must be removed
+/// before rename, so callers still hold the lifecycle lock across this short
+/// platform-specific replacement window.
+#[cfg(unix)]
+fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), LifecycleError> {
+    fs::rename(temporary, destination).map_err(|_| LifecycleError::StagingFailed)
+}
+
+#[cfg(not(unix))]
+fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), LifecycleError> {
+    if destination.exists() {
+        remove_file_if_present(destination).map_err(|_| LifecycleError::StagingFailed)?;
+    }
+    fs::rename(temporary, destination).map_err(|_| LifecycleError::StagingFailed)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LifecycleError> {
