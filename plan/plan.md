@@ -670,6 +670,14 @@ failure category. The naming gate pins all five preflight steps. This removes
 several minutes of opaque Cargo retries and makes the remaining CI blocker
 actionable without weakening the required three-OS gate.
 
+Preflight execution result (same day, run `33745898713`): the new validation
+ran on all native runners and showed `NUCLEUS_CHARTS_TOKEN` is empty in the
+job environment on Linux, Windows, and macOS. The repository secret name is
+listed in GitHub metadata, but no value is injected; Cargo therefore never
+starts. This narrows the maintainer action from “debug Cargo authentication”
+to storing a non-empty read-only token value with access to the private charts
+repository, then rerunning the workflow.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
