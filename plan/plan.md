@@ -599,9 +599,11 @@ platform-specific skip was added.
 
 Native release-pair CI preparation (same day, this batch): every Linux,
 Windows, and macOS deterministic lane now builds the release desktop and
-engine together after the workspace build and uploads an OS-labelled pair.
-Uploads fail when either expected binary is absent, and the architecture gate
-pins the three release commands, artifact names, and fail-closed upload policy.
+engine together after the workspace build, embeds the same commit SHA as the
+release identity and workflow run number as the install generation, and
+uploads an OS-labelled pair. Uploads fail when either expected binary is
+absent, and the architecture gate pins the three release commands, embedded
+identity inputs, artifact names, and fail-closed upload policy.
 This supplies provenance-bound binaries for the installed-pair qualification
 once CI authentication is repaired; it does not itself constitute packaging,
 launch, update, rollback, or uninstall evidence. Verification on Windows:

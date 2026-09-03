@@ -1464,6 +1464,16 @@ mod tests {
             3,
             "every native release-pair upload must fail when its binaries are absent"
         );
+        for identity in [
+            "AXIUSFLOW_RELEASE_IDENTITY: ${{ github.sha }}",
+            "AXIUSFLOW_INSTALL_GENERATION: ${{ github.run_number }}",
+        ] {
+            assert_eq!(
+                workflow.matches(identity).count(),
+                3,
+                "every native release pair must embed {identity}"
+            );
+        }
         assert!(
             !workflow.contains("continue-on-error"),
             "CI must keep platform-specific failures visible"
