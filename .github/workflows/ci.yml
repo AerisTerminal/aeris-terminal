@@ -32,6 +32,19 @@ jobs:
           test "$status" = 200
       - name: Install desktop build libraries
         run: tools/setup_linux_desktop.sh --system
+      - name: Free runner disk space
+        # The debug workspace build plus the release desktop/engine pair
+        # exceed the default free space (the release `gpui` rlib failed
+        # with ENOSPC). Remove only preinstalled SDKs no lane uses; the
+        # tool cache backing the runner's own Node stays untouched.
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/swift
+          sudo apt-get clean
+          df -h /
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Check formatting

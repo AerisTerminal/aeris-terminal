@@ -1237,6 +1237,28 @@ mod tests {
         server.join().expect("join accepting server");
     }
 
+    /// Reads one frame from a stream accepted off a non-blocking listener.
+    /// Accepted streams can inherit non-blocking mode (macOS), so temporary
+    /// no-data is polled with a bound instead of being mistaken for a closed
+    /// peer. An orderly shutdown still returns empty immediately so the
+    /// caller's decode assertion fires without waiting out the deadline.
+    fn read_arrival_frame(stream: &mut LocalSocketStream, what: &str) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match stream.read(&mut bytes) {
+                Ok(0) => return Vec::new(),
+                Ok(count) => return bytes[..count].to_vec(),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => panic!("{what}: {error}"),
+            }
+            assert!(Instant::now() < deadline, "{what} timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Drains one legacy fixture listener and returns its command-role
     /// arrival. Arrival order is not deterministic under load, and a legacy
     /// client may only ever open its command stream, so arrivals are polled
@@ -1251,9 +1273,8 @@ mod tests {
             match listener.accept() {
                 Ok(mut stream) => {
                     let mut decoder = EnvelopeDecoder::try_new().expect("decoder");
-                    let mut bytes = [0_u8; 4096];
-                    let count = stream.read(&mut bytes).expect("read client hello");
-                    let hello = decoder.push(&bytes[..count]).expect("decode hello");
+                    let frame = read_arrival_frame(&mut stream, "read client hello");
+                    let hello = decoder.push(&frame).expect("decode hello");
                     let payload = hello.first().and_then(|message| message.payload.as_ref());
                     assert!(
                         matches!(payload, Some(envelope::Payload::ClientHello(_))),
@@ -1296,7 +1317,6 @@ mod tests {
         let server = thread::spawn(move || {
             let mut stream = accept_legacy_command_stream(&listener);
             let mut decoder = EnvelopeDecoder::try_new().expect("decoder");
-            let mut bytes = [0_u8; 4096];
             let ready = encode_envelope(&Envelope {
                 protocol_version: PROTOCOL_VERSION,
                 target_consumer_id: 0,
@@ -1313,8 +1333,8 @@ mod tests {
             })
             .expect("encode legacy readiness");
             stream.write_all(&ready).expect("send legacy readiness");
-            let count = stream.read(&mut bytes).expect("read shutdown command");
-            let shutdown = decoder.push(&bytes[..count]).expect("decode shutdown");
+            let frame = read_arrival_frame(&mut stream, "read shutdown command");
+            let shutdown = decoder.push(&frame).expect("decode shutdown");
             assert!(matches!(
                 shutdown
                     .first()
@@ -1380,9 +1400,8 @@ mod tests {
             while Instant::now() < deadline {
                 match listener.accept() {
                     Ok(mut stream) => {
-                        let mut bytes = [0_u8; 4096];
-                        let count = stream.read(&mut bytes).expect("read client hello");
-                        assert!(count > 0);
+                        let frame = read_arrival_frame(&mut stream, "read client hello");
+                        assert!(!frame.is_empty());
                         let ready = encode_envelope(&Envelope {
                             protocol_version: PROTOCOL_VERSION,
                             target_consumer_id: 0,

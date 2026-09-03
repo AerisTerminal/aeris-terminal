@@ -832,6 +832,27 @@ remote-lane execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
 `[rithmic-credentials]` runner remain open, so the exit gate stays closed
 and phase 5 remains blocked.
 
+First authenticated three-OS run (same day, run `33758370088`): after the
+maintainer stored a non-empty `NUCLEUS_CHARTS_TOKEN`, all three lanes passed
+checkout, chart authentication, credential preflight, formatting, clippy,
+and the debug workspace build — the first remote execution past dependency
+fetch since Aug 31. Verdicts: Windows passed the entire lane (release pair,
+workspace tests, perf baseline `first_usable=15 ms, warm_read=1558 ms`);
+Linux failed the release pair with `No space left on device` building the
+`gpui` rlib (debug plus release artifacts exceed default free space);
+macOS failed exactly one test,
+`lifecycle_revision_zero_resident_is_shutdown_before_replacement_start`,
+with `WouldBlock` (os error 35) on the first read off a non-blocking
+listener — accepted Unix sockets inherit non-blocking mode on macOS while
+Linux blocks, so the single `.expect` read raced the client hello.
+Production IPC already polls `WouldBlock` correctly; only the `#[cfg(test)]`
+helpers assumed blocking reads. Fixes in this batch (no production
+change): bounded `read_arrival_frame` arrival reads at the three fixture
+sites, and a Linux-lane disk-freeing step removing only unused preinstalled
+SDKs (the runner tool cache stays untouched). Local verification: fmt,
+warnings-denied client clippy, client 4/4, architecture 35/35. CI re-run
+pending; the exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
