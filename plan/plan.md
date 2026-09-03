@@ -965,6 +965,22 @@ The reworked workflows have no remote execution yet (no runner
 registered), so they are reviewed but unproven; the exit gate stays
 closed and phase 5 remains blocked.
 
+First self-hosted Windows green (same day, run `33788488213` on
+`7f719d9`): the maintainer registered `axiusflow-windows`
+(`C:\actions-runner`, labels `axiusflow,windows`, interactive
+`run.cmd`). The lane's first attempt failed in 18s at `Validate private
+chart credential` with `pwsh: command not found` — this box had only
+Windows PowerShell 5.1 while the lane pins `shell: pwsh`; free
+PowerShell 7.6.5 was installed via winget and the failed lane rerun.
+Result: `workspace-windows` completed success — fmt, warnings-denied
+clippy, workspace build, release desktop/engine pair with provenance
+manifest, full workspace tests, and the market-data baseline all pass
+on maintainer hardware, with `release-pair-windows` and
+`market-data-performance-windows` uploaded. The Linux and macOS lanes
+stay queued with no runners and will fail closed at their timeouts;
+macOS remains without an execution path until Apple hardware exists.
+The exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
