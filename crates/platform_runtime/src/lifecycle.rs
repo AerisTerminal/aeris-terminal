@@ -1372,6 +1372,43 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_bundle_fails_closed_without_activation() {
+        let root = temporary_root("interrupted-bundle");
+        let (signed, key, bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        fs::remove_file(bundle.join("axiusflow_engine")).expect("drop one bundle file");
+        assert_eq!(
+            installer.install(&signed, &bundle, &Hooks::default()),
+            Err(LifecycleError::StagingFailed)
+        );
+        assert_eq!(installer.active_release().expect("active state"), None);
+        assert!(!installer.update_journal_path().exists());
+        let _ = remove_owned_path(&root);
+
+        let root = temporary_root("truncated-bundle");
+        let (signed, key, bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        fs::write(bundle.join("axiusflow_engine"), b"truncated").expect("truncate bundle file");
+        assert_eq!(
+            installer.install(&signed, &bundle, &Hooks::default()),
+            Err(LifecycleError::VerificationFailed)
+        );
+        assert_eq!(installer.active_release().expect("active state"), None);
+        assert!(!installer.update_journal_path().exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
     fn release_minimum_version_is_enforced_after_signature_verification() {
         let root = temporary_root("minimum-version");
         let (signed, key, _) = release(&root, 1);

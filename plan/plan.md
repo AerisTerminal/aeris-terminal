@@ -535,6 +535,25 @@ remote-lane execution, the `NUCLEUS_CHARTS_TOKEN` value, and the
 self-hosted `[rithmic-credentials]` runner remain open, so the exit
 gate stays closed and phase 5 remains blocked.
 
+Interrupted-download coverage (same day, this batch): the exit gate
+requires interrupted downloads to fail safely, but the suite proved
+only tampered bytes, never a partial bundle. The new
+`interrupted_bundle_fails_closed_without_activation` regression proves
+both shapes: a missing bundle file fails with `StagingFailed` and a
+truncated file fails with `VerificationFailed`, each with no active
+release and no residual journal. No production behavior changed; the
+test pins the existing per-file copy-then-verify staging order. The
+live-gate architecture check now also rejects `continue-on-error` so
+venue failures stay visible. Verification on Windows (this machine):
+`cargo fmt --all -- --check`, workspace clippy with warnings denied,
+workspace build, and `cargo test --workspace --all-features` all pass
+with zero failures (architecture checks 35 of 35, desktop 141 of 141,
+`axiusflow_platform_runtime` 43 of 43, handshake 17 of 17, protocol 7
+of 7, engine 106 with 1 ignored). Items 4 through 7, remote-lane
+execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
+`[rithmic-credentials]` runner remain open, so the exit gate stays
+closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

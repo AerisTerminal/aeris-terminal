@@ -1478,6 +1478,10 @@ mod tests {
             2,
             "every live-market gate must authenticate the private charts dependency"
         );
+        assert!(
+            !workflow.contains("continue-on-error"),
+            "live-market gates must keep venue failures visible"
+        );
     }
 
     #[test]
