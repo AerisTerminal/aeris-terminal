@@ -886,6 +886,27 @@ selection will run the live engine path; tick bars and history still
 resolve only when the test feed carries prints. Handed over running for
 maintainer-driven use; no graceful shutdown was issued.
 
+Stalled depth-snapshot recovery (same day, this batch): live diagnosis on a
+resident engine showed a book stuck `AwaitingSnapshot` publishing one empty
+frame in 30s while bars flowed — a missed initial venue snapshot stalls
+forever because later deltas cannot build the book
+(`apply_delta` requires `snapshot_ready`) and nothing resubscribes while
+the product set is unchanged. Fix (engine production, `89ff2f4`): each
+canonical book carries a bounded watch on the coordinator tick — 30s
+without a first install triggers an exclude-then-restore resubscribe dance
+for the stalled products only (the venue re-sends snapshots solely on
+subscribe); five dances without progress go quiet with a redacted stderr
+diagnostic, leaving recovery to fresh demand, product change, or session
+reconnect. Subscription updates now preserve Ready books for retained
+products instead of wiping all books on every update. Rithmic books are
+excluded from the wall-clock bound (slow backfill is legitimate there).
+Regression cover: targeted dance legs, quiet after bound, Ready untouched,
+Rithmic skip, session preservation (engine 111 = 106 + 5 new). Live
+verification on the rebuilt `89ff2f4`/gen-47 pair: 534/534 Ready books in
+30s with zero empty, so the preserve change did not regress subscribes.
+Workspace gates green; CI run pending. The exit gate stays closed and
+phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
