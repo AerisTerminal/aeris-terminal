@@ -1003,6 +1003,18 @@ warnings-denied clippy clean, architecture checks 36 of 36. The next
 Windows lane execution is the live proof; the exit gate stays closed
 and phase 5 remains blocked.
 
+Workflow indentation breakage (same day, this batch): the scoped
+credential commit above shipped with three corrupted `name:` lines (12
+spaces instead of 10 under `with:`) introduced by the editing step, so
+run `33792720189` died with zero jobs and a workflow-file error before
+any lane started. Fixed by restoring the exact indentation; both
+workflow files now parse under a real YAML parser with the expected
+shape (ci: 3 lanes at 16/14/14 steps with self-hosted labels; live
+gates: 2 jobs at 8/7 steps). Lesson for this machine: workflow edits
+get parser validation before push, since remote execution is the only
+other check and it costs a full run. The exit gate stays closed and
+phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

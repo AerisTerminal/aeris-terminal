@@ -101,7 +101,7 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-            name: market-data-performance-linux
+          name: market-data-performance-linux
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
       - name: Remove job-scoped git credential
@@ -178,7 +178,7 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-            name: market-data-performance-windows
+          name: market-data-performance-windows
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
       - name: Remove job-scoped git credential
@@ -254,7 +254,7 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-            name: market-data-performance-macos
+          name: market-data-performance-macos
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
       - name: Remove job-scoped git credential
