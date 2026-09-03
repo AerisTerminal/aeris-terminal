@@ -1073,6 +1073,33 @@ alongside the Windows pair from the same run. Two native OS lanes are
 now green on maintainer hardware; macOS remains without an execution
 path. The exit gate stays closed and phase 5 remains blocked.
 
+Installed-lifecycle campaign, Windows (same day, this batch): the real
+`axiusflow_launcher` (built with a throwaway test key) drove a temp
+install root through test-signed v1 (gen 9001) and v2 (gen 9002) release
+binaries. Fresh install exited 0 with exactly one version directory,
+one active pointer, one manifest, and no journals — the live health
+check passed against the real desktop/engine over Coinbase. Update
+exited 0 with exactly one v2 directory (v1 fully removed), one
+pointer/manifest, no journals, no stray processes. Full
+`--remove-all-local-data` deleted the vault keys (including the Rithmic
+test credential), data, cache, and logs, then failed closed with
+`UninstallPendingCleanup`: residue was the complete versions tree,
+pointers, manifests, and journal. Root cause proven, not assumed: the
+launcher runs from inside the tree it deletes, and Windows denies
+deleting a running executable (empirical `Access denied` deleting the
+running campaign engine; read_dir order hits the launcher first, so
+nothing after it was attempted). Manual deletion completed the removal
+and the absence audit passes (no roots, no Run entry, vault already
+audited absent by the uninstall itself; engine state recreated by the
+semantics probe was removed too). Production consequence: complete
+uninstall needs an out-of-tree uninstall path (self-relocating launcher
+or equivalent) — recorded as required phase-4 work, not yet
+implemented. Side note: identity-gated IPC shutdown verified in passing
+(same-identity `--shutdown` exits 0). The maintainer's resident engine
+was shut down gracefully before the campaign; Rithmic reprovisioning
+awaits the test password. The exit gate stays closed and phase 5
+remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
