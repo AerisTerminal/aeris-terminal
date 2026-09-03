@@ -1117,6 +1117,22 @@ path itself stays physical-only by design); the architecture check pins
 the relocation markers. The exit gate stays closed and phase 5 remains
 blocked.
 
+Rithmic reprovision and session restore (same day, this batch): the
+maintainer-supplied test credential was encoded to the version-1 vault
+blob and stored under the existing key through a throwaway helper that
+was deleted afterward (round-trip verified, secrets cleared from the
+session, tree clean). The dev release desktop/engine were rebuilt
+without campaign identity (binaries verified clean) and relaunched
+(engine resident, desktop window open). The ignored
+`native_release_rithmic_markets_live_round_trip` probe then
+live-verified the credential on the engine path: workspace restore,
+attach, Rithmic search, instrument selection, and series demand all
+pass; tick bars cannot form because the test feed publishes no prints
+or history for MNQU6 (`historical bars are unavailable`), unchanged
+from every prior feed characterization — adapter correct on every
+populated stage, engine healthy afterward. The exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
