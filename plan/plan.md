@@ -417,6 +417,21 @@ characterization. Live Rithmic logins also stay single-session, so all
 further live probing is maintainer-driven while the desktop holds the
 session.
 
+Actionable Rithmic terminal error (same day): phase 4 requires loading to
+resolve to data, bounded recovery, or an actionable terminal error, and the
+maintainer-hit "Rithmic visible history could not be loaded" was terminal
+but not actionable (cause buried, no corrective action). The desktop now
+maps the known empty-feed marker (`history_failure_messages` in
+`rithmic_engine_history.rs`, marker produced by
+`apps/engine/.../history.rs`): that case renders cause (feed published no
+prints/history, no bars can form), action (check market-data entitlement,
+reselect to retry), and standing state (previous chart stays live). All
+other failures keep byte-identical wording; success paths untouched.
+Regression cover: empty-feed message content and exact legacy wording.
+Verification on Windows (this machine): workspace gates all pass (desktop
+141 of 141, naming 34 of 34, zero failures). No live Rithmic login was used;
+the maintainer holds the single test-plant session.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

@@ -401,6 +401,39 @@ fn ipc_depth_levels(
     Ok(converted)
 }
 
+/// Engine-side marker for a provider history demand that completed with no
+/// bars to form them from (produced in
+/// `apps/engine/src/market_service/history.rs`). The desktop matches it to
+/// render the one terminal state it can diagnose precisely: the session,
+/// selection, and subscription succeeded, but the feed published no prints
+/// or history for the instrument.
+const EMPTY_HISTORY_MARKER: &str = "historical bars are unavailable";
+
+/// Maps a failed Rithmic history bootstrap to the terminal
+/// `(series_message, chart_state_message)` pair. Every failure keeps the
+/// previous chart and restates its demand at the call site; only the message
+/// content varies. The empty-feed case names the cause, the corrective
+/// action, and the standing chart so the trader is not left guessing. All
+/// other failures keep their exact existing wording.
+pub(crate) fn history_failure_messages(error: &str) -> (String, String) {
+    let series_message = "Rithmic visible history is unavailable".to_string();
+    if error.contains(EMPTY_HISTORY_MARKER) {
+        return (
+            series_message,
+            format!(
+                "Rithmic visible history could not be loaded: {error}. \
+                 The feed published no prints or history for this instrument, \
+                 so no bars can form. Check the account market-data entitlement, \
+                 then select the instrument again to retry; the previous chart stays live."
+            ),
+        );
+    }
+    (
+        series_message,
+        format!("Rithmic visible history could not be loaded: {error}"),
+    )
+}
+
 pub(crate) fn demand_error_message(error: &DemandError) -> String {
     let stage = match FailureStage::try_from(error.stage_code) {
         Ok(stage) => failure_stage_label(stage),
@@ -511,6 +544,29 @@ mod tests {
                 .provenance()
                 .exchange_timestamp_unix_nanos,
             1_700_000_000_123_456_789
+        );
+    }
+
+    #[test]
+    fn empty_feed_failure_names_cause_action_and_standing_chart() {
+        let error = "provider history failed after 12 ms: Rithmic historical bars are unavailable";
+        let (series_message, chart_message) = history_failure_messages(error);
+        assert_eq!(series_message, "Rithmic visible history is unavailable");
+        assert!(chart_message.contains(error));
+        assert!(chart_message.contains("no prints or history"));
+        assert!(chart_message.contains("market-data entitlement"));
+        assert!(chart_message.contains("select the instrument again to retry"));
+        assert!(chart_message.contains("previous chart stays live"));
+    }
+
+    #[test]
+    fn unrelated_failure_keeps_exact_existing_wording() {
+        let error = "Rithmic engine snapshot is invalid";
+        let (series_message, chart_message) = history_failure_messages(error);
+        assert_eq!(series_message, "Rithmic visible history is unavailable");
+        assert_eq!(
+            chart_message,
+            "Rithmic visible history could not be loaded: Rithmic engine snapshot is invalid"
         );
     }
 }

@@ -3480,12 +3480,10 @@ impl WorkspaceSurface {
             Ok(bootstrap) => bootstrap,
             Err(error) => {
                 if self.series_browser.reject(series_generation) {
-                    self.series_message = "Rithmic visible history is unavailable".to_string();
-                    self.set_chart_state(
-                        ChartState::Error,
-                        format!("Rithmic visible history could not be loaded: {error}"),
-                        cx,
-                    );
+                    let (series_message, chart_message) =
+                        rithmic_engine_history::history_failure_messages(&error);
+                    self.series_message = series_message;
+                    self.set_chart_state(ChartState::Error, chart_message, cx);
                     // The chart on screen is still the previous series, so its
                     // demand is restated rather than abandoned: the trader keeps
                     // a live chart and an actionable error, not an empty surface.
