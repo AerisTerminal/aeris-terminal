@@ -11,7 +11,7 @@ use std::{
 };
 use sysinfo::{ProcessesToUpdate, System};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::{fs, io::Write};
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
@@ -342,7 +342,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn configure_autostart_file(
     path: &Path,
     enabled: bool,
@@ -432,9 +432,10 @@ impl Error for BackgroundServiceError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundService, desktop_exec_argument, linux_desktop_entry, macos_launch_agent,
-        quoted_windows_command,
+        BackgroundService, configure_autostart_file, desktop_exec_argument, linux_desktop_entry,
+        macos_launch_agent, quoted_windows_command,
     };
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     fn absolute_engine() -> PathBuf {
@@ -471,6 +472,22 @@ mod tests {
         let launch_agent = macos_launch_agent(executable, None);
         assert!(launch_agent.contains("Axiusflow &amp; Co"));
         assert!(launch_agent.contains("&quot;quoted&quot;"));
+    }
+
+    #[test]
+    fn autostart_file_write_replaces_atomically_and_cleans_staging() {
+        let root =
+            std::env::temp_dir().join(format!("axiusflow-autostart-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temporary autostart directory");
+        let path = root.join("axiusflow-engine.desktop");
+        fs::write(&path, "old").expect("initial autostart payload");
+
+        configure_autostart_file(&path, true, "new\n").expect("atomic autostart write");
+
+        assert_eq!(fs::read_to_string(&path).expect("new payload"), "new\n");
+        assert!(!root.join(".axiusflow-engine.desktop.next").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(target_os = "windows")]
