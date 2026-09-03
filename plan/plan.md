@@ -715,6 +715,11 @@ native workflow after this documentation update again completed with all three
 OS lanes failing at the same empty-token preflight. No Cargo compilation,
 release artifact, or runtime evidence was produced.
 
+Latest native run confirmation (same day, run `33746889051`): the completed
+logs show the empty value on Linux, Windows, and macOS explicitly; the
+workflow remains correctly fail-closed before any private dependency or
+release artifact is downloaded.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
