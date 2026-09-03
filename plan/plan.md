@@ -627,6 +627,17 @@ attempt exposed only generated-target contamination from a cross-target check;
 the clean rebuild removed that false failure. Remote three-OS execution is
 still blocked before compilation by the invalid private-chart credential.
 
+Local release-pair qualification (same day, this batch): the Windows release
+desktop and engine were built with `AXIUSFLOW_RELEASE_IDENTITY` set to the
+current commit and `AXIUSFLOW_INSTALL_GENERATION=42`. The exact engine binary
+was launched resident, and the optimized `native_release_status_probe`
+completed over authenticated IPC: PID 16504, two provider slots, 6,767
+retained bars, and a running shutdown state. The engine was then shut down via
+its supported authenticated command and no Axiusflow engine process remained.
+This proves identity-bound release startup/status IPC on Windows; it is not
+installed packaging, update/rollback, rendering, transition, endurance, or
+macOS/Linux runtime evidence.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
