@@ -1713,6 +1713,61 @@ mod tests {
     }
 
     #[test]
+    fn update_journal_reads_newest_state_slot_and_rejects_corrupt_newest_slot() {
+        let root = temporary_root("journal-slots");
+        let (_, key, _) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let candidate = ActiveRelease {
+            release_identity: "candidate".to_string(),
+            install_generation: 2,
+            directory_name: "00000000000000000002-candidate".to_string(),
+        };
+        let staged = UpdateJournal {
+            state: UpdateState::Staged,
+            candidate: candidate.clone(),
+            previous: None,
+        };
+        let activated = UpdateJournal {
+            state: UpdateState::Activated,
+            candidate,
+            previous: None,
+        };
+
+        installer
+            .write_update_journal(&staged)
+            .expect("write staged slot");
+        installer
+            .write_update_journal(&activated)
+            .expect("write activated slot");
+        assert_eq!(
+            installer
+                .read_update_journal()
+                .expect("read journal")
+                .expect("journal")
+                .state,
+            UpdateState::Activated
+        );
+
+        fs::write(
+            installer
+                .lifecycle_root
+                .join(update_journal_name(UpdateState::Activated)),
+            b"not-json",
+        )
+        .expect("corrupt newest slot");
+        assert_eq!(
+            installer.read_update_journal(),
+            Err(LifecycleError::JournalCorrupt)
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
     fn shutdown_failure_preserves_current_release_for_recovery() {
         let root = temporary_root("shutdown-failure");
         let (first, key, first_bundle) = release(&root, 1);

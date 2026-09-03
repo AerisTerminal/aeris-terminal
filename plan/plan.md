@@ -554,6 +554,16 @@ execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
 `[rithmic-credentials]` runner remain open, so the exit gate stays
 closed and phase 5 remains blocked.
 
+Lifecycle journal durability follow-up (same day, this batch): update
+transactions now persist each state transition in a dedicated journal slot
+(`update-0-preparing.json` through `update-5-cleanup.json`) before removing
+older slots. Recovery scans newest-to-oldest and validates the embedded state,
+so an interrupted Windows write cannot silently make a later transaction look
+earlier. A regression test proves newest-state selection and fail-closed
+behavior when the newest slot is corrupt. The focused platform-runtime suite
+passes 44/44 on Windows; native installed update interruption and reboot
+validation remain open under exit-gate items 4 and 7.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
