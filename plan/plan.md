@@ -646,6 +646,13 @@ record remains readable after the lock is released, and verifies no temporary
 artifact remains. Windows platform-runtime verification is 45/45 tests with
 warnings-denied clippy green; installed update/reboot behavior remains open.
 
+Release-pair provenance manifest (same day, this batch): each native CI lane
+now writes `release-pair.provenance` containing the workflow commit, install
+generation, and SHA-256 of both release binaries, then uploads it with the
+pair. The naming gate pins all three manifests and the fail-closed artifact
+paths. Local Windows release startup/status qualification remains valid; CI
+cannot produce the manifest until the private dependency credential is fixed.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,

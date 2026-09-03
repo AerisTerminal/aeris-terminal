@@ -3,7 +3,8 @@
 //! Packaging supplies the small stable launcher that calls this boundary. The
 //! desktop and resident engine never replace or delete themselves.
 
-#[cfg(all(windows, test))]
+#[cfg(target_os = "windows")]
+#[cfg_attr(not(test), allow(unused_imports))]
 use std::os::windows::fs::OpenOptionsExt;
 use std::{
     collections::BTreeSet,

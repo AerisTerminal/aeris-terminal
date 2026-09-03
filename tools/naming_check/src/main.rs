@@ -1460,6 +1460,11 @@ mod tests {
             );
         }
         assert_eq!(
+            workflow.matches("release-pair.provenance").count(),
+            6,
+            "each native release pair must record and upload its provenance manifest"
+        );
+        assert_eq!(
             workflow.matches("if-no-files-found: error").count(),
             3,
             "every native release-pair upload must fail when its binaries are absent"
