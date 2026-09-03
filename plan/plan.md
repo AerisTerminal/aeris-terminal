@@ -617,6 +617,16 @@ new release build and upload steps were not reached. This is the same
 credential-only failure observed in the prior run, now confirmed after the
 release-pair workflow change; no release artifact exists from CI yet.
 
+Clean-host workspace verification (same day, this batch): after stopping the
+stale resident release engine that held a Windows executable lock, the full
+`cargo test --workspace --all-features` suite completed with zero failures.
+The run covers desktop 141, engine 106 plus one intentional release-only
+ignore, handshake 17, protocol 7, naming 35, platform runtime 44, Rithmic
+adapter 111, and all remaining workspace crates and doc tests. The initial
+attempt exposed only generated-target contamination from a cross-target check;
+the clean rebuild removed that false failure. Remote three-OS execution is
+still blocked before compilation by the invalid private-chart credential.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
