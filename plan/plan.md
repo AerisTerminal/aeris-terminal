@@ -402,6 +402,21 @@ test users allow a single concurrent login, so adapter-level smoke logins
 can force-logout the engine's own session and churn its generations; run
 either the smoke or the engine path at a time, never both at once.
 
+Why the test feed carries no data (same day): the chain to the plant is
+proven (login/search/reference/subscribe/heartbeat/quotes/depth), so the
+absence is plant-side. Ranked causes: (1) the Rithmic test system publishes
+no prints or history for these symbols right now (5+ quiet minutes,
+empty 4-day replay); (2) the paper account's CME market-data entitlement
+lapsed or never covered streaming (login/authentication is not
+entitlement); (3) schedule effects on the test plant. Notably, an Aug 7
+commit ("Enable entitled Rithmic CME data") shows search results then
+carried `-Delayed` venue suffixes that had to be stripped for entitled
+streaming, so a change in what the catalog offers is itself a signal: the
+smoke now lists every search hit (symbol/exchange/expiration) for feed
+characterization. Live Rithmic logins also stay single-session, so all
+further live probing is maintainer-driven while the desktop holds the
+session.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

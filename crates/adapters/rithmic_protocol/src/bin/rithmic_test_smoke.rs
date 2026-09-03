@@ -317,6 +317,14 @@ fn search_and_reference(
         "rithmic_symbol_search=passed results={}",
         results.results.len()
     );
+    for result in results.results.iter().take(32) {
+        println!(
+            "rithmic_search_result symbol={} exchange={} expiration={}",
+            result.symbol,
+            result.exchange,
+            result.expiration_date.as_deref().unwrap_or("-")
+        );
+    }
     println!(
         "rithmic_symbol_selected symbol={} exchange={}",
         selected.symbol, selected.exchange
