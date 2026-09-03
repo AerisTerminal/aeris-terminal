@@ -346,6 +346,21 @@ silently fall back to kitless Rithmic when `provider_kit/current` is
 absent; keep the kit restored before concluding Rithmic is unavailable. The
 provisioned password transited chat to reach the vault; rotate it at will.
 
+Both-paths rerun (same day, test credentials confirmed no-rotation-needed):
+the engine markets-live round trip and the full smoke were each run again
+against the fixed release engine. Engine path: login/search/select succeed,
+then the tick-history leg fails bounded with provider `Recovering` and an
+actionable "historical bars are unavailable" terminal detail — no stream
+death, no poison, engine alive, lifecycle restored. Smoke path: login,
+31-result search with MNQU6/CME selected, reference, heartbeat, live quotes
+and depth all pass; a 5-minute tolerant watch then sees zero prints, and the
+plant drops the long-idle connection (honest transport error; the smoke
+sends no heartbeats while watching, unlike the product session driver).
+Conclusion unchanged: the adapter is correct on every stage the test feed
+populates; prints and history for MNQU6 are simply absent on this feed, so
+tick bars cannot form. Still needs a data-carrying feed or entitlement
+before the credentialed path can pass end to end.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
