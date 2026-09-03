@@ -927,6 +927,44 @@ release-only ignore plus 3 live-soak ignores by design), handshake 17
 of 17, architecture checks 35 of 35. The exit gate stays closed and
 phase 5 remains blocked.
 
+Zero-cost CI migration (same day, this batch): the maintainer will not
+fund GitHub-hosted runners, so the matrix moves to maintainer-owned
+self-hosted runners instead of staying red on billing. `ci.yml` lanes
+now target `[self-hosted, axiusflow, linux|windows|macos]`, with a
+same-ref `concurrency` cancel so pushes do not pile up behind one
+machine; the Linux disk-freeing step is best-effort (`sudo -n ...
+|| true`) because it was a GitHub-hosted workaround that must never
+fail a personally-sized runner on a sudo prompt. The `coinbase` live
+gate moves to `[self-hosted, axiusflow, linux]`; the `rithmic` gate was
+already self-hosted and its comment now states the true behavior (queues
+to timeout with no matching runner, reported as "not run", never a
+pass). Architecture checks pin the new labels and forbid any return to
+`*-latest` runners in both workflows
+(`three_os_deterministic_gates_remain_required`,
+`live_market_gates_stay_on_self_hosted_runners`, 36 of 36).
+
+Hardware reality: only this Windows machine exists, so only the Windows
+lane has an execution path today. Maintainer setup (my API token lacks
+runner-admin scope, so this is Settings-side): repo Settings → Actions
+→ Runners → New self-hosted runner → Windows → run the shown
+download/config commands as the maintainer user with the `axiusflow`
+and `windows` labels, then run interactively via `run.cmd`, not as a
+service (vault/DPAPI parity with dev; the lane needs git, rustup with
+the pinned toolchain auto-installing from `rust-toolchain.toml`, and
+the already-stored `NUCLEUS_CHARTS_TOKEN`). Expect ~40 heavy minutes
+per run; push in batches. Linux needs a VM (git, rustup, one-time
+`tools/setup_linux_desktop.sh --system`, labels `axiusflow,linux`); a
+runner holding Rithmic vault credentials takes the additional
+`rithmic-credentials` label. macOS has no path: Apple hardware is
+mandatory and none exists, so the macOS lane will queue 60 minutes and
+fail closed on every push, and macOS cannot be called supported until a
+native lane runs — the target is kept, not dropped, pending an explicit
+maintainer decision. Verification on Windows (this machine): fmt clean,
+targeted warnings-denied clippy clean, architecture checks 36 of 36.
+The reworked workflows have no remote execution yet (no runner
+registered), so they are reviewed but unproven; the exit gate stays
+closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

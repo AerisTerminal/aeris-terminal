@@ -1424,13 +1424,25 @@ mod tests {
     fn three_os_deterministic_gates_remain_required() {
         let workflow = manifest(".github/workflows/ci.yml");
         for runner in [
+            "runs-on: [self-hosted, axiusflow, linux]",
+            "runs-on: [self-hosted, axiusflow, windows]",
+            "runs-on: [self-hosted, axiusflow, macos]",
+        ] {
+            assert!(
+                workflow.contains(runner),
+                "CI lost the required native gate {runner}"
+            );
+        }
+        // The account carries no paid Actions quota: a GitHub-hosted runner
+        // fails every lane at startup, so the matrix must stay self-hosted.
+        for hosted in [
             "runs-on: ubuntu-latest",
             "runs-on: windows-latest",
             "runs-on: macos-latest",
         ] {
             assert!(
-                workflow.contains(runner),
-                "CI lost the required native gate {runner}"
+                !workflow.contains(hosted),
+                "CI must stay on zero-cost self-hosted runners, found {hosted}"
             );
         }
         for gate in [
@@ -1520,6 +1532,26 @@ mod tests {
             !workflow.contains("continue-on-error"),
             "live-market gates must keep venue failures visible"
         );
+    }
+
+    #[test]
+    fn live_market_gates_stay_on_self_hosted_runners() {
+        let workflow = manifest(".github/workflows/live_market_gates.yml");
+        for runner in [
+            "runs-on: [self-hosted, axiusflow, linux]",
+            "runs-on: [self-hosted, rithmic-credentials]",
+        ] {
+            assert!(
+                workflow.contains(runner),
+                "live-market gates lost the required gate {runner}"
+            );
+        }
+        for hosted in ["ubuntu-latest", "windows-latest", "macos-latest"] {
+            assert!(
+                !workflow.contains(&format!("runs-on: {hosted}")),
+                "live-market gates must stay on zero-cost self-hosted runners, found {hosted}"
+            );
+        }
     }
 
     #[test]

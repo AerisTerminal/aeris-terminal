@@ -13,7 +13,9 @@ permissions:
 
 jobs:
   coinbase:
-    runs-on: ubuntu-latest
+    # Self-hosted like every other lane: the account carries no paid Actions
+    # quota, so GitHub-hosted runners are forbidden.
+    runs-on: [self-hosted, axiusflow, linux]
     timeout-minutes: 45
     env:
       # Cargo's built-in git client ignores URL-embedded credentials, so the
@@ -53,8 +55,9 @@ jobs:
 
   rithmic:
     # Rithmic needs credentials in the runner's native vault, so this job only
-    # runs where they exist. It is expected to be skipped elsewhere, and a
-    # skipped gate is reported as "not run" — never as a pass.
+    # runs where they exist. With no matching runner it queues until its
+    # timeout and fails closed — a missing gate is reported as "not run",
+    # never as a pass.
     runs-on: [self-hosted, rithmic-credentials]
     timeout-minutes: 45
     env:

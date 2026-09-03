@@ -1,5 +1,10 @@
 name: CI
 
+# Zero-cost execution policy: lanes run ONLY on maintainer-owned self-hosted
+# runners. GitHub-hosted (`*-latest`) runners are forbidden here because the
+# account carries no paid Actions quota. Register each runner with the
+# `axiusflow` label plus its OS label; a lane with no registered runner
+# queues until its timeout and fails closed — never silently green.
 on:
   push:
     branches: [main]
@@ -8,9 +13,15 @@ on:
 permissions:
   contents: read
 
+# One maintainer machine serves the lanes, so a newer push on the same ref
+# cancels the older queued run instead of piling up behind it.
+concurrency:
+  group: axiusflow-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   workspace-linux:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, axiusflow, linux]
     timeout-minutes: 45
     env:
       # Cargo's built-in git client ignores URL-embedded credentials, so the
@@ -33,17 +44,17 @@ jobs:
       - name: Install desktop build libraries
         run: tools/setup_linux_desktop.sh --system
       - name: Free runner disk space
-        # The debug workspace build plus the release desktop/engine pair
-        # exceed the default free space (the release `gpui` rlib failed
-        # with ENOSPC). Remove only preinstalled SDKs no lane uses; the
-        # tool cache backing the runner's own Node stays untouched.
+        # Best-effort only: the GitHub-hosted lanes needed this because the
+        # debug plus release artifacts exceeded default free space. A
+        # maintainer-owned runner is sized by its owner, so absent paths or a
+        # sudo password prompt must never fail the lane.
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/swift
-          sudo apt-get clean
+          sudo -n rm -rf /usr/share/dotnet || true
+          sudo -n rm -rf /opt/ghc || true
+          sudo -n rm -rf /usr/local/share/boost || true
+          sudo -n rm -rf /usr/local/lib/android || true
+          sudo -n rm -rf /usr/share/swift || true
+          sudo -n apt-get clean || true
           df -h /
       - name: Install pinned Rust toolchain
         run: rustup show
@@ -87,7 +98,7 @@ jobs:
           retention-days: 30
 
   workspace-windows:
-    runs-on: windows-latest
+    runs-on: [self-hosted, axiusflow, windows]
     timeout-minutes: 60
     env:
       # Cargo's built-in git client ignores URL-embedded credentials, so the
@@ -150,7 +161,7 @@ jobs:
           retention-days: 30
 
   workspace-macos:
-    runs-on: macos-latest
+    runs-on: [self-hosted, axiusflow, macos]
     timeout-minutes: 60
     env:
       # Cargo's built-in git client ignores URL-embedded credentials, so the
