@@ -1462,6 +1462,25 @@ mod tests {
     }
 
     #[test]
+    fn live_market_gates_fetch_private_charts_through_cli() {
+        let workflow = manifest(".github/workflows/live_market_gates.yml");
+        assert_eq!(
+            workflow
+                .matches("CARGO_NET_GIT_FETCH_WITH_CLI: \"true\"")
+                .count(),
+            2,
+            "every live-market gate must fetch the private charts dependency through the git CLI"
+        );
+        assert_eq!(
+            workflow
+                .matches("Authenticate private chart dependency")
+                .count(),
+            2,
+            "every live-market gate must authenticate the private charts dependency"
+        );
+    }
+
+    #[test]
     fn phase_five_authentication_surface_stays_out_until_phase_four_passes() {
         const FORBIDDEN: &[&str] = &[
             "better_auth",

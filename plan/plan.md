@@ -495,6 +495,25 @@ behavior behind the no-in-place-overwrite update rule. Display make/model,
 scanout rates, and physical/credentialed runs remain open under items 4
 through 7.
 
+Live-gate fetch parity (same day, this batch): the scheduled `rithmic`
+live-market gate lacked the private-charts fetch contract that `ci.yml`
+and the `coinbase` live gate already carry (no
+`CARGO_NET_GIT_FETCH_WITH_CLI`, no `Authenticate private chart
+dependency` step), so the self-hosted credentialed lane would fail at
+dependency fetch even after the runner exists. It now carries the same
+job-level CLI-fetch env and authentication step. The new architecture
+check `live_market_gates_fetch_private_charts_through_cli` pins both
+live gates to that contract so the asymmetry cannot recur.
+Verification on Windows (this machine): `cargo fmt --all -- --check`,
+workspace clippy with warnings denied, workspace build, and
+`cargo test --workspace --all-features` all pass with zero failures
+(architecture checks 35 of 35, desktop 141 of 141,
+`axiusflow_platform_runtime` 41 of 41, handshake 17 of 17, protocol 7
+of 7, engine 106 with 1 ignored). Items 4 through 7, remote-lane
+execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
+`[rithmic-credentials]` runner remain open, so the exit gate stays
+closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

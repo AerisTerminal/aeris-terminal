@@ -47,8 +47,14 @@ jobs:
     # skipped gate is reported as "not run" — never as a pass.
     runs-on: [self-hosted, rithmic-credentials]
     timeout-minutes: 45
+    env:
+      # Cargo's built-in git client ignores URL-embedded credentials, so the
+      # private chart dependency below must be fetched through the git CLI.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
+      - name: Authenticate private chart dependency
+        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Soak the live Rithmic feed through the engine
