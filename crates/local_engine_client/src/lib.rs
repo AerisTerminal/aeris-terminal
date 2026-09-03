@@ -1587,11 +1587,25 @@ mod tests {
             .expect("connect optimized resident engine");
         let status = client.engine_status().expect("read engine status");
         assert_ne!(status.process_id, 0);
+        let providers = status
+            .providers
+            .iter()
+            .map(|provider| {
+                format!(
+                    "{}:{}:gen{}:{}",
+                    provider.provider,
+                    provider.state,
+                    provider.generation,
+                    provider.detail.as_deref().unwrap_or("-")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         println!(
             "native_engine_probe pid={} clients={} providers={} retained_series={} retained_bars={} bytes={} shutdown_state={}",
             status.process_id,
             status.connected_desktop_clients,
-            status.providers.len(),
+            providers,
             status.retained_series,
             status.retained_bars,
             status.approximate_series_bytes,

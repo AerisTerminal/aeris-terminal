@@ -373,6 +373,16 @@ subscription, and live quotes/depth through the real engine path; tick bars
 and history resolve only when the test feed carries prints. Handed over
 with the window open for maintainer-driven selection.
 
+Rithmic selection diagnosis (same day): the maintainer reported the desktop
+shows normal data, not Rithmic. Engine status confirms it: `coinbase:2:gen3`
+(Online) but `rithmic:0:gen0` — no Rithmic session has ever started in this
+engine lifetime, so no Rithmic demand has reached the engine; only Coinbase
+is demanded. The desktop is fully wired for Rithmic selection
+(`symbol_menu`, supervisor search/select/install, dedicated Rithmic client
+modules), and the status probe now prints per-provider state to make this
+visible. Next step is maintainer-driven selection in the open window while
+watching the engine state change.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
