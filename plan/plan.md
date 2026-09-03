@@ -399,6 +399,22 @@ populates; prints and history for MNQU6 are simply absent on this feed, so
 tick bars cannot form. Still needs a data-carrying feed or entitlement
 before the credentialed path can pass end to end.
 
+Feed re-characterization (same day, vault credentials present): with no
+local engine or desktop running, the debug smoke was rebuilt from current
+`main` (kit enabled via `provider_kit/current/proto`) and run twice,
+sequentially. Full smoke: login, 31-result search (both `CME` and
+`CME-Delayed` venues offered; MNQU6/CME selected), instrument reference,
+live quotes and depth all pass with zero prints; the plant then drops the
+idle watch connection (`stream_read_failed=Rithmic transport failed` at
+about two minutes; the smoke sends no heartbeats while watching, unlike
+the product session driver). History-only: same login/search/reference
+pass, ticker closes cleanly, and the replay completes with `history_empty`.
+Conclusion unchanged: the adapter is correct on every populated stage;
+prints and history for MNQU6 remain absent plant-side, so tick bars cannot
+form. Still needs a data-carrying feed or entitlement before the
+credentialed path passes end to end. No secret material in logs or repo;
+sessions were sequential, never concurrent.
+
 Full-platform launch with Rithmic (same day): release desktop and the
 kit-enabled v17 engine were rebuilt from current `main` and launched (the
 running engine was stopped gracefully first, since Windows cannot replace a
