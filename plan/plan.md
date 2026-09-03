@@ -1055,6 +1055,24 @@ run shows whether it stays bound. Verification: key-only SSH, toolchain
 versions, and runner `Listening for Jobs`. The exit gate stays closed
 and phase 5 remains blocked.
 
+Linux lane OOM and memory fix (same day, this batch): the first
+`workspace-linux` execution reached clippy, then rustc was SIGKilled
+compiling `ash` and the runner worker died with it (job cancelled).
+Cause: the VM had 2 GB, not 16 — Hyper-V `New-VM` enables Dynamic
+Memory by default and never ballooned up. Pinned static 16 GB
+(`dynamic=False startup=17179869184` verified in-VM as 15 GB usable),
+plus an 8 GB swap file and `jobs = 4` in the runner user's
+`~/.cargo/config.toml` (runner-scoped; no workflow change) as
+insurance for dual-lane load. Same run also proved the rename is
+harmless to the old Windows registration: `workspace-windows` went
+green post-rename. The rerun after the fix completed success: fmt,
+warnings-denied clippy, workspace build, release pair with provenance,
+full workspace tests, and market-data baseline all pass on the VM, with
+`release-pair-linux` and `market-data-performance-linux` uploaded
+alongside the Windows pair from the same run. Two native OS lanes are
+now green on maintainer hardware; macOS remains without an execution
+path. The exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
