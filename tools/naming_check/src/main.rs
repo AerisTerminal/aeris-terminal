@@ -1410,4 +1410,45 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn three_os_deterministic_gates_remain_required() {
+        let workflow = manifest(".github/workflows/ci.yml");
+        for runner in [
+            "runs-on: ubuntu-latest",
+            "runs-on: windows-latest",
+            "runs-on: macos-latest",
+        ] {
+            assert!(
+                workflow.contains(runner),
+                "CI lost the required native gate {runner}"
+            );
+        }
+        for gate in [
+            "cargo fmt --all -- --check",
+            "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+            "cargo build --workspace --all-targets --all-features",
+            "cargo test --workspace --all-features",
+        ] {
+            assert_eq!(
+                workflow.matches(gate).count(),
+                3,
+                "every native OS lane must run {gate}"
+            );
+        }
+        for artifact in [
+            "market-data-performance-linux",
+            "market-data-performance-windows",
+            "market-data-performance-macos",
+        ] {
+            assert!(
+                workflow.contains(artifact),
+                "CI lost provenance-bound market-data evidence {artifact}"
+            );
+        }
+        assert!(
+            !workflow.contains("continue-on-error"),
+            "CI must keep platform-specific failures visible"
+        );
+    }
 }

@@ -249,6 +249,22 @@ all pass; architecture checks 32 of 32, desktop 139 of 139,
 and provenance-bound physical/credentialed results remain open, so the exit
 gate stays closed and phase 5 remains blocked.
 
+Item 3/8 follow-up (same day, this batch): deterministic CI evidence is now
+symmetric across all three OS lanes. `workspace-windows` and
+`workspace-macos` run the same market-data performance baseline and upload
+OS-named 30-day artifacts (`market-data-performance-windows`,
+`market-data-performance-macos`) as the Linux lane; the evidence JSON already
+carries schema version, CPU/hardware, and OS/arch provenance. The new
+architecture check `three_os_deterministic_gates_remain_required` pins the
+three native runners, the four gates per lane, all three evidence artifacts,
+and the absence of `continue-on-error`. Verification on Windows (this
+machine): workspace gates all pass (architecture checks 33 of 33); the
+release performance baseline passes locally (100k bars, first_usable 193 ms,
+warm_read 338 ms). The new lanes still have to execute remotely; installed
+packaging, transitions, rendering, endurance, and credentialed/physical
+provenance in items 4 through 7 remain open, so the exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
