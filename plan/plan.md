@@ -265,6 +265,22 @@ packaging, transitions, rendering, endurance, and credentialed/physical
 provenance in items 4 through 7 remain open, so the exit gate stays closed
 and phase 5 remains blocked.
 
+Phase 4 protocol review (same day, this batch): all 67 engine-protocol types
+were audited for producers and consumers across `apps` and `crates`. Exactly
+one message was obsolete: `ActivateExistingUi` (envelope tag 16) had no
+sender and no handler anywhere in the workspace; second-desktop behavior
+stays as implemented (isolated authenticated clients, update lock blocks new
+processes). It is removed as a deliberate wire change: `PROTOCOL_VERSION`
+17, tag 16 retired permanently beside the existing retired gaps, and the
+architecture check now pins both the version and the tag-16 gap. The
+`legacy_*` workspace/storage migrations and the legacy-engine replacement
+path were reviewed and kept: they are live upgrade/replacement contracts
+with regression coverage, not scaffolding. Verification on Windows (this
+machine): workspace gates all pass (naming 33 of 33, protocol 7 of 7,
+desktop 139 of 139, `axiusflow_platform_runtime` 41 of 41, handshake 17 of
+17). Items 4 through 7 and remote-lane execution remain open, so the exit
+gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

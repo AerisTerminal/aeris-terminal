@@ -1,9 +1,9 @@
 use std::num::NonZeroUsize;
 
 use axiusflow_engine_protocol::{
-    ActivateExistingUi, AttachClient, ClientHello, ClientKind, DemandError, DetachClient,
-    EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope,
-    EnvelopeDecoder, Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument,
+    AttachClient, ClientHello, ClientKind, DemandError, DetachClient, EngineFaultCode,
+    EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder,
+    Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument,
     LIFECYCLE_CONTRACT_REVISION, MAX_FRAME_BYTES, MarketBar, OrderBookLevel, OrderBookSnapshot,
     OrderBookState, OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot, OrderFlowTrade,
     OrderFlowUpdate, PROTOCOL_VERSION, PersistenceState, ProtocolError, ProviderCatalogRejected,
@@ -32,7 +32,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 16);
+    assert_eq!(PROTOCOL_VERSION, 17);
 }
 
 fn workspace_payloads() -> Vec<envelope::Payload> {
@@ -78,7 +78,6 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
             code: EngineFaultCode::Retryable as i32,
             redacted_detail: "retry".into(),
         }),
-        envelope::Payload::ActivateExistingUi(ActivateExistingUi {}),
         envelope::Payload::Goodbye(Goodbye {
             reason: "done".into(),
         }),

@@ -1216,13 +1216,22 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 16"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 17"),
             "incompatible IPC revisions require a deliberate protocol-version change"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");
         assert!(
             codec.contains("ProtocolError::VersionMismatch"),
             "IPC decoding must fail closed on incompatible protocol versions"
+        );
+        let messages = manifest("crates/engine_protocol/src/messages.rs");
+        assert!(
+            !messages.contains("ActivateExistingUi"),
+            "removed single-instance activation command must not return"
+        );
+        assert!(
+            messages.contains("15, 17, 18"),
+            "retired envelope tag 16 must remain permanently unused"
         );
         let client = manifest("crates/local_engine_client/src/lib.rs");
         for contract in [

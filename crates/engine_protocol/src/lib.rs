@@ -11,21 +11,20 @@ mod messages;
 pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
 pub use messages::{
-    ActivateExistingUi, AttachClient, ClientHello, ClientKind, ConsumerResourceClass, DemandError,
-    DetachClient, EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState,
-    EngineStatus, Envelope, FailureStage, Fault, GetEngineStatus, Goodbye, HotSeries,
-    InstallProviderInstrument, MarketBar, OrderBookLevel, OrderBookSnapshot, OrderBookState,
-    OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot, OrderFlowTrade, OrderFlowUpdate,
-    PersistenceState, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderConnectionState, ProviderInstrumentInstalled, ProviderInstrumentSearchResult,
-    ProviderInstrumentSelection, ProviderInstrumentSummary, ProviderState, RegisterConsumer,
-    RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
-    SeriesSnapshot, SeriesState, SeriesUpdate, SeriesUpdateOperation, SetEngineLifecycle,
-    SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout,
-    ShutdownEngine, StreamRole, ViewportDemand, VisibilityDemand, WorkspaceLayoutState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
-    envelope,
+    AttachClient, ClientHello, ClientKind, ConsumerResourceClass, DemandError, DetachClient,
+    EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope,
+    FailureStage, Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument, MarketBar,
+    OrderBookLevel, OrderBookSnapshot, OrderBookState, OrderFlowAggressor, OrderFlowLevel,
+    OrderFlowSnapshot, OrderFlowTrade, OrderFlowUpdate, PersistenceState, ProviderCatalogRejected,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentInstalled,
+    ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
+    ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey,
+    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SeriesUpdateOperation,
+    SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist,
+    SetWorkspaceLayout, ShutdownEngine, StreamRole, ViewportDemand, VisibilityDemand,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceTabState, envelope,
 };
 
 /// Current compatible lifecycle contract revision advertised during readiness.
@@ -37,7 +36,13 @@ pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 /// `ClientHello`: every session owns a write-only command stream and a
 /// read-only event stream so blocking reads never share a transport handle
 /// with writes.
-pub const PROTOCOL_VERSION: u32 = 16;
+///
+/// Revision 17 removes the dormant single-instance `ActivateExistingUi`
+/// command (tag 16, retired permanently): the audit found no producer and no
+/// consumer anywhere in the workspace. Second-desktop behavior stays exactly
+/// as implemented: each desktop attaches as an isolated authenticated client,
+/// and lifecycle transactions block new processes through the update lock.
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Maximum prost payload accepted in one frame (3 MiB).
 pub const MAX_FRAME_BYTES: usize = 3 * 1_048_576;

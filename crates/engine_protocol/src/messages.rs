@@ -1167,10 +1167,6 @@ pub struct Fault {
     pub redacted_detail: String,
 }
 
-/// Requests activation of the existing UI instance.
-#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
-pub struct ActivateExistingUi {}
-
 /// Orderly connection shutdown notice.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct Goodbye {
@@ -1179,7 +1175,9 @@ pub struct Goodbye {
     pub reason: String,
 }
 
-/// Versioned local engine envelope. Removed tags remain permanently unused.
+/// Versioned local engine envelope. Removed tags remain permanently unused:
+/// tags 8-14, 19-24, and 39-40 predate the paired-session contract, and tag
+/// 16 carried the removed single-instance UI activation command.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Envelope {
     /// Protocol version.
@@ -1191,7 +1189,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54"
+        tags = "2, 3, 4, 5, 6, 7, 15, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1222,9 +1220,6 @@ pub mod envelope {
         /// Fault. Tag 15.
         #[prost(message, tag = "15")]
         Fault(super::Fault),
-        /// Existing UI activation. Tag 16.
-        #[prost(message, tag = "16")]
-        ActivateExistingUi(super::ActivateExistingUi),
         /// Orderly shutdown. Tag 17.
         #[prost(message, tag = "17")]
         Goodbye(super::Goodbye),
