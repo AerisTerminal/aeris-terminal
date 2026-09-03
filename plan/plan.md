@@ -1027,6 +1027,34 @@ global gitconfig is verified empty afterward: no persistent rewrite,
 no lingering secret. Linux/macOS lanes remain queued with no runners.
 The exit gate stays closed and phase 5 remains blocked.
 
+Self-hosted Linux runner online (same day, this batch): Hyper-V was
+enabled by the maintainer (no reboot needed for staging; one reboot
+taken later for an unrelated reason), and an Ubuntu 24.04 Server VM
+(`axiusflow-linux`: 8 vCPU, 16 GB RAM, 120 GB disk, NAT via Default
+Switch) was built on this box and registered with labels
+`axiusflow,linux`, running as a systemd service. Provisioned inside:
+git, build-essential, pkg-config, desktop build libraries, rustup with
+pinned toolchain 1.97.1 plus clippy/rustfmt, cargo on the system PATH.
+Lessons from the build, in order: (1) Ubuntu's `*-cloudimg-amd64.img`
+is qcow2 despite the name — raw conversions boot nothing; convert with
+`-f qcow2`. (2) Hyper-V automatic checkpoints corrupted the first VM's
+disk chain (config referenced a deleted AVHDX); they are disabled for
+this VM. (3) qemu-img output needs a desparse copy before Hyper-V
+accepts `Resize-VHD` (0xC03A001A). (4) The cloud image emits nothing on
+the Hyper-V serial console; the VMConnect console is the ground truth.
+(5) This box does not automount new volumes — seed-disk handling must
+assign and mountvol-mount a letter explicitly. (6) PowerShell quoting:
+`ssh-keygen -N '""'` sets a literal two-quote passphrase, which broke
+key auth with a misleading server-accepts-then-client-gives-up
+handshake; fixed with `-N ''`, and the VM is now key-only (password
+login refused at protocol level). (7) The repo was renamed to canonical
+`Axiusflowhq/axiusflow-gpui`; runner registration is case-sensitive on
+the path and 404s otherwise, while git itself follows the rename —
+local origin updated. The Windows runner predates the rename; the next
+run shows whether it stays bound. Verification: key-only SSH, toolchain
+versions, and runner `Listening for Jobs`. The exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
