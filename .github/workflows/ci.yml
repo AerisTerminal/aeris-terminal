@@ -30,6 +30,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build workspace
         run: cargo build --workspace --all-targets --all-features
+      - name: Build release desktop and engine pair
+        run: cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features
+      - name: Upload release pair
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-pair-linux
+          path: |
+            target/release/axiusflow_desktop
+            target/release/axiusflow_engine
+          if-no-files-found: error
       - name: Test workspace
         run: cargo test --workspace --all-features
       - name: Check local market-data performance
@@ -60,6 +70,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build workspace
         run: cargo build --workspace --all-targets --all-features
+      - name: Build release desktop and engine pair
+        run: cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features
+      - name: Upload release pair
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-pair-windows
+          path: |
+            target/release/axiusflow_desktop.exe
+            target/release/axiusflow_engine.exe
+          if-no-files-found: error
       - name: Test workspace
         run: cargo test --workspace --all-features
       - name: Check local market-data performance
@@ -90,6 +110,16 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build workspace
         run: cargo build --workspace --all-targets --all-features
+      - name: Build release desktop and engine pair
+        run: cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features
+      - name: Upload release pair
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-pair-macos
+          path: |
+            target/release/axiusflow_desktop
+            target/release/axiusflow_engine
+          if-no-files-found: error
       - name: Test workspace
         run: cargo test --workspace --all-features
       - name: Check local market-data performance

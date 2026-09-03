@@ -597,6 +597,16 @@ workspace gate now passes with `cargo clippy --workspace --all-targets
 when compiled in the workspace dependency graph. No warning suppression or
 platform-specific skip was added.
 
+Native release-pair CI preparation (same day, this batch): every Linux,
+Windows, and macOS deterministic lane now builds the release desktop and
+engine together after the workspace build and uploads an OS-labelled pair.
+Uploads fail when either expected binary is absent, and the architecture gate
+pins the three release commands, artifact names, and fail-closed upload policy.
+This supplies provenance-bound binaries for the installed-pair qualification
+once CI authentication is repaired; it does not itself constitute packaging,
+launch, update, rollback, or uninstall evidence. Verification on Windows:
+formatting passes and architecture checks pass 35/35.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,

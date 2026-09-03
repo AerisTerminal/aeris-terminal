@@ -1437,6 +1437,7 @@ mod tests {
             "cargo fmt --all -- --check",
             "cargo clippy --workspace --all-targets --all-features -- -D warnings",
             "cargo build --workspace --all-targets --all-features",
+            "cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features",
             "cargo test --workspace --all-features",
         ] {
             assert_eq!(
@@ -1449,12 +1450,20 @@ mod tests {
             "market-data-performance-linux",
             "market-data-performance-windows",
             "market-data-performance-macos",
+            "release-pair-linux",
+            "release-pair-windows",
+            "release-pair-macos",
         ] {
             assert!(
                 workflow.contains(artifact),
                 "CI lost provenance-bound market-data evidence {artifact}"
             );
         }
+        assert_eq!(
+            workflow.matches("if-no-files-found: error").count(),
+            3,
+            "every native release-pair upload must fail when its binaries are absent"
+        );
         assert!(
             !workflow.contains("continue-on-error"),
             "CI must keep platform-specific failures visible"
