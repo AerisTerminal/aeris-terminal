@@ -704,6 +704,12 @@ startup definition. The Windows registry path remains unchanged. Platform
 runtime tests (46/46, including a staging-cleanup regression), warnings-denied
 clippy, formatting, and architecture checks (35/35) pass after this change.
 
+Native CI rerun confirmation (same day, run `33746804477`): all three native
+jobs reached the credential preflight and failed because the injected
+`NUCLEUS_CHARTS_TOKEN` value is empty. The target-root and atomic-autostart
+changes therefore have local Windows evidence only; no claim of native
+Linux/macOS build or runtime qualification is made.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
