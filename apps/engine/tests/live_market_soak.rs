@@ -392,14 +392,26 @@ fn assert_carries_the_open_candle(fold: &SeriesFold, symbol: &str) {
     if fold.started.elapsed() < SETTLE || in_the_bucket_roll_grace(fold) {
         return;
     }
+    let current = open_bucket(fold.interval_seconds);
+    let newest = fold
+        .bars
+        .values()
+        .next_back()
+        .map(|bar| bar.exchange_timestamp_seconds);
+    let bucket_age = current.zip(newest).map(|(open, _)| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+            .map_or(-1, |now| now - open)
+    });
     assert!(
         carries_the_open_candle(fold),
-        "the open candle for {symbol} at {}s is missing: newest bucket is {:?}",
+        "the open candle for {symbol} at {}s is missing: newest bucket is {newest:?}, current bucket is {current:?} (age {bucket_age:?}s), {} snapshots, {} updates, last publication {:?} ago",
         fold.interval_seconds,
-        fold.bars
-            .values()
-            .next_back()
-            .map(|bar| bar.exchange_timestamp_seconds)
+        fold.snapshots,
+        fold.updates,
+        fold.last_publication.elapsed(),
     );
 }
 

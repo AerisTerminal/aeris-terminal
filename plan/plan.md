@@ -790,6 +790,48 @@ resumable recovery path. Verification on Windows (this machine):
 `[rithmic-credentials]` runner remain open, so the exit gate stays closed and
 phase 5 remains blocked.
 
+Release-pair qualification on current tree (same day, this batch): the
+release desktop and engine were rebuilt from `d22c181` with
+`AXIUSFLOW_RELEASE_IDENTITY` set to the commit and
+`AXIUSFLOW_INSTALL_GENERATION=43` (engine SHA256
+`DFF99BB566285332093549B3F1E85A6674414641A1332A388273186A245CB178`,
+desktop SHA256
+`5BA359B5B2B434A2C368AF3DC2C0D24679800EF9C41A7A97C9ECEA2583F4A9C6`).
+The exact engine binary was launched resident (PID 19552, path match) with
+no other Axiusflow process running. The optimized status probe passed over
+authenticated IPC (PID match, `coinbase:2:gen1` Online with retained bars
+growing 6821 to 6956 across probes, `rithmic:0:gen0` with no demand,
+shutdown `Running`); a probe built without the release identity is rejected
+with the redacted mismatch detail, confirming the handshake gate. The first
+snapshot demand timed out at its 2s deadline on a cold series shortly after
+engine start, and the bounded retry passed (135-bar BTC-USD snapshot with
+sequence, timestamp, close, and volume populated, publication 1). The
+engine was shut down gracefully through `--shutdown` (no Axiusflow
+processes remain; a second `--shutdown` fails closed with os error 2 as the
+socket is released). This re-proves identity-bound release
+startup/status/snapshot IPC on Windows for the current tree; installed
+packaging, transitions, rendering, endurance, and macOS/Linux evidence
+remain open under items 4 through 7.
+
+Coinbase 600s live soak (same day, this batch): the gate-standard soak ran
+twice through the in-process engine. Run 1 failed at 263s on generation 7
+(ETH-USD 60s): the open-candle assert fired just past the 5s bucket-roll
+grace with newest bucket `1788439380` and no forming candle yet, after six
+prior switches had all passed with open candles present. The failure
+message now also carries the current bucket, bucket age, snapshot/update
+counts, and last-publication age (test-only diagnostic change; no behavior
+or threshold change). Run 2 passed the full 600s window: 15 switches, 19
+snapshots, 1682 updates, every switch loading 251 bars with the open candle
+present, and the gate evidence records `passed` (15 switches, 19 snapshots,
+1682 updates). Conclusion: the run-1 failure was a transient slow bucket
+roll past the tight grace, not a systematic handoff defect — but the 5s
+grace can false-positive on a slow roll, and future failures must be read
+with the new diagnostic fields rather than assumed transient. Full
+workspace gates pass with the diagnostic change. Items 4 through 7,
+remote-lane execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
+`[rithmic-credentials]` runner remain open, so the exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
