@@ -653,6 +653,15 @@ pair. The naming gate pins all three manifests and the fail-closed artifact
 paths. Local Windows release startup/status qualification remains valid; CI
 cannot produce the manifest until the private dependency credential is fixed.
 
+macOS cross-target audit result (same day, this batch): a Windows-hosted
+`cargo check --workspace --all-targets --all-features --target
+x86_64-apple-darwin` reached the native macOS dependency graph and then stopped
+in `ring`/`aws-lc-sys` because no C compiler is installed for the Apple target
+(`cc` not found). This is an environment limitation of cross-compiling
+C-backed dependencies, not evidence of source compatibility; the authoritative
+macOS build remains the native `macos-latest` lane once its private dependency
+credential is repaired.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
