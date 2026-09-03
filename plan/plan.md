@@ -853,6 +853,27 @@ SDKs (the runner tool cache stays untouched). Local verification: fmt,
 warnings-denied client clippy, client 4/4, architecture 35/35. CI re-run
 pending; the exit gate stays closed and phase 5 remains blocked.
 
+First green three-OS run (same day, run `33768795698` on `ac3bf42`):
+macOS 16m38s, Linux 31m24s, Windows 39m35s, all steps green on all lanes,
+with all three release pairs and all three 30-day market-data baselines
+uploaded. The two intervening reds were each diagnosed from lane logs and
+fixed without touching production code: a one-frame-in-80ms scheduling
+stall on a loaded macOS runner (same assertion passed there 40 minutes
+earlier; window widened to 320 ms with continuity/bounds assertions
+unchanged), then thirteen macOS-only failures from two native-fixture gaps
+exposed the first time the suite ran that far — `TMPDIR` under symlinked
+`/var` failing installer validation (fixtures now canonicalize the base on
+Unix) and the display test still asserting `Unavailable` after the macOS
+probe was enabled (now a validating macOS probe test mirroring Linux).
+The macOS cross-target clippy lane (`x86_64-apple-darwin`, warnings denied)
+passes from the Windows host for the touched crate. This meets the
+cross-platform exit-gate bullet for deterministic workspace gates on native
+runners. Still open: installed packaging and reboot validation, physical
+transitions, rendering/scanout, eight-hour endurance, a data-carrying
+Rithmic feed, the self-hosted `[rithmic-credentials]` runner, and
+maintainer approval — so the exit gate stays closed and phase 5 remains
+blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
