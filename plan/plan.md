@@ -907,6 +907,26 @@ verification on the rebuilt `89ff2f4`/gen-47 pair: 534/534 Ready books in
 Workspace gates green; CI run pending. The exit gate stays closed and
 phase 5 remains blocked.
 
+Remote CI billing block (same day, this batch): the three runs after the
+last green (`33782369459` on `f97cb98`, `33786596888` on `89ff2f4`,
+`33786927635` on `6e35aad`) all fail identically with zero executed
+steps: every lane's check-run annotation reads "The job was not started
+because recent account payments have failed or your spending limit needs
+to be increased. Please check the 'Billing & plans' section in your
+settings". Jobs never reach a runner (11s, no steps, runner unassigned),
+so no build, test, release-pair, or baseline artifact exists from these
+runs and the code batches are exonerated — the last green run
+(`33778255928` on `e08604e`, 16:22 UTC) predates the first billing
+failure (17:04 UTC). Maintainer action required: resolve the account
+billing/spending-limit condition, then rerun the workflow from current
+`main`; no workflow or code change is needed for this. Until remote
+lanes execute, the current tree's evidence is local only. Local
+re-verification on Windows (this machine, `6e35aad`): `cargo fmt --all
+-- --check` clean, `axiusflow_engine` 111 passed / 0 failed (1
+release-only ignore plus 3 live-soak ignores by design), handshake 17
+of 17, architecture checks 35 of 35. The exit gate stays closed and
+phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
