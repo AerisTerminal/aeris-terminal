@@ -662,6 +662,14 @@ C-backed dependencies, not evidence of source compatibility; the authoritative
 macOS build remains the native `macos-latest` lane once its private dependency
 credential is repaired.
 
+Private-dependency preflight (same day, this batch): deterministic and live
+market workflows now validate `NUCLEUS_CHARTS_TOKEN` against the GitHub API
+before Cargo runs. Linux/macOS use `curl` and Windows uses PowerShell; both
+paths keep the token in an environment variable and emit only an empty/HTTP
+failure category. The naming gate pins all five preflight steps. This removes
+several minutes of opaque Cargo retries and makes the remaining CI blocker
+actionable without weakening the required three-OS gate.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,

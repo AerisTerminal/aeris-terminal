@@ -1465,6 +1465,13 @@ mod tests {
             "each native release pair must record and upload its provenance manifest"
         );
         assert_eq!(
+            workflow
+                .matches("Validate private chart credential")
+                .count(),
+            3,
+            "every native workspace lane must preflight private chart access"
+        );
+        assert_eq!(
             workflow.matches("if-no-files-found: error").count(),
             3,
             "every native release-pair upload must fail when its binaries are absent"
@@ -1501,6 +1508,13 @@ mod tests {
                 .count(),
             2,
             "every live-market gate must authenticate the private charts dependency"
+        );
+        assert_eq!(
+            workflow
+                .matches("Validate private chart credential")
+                .count(),
+            2,
+            "every live-market gate must preflight private chart access"
         );
         assert!(
             !workflow.contains("continue-on-error"),

@@ -23,6 +23,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
         run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Validate private chart credential
+        env:
+          NUCLEUS_CHARTS_TOKEN: ${{ secrets.NUCLEUS_CHARTS_TOKEN }}
+        run: |
+          test -n "$NUCLEUS_CHARTS_TOKEN"
+          status=$(curl --fail-with-body --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            -H "Authorization: Bearer $NUCLEUS_CHARTS_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/NucleusCharts/financial-charts)
+          test "$status" = 200
       - name: Install desktop build libraries
         run: tools/setup_linux_desktop.sh --system
       - name: Install pinned Rust toolchain
@@ -55,6 +65,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
         run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Validate private chart credential
+        shell: pwsh
+        env:
+          NUCLEUS_CHARTS_TOKEN: ${{ secrets.NUCLEUS_CHARTS_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NUCLEUS_CHARTS_TOKEN)) { throw 'NUCLEUS_CHARTS_TOKEN is empty' }
+          $response = Invoke-WebRequest -Uri 'https://api.github.com/repos/NucleusCharts/financial-charts' -Headers @{ Authorization = "Bearer $env:NUCLEUS_CHARTS_TOKEN"; Accept = 'application/vnd.github+json' } -UseBasicParsing
+          if ($response.StatusCode -ne 200) { throw "private chart credential returned HTTP $($response.StatusCode)" }
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Soak the live Rithmic feed through the engine
