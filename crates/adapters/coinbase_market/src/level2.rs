@@ -104,6 +104,13 @@ impl CoinbaseLevel2Book {
         self.diagnostics
     }
 
+    /// Product this book decodes for; subscription updates preserve the
+    /// books of products they do not touch.
+    #[must_use]
+    pub fn product_id(&self) -> &str {
+        &self.product_id
+    }
+
     /// Clears retained depth and binds the book to a newer session generation.
     ///
     /// # Errors

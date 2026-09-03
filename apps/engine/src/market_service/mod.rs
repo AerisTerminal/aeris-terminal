@@ -322,6 +322,20 @@ struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
     traded_volumes: BTreeMap<i64, i64>,
+    watch: DepthSnapshotWatch,
+}
+
+/// Bounded recovery state for a book still awaiting its first snapshot.
+///
+/// A missed initial venue snapshot otherwise stalls the book forever: later
+/// deltas cannot build it, and nothing resubscribes while the product set is
+/// unchanged. The watchdog resubscribes a few times, then goes quiet; a new
+/// demand, product change, or session reconnect re-arms it.
+#[derive(Default)]
+struct DepthSnapshotWatch {
+    awaited_since: Option<Instant>,
+    last_attempt: Option<Instant>,
+    resubscribes: u32,
 }
 
 mod realtime;

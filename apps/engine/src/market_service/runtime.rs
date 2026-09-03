@@ -285,18 +285,24 @@ impl LiveCoinbaseRealtime {
             .map(|product| product.symbol.clone())
             .collect::<Vec<_>>();
         CoinbaseConfig::try_new(symbols.clone()).ok()?;
-        *books.borrow_mut() = products
-            .iter()
-            .filter_map(|product| {
-                CoinbaseLevel2Book::try_new(
+        // Books of retained products survive the update: recreating every
+        // book dropped live depth until the venue re-sent snapshots it only
+        // emits on subscribe. Added products start awaiting; removed ones go
+        // away with the unsubscribe the session sends below.
+        let mut books = books.borrow_mut();
+        books.retain(|book| symbols.iter().any(|symbol| symbol == book.product_id()));
+        for product in &products {
+            if !books.iter().any(|book| book.product_id() == product.symbol)
+                && let Ok(book) = CoinbaseLevel2Book::try_new(
                     product.symbol.clone(),
                     product.price_scale,
                     product.quantity_scale,
                     generation.0.get(),
                 )
-                .ok()
-            })
-            .collect();
+            {
+                books.push(book);
+            }
+        }
         self.products = products;
         Some(symbols)
     }
@@ -1460,5 +1466,69 @@ impl MarketService {
         reply_rx
             .recv()
             .map_err(|_| "market engine coordinator stopped before replying".to_string())?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::num::NonZeroU64;
+    use std::sync::mpsc;
+
+    const LEVEL2_SNAPSHOT: &[u8] = br#"{"channel":"l2_data","timestamp":"2023-11-14T22:13:20Z","sequence_num":0,"events":[{"type":"snapshot","product_id":"BTC-USD","updates":[{"side":"bid","event_time":"2023-11-14T22:13:20Z","price_level":"100.00","new_quantity":"2.00000000"},{"side":"offer","event_time":"2023-11-14T22:13:20Z","price_level":"101.00","new_quantity":"3.00000000"}]}]}"#;
+
+    fn product(symbol: &str) -> RealtimeProduct {
+        RealtimeProduct {
+            symbol: symbol.to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+        }
+    }
+
+    #[test]
+    fn subscription_updates_preserve_ready_books_for_retained_products() {
+        let mut source = LiveCoinbaseRealtime::try_new();
+        let generation = ProviderGeneration(NonZeroU64::new(2).expect("generation"));
+        let books = RefCell::new(vec![
+            CoinbaseLevel2Book::try_new("BTC-USD", 2, 8, 2).expect("book"),
+        ]);
+        books.borrow_mut()[0]
+            .apply_message(LEVEL2_SNAPSHOT, 1)
+            .expect("snapshot installs");
+        assert_eq!(books.borrow()[0].diagnostics().snapshots, 1);
+        let (controls_tx, controls_rx) = mpsc::sync_channel(4);
+        controls_tx
+            .send(RealtimeControl::Start(vec![product("BTC-USD")]))
+            .expect("control");
+        assert_eq!(
+            source
+                .take_product_update(&controls_rx, generation, &books)
+                .expect("identical update applies"),
+            vec!["BTC-USD".to_string()]
+        );
+        assert_eq!(books.borrow().len(), 1);
+        assert_eq!(books.borrow()[0].product_id(), "BTC-USD");
+        assert_eq!(
+            books.borrow()[0].diagnostics().snapshots,
+            1,
+            "a retained ready book survives an identical update"
+        );
+        controls_tx
+            .send(RealtimeControl::Start(vec![product("ETH-USD")]))
+            .expect("control");
+        assert_eq!(
+            source
+                .take_product_update(&controls_rx, generation, &books)
+                .expect("changed update applies"),
+            vec!["ETH-USD".to_string()]
+        );
+        assert_eq!(books.borrow().len(), 1);
+        assert_eq!(books.borrow()[0].product_id(), "ETH-USD");
+        assert_eq!(
+            books.borrow()[0].diagnostics().snapshots,
+            0,
+            "an added product starts awaiting its own snapshot"
+        );
     }
 }

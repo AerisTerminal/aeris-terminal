@@ -1,21 +1,22 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey,
     COINBASE_PROVIDER_GENERATION, CanonicalOrderBookState, CanonicalTrade,
-    CoinbaseRealtimeWorkerState, ConsumerId, Coordinator, DepthSnapshot, Duration, FailureStage,
-    FormingBar, HISTORY_BARS_PER_SERIES, HistoryRange, HistoryRequestKind,
+    CoinbaseRealtimeWorkerState, ConsumerId, Coordinator, DepthSnapshot, DepthSnapshotWatch,
+    Duration, FailureStage, FormingBar, HISTORY_BARS_PER_SERIES, HistoryRange, HistoryRequestKind,
     InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, LIVE_EDGE_REPAIR_RETRY_DELAY,
     LiveHandoff, LiveSeriesPublication, MAXIMUM_LIVE_EDGE_REPAIR_RETRIES,
     MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream,
-    MarketTrade, NonZeroU64, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering,
-    PendingLiveEdgeRepair, PersistenceState, ProviderConnectionState, ProviderGeneration,
-    ProviderHealth, ProviderOrderBook, ProviderRequest, ProviderRuntimeLifecycle,
-    PublishedTailState, RealtimeControl, RealtimeEvent, RealtimeProduct, RealtimeSource, Receiver,
-    ResourceMode, RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicLiveCadence,
-    RithmicLiveHandoff, RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection,
-    SeriesLoadState, SyncSender, TrySendError, VecDeque, chart_stream_requirements,
-    coinbase_aggregator, coinbase_instrument_id, coinbase_live_edge_repair_range,
-    coinbase_series_profile, current_unix_nanos, id, ipc_series, order_flow_payload, publish_state,
-    series_state_with_persistence, series_update_message, snapshot_message, thread,
+    MarketTrade, NonZeroU64, NonZeroUsize, OrderBook, OrderBookApplyOutcome,
+    OrderBookRecoveryReason, Ordering, PendingLiveEdgeRepair, PersistenceState,
+    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderOrderBook,
+    ProviderRequest, ProviderRuntimeLifecycle, PublishedTailState, RealtimeControl, RealtimeEvent,
+    RealtimeProduct, RealtimeSource, Receiver, ResourceMode, RithmicCalendarPeriod,
+    RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff, RithmicRealtimeControl,
+    RithmicRealtimeEvent, RithmicSelection, SeriesLoadState, SyncSender, TrySendError, VecDeque,
+    chart_stream_requirements, coinbase_aggregator, coinbase_instrument_id,
+    coinbase_live_edge_repair_range, coinbase_series_profile, current_unix_nanos, id, ipc_series,
+    order_flow_payload, publish_state, series_state_with_persistence, series_update_message,
+    snapshot_message, thread,
 };
 
 impl ProviderOrderBook {
@@ -26,6 +27,7 @@ impl ProviderOrderBook {
                 NonZeroUsize::new(MAXIMUM_PUBLISHED_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
             traded_volumes: BTreeMap::new(),
+            watch: DepthSnapshotWatch::default(),
         }
     }
 
@@ -916,6 +918,102 @@ impl Coordinator<'_> {
         }
     }
 
+    /// A demanded Coinbase book waiting this long for its first snapshot is
+    /// stalled: the venue snapshot was missed and later deltas cannot build
+    /// the book. Triggers one resubscribe dance; see
+    /// `MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES`.
+    const DEPTH_SNAPSHOT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Bounded resubscribe dances per stalled book before going quiet.
+    /// Recovery then waits for a fresh demand, product change, or session
+    /// reconnect, each of which advances or replaces the book and re-arms
+    /// the watch.
+    pub(super) const MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES: u32 = 5;
+    /// Minimum spacing between resubscribe dances for one book, so a full
+    /// control channel degrades to one attempt per second instead of one per
+    /// tick.
+    const DEPTH_RESUBSCRIBE_SPACING: Duration = Duration::from_secs(1);
+
+    /// Resubscribes Coinbase books stalled awaiting their first snapshot.
+    ///
+    /// Rithmic books are skipped: their history and backfill legitimately
+    /// take tens of seconds, so a wall-clock bound cannot tell a stall from
+    /// a slow load.
+    pub(super) fn recover_stalled_depth_snapshots(&mut self) {
+        if self.resource_mode == ResourceMode::OfflineSuspended {
+            return;
+        }
+        let now = Instant::now();
+        let mut stalled = Vec::new();
+        for (identity, order_book) in &mut self.order_books {
+            if order_book.instrument.provider != "coinbase" {
+                continue;
+            }
+            if order_book.book.state()
+                != CanonicalOrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot)
+            {
+                order_book.watch = DepthSnapshotWatch::default();
+                continue;
+            }
+            let awaited = *order_book.watch.awaited_since.get_or_insert(now);
+            if now.duration_since(awaited) < Self::DEPTH_SNAPSHOT_STALL_TIMEOUT
+                || order_book.watch.resubscribes >= Self::MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES
+                || order_book.watch.last_attempt.is_some_and(|attempt| {
+                    now.duration_since(attempt) < Self::DEPTH_RESUBSCRIBE_SPACING
+                })
+            {
+                continue;
+            }
+            stalled.push((
+                identity.clone(),
+                order_book.instrument.provider_symbol.clone(),
+            ));
+        }
+        if stalled.is_empty() {
+            return;
+        }
+        let Ok(products) = self.coinbase_live_products() else {
+            return;
+        };
+        let stalled_symbols: BTreeSet<String> = stalled
+            .iter()
+            .map(|(_, symbol)| symbol.clone())
+            .filter(|symbol| products.contains_key(symbol))
+            .collect();
+        if stalled_symbols.is_empty() {
+            return;
+        }
+        // Exclude-then-restore: the venue re-sends snapshots only on
+        // subscribe, so the stalled products leave and rejoin while every
+        // other product keeps its Ready book untouched.
+        let reduced = products
+            .iter()
+            .filter(|(symbol, _)| !stalled_symbols.contains(*symbol))
+            .map(|(_, product)| product.clone())
+            .collect::<Vec<_>>();
+        let full = products.into_values().collect::<Vec<_>>();
+        let completed = match self.providers.start_coinbase_realtime(reduced) {
+            Err(_) => return,
+            Ok(sent) => sent && matches!(self.providers.start_coinbase_realtime(full), Ok(true)),
+        };
+        for (identity, _) in &stalled {
+            let Some(order_book) = self.order_books.get_mut(identity) else {
+                continue;
+            };
+            order_book.watch.last_attempt = Some(now);
+            if !completed {
+                continue;
+            }
+            order_book.watch.resubscribes = order_book.watch.resubscribes.saturating_add(1);
+            order_book.watch.awaited_since = Some(now);
+            if order_book.watch.resubscribes >= Self::MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES {
+                eprintln!(
+                    "Axiusflow engine depth snapshot unavailable for {} after bounded resubscribes; waiting for fresh demand",
+                    order_book.instrument.instrument_id,
+                );
+            }
+        }
+    }
+
     pub(super) fn rithmic_recovering(&mut self, generation: u64, detail: &'static str) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
@@ -1579,6 +1677,27 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn sync_coinbase_realtime(&mut self) -> Result<(), String> {
+        let subscriptions = self.coinbase_live_products()?;
+        let products = subscriptions.keys().cloned().collect::<BTreeSet<_>>();
+        if products.is_empty()
+            || products.len() > axiusflow_coinbase_market_adapter::MAXIMUM_PRODUCTS
+        {
+            return Err("Coinbase realtime subscription set is invalid".to_string());
+        }
+        if products != self.realtime_products
+            && self
+                .providers
+                .start_coinbase_realtime(subscriptions.into_values().collect())?
+        {
+            self.realtime_products = products;
+            self.realtime_started = true;
+        }
+        Ok(())
+    }
+
+    /// Products the live series currently require, shared by subscription
+    /// sync and the stalled-depth resubscribe dance so both agree on the set.
+    fn coinbase_live_products(&self) -> Result<BTreeMap<String, RealtimeProduct>, String> {
         let mut subscriptions = BTreeMap::new();
         for series in self.live.keys() {
             let instrument = self.coinbase_instrument(series)?;
@@ -1597,21 +1716,7 @@ impl Coordinator<'_> {
                 },
             );
         }
-        let products = subscriptions.keys().cloned().collect::<BTreeSet<_>>();
-        if products.is_empty()
-            || products.len() > axiusflow_coinbase_market_adapter::MAXIMUM_PRODUCTS
-        {
-            return Err("Coinbase realtime subscription set is invalid".to_string());
-        }
-        if products != self.realtime_products
-            && self
-                .providers
-                .start_coinbase_realtime(subscriptions.into_values().collect())?
-        {
-            self.realtime_products = products;
-            self.realtime_started = true;
-        }
-        Ok(())
+        Ok(subscriptions)
     }
 
     /// Hands the worker a replacement selection the control channel refused.

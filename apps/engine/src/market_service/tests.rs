@@ -6479,3 +6479,313 @@ fn realtime_queue_overflow_closes_and_restarts_the_provider_generation() {
     while event_rx.recv_timeout(Duration::from_millis(50)).is_ok() {}
     worker.join().expect("realtime worker exits");
 }
+
+fn coinbase_bar_series(market: &str) -> BarSeriesKey {
+    let instrument = if market == "ETH-USD" {
+        "instrument:coinbase:eth:usd"
+    } else {
+        "instrument:coinbase:btc:usd"
+    };
+    BarSeriesKey {
+        provider_id: "coinbase".to_string(),
+        instrument_id: instrument.to_string(),
+        entitlement_id: ENTITLEMENT_CLASS.to_string(),
+        period: BarPeriod::time(60).expect("period"),
+        definition_version: 1,
+    }
+}
+
+fn coinbase_depth_snapshot(
+    instrument_id: &str,
+    session_generation: u64,
+    source_sequence: u64,
+) -> DepthSnapshot {
+    DepthSnapshot {
+        metadata: EventMetadata {
+            provider_id: "coinbase".to_string(),
+            instrument_id: instrument_id.to_string(),
+            entitlement_id: ENTITLEMENT_CLASS.to_string(),
+            source_sequence,
+            session_generation,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: Some(20),
+                provider_unix_nanos: None,
+                received_unix_nanos: 21,
+            },
+        },
+        bids: vec![DepthLevel {
+            price: 20_000,
+            quantity: 7,
+            order_count: Some(3),
+        }],
+        asks: vec![DepthLevel {
+            price: 20_025,
+            quantity: 4,
+            order_count: Some(2),
+        }],
+    }
+}
+
+fn stalled_book_key(series: &BarSeriesKey) -> (String, String) {
+    (series.provider_id.clone(), series.instrument_id.clone())
+}
+
+fn backdate_depth_watch(coordinator: &mut Coordinator<'_>, series: &BarSeriesKey) {
+    let key = stalled_book_key(series);
+    let watch = &mut coordinator
+        .order_books
+        .get_mut(&key)
+        .expect("stalled book exists")
+        .watch;
+    watch.awaited_since = Instant::now().checked_sub(Duration::from_hours(1));
+}
+
+fn install_coinbase_depth(
+    coordinator: &mut Coordinator<'_>,
+    client_id: ClientId,
+    consumer_id: ConsumerId,
+    series: &BarSeriesKey,
+) {
+    coordinator
+        .engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id,
+                workspace_id: WorkspaceId(id(1).expect("workspace")),
+                consumer_id,
+            },
+            true,
+        )
+        .expect("consumer registers");
+    coordinator
+        .engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            GenerationId(id(3).expect("generation")),
+            series,
+            chart_stream_requirements(series),
+        )
+        .expect("depth demand installs");
+    coordinator
+        .engine
+        .set_visibility(consumer_id, true)
+        .expect("consumer is foreground");
+    coordinator
+        .install_provider_instrument(&coinbase_instrument(series))
+        .expect("instrument installs");
+    coordinator.live.insert(
+        series.clone(),
+        LiveHandoff::try_new(
+            series,
+            ProviderGeneration(id(1).expect("generation")),
+            &coinbase_instrument(series),
+        )
+        .expect("live handoff"),
+    );
+}
+
+fn demand_legs(realtime: &Receiver<RealtimeControl>) -> Vec<BTreeSet<String>> {
+    let mut legs = Vec::new();
+    while let Ok(RealtimeControl::Start(products)) = realtime.try_recv() {
+        legs.push(
+            products
+                .into_iter()
+                .map(|product| product.symbol)
+                .collect::<BTreeSet<_>>(),
+        );
+    }
+    legs
+}
+
+#[test]
+fn stalled_coinbase_book_resubscribes_only_the_stalled_product() {
+    let client_id = ClientId(id(7).expect("client"));
+    let btc_consumer = ConsumerId(id(9).expect("consumer"));
+    let eth_consumer = ConsumerId(id(10).expect("consumer"));
+    let btc = coinbase_bar_series("BTC-USD");
+    let eth = coinbase_bar_series("ETH-USD");
+    let engine = configured_engine().expect("engine");
+    let (history_tx, _history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, realtime_rx) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &stop,
+        btc_consumer,
+        &btc,
+    );
+    install_coinbase_depth(&mut coordinator, client_id, btc_consumer, &btc);
+    coordinator
+        .events
+        .insert(eth_consumer, ConsumerEvents::default());
+    install_coinbase_depth(&mut coordinator, client_id, eth_consumer, &eth);
+    // The healthy book completes its snapshot while BTC-USD stalls.
+    coordinator.provider_depth(
+        "coinbase",
+        1,
+        &coinbase_depth_snapshot("instrument:coinbase:eth:usd", 1, 11),
+    );
+    backdate_depth_watch(&mut coordinator, &btc);
+    backdate_depth_watch(&mut coordinator, &btc);
+    coordinator.recover_stalled_depth_snapshots();
+    // The dance excludes only the stalled product, then restores the set.
+    assert_eq!(
+        demand_legs(&realtime_rx),
+        vec![
+            BTreeSet::from(["ETH-USD".to_string()]),
+            BTreeSet::from(["BTC-USD".to_string(), "ETH-USD".to_string()]),
+        ]
+    );
+    let btc_key = stalled_book_key(&btc);
+    assert_eq!(
+        coordinator
+            .order_books
+            .get(&btc_key)
+            .expect("stalled book")
+            .watch
+            .resubscribes,
+        1
+    );
+    // The healthy book is never fenced by another product's stall.
+    let eth_key = stalled_book_key(&eth);
+    assert_eq!(
+        coordinator
+            .order_books
+            .get(&eth_key)
+            .expect("healthy book")
+            .watch
+            .resubscribes,
+        0
+    );
+    assert_eq!(
+        coordinator
+            .order_books
+            .get(&eth_key)
+            .expect("healthy book")
+            .book
+            .state(),
+        CanonicalOrderBookState::Ready
+    );
+}
+
+#[test]
+fn depth_watchdog_goes_quiet_after_bounded_resubscribes() {
+    let client_id = ClientId(id(7).expect("client"));
+    let consumer_id = ConsumerId(id(9).expect("consumer"));
+    let series = coinbase_bar_series("BTC-USD");
+    let engine = configured_engine().expect("engine");
+    let (history_tx, _history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, realtime_rx) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &stop,
+        consumer_id,
+        &series,
+    );
+    install_coinbase_depth(&mut coordinator, client_id, consumer_id, &series);
+    let key = stalled_book_key(&series);
+    coordinator
+        .order_books
+        .get_mut(&key)
+        .expect("stalled book")
+        .watch
+        .resubscribes = super::coordinator::Coordinator::MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES;
+    backdate_depth_watch(&mut coordinator, &series);
+    coordinator.recover_stalled_depth_snapshots();
+    assert!(realtime_rx.try_recv().is_err());
+}
+
+#[test]
+fn ready_books_never_trigger_a_resubscribe() {
+    let client_id = ClientId(id(7).expect("client"));
+    let consumer_id = ConsumerId(id(9).expect("consumer"));
+    let series = coinbase_bar_series("BTC-USD");
+    let engine = configured_engine().expect("engine");
+    let (history_tx, _history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, realtime_rx) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &stop,
+        consumer_id,
+        &series,
+    );
+    install_coinbase_depth(&mut coordinator, client_id, consumer_id, &series);
+    coordinator.provider_depth(
+        "coinbase",
+        1,
+        &coinbase_depth_snapshot("instrument:coinbase:btc:usd", 1, 11),
+    );
+    backdate_depth_watch(&mut coordinator, &series);
+    backdate_depth_watch(&mut coordinator, &series);
+    coordinator.recover_stalled_depth_snapshots();
+    assert!(realtime_rx.try_recv().is_err());
+    let key = stalled_book_key(&series);
+    assert_eq!(
+        coordinator
+            .order_books
+            .get(&key)
+            .expect("ready book")
+            .watch
+            .resubscribes,
+        0
+    );
+}
+
+#[test]
+fn rithmic_stalls_never_trigger_a_resubscribe() {
+    let client_id = ClientId(id(7).expect("client"));
+    let consumer_id = ConsumerId(id(9).expect("consumer"));
+    let series = rithmic_series_key("instrument:rithmic:CME:MNQU6", "rithmic-test:CME:MNQU6");
+    let mut engine = configured_engine().expect("engine");
+    engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id,
+                workspace_id: WorkspaceId(id(1).expect("workspace")),
+                consumer_id,
+            },
+            true,
+        )
+        .expect("consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            GenerationId(id(3).expect("generation")),
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("depth demand installs");
+    let (history_tx, _history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, realtime_rx) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &stop,
+        consumer_id,
+        &series,
+    );
+    coordinator
+        .install_provider_instrument(&provider_instrument(7, 2))
+        .expect("instrument installs");
+    backdate_depth_watch(&mut coordinator, &series);
+    coordinator.recover_stalled_depth_snapshots();
+    assert!(realtime_rx.try_recv().is_err());
+}

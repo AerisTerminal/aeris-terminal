@@ -135,6 +135,7 @@ fn run_coordinator(
         coordinator.retry_pending_empty_repairs();
         coordinator.retry_history();
         coordinator.flush_coinbase_live_edge_repairs();
+        coordinator.recover_stalled_depth_snapshots();
         coordinator.enforce_resource_policy();
         match commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
