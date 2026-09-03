@@ -392,6 +392,16 @@ with that flag alongside the Coinbase window: single engine PID 32852,
 session establishing (`rithmic:1:gen6`, reconnecting at probe time). The
 Rithmic window is open for maintainer-driven search and selection.
 
+Maintainer-reported Rithmic chart error (same day): "Rithmic visible
+history could not be loaded" is the desktop's honest terminal state for the
+empty feed (main.rs `apply_rithmic_history` failure path keeps the previous
+chart and restates demand). At probe time both desktops were closed
+(`clients=0`) with providers mid-recovery (`coinbase:1:gen4`,
+`rithmic:0:gen7` reconnecting). One caution for future live runs: Rithmic
+test users allow a single concurrent login, so adapter-level smoke logins
+can force-logout the engine's own session and churn its generations; run
+either the smoke or the engine path at a time, never both at once.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
