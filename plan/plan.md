@@ -591,6 +591,12 @@ new macOS code path is warning-clean even though it cannot provide native
 runtime or physical-display evidence here. The Windows test suite remains
 44/44 green.
 
+Workspace lint follow-up (same day, this batch): the complete Windows host
+workspace gate now passes with `cargo clippy --workspace --all-targets
+--all-features -- -D warnings`, including the macOS-targeted platform code
+when compiled in the workspace dependency graph. No warning suppression or
+platform-specific skip was added.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
