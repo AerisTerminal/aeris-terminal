@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Authenticate private chart dependency
+        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - name: Install desktop build libraries
         run: tools/setup_linux_desktop.sh --system
       - name: Install pinned Rust toolchain

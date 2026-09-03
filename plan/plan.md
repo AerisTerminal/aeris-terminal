@@ -216,8 +216,20 @@ and phase 5 remains blocked.
   Windows per-file sync plus atomic same-directory rename). Lifecycle and
   autostart fixtures use native executable names and paths.
 - Item 3: `ci.yml` runs the deterministic workspace gates on Linux, Windows,
-  and macOS runners. The new Windows and macOS lanes have not executed
-  remotely yet; only the Windows lane is verified locally.
+  and macOS runners. Remote CI has never passed: every push run since Aug 31
+  fails all lanes at dependency fetch because `NucleusCharts/financial-charts`
+  is PRIVATE and runners have no credentials (`revision 6a3ac948 not found`
+  under `failed to authenticate`). Only `cargo fmt` passes remotely. The
+  lanes now run `git config url."https://x-access-token:${{
+  secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf
+  "https://github.com/"` after checkout (all three `ci.yml` lanes plus the
+  scheduled coinbase live-gate, which fails on the same fetch); the secret
+  does not exist yet, so the maintainer must create a read-only token for
+  the charts repo and add it (`gh secret set NUCLEUS_CHARTS_TOKEN --repo
+  Axiusflowhq/Axiusflow_GPUI`). Until then remote lanes stay red and only
+  local gates count. The scheduled rithmic live-gate additionally needs a
+  self-hosted `[rithmic-credentials]` runner that does not exist (it queues
+  to timeout); that is maintainer infrastructure, still open.
 - Item 8 (partial): the architecture check pins the deliberate protocol
   revision and now rejects unguarded Unix/Windows filesystem and autostart
   assumptions in shared platform code
