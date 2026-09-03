@@ -686,6 +686,16 @@ credential-preflight changes; they do not substitute for the still-blocked
 native Linux/macOS CI, packaging, physical-transition, provider-feed, or
 endurance evidence.
 
+Native data-root selection correction (same day, this batch): lifecycle
+inventory resolution now selects the path policy by compiled target before
+reading environment variables. Windows uses `LOCALAPPDATA`, macOS uses
+`~/Library/Application Support` and `~/Library/Caches`, and Linux uses the
+XDG locations with the documented home-directory fallbacks. A stray
+`LOCALAPPDATA` variable can no longer redirect a macOS or Linux uninstall into
+a Windows-shaped root. Formatting, warnings-denied platform clippy, and the
+45-test platform suite pass after this change; native-host verification on
+macOS/Linux remains a CI responsibility.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,

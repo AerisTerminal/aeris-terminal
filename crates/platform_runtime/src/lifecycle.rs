@@ -879,20 +879,30 @@ fn inventory_roots(inventory: &InstallationInventory) -> Vec<PathBuf> {
 /// # Errors
 /// Returns an error when the current user's native data directory is unavailable.
 pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
-    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(root).join("Axiusflow"));
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("Axiusflow"))
+            .ok_or(LifecycleError::InvalidInventory)
     }
-    if cfg!(target_os = "macos") {
-        return std::env::var_os("HOME")
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
             .map(PathBuf::from)
             .map(|root| root.join("Library/Application Support/Axiusflow"))
-            .ok_or(LifecycleError::InvalidInventory);
+            .ok_or(LifecycleError::InvalidInventory)
     }
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share")))
-        .map(|root| root.join("axiusflow"))
-        .ok_or(LifecycleError::InvalidInventory)
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
+            })
+            .map(|root| root.join("axiusflow"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
 }
 
 /// Builds the versioned inventory for all currently owned native artifacts.
@@ -905,19 +915,29 @@ pub fn native_installation_inventory(
     let install_root = install_root.into();
     validate_owned_root(&install_root)?;
     let data = native_data_root()?;
-    let cache = if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        PathBuf::from(root).join("Axiusflow/cache")
-    } else if cfg!(target_os = "macos") {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|root| root.join("Library/Caches/Axiusflow"))
-            .ok_or(LifecycleError::InvalidInventory)?
-    } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".cache")))
-            .map(|root| root.join("axiusflow"))
-            .ok_or(LifecycleError::InvalidInventory)?
+    let cache = {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .map(|root| root.join("Axiusflow/cache"))
+                .ok_or(LifecycleError::InvalidInventory)?
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|root| root.join("Library/Caches/Axiusflow"))
+                .ok_or(LifecycleError::InvalidInventory)?
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".cache")))
+                .map(|root| root.join("axiusflow"))
+                .ok_or(LifecycleError::InvalidInventory)?
+        }
     };
     let logs = data.join("logs");
     let registrations = if cfg!(target_os = "windows") {
