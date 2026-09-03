@@ -564,6 +564,16 @@ behavior when the newest slot is corrupt. The focused platform-runtime suite
 passes 44/44 on Windows; native installed update interruption and reboot
 validation remain open under exit-gate items 4 and 7.
 
+Three-OS CI rerun evidence (same day, run `33714658670`): the corrected
+workflow reached the private-chart authentication step on Linux, Windows,
+and macOS, and formatting passed on all three runners. Each lane then failed
+at the first Cargo dependency fetch with GitHub's explicit `Invalid username
+or token` response for `NucleusCharts/financial-charts`; no platform build or
+test step ran. This confirms the workflow mechanism is now symmetric and the
+remaining blocker is solely the repository secret value/scope. The phase-4
+exit gate therefore remains closed until a valid read-only token is stored and
+the complete three-OS run reaches build and test.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
