@@ -1015,6 +1015,18 @@ get parser validation before push, since remote execution is the only
 other check and it costs a full run. The exit gate stays closed and
 phase 5 remains blocked.
 
+Job-scoped credential live proof (same day, run `33793515820` on
+`e14503d`): `workspace-windows` completed success through the new path
+— checkout, job-scoped authenticate, preflight, fmt, warnings-denied
+clippy, workspace build, release pair with provenance, full workspace
+tests, market-data baseline, artifact uploads, and the always-run
+credential cleanup all pass, with `release-pair-windows` and
+`market-data-performance-windows` uploaded. The private charts
+dependency fetched through `GIT_CONFIG_GLOBAL`, and this machine's
+global gitconfig is verified empty afterward: no persistent rewrite,
+no lingering secret. Linux/macOS lanes remain queued with no runners.
+The exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
