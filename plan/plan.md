@@ -361,6 +361,18 @@ populates; prints and history for MNQU6 are simply absent on this feed, so
 tick bars cannot form. Still needs a data-carrying feed or entitlement
 before the credentialed path can pass end to end.
 
+Full-platform launch with Rithmic (same day): release desktop and the
+kit-enabled v17 engine were rebuilt from current `main` and launched (the
+running engine was stopped gracefully first, since Windows cannot replace a
+running binary). Desktop PID 27524 opened a responding native window and
+attached as the engine's single authenticated client (engine PID 32852,
+2 providers, 5341 retained Coinbase bars and growing, `Running`). Rithmic
+vault credentials are provisioned, so selecting provider Rithmic and
+instrument MNQU6/CME in the UI will run login, search, reference,
+subscription, and live quotes/depth through the real engine path; tick bars
+and history resolve only when the test feed carries prints. Handed over
+with the window open for maintainer-driven selection.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
