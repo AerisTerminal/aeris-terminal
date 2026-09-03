@@ -219,8 +219,13 @@ and phase 5 remains blocked.
   and macOS runners. The new Windows and macOS lanes have not executed
   remotely yet; only the Windows lane is verified locally.
 - Item 8 (partial): the architecture check pins the deliberate protocol
-  revision. Checks rejecting unguarded Unix-only assumptions and
-  provenance-bound physical or credentialed results are still missing.
+  revision and now rejects unguarded Unix/Windows filesystem and autostart
+  assumptions in shared platform code
+  (`platform_filesystem_assumptions_remain_explicitly_guarded`: `std::os`
+  imports, ownership APIs, signals, and native autostart literals require
+  explicit `cfg` guards; platform absolute paths and hardcoded Axiusflow
+  `.exe` names are rejected). Provenance-bound physical or credentialed
+  results are still missing.
 
 Verification on Windows (this machine, commit `9ba934c`):
 
@@ -234,6 +239,15 @@ Verification on Windows (this machine, commit `9ba934c`):
   providers and 1082 retained bars, and a Coinbase BTC-USD snapshot returned
   581 bars. Rithmic, installed packaging, transitions, rendering, endurance,
   and uninstall evidence required by the exit gate are still outstanding.
+
+Item 8 follow-up (same day, this batch): the Unix-guard architecture check
+above is implemented with no production behavior change. Verification on
+Windows (this machine): `cargo fmt --all -- --check`, workspace clippy with
+warnings denied, workspace build, and `cargo test --workspace --all-features`
+all pass; architecture checks 32 of 32, desktop 139 of 139,
+`axiusflow_platform_runtime` 41 of 41, handshake 17 of 17. Items 4 through 7
+and provenance-bound physical/credentialed results remain open, so the exit
+gate stays closed and phase 5 remains blocked.
 
 ### Cross-platform exit gate
 

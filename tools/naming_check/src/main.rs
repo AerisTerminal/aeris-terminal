@@ -1327,4 +1327,87 @@ mod tests {
             "desktop and engine local artifacts must share platform-owned roots"
         );
     }
+
+    #[test]
+    fn platform_filesystem_assumptions_remain_explicitly_guarded() {
+        let mut sources = Vec::new();
+        for root in [
+            "crates/platform_runtime/src",
+            "crates/local_storage/src",
+            "crates/local_history/src",
+            "crates/local_engine_client/src",
+            "apps/engine/src",
+            "apps/desktop/src",
+        ] {
+            sources.extend(production_sources_under(root));
+        }
+        assert!(
+            !sources.is_empty(),
+            "platform guard audit found no production sources"
+        );
+
+        for path in sources {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = production_prefix(&contents);
+            let relative = relative_string(&path);
+
+            if production.contains("std::os::unix") {
+                assert!(
+                    production.contains("cfg(unix)") || production.contains("cfg(target_os"),
+                    "{relative} uses std::os::unix without a Unix platform guard"
+                );
+            }
+            if production.contains("std::os::windows") {
+                assert!(
+                    production.contains("cfg(windows)") || production.contains("cfg(target_os"),
+                    "{relative} uses std::os::windows without a Windows platform guard"
+                );
+            }
+            if production.contains("PermissionsExt")
+                || production.contains("OpenOptionsExt")
+                || production.contains("from_mode(")
+            {
+                assert!(
+                    production.contains("cfg("),
+                    "{relative} uses Unix/Windows file ownership APIs without a platform guard"
+                );
+            }
+            if production.contains("signal_hook")
+                || production.contains("SIGHUP")
+                || production.contains("SIGTERM")
+            {
+                assert!(
+                    production.contains("cfg(target_os") || production.contains("cfg(any"),
+                    "{relative} uses process signals without a platform guard"
+                );
+            }
+            if production.contains("reg.exe")
+                || production.contains("HKCU")
+                || production.contains("xdg-autostart")
+                || production.contains("LaunchAgents")
+            {
+                assert!(
+                    production.contains("cfg("),
+                    "{relative} uses native autostart integration without a platform guard"
+                );
+            }
+            for forbidden in [
+                "/proc/",
+                "\"/tmp",
+                "/opt/axiusflow",
+                "/Applications/",
+                "C:\\Program",
+                "C:/Program",
+                "axiusflow_engine.exe",
+                "axiusflow_desktop.exe",
+                "axiusflow_launcher.exe",
+            ] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{relative} hardcodes platform absolute path or executable suffix {forbidden}"
+                );
+            }
+        }
+    }
 }
