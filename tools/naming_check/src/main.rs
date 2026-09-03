@@ -1460,4 +1460,69 @@ mod tests {
             "CI must keep platform-specific failures visible"
         );
     }
+
+    #[test]
+    fn phase_five_authentication_surface_stays_out_until_phase_four_passes() {
+        const FORBIDDEN: &[&str] = &[
+            "better_auth",
+            "better-auth",
+            "stripe",
+            "Stripe",
+            "dodo",
+            "Dodo",
+            "cloudflare",
+            "Cloudflare",
+            "passkey",
+            "Passkey",
+            "webauthn",
+            "openid",
+            "oidc",
+            "OIDC",
+            "pkce",
+            "PKCE",
+            "refresh_token",
+            "billing",
+            "Billing",
+            "AccountId",
+            "PlanId",
+            "FeatureId",
+            "FeatureSet",
+            "BeginLogin",
+            "AccountView",
+        ];
+
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = production_prefix(&contents);
+            for forbidden in FORBIDDEN {
+                assert!(
+                    !production.contains(forbidden),
+                    "{} adds dormant phase-5 authentication surface {forbidden} before phase 4 passes",
+                    relative_string(&path)
+                );
+            }
+        }
+
+        let mut manifests = workspace_manifests();
+        manifests.push(repository_root().join("Cargo.lock"));
+        for path in manifests {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            for forbidden in [
+                "better-auth",
+                "stripe",
+                "dodo",
+                "cloudflare",
+                "passkey",
+                "webauthn",
+            ] {
+                assert!(
+                    !contents.contains(forbidden),
+                    "{} adds a phase-5 identity/billing dependency {forbidden} before phase 4 passes",
+                    relative_string(&path)
+                );
+            }
+        }
+    }
 }

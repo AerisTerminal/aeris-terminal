@@ -281,6 +281,20 @@ desktop 139 of 139, `axiusflow_platform_runtime` 41 of 41, handshake 17 of
 17). Items 4 through 7 and remote-lane execution remain open, so the exit
 gate stays closed and phase 5 remains blocked.
 
+Phase sequencing enforcement (same day, this batch): the workspace was
+audited for dormant phase-5 surface (Better Auth, Stripe, Dodo, Cloudflare,
+passkeys, OIDC/PKCE, refresh tokens, billing, and the exact phase-5
+`AccountId`/`PlanId`/`FeatureId`/`BeginLogin`/`AccountView` identifiers
+across all Rust sources, manifests, and the dependency lock) and found
+clean. The new architecture check
+`phase_five_authentication_surface_stays_out_until_phase_four_passes` makes
+that prohibition executable: any dormant authentication type, account state,
+login UI, cloud identity networking, or billing dependency fails the gate
+until the phase 4 exit gate passes and the check is deliberately retired.
+Verification on Windows (this machine): workspace gates all pass
+(architecture checks 34 of 34). Items 4 through 7 and remote-lane execution
+remain open, so the exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
