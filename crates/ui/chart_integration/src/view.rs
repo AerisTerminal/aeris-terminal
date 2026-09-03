@@ -487,11 +487,18 @@ struct LegendRow {
     item: LegendItem,
     pane: usize,
     title: String,
-    /// One entry per readout (`O 77,876.69`, `%K 36.95`, …) so a legend that outgrows its pane
-    /// wraps value by value instead of spilling over the price axis.
+    /// One entry per readout (`O 77,876.69`, `%K 36.95`, …). Values render on
+    /// one clipped line instead of wrapping: ticking values otherwise cross
+    /// the wrap threshold every frame and the row bounces between line counts.
     values: Vec<LegendValue>,
     values_tone: LegendValueTone,
     visible: bool,
+}
+
+/// Tabular numerals for legend readouts so ticking digits keep a stable width
+/// instead of shoving sibling values sideways. Fonts without `tnum` ignore it.
+fn legend_tabular_numerals() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3385,18 +3392,32 @@ fn chart_legend_row(
             .child(value.text)
             .into_any_element()
     });
+    // The values sit in one non-wrapping, clipped lane: every child keeps its
+    // fixed row height, so ticking values can never change the row's vertical
+    // footprint. The lane alone absorbs horizontal overflow, leaving the title
+    // and hover controls pinned at the row edges.
+    let values = div()
+        .flex_initial()
+        .min_w(px(0.0))
+        .flex()
+        .flex_nowrap()
+        .items_center()
+        .gap_x_2()
+        .overflow_hidden()
+        .children(values);
     div()
         .id(("chart_legend_row", row.item.key()))
         .group(group)
         .min_h(px(LEGEND_ROW_HEIGHT))
         .max_w_full()
         .flex()
-        .flex_wrap()
+        .flex_nowrap()
         .items_center()
         .gap_x_2()
         .px_1()
         .rounded(px(3.0))
         .text_xs()
+        .font_features(legend_tabular_numerals())
         .text_color(if row.visible {
             palette.text
         } else {
@@ -3414,8 +3435,9 @@ fn chart_legend_row(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(row.title.clone()),
         )
-        .children(values)
+        .child(values)
         .child(controls)
+        .overflow_hidden()
 }
 
 /// The symbol row's own load indicator, sized to the legend text and placed ahead
@@ -4674,6 +4696,62 @@ mod tests {
         chart.set_chart_type(ChartType::Candles);
         assert!(asset_values(&chart).contains("O "));
         assert!(asset_values(&chart).contains("C "));
+    }
+
+    #[test]
+    fn asset_legend_readouts_keep_stable_structure_across_width_varying_ticks() {
+        // The symbol row renders on one clipped line, so its vertical
+        // footprint cannot move. That contract holds only while ticking values
+        // keep the same readout structure: four labeled values in order, even
+        // when formatted widths swing across digit glyphs and magnitudes.
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+            .expect("embedded replay validates");
+        let mut chart = NucleusChartView::with_replay(&replay);
+        let source = replay.bars().last().cloned().expect("tail exists");
+        let title = chart
+            .legend_rows()
+            .into_iter()
+            .find(|row| row.item == LegendItem::Asset)
+            .expect("asset legend")
+            .title;
+        let base_publication = replay.evidence().publication_generation + 1;
+        // Narrow glyphs, wide glyphs, then a magnitude boundary crossing.
+        for (tick, delta) in [1_i64, 11_111, 88_888, 9_999_999].into_iter().enumerate() {
+            let mut tick_bar = *source.value();
+            tick_bar.close = tick_bar.close.saturating_add(delta);
+            tick_bar.high = tick_bar.high.max(tick_bar.close);
+            tick_bar.low = tick_bar.low.min(tick_bar.close);
+            let mut tick_provenance = source.provenance().clone();
+            tick_provenance.event_id = format!("width-tick-{delta}");
+            let tick = ReplayTailUpdate::try_new(
+                Provenanced::new(tick_bar, tick_provenance),
+                base_publication + u64::try_from(tick).expect("tick fits"),
+                true,
+                ReplayTailOperation::Revise,
+            )
+            .expect("tick validates");
+            chart
+                .try_queue_replay_update(ReplayStreamUpdate::Tail(tick))
+                .expect("tick queues");
+            assert_eq!(chart.apply_pending_data(), SeriesMutation::TailReplace);
+            let row = chart
+                .legend_rows()
+                .into_iter()
+                .find(|row| row.item == LegendItem::Asset)
+                .expect("asset legend");
+            assert_eq!(row.title, title, "symbol title is tick stable");
+            let labels: Vec<_> = row
+                .values
+                .iter()
+                .map(|value| value.text.split(' ').next().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                labels,
+                vec!["O", "H", "L", "C"],
+                "OHLC readouts keep order at delta {delta}"
+            );
+        }
     }
 
     #[test]
