@@ -315,6 +315,37 @@ from the desktop lifecycle settings if it is wanted. Rithmic credentialed
 probes, installed packaging, transitions, rendering, and endurance remain
 open, so the exit gate stays closed and phase 5 remains blocked.
 
+Rithmic credentialed verification (same day, this batch): the maintainer
+supplied R|Protocol API 0.89.0.0 from Downloads; `proto/` (156 entries,
+template 5.42) was copied to gitignored `provider_kit/current/proto` with
+the Downloads copy unchanged, and the release engine was rebuilt with the
+`rithmic_kit` cfg verified on (kit-gated session tests compile in). Test
+credentials were provisioned to the native vault
+(`com.axiusflow.terminal`/`provider-rithmic-test-default-v1`) through a
+throwaway helper that has since been deleted; no secret material is in the
+repo, logs, or binaries. The phase-1 baseline failure was reproduced live
+and root-caused: the test plant emits schema-valid `LastTrade` session/clear
+markers with presence/clear bits set but no price or size, and the adapter
+required both unconditionally, so `MissingField("trade_price")` tore down
+every session before engine-registry routing. The fix skips content-free
+marker frames at decode and read time (mirroring the existing quote
+`Cleared`/`Unchanged` and `Ok(None)` conversion patterns): no price is ever
+fabricated, partial trade content still fails closed, and a leftover Sep-1
+per-trade stderr probe was removed. Regression cover: marker skip,
+partial-absence failure, anonymous-marker rejection, and a session-level
+marker-then-trade fixture. Live results on the release path: ticker login,
+31-result search, instrument reference, heartbeat, quotes, and depth all
+pass; a 5-minute tolerant observation saw zero prints for front-month
+MNQU6/CME, and a 4-day minute-bar replay completes with zero bars
+(`history_empty`), so the engine tick round trip still cannot form bars.
+That absence is test-feed/account-entitlement state, not a protocol defect:
+every stage that has data verifies end to end. Still open: a feed (or
+entitlement) that actually carries prints/history, plus installed
+packaging, transitions, rendering, endurance, and remote lanes. Builds now
+silently fall back to kitless Rithmic when `provider_kit/current` is
+absent; keep the kit restored before concluding Rithmic is unavailable. The
+provisioned password transited chat to reach the vault; rotate it at will.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

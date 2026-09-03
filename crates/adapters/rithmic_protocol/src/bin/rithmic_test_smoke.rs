@@ -6,11 +6,11 @@ use axiusflow_rithmic_protocol_adapter::{
     ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
     RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication,
     RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCredentialBytes,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicSessionLimits,
-    RithmicSessionMessage, RithmicSessionTiming, RithmicTestSession, SearchPattern,
-    SessionGeneration, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
-    SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
-    collect_rithmic_covering_recovery_evidence,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicSessionError,
+    RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming, RithmicTestSession,
+    SearchPattern, SessionGeneration, SubscriptionAction, SymbolSearchCollectionRequest,
+    SymbolSearchCollector, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
+    TimeBarType, collect_rithmic_covering_recovery_evidence,
 };
 use std::{
     io::{self, Write},
@@ -39,10 +39,15 @@ const HISTORY_LOOKBACK_MINUTES: i32 = 4 * 24 * 60 + 300;
 const MAXIMUM_HISTORY_BARS: usize = 6_063;
 const MINIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 30;
 const MAXIMUM_PROVIDER_OBSERVATION_SECONDS: u64 = 24 * 60 * 60;
+// The test plant can go quiet for minutes between prints. Subscription
+// observation tolerates per-read deadlines up to this total budget.
+const SUBSCRIPTION_OBSERVATION_BUDGET: Duration = Duration::from_mins(5);
+const SUBSCRIPTION_PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Eq, PartialEq)]
 enum RunMode {
     Smoke,
+    HistoryOnly,
     AuthorizedClientLocalSilence,
     ProviderObservedSilence {
         expected: ExpectedSilence,
@@ -76,6 +81,19 @@ fn main() -> Result<(), String> {
     match mode {
         RunMode::AuthorizedClientLocalSilence => {
             run_authorized_silence_recovery(&credentials)?;
+            return Ok(());
+        }
+        RunMode::HistoryOnly => {
+            let (ticker, selected) = login_and_select(&credentials, application())?;
+            ticker
+                .close()
+                .map_err(|error| format!("ticker_close_failed={error}"))?;
+            println!("rithmic_ticker_close=passed");
+            run_history(&credentials, application(), &selected)?;
+            println!(
+                "rithmic_history_only=passed symbol={} exchange={}",
+                selected.symbol, selected.exchange
+            );
             return Ok(());
         }
         RunMode::ProviderObservedSilence {
@@ -123,6 +141,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
         [argument] if argument == "--authorized-silence-recovery" => {
             Ok(RunMode::AuthorizedClientLocalSilence)
         }
+        [argument] if argument == "--history-only" => Ok(RunMode::HistoryOnly),
         [
             flag,
             expected,
@@ -166,7 +185,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
 }
 
 fn usage() -> String {
-    "usage: rithmic_test_smoke [--authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
+    "usage: rithmic_test_smoke [--history-only | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
 }
 
 #[derive(Clone)]
@@ -186,6 +205,26 @@ fn run_ticker(
     credentials: &RithmicCredentialBytes,
     application: RithmicApplication<'_>,
 ) -> Result<(SelectedInstrument, bool), String> {
+    let (mut ticker, selected) = login_and_select(credentials, application)?;
+    let rejected = test_subscription(&mut ticker, &selected)?;
+    test_heartbeat(&mut ticker)?;
+    ticker
+        .close()
+        .map_err(|error| format!("ticker_close_failed={error}"))?;
+    println!("rithmic_ticker_close=passed");
+    Ok((selected, rejected))
+}
+
+fn login_and_select(
+    credentials: &RithmicCredentialBytes,
+    application: RithmicApplication<'_>,
+) -> Result<
+    (
+        axiusflow_rithmic_protocol_adapter::RithmicTickerConnection,
+        SelectedInstrument,
+    ),
+    String,
+> {
     let borrowed = credentials
         .credentials()
         .map_err(|_| "credentials_invalid")?;
@@ -198,13 +237,7 @@ fn run_ticker(
     .map_err(|error| format!("ticker_login_failed={error}"))?;
     println!("rithmic_ticker_login=passed");
     let selected = search_and_reference(&mut ticker)?;
-    let rejected = test_subscription(&mut ticker, &selected)?;
-    test_heartbeat(&mut ticker)?;
-    ticker
-        .close()
-        .map_err(|error| format!("ticker_close_failed={error}"))?;
-    println!("rithmic_ticker_close=passed");
-    Ok((selected, rejected))
+    Ok((ticker, selected))
 }
 
 fn test_heartbeat(
@@ -284,6 +317,10 @@ fn search_and_reference(
         "rithmic_symbol_search=passed results={}",
         results.results.len()
     );
+    println!(
+        "rithmic_symbol_selected symbol={} exchange={}",
+        selected.symbol, selected.exchange
+    );
 
     ticker
         .request_instrument_reference(InstrumentReferenceRequest {
@@ -328,11 +365,26 @@ fn test_subscription(
     let mut trade_observed = false;
     let mut quote_observed = false;
     let mut depth_observed = false;
+    // The test plant can go quiet for minutes between prints. Tolerate per-read
+    // deadlines up to the total observation budget so a thin feed still verifies.
+    let observation_deadline = Instant::now() + SUBSCRIPTION_OBSERVATION_BUDGET;
+    let mut next_progress = Instant::now() + SUBSCRIPTION_PROGRESS_INTERVAL;
     while !(subscription_rejected || trade_observed && quote_observed && depth_observed) {
-        match ticker
-            .read_next()
-            .map_err(|error| format!("stream_read_failed={error}"))?
-        {
+        let message = match ticker.read_next() {
+            Ok(message) => message,
+            Err(RithmicSessionError::Deadline) if Instant::now() < observation_deadline => {
+                if Instant::now() >= next_progress {
+                    println!(
+                        "rithmic_stream_progress trades={trade_observed} quotes={quote_observed} depth={depth_observed}"
+                    );
+                    next_progress = Instant::now() + SUBSCRIPTION_PROGRESS_INTERVAL;
+                }
+                continue;
+            }
+            Err(error) => return Err(format!("stream_read_failed={error}")),
+        };
+        println!("rithmic_stream_frame kind={}", stream_frame_kind(&message));
+        match message {
             RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
                 accepted,
             }) => {
@@ -360,6 +412,17 @@ fn test_subscription(
         );
     }
     Ok(subscription_rejected)
+}
+
+fn stream_frame_kind(message: &RithmicSessionMessage) -> &'static str {
+    match message {
+        RithmicSessionMessage::Control(_) => "control",
+        RithmicSessionMessage::Catalog(_) => "catalog",
+        RithmicSessionMessage::Market(DecodedMarketMessage::Trade(_)) => "market-trade",
+        RithmicSessionMessage::Market(DecodedMarketMessage::Quote(_)) => "market-quote",
+        RithmicSessionMessage::Market(DecodedMarketMessage::OrderBook(_)) => "market-book",
+        RithmicSessionMessage::History(_) => "history",
+    }
 }
 
 fn run_history(
@@ -1009,6 +1072,10 @@ mod tests {
             EvidenceProvenance::for_current_executable(&revision, &cargo_lock)
                 .expect("verifier provenance is valid");
         assert_eq!(parse_run_mode(Vec::new()), Ok(RunMode::Smoke));
+        assert_eq!(
+            parse_run_mode(vec!["--history-only".to_string()]),
+            Ok(RunMode::HistoryOnly)
+        );
         assert_eq!(
             parse_run_mode(vec!["--authorized-silence-recovery".to_string()]),
             Ok(RunMode::AuthorizedClientLocalSilence)

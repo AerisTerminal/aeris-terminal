@@ -58,6 +58,8 @@ impl RithmicProtocolBackend {
     }
 
     /// Decodes one bounded read-only market-data update when the kit is available.
+    /// Returns `Ok(None)` for a schema-valid marker frame that carries no
+    /// market content; the session layer skips those without an event.
     ///
     /// # Errors
     ///
@@ -65,7 +67,7 @@ impl RithmicProtocolBackend {
     pub fn decode_market(
         &self,
         frame: &[u8],
-    ) -> Result<crate::DecodedMarketMessage, ProtocolError> {
+    ) -> Result<Option<crate::DecodedMarketMessage>, ProtocolError> {
         match self {
             Self::Kit(codec) => codec.decode_market(frame),
             Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
@@ -358,11 +360,16 @@ impl RithmicProtocolCodec {
     }
 
     /// Decodes one bounded read-only market-data WebSocket message.
+    /// Returns `Ok(None)` for a schema-valid marker frame that carries no
+    /// market content.
     ///
     /// # Errors
     ///
     /// Returns an error for oversized, malformed, unsupported, or unbounded input.
-    pub fn decode_market(self, frame: &[u8]) -> Result<crate::DecodedMarketMessage, ProtocolError> {
+    pub fn decode_market(
+        self,
+        frame: &[u8],
+    ) -> Result<Option<crate::DecodedMarketMessage>, ProtocolError> {
         crate::market::decode(frame)
     }
 

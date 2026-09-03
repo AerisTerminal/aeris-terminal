@@ -285,9 +285,13 @@ impl AuthenticatedConnection {
         &mut self,
         deadline: Instant,
     ) -> Result<RithmicSessionMessage, RithmicSessionError> {
-        set_deadline(&mut self.socket, deadline);
-        let frame = read_binary_until(&mut self.socket, deadline)?;
-        decode_session_message(&frame)
+        loop {
+            set_deadline(&mut self.socket, deadline);
+            let frame = read_binary_until(&mut self.socket, deadline)?;
+            if let Some(message) = decode_session_message(&frame)? {
+                return Ok(message);
+            }
+        }
     }
 
     fn close(mut self) -> Result<(), RithmicSessionError> {
@@ -607,26 +611,29 @@ fn read_binary_until(
     }
 }
 
-fn decode_session_message(frame: &[u8]) -> Result<RithmicSessionMessage, RithmicSessionError> {
+fn decode_session_message(
+    frame: &[u8],
+) -> Result<Option<RithmicSessionMessage>, RithmicSessionError> {
     let codec = RithmicProtocolCodec;
     match codec.decode_control(frame) {
-        Ok(message) => return Ok(RithmicSessionMessage::Control(message)),
+        Ok(message) => return Ok(Some(RithmicSessionMessage::Control(message))),
         Err(ProtocolError::UnsupportedTemplate(_)) => {}
         Err(error) => return Err(map_protocol_error(error)),
     }
     match codec.decode_catalog(frame) {
-        Ok(message) => return Ok(RithmicSessionMessage::Catalog(message)),
+        Ok(message) => return Ok(Some(RithmicSessionMessage::Catalog(message))),
         Err(ProtocolError::UnsupportedTemplate(_)) => {}
         Err(error) => return Err(map_protocol_error(error)),
     }
     match codec.decode_market(frame) {
-        Ok(message) => return Ok(RithmicSessionMessage::Market(message)),
+        Ok(Some(message)) => return Ok(Some(RithmicSessionMessage::Market(message))),
+        Ok(None) => return Ok(None),
         Err(ProtocolError::UnsupportedTemplate(_)) => {}
         Err(error) => return Err(map_protocol_error(error)),
     }
     codec
         .decode_history(frame)
-        .map(RithmicSessionMessage::History)
+        .map(|message| Some(RithmicSessionMessage::History(message)))
         .map_err(map_protocol_error)
 }
 

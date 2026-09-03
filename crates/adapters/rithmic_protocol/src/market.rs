@@ -113,7 +113,7 @@ pub enum DecodedMarketMessage {
 }
 
 #[cfg(rithmic_kit)]
-pub(crate) fn decode(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
+pub(crate) fn decode(frame: &[u8]) -> Result<Option<DecodedMarketMessage>, ProtocolError> {
     use crate::generated::rti;
     use prost::Message;
 
@@ -121,31 +121,31 @@ pub(crate) fn decode(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError
     let message_type = rti::MessageType::decode(frame).map_err(|_| ProtocolError::Decode)?;
     match message_type.template_id {
         150 => decode_trade(frame),
-        151 => decode_quote(frame),
-        156 => decode_order_book(frame),
+        151 => decode_quote(frame).map(Some),
+        156 => decode_order_book(frame).map(Some),
         template => Err(ProtocolError::UnsupportedTemplate(template)),
     }
 }
 
 #[cfg(not(rithmic_kit))]
-pub(crate) fn decode(_frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
+pub(crate) fn decode(_frame: &[u8]) -> Result<Option<DecodedMarketMessage>, ProtocolError> {
     Err(ProtocolError::KitUnavailable)
 }
 
 #[cfg(rithmic_kit)]
-fn decode_trade(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
+fn decode_trade(frame: &[u8]) -> Result<Option<DecodedMarketMessage>, ProtocolError> {
     use crate::generated::rti;
     use prost::Message;
 
     let message = rti::LastTrade::decode(frame).map_err(|_| ProtocolError::Decode)?;
-    eprintln!(
-        "Rithmic trade field presence: last={} clear={} price={} size={}",
-        message.presence_bits.unwrap_or(0) & 1 != 0,
-        message.clear_bits.unwrap_or(0) & 1 != 0,
-        message.trade_price.is_some(),
-        message.trade_size.is_some(),
-    );
     let identity = identity(message.symbol, message.exchange)?;
+    if message.trade_price.is_none() && message.trade_size.is_none() {
+        // Schema-valid session/clear marker: a LastTrade frame without price
+        // and size carries no trade. The plant emits these around session
+        // boundaries and subscription snapshots. Never fabricate a price and
+        // never poison the stream; the session layer skips marker frames.
+        return Ok(None);
+    }
     let price = finite_required("trade_price", message.trade_price)?;
     let size = nonnegative_required("trade_size", message.trade_size)?;
     let aggressor = message
@@ -158,14 +158,14 @@ fn decode_trade(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
             },
         )
         .transpose()?;
-    Ok(DecodedMarketMessage::Trade(TradeUpdate {
+    Ok(Some(DecodedMarketMessage::Trade(TradeUpdate {
         identity,
         price,
         size,
         aggressor,
         is_snapshot: message.is_snapshot.unwrap_or(false),
         timestamp: timestamp(message.ssboe, message.usecs)?,
-    }))
+    })))
 }
 
 #[cfg(rithmic_kit)]
@@ -485,31 +485,31 @@ mod tests {
         .encode_to_vec();
         assert!(matches!(
             codec.decode_market(&trade).expect("trade decodes"),
-            DecodedMarketMessage::Trade(TradeUpdate {
+            Some(DecodedMarketMessage::Trade(TradeUpdate {
                 size: 3,
                 aggressor: Some(TradeAggressor::Buy),
                 ..
-            })
+            }))
         ));
 
         let quote = quote_message().encode_to_vec();
         assert!(matches!(
             codec.decode_market(&quote).expect("quote decodes"),
-            DecodedMarketMessage::Quote(QuoteUpdate {
+            Some(DecodedMarketMessage::Quote(QuoteUpdate {
                 bid: QuoteSideUpdate::Value(QuoteLevel { size: 10, .. }),
                 ask: QuoteSideUpdate::Value(QuoteLevel { size: 12, .. }),
                 ..
-            })
+            }))
         ));
 
         let book = order_book(vec![5_100.0], vec![10]);
         assert!(matches!(
             codec.decode_market(&book).expect("book decodes"),
-            DecodedMarketMessage::OrderBook(OrderBookUpdate {
+            Some(DecodedMarketMessage::OrderBook(OrderBookUpdate {
                 kind: OrderBookUpdateKind::Solo,
                 bids,
                 ..
-            }) if bids.len() == 1
+            })) if bids.len() == 1
         ));
     }
 
@@ -522,11 +522,11 @@ mod tests {
             codec
                 .decode_market(&snapshot_clear.encode_to_vec())
                 .expect("snapshot clear-and-set decodes"),
-            DecodedMarketMessage::Quote(QuoteUpdate {
+            Some(DecodedMarketMessage::Quote(QuoteUpdate {
                 bid: QuoteSideUpdate::Value(_),
                 ask: QuoteSideUpdate::Value(_),
                 ..
-            })
+            }))
         ));
 
         let clear_bid = rti::BestBidOffer {
@@ -544,11 +544,11 @@ mod tests {
             codec
                 .decode_market(&clear_bid.encode_to_vec())
                 .expect("clear-only quote decodes"),
-            DecodedMarketMessage::Quote(QuoteUpdate {
+            Some(DecodedMarketMessage::Quote(QuoteUpdate {
                 bid: QuoteSideUpdate::Cleared,
                 ask: QuoteSideUpdate::Unchanged,
                 ..
-            })
+            }))
         ));
     }
 
@@ -589,11 +589,86 @@ mod tests {
         book.usecs = None;
         assert!(matches!(
             RithmicProtocolCodec.decode_market(&book.encode_to_vec()),
-            Ok(DecodedMarketMessage::OrderBook(OrderBookUpdate {
+            Ok(Some(DecodedMarketMessage::OrderBook(OrderBookUpdate {
                 timestamp: None,
                 ..
-            }))
+            })))
         ));
+    }
+
+    #[test]
+    fn priceless_trade_marker_skips_without_an_event_or_a_failure() {
+        let codec = RithmicProtocolCodec;
+        // Mirrors the live plant's session/clear marker: presence and clear
+        // bits set, but no price, size, or timestamp. It carries no trade, so
+        // it decodes to no event; it is schema-valid, so it must not fail.
+        let marker = trade_message();
+        let marker = rti::LastTrade {
+            trade_price: None,
+            trade_size: None,
+            aggressor: None,
+            ssboe: None,
+            usecs: None,
+            clear_bits: Some(1),
+            ..marker
+        }
+        .encode_to_vec();
+        assert_eq!(codec.decode_market(&marker).expect("marker decodes"), None);
+
+        let mut anonymous = trade_message();
+        anonymous.symbol = None;
+        anonymous.trade_price = None;
+        anonymous.trade_size = None;
+        assert!(matches!(
+            codec.decode_market(&anonymous.encode_to_vec()),
+            Err(ProtocolError::MissingField("symbol"))
+        ));
+    }
+
+    #[test]
+    fn partial_trade_content_still_fails_closed() {
+        let codec = RithmicProtocolCodec;
+        let mut price_only = trade_message();
+        price_only.trade_size = None;
+        assert!(matches!(
+            codec.decode_market(&price_only.encode_to_vec()),
+            Err(ProtocolError::MissingField("trade_size"))
+        ));
+
+        let mut size_only = trade_message();
+        size_only.trade_price = None;
+        assert!(matches!(
+            codec.decode_market(&size_only.encode_to_vec()),
+            Err(ProtocolError::MissingField("trade_price"))
+        ));
+    }
+
+    fn trade_message() -> rti::LastTrade {
+        rti::LastTrade {
+            template_id: 150,
+            symbol: Some("ESM7".to_string()),
+            exchange: Some("CME".to_string()),
+            presence_bits: Some(1),
+            clear_bits: Some(0),
+            is_snapshot: Some(false),
+            trade_price: Some(5_100.25),
+            trade_size: Some(3),
+            aggressor: Some(rti::last_trade::TransactionType::Buy.into()),
+            exchange_order_id: None,
+            aggressor_exchange_order_id: None,
+            net_change: None,
+            percent_change: None,
+            volume: None,
+            vwap: None,
+            trade_time: None,
+            ssboe: Some(1_800_000_000),
+            usecs: Some(123_456),
+            source_ssboe: None,
+            source_usecs: None,
+            source_nsecs: None,
+            jop_ssboe: None,
+            jop_nsecs: None,
+        }
     }
 
     fn order_book(bid_price: Vec<f64>, bid_size: Vec<i32>) -> Vec<u8> {

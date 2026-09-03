@@ -104,6 +104,66 @@ fn discovery_closes_before_fresh_ticker_login_over_tls() {
 }
 
 #[test]
+fn priceless_trade_marker_is_skipped_before_the_next_trade() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-trade-marker-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)?;
+            drop(discovery);
+
+            let (mut ticker, _) = accept_websocket(&listener, &server_config)?;
+            assert_login_request(&read_binary(&mut ticker)?)?;
+            ticker
+                .send(Message::binary(login_response(true, &[])))
+                .map_err(|error| error.to_string())?;
+            ticker
+                .send(Message::binary(trade_marker()))
+                .map_err(|error| error.to_string())?;
+            ticker
+                .send(Message::binary(trade_update()))
+                .map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut ticker)?);
+            ticker
+                .send(Message::binary(logout_response()))
+                .map_err(|error| error.to_string())?;
+            require_close(&mut ticker)?;
+            finish_server_close(&mut ticker)
+        })
+        .expect("spawn trade marker fixture");
+
+    let mut connection = RithmicTestSession::connect_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        None,
+        client_config,
+    )
+    .expect("discover and log in over local TLS");
+    assert!(matches!(
+        connection.read_next().expect("read past the marker"),
+        RithmicSessionMessage::Market(DecodedMarketMessage::Trade(update))
+            if update.identity.symbol == "ESM7" && update.size == 3
+    ));
+    connection.close().expect("send ticker close frame");
+    server
+        .join()
+        .expect("trade marker fixture did not panic")
+        .expect("trade marker lifecycle completed");
+}
+
+#[test]
 fn authenticated_close_deadline_survives_continuous_control_frames() {
     let fixture = LocalTlsFixture::bind();
     let endpoint = fixture.endpoint;
@@ -585,6 +645,38 @@ fn trade_update() -> Vec<u8> {
         trade_price: Some(5_100.25),
         trade_size: Some(3),
         aggressor: Some(rti::last_trade::TransactionType::Buy.into()),
+        exchange_order_id: None,
+        aggressor_exchange_order_id: None,
+        net_change: None,
+        percent_change: None,
+        volume: None,
+        vwap: None,
+        trade_time: None,
+        ssboe: Some(1_800_000_000),
+        usecs: Some(123_457),
+        source_ssboe: None,
+        source_usecs: None,
+        source_nsecs: None,
+        jop_ssboe: None,
+        jop_nsecs: None,
+    }
+    .encode_to_vec()
+}
+
+fn trade_marker() -> Vec<u8> {
+    // Mirrors the live plant's session/clear marker: presence and clear bits
+    // set, but no price, size, or aggressor. It must be skipped, never a
+    // trade and never a stream failure.
+    rti::LastTrade {
+        template_id: 150,
+        symbol: Some("ESM7".to_string()),
+        exchange: Some("CME".to_string()),
+        presence_bits: Some(1),
+        clear_bits: Some(1),
+        is_snapshot: Some(false),
+        trade_price: None,
+        trade_size: None,
+        aggressor: None,
         exchange_order_id: None,
         aggressor_exchange_order_id: None,
         net_change: None,
