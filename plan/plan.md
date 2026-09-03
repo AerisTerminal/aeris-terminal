@@ -566,6 +566,15 @@ POSIX activation guarantee but does not close the native Windows atomic
 replacement, physical-transition, remote-lane, credentialed-feed, packaging,
 or endurance evidence gates; phase 5 remains blocked.
 
+Cross-platform journal durability follow-up (same day, this batch): update
+recovery no longer overwrites a single `update.json`. Each transaction state is
+written to its own bounded journal record, and the new record is durable before
+older state records are removed; recovery selects the newest valid state and
+cleanup removes every slot. Interrupted uninstall also preserves an existing
+journal rather than rewriting it. This removes the Windows delete-before-rename
+gap from update state transitions while keeping the lifecycle lock and
+fail-closed recovery semantics. The focused platform suite remains 43/43.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

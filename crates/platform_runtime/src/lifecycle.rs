@@ -356,7 +356,7 @@ fn safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(value) if !value.is_empty()))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 enum UpdateState {
     Preparing,
     Staged,
@@ -364,6 +364,28 @@ enum UpdateState {
     Activated,
     HealthChecked,
     Cleanup,
+}
+
+impl UpdateState {
+    const ALL: [Self; 6] = [
+        Self::Preparing,
+        Self::Staged,
+        Self::ProcessesStopped,
+        Self::Activated,
+        Self::HealthChecked,
+        Self::Cleanup,
+    ];
+}
+
+fn update_journal_name(state: UpdateState) -> &'static str {
+    match state {
+        UpdateState::Preparing => "update-0-preparing.json",
+        UpdateState::Staged => "update-1-staged.json",
+        UpdateState::ProcessesStopped => "update-2-processes-stopped.json",
+        UpdateState::Activated => "update-3-activated.json",
+        UpdateState::HealthChecked => "update-4-health-checked.json",
+        UpdateState::Cleanup => "update-5-cleanup.json",
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -576,11 +598,9 @@ impl ReleaseInstaller {
         if self.lifecycle_root.join("uninstall.json").exists() {
             return Err(LifecycleError::UninstallPendingCleanup);
         }
-        let journal_path = self.update_journal_path();
-        if !journal_path.exists() {
+        let Some(journal) = self.read_update_journal()? else {
             return Ok(());
-        }
-        let journal: UpdateJournal = read_json(&journal_path)?;
+        };
         let candidate_root = self.version_path(&journal.candidate)?;
         match journal.state {
             UpdateState::Preparing | UpdateState::Staged | UpdateState::ProcessesStopped => {
@@ -619,11 +639,14 @@ impl ReleaseInstaller {
     ) -> Result<UninstallOutcome, LifecycleError> {
         self.validate_inventory(inventory)?;
         let lock = LifecycleLock::acquire(&self.lifecycle_root)?;
-        write_json_atomic(
-            &self.lifecycle_root,
-            "uninstall.json",
-            &UninstallJournal { started: true },
-        )?;
+        let uninstall_journal = self.lifecycle_root.join("uninstall.json");
+        if !uninstall_journal.exists() {
+            write_json_atomic(
+                &self.lifecycle_root,
+                "uninstall.json",
+                &UninstallJournal { started: true },
+            )?;
+        }
         hooks
             .disable_registrations(&inventory.registrations)
             .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
@@ -733,16 +756,46 @@ impl ReleaseInstaller {
     }
 
     fn write_update_journal(&self, journal: &UpdateJournal) -> Result<(), LifecycleError> {
-        write_json_atomic(&self.lifecycle_root, "update.json", journal)
+        let name = update_journal_name(journal.state);
+        write_json_atomic(&self.lifecycle_root, name, journal)?;
+        for state in UpdateState::ALL {
+            if state != journal.state {
+                remove_file_if_present(&self.lifecycle_root.join(update_journal_name(state)))
+                    .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+            }
+        }
+        Ok(())
     }
 
-    fn update_journal_path(&self) -> PathBuf {
-        self.lifecycle_root.join("update.json")
+    fn read_update_journal(&self) -> Result<Option<UpdateJournal>, LifecycleError> {
+        for state in UpdateState::ALL.into_iter().rev() {
+            let path = self.lifecycle_root.join(update_journal_name(state));
+            if path.exists() {
+                let journal: UpdateJournal = read_json(&path)?;
+                if journal.state != state {
+                    return Err(LifecycleError::JournalCorrupt);
+                }
+                return Ok(Some(journal));
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(test)]
+    fn update_journal_exists(&self) -> bool {
+        UpdateState::ALL.into_iter().any(|state| {
+            self.lifecycle_root
+                .join(update_journal_name(state))
+                .exists()
+        })
     }
 
     fn remove_update_journal(&self) -> Result<(), LifecycleError> {
-        remove_file_if_present(&self.update_journal_path())
-            .map_err(|_| LifecycleError::UpdatePendingCleanup)
+        for state in UpdateState::ALL {
+            remove_file_if_present(&self.lifecycle_root.join(update_journal_name(state)))
+                .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        }
+        Ok(())
     }
 
     fn audit_single_active(&self, expected: &ActiveRelease) -> Result<(), LifecycleError> {
@@ -1403,7 +1456,7 @@ mod tests {
             Err(LifecycleError::StagingFailed)
         );
         assert_eq!(installer.active_release().expect("active state"), None);
-        assert!(!installer.update_journal_path().exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
 
         let root = temporary_root("truncated-bundle");
@@ -1420,7 +1473,7 @@ mod tests {
             Err(LifecycleError::VerificationFailed)
         );
         assert_eq!(installer.active_release().expect("active state"), None);
-        assert!(!installer.update_journal_path().exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
@@ -1458,7 +1511,7 @@ mod tests {
             .expect("upgrade");
         assert_eq!(outcome.active.install_generation, 2);
         assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
-        assert!(!installer.update_journal_path().exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
@@ -1492,7 +1545,7 @@ mod tests {
             3
         );
         assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
-        assert!(!installer.update_journal_path().exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
@@ -1579,7 +1632,7 @@ mod tests {
             1
         );
         assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
-        assert!(!installer.update_journal_path().exists());
+        assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
@@ -1641,7 +1694,7 @@ mod tests {
                 })
                 .expect("write interrupted journal");
             installer.recover(&Hooks::default()).expect("recover");
-            assert!(!installer.update_journal_path().exists());
+            assert!(!installer.update_journal_exists());
             let active = installer
                 .active_release()
                 .expect("active")
