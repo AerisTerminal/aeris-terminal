@@ -244,6 +244,18 @@ and phase 5 remains blocked.
   the scheduled coinbase gate, keeping the `insteadOf` step. Local machine
   state was restored pristine afterward (global gitconfig empty, cargo git
   db intact, experiment artifacts removed).
+
+  Mechanism fully proven on run `33711196341` (same day): the CLI fetch is
+  active on all lanes, the public zed dependency clones fine through it,
+  and GitHub evaluates the rewritten credential and rejects it verbatim:
+  "remote: Invalid username or token." So the workflow is now correct and
+  the only remaining variable is the stored secret value itself — it is
+  garbled, scope-less, expired, revoked, or minted on the wrong account
+  (a valid-but-unauthorized credential would 404, not fail auth). The
+  maintainer must store a working classic `repo`-scoped value; a
+  validate-then-store script (API check first, `gh secret set` only on
+  HTTP 200) was provided to make the next attempt foolproof. No further
+  workflow change is needed; rerun the failed jobs after the secret lands.
 - Item 8 (partial): the architecture check pins the deliberate protocol
   revision and now rejects unguarded Unix/Windows filesystem and autostart
   assumptions in shared platform code
