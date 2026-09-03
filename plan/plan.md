@@ -432,6 +432,31 @@ Verification on Windows (this machine): workspace gates all pass (desktop
 141 of 141, naming 34 of 34, zero failures). No live Rithmic login was used;
 the maintainer holds the single test-plant session.
 
+Provenance-bound gate evidence, Windows (same day, item 8): the deterministic
+gates above ran against tree `d2788b3` with `Cargo.lock` SHA256
+`638A13B743A23BBEC72EB8E382DADF9315BE440F1FE9CEA1961BF9D217F6B1AE` on
+Microsoft Windows 11 Pro 10.0.26200, Intel64 Family 6 Model 183. Tallies:
+desktop 141, naming 34, `platform_runtime` 41, handshake 17, protocol 7,
+adapter 111 + smoke-bin 11, engine 106, market_data 23, observability 18,
+local_history 12, storage lifecycle 22, provider_history conformance 11,
+handoff conformance 3, market_engine 30; clippy workspace `-D warnings`
+clean, `cargo fmt --check` clean, zero failures. The resident release pair
+currently running (desktop PID 32216, engine PID 10852) was built from tree
+`162e924`: engine SHA256
+`B217BC973468A4F3AF0A7BFEC3AB6F2D757323BBDE77A60935786CB416669864`,
+desktop SHA256
+`92581A9AA1180E0DE91F103DF740C7EC735ED7D9DA46D3945250ECDE5D9A3BE7`.
+Production-code drift between the build tree and `d2788b3` is exactly the
+desktop message mapping (`main.rs`, `rithmic_engine_history.rs`); engine
+production code is identical and the `local_engine_client` drift is inside
+`#[cfg(test)]` probe code only. A same-tree release rebuild was attempted
+and correctly refused by the OS: the running release desktop holds a lock
+on its own executable (access denied replacing
+`target/release/axiusflow_desktop.exe`), which is the expected Windows
+behavior behind the no-in-place-overwrite update rule. Display make/model,
+scanout rates, and physical/credentialed runs remain open under items 4
+through 7.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
