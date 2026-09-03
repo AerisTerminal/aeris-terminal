@@ -720,6 +720,14 @@ logs show the empty value on Linux, Windows, and macOS explicitly; the
 workflow remains correctly fail-closed before any private dependency or
 release artifact is downloaded.
 
+Full local workspace gate refresh (same day, this batch): after the recent
+platform changes, `cargo test --workspace --all-features` completed with zero
+failures on Windows. The run covered all workspace unit, integration, and doc
+tests; only the explicitly release-only performance test and three live-market
+soak tests remained ignored by design because they require an optimized
+resident process, live feeds, or native credentials. This strengthens local
+regression evidence but does not replace the native three-OS release gate.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
