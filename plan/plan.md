@@ -728,6 +728,13 @@ soak tests remained ignored by design because they require an optimized
 resident process, live feeds, or native credentials. This strengthens local
 regression evidence but does not replace the native three-OS release gate.
 
+Workspace clippy gate refresh (same day, this batch):
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+completed successfully on Windows in 48 seconds after rebuilding the full
+dependency graph. No warning suppression or platform skip was introduced; the
+native Linux/macOS and live-provider gates remain separate evidence
+requirements.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
