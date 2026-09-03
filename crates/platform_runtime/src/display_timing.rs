@@ -862,7 +862,33 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_probe_reports_validated_outputs_or_transport_failure() {
+        assert_eq!(
+            NativeDisplayProbe::availability(),
+            CapabilityAvailability::Available
+        );
+        match NativeDisplayProbe::probe() {
+            Ok(environment) => {
+                for output in environment.outputs() {
+                    if let Some(millihertz) = output.refresh_millihertz() {
+                        assert!(millihertz > 0);
+                        assert!(millihertz <= 1_000_000);
+                    }
+                    if let Some(scale) = output.effective_scale_milli() {
+                        assert!(scale > 0);
+                    }
+                    assert!(output.pixel_size().is_some());
+                }
+                assert_eq!(environment.presentation_clock(), None);
+            }
+            Err(DisplayTimingError::Transport) => {}
+            Err(error) => panic!("unexpected probe failure: {error}"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     #[test]
     fn unsupported_targets_fail_explicitly() {
         assert_eq!(

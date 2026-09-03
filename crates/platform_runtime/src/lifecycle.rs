@@ -1388,13 +1388,26 @@ mod tests {
     }
 
     fn temporary_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
+        let root = fixture_base_dir().join(format!(
             "axiusflow-lifecycle-{name}-{}-{}",
             std::process::id(),
             rand_suffix()
         ));
         fs::create_dir_all(&root).expect("fixture root");
         root
+    }
+
+    /// Fixture base with symlinked ancestors resolved: installer roots
+    /// reject symlinks, and macOS points `TMPDIR` under `/var`, which is a
+    /// symlink to `/private/var`.
+    #[cfg(unix)]
+    fn fixture_base_dir() -> PathBuf {
+        std::fs::canonicalize(std::env::temp_dir()).expect("canonical fixture base")
+    }
+
+    #[cfg(not(unix))]
+    fn fixture_base_dir() -> PathBuf {
+        std::env::temp_dir()
     }
 
     fn rand_suffix() -> u128 {
