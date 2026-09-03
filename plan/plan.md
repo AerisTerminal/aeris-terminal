@@ -678,6 +678,14 @@ starts. This narrows the maintainer action from “debug Cargo authentication”
 to storing a non-empty read-only token value with access to the private charts
 repository, then rerunning the workflow.
 
+Focused gate refresh (same day, this batch): the current Windows checkout
+passes the platform-runtime suite at 45/45 and the standalone architecture
+naming suite at 35/35, with no ignored tests in either suite. These checks
+confirm the local lifecycle and boundary assertions remain green after the
+credential-preflight changes; they do not substitute for the still-blocked
+native Linux/macOS CI, packaging, physical-transition, provider-feed, or
+endurance evidence.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
