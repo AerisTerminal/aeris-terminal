@@ -1566,6 +1566,25 @@ mod tests {
     }
 
     #[test]
+    fn launcher_uninstall_relocates_outside_install_root() {
+        let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
+        // The launcher runs from inside the tree uninstall deletes, and
+        // Windows refuses to delete a running executable: uninstall must
+        // rename the image to a sibling staging dir first so the original
+        // tree can be removed synchronously with an honest exit code.
+        for marker in [
+            "relocate_running_binary",
+            "remove_relocated_binary",
+            "uninstall-stage",
+        ] {
+            assert!(
+                launcher.contains(marker),
+                "launcher uninstall lost its out-of-tree relocation {marker}"
+            );
+        }
+    }
+
+    #[test]
     fn live_market_gates_stay_on_self_hosted_runners() {
         let workflow = manifest(".github/workflows/live_market_gates.yml");
         for runner in [

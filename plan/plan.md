@@ -1100,6 +1100,23 @@ was shut down gracefully before the campaign; Rithmic reprovisioning
 awaits the test password. The exit gate stays closed and phase 5
 remains blocked.
 
+Uninstall fix landed and proven (same day, this batch): the launcher
+now renames its running image to a sibling staging directory (same
+volume, renames permitted) before deleting the original tree
+synchronously with an honest exit code; an OS-owned delayed deleter
+removes staging afterwards (batch file on Windows, direct unlink on
+Unix). Two failed designs are recorded so they are not retried: a
+relocated child can never remove the tree while its waiting parent runs
+from inside it, and inline `cmd /c` commands silently break because
+Rust's argv quoting leaves cmd-stripped `\"` escapes in every path —
+the command must live in a batch file. Final proof on Windows: fresh
+install, then `--remove-all-local-data` exits 0 with install root,
+lifecycle, staging, data, vault, and processes all verified absent.
+Unit cover is the rename round-trip on fixture copies (the destructive
+path itself stays physical-only by design); the architecture check pins
+the relocation markers. The exit gate stays closed and phase 5 remains
+blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
