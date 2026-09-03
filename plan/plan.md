@@ -574,6 +574,16 @@ remaining blocker is solely the repository secret value/scope. The phase-4
 exit gate therefore remains closed until a valid read-only token is stored and
 the complete three-OS run reaches build and test.
 
+macOS display-probe parity (same day, this batch): the platform runtime no
+longer reports display timing as unimplemented on macOS. The existing pinned
+CoreGraphics-backed `display-info` adapter is now enabled for macOS and feeds
+the same validated output model used by Windows (pixel dimensions, refresh
+rate, scale, and descriptive identity; invalid native values are discarded).
+The Windows platform-runtime test and clippy gates remain green (44/44 tests,
+warnings denied). This establishes the native code path but is not physical
+macOS rendering or scanout evidence; those release qualifications remain open
+under exit-gate items 4 through 7.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,

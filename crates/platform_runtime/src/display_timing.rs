@@ -11,13 +11,14 @@
 //! itself requires a committed surface, so it remains the UI layer's
 //! responsibility; this probe only reports the clock the feedback will carry.
 //! Windows reads the same current-mode fields through the operating system's
-//! display configuration APIs. macOS and unsupported Linux sessions report
-//! the port unavailable rather than inventing geometry.
+//! display configuration APIs. macOS reads the native CoreGraphics-backed
+//! display inventory through the pinned `display-info` adapter. Unsupported
+//! Linux sessions report the port unavailable rather than inventing geometry.
 
 use crate::CapabilityAvailability;
 use core::fmt;
 use std::error::Error;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -218,7 +219,7 @@ impl NativeDisplayProbe {
     /// [`Self::probe`] with [`DisplayTimingError::NoSession`].
     #[must_use]
     pub const fn availability() -> CapabilityAvailability {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         return CapabilityAvailability::Available;
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -239,7 +240,10 @@ impl NativeDisplayProbe {
         #[cfg(target_os = "windows")]
         return probe_windows();
 
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(target_os = "macos")]
+        return probe_macos();
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Err(DisplayTimingError::UnsupportedPlatform)
     }
 }
@@ -454,6 +458,47 @@ mod windows_composition {
 
 #[cfg(target_os = "windows")]
 fn probe_windows() -> Result<DisplayEnvironment, DisplayTimingError> {
+    let displays = display_info::DisplayInfo::all().map_err(|_| DisplayTimingError::Transport)?;
+    let outputs = displays
+        .into_iter()
+        .filter_map(|display| {
+            if display.width == 0
+                || display.height == 0
+                || !display.frequency.is_finite()
+                || display.frequency <= 0.0
+                || !display.scale_factor.is_finite()
+                || display.scale_factor <= 0.0
+            {
+                return None;
+            }
+            let refresh_interval = Duration::from_secs_f32(display.frequency.recip());
+            let refresh_millihertz =
+                u32::try_from(1_000_000_000_000_u128.checked_div(refresh_interval.as_nanos())?)
+                    .ok()
+                    .filter(|&rate| (1..=1_000_000).contains(&rate))?;
+            let scale_milli =
+                u32::try_from(Duration::from_secs_f32(display.scale_factor).as_millis())
+                    .ok()
+                    .filter(|&scale| scale > 0)?;
+            Some(DisplayOutput {
+                name: Some(display.name),
+                description: (!display.friendly_name.is_empty()).then_some(display.friendly_name),
+                refresh_millihertz: Some(refresh_millihertz),
+                pixel_size: Some((display.width, display.height)),
+                integer_scale: None,
+                logical_size: None,
+                effective_scale_milli: Some(scale_milli),
+            })
+        })
+        .collect();
+    Ok(DisplayEnvironment {
+        outputs,
+        presentation_clock: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn probe_macos() -> Result<DisplayEnvironment, DisplayTimingError> {
     let displays = display_info::DisplayInfo::all().map_err(|_| DisplayTimingError::Transport)?;
     let outputs = displays
         .into_iter()
